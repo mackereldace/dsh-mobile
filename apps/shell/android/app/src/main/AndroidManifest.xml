@@ -1,0 +1,69 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 局域网访问电脑端 DSH：没有 INTERNET 连 WebSocket 隧道都建不起来 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- 连接状态提示（离线时给出可读原因，而不是白屏） -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- 扫码配对 -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
+    <!--
+      明文流量说明（重要）：
+
+      dsh-mobile 的隧道在**应用层**做端到端加密（X25519 + AES-256-GCM），
+      因此不依赖 TLS 证书体系；手机与电脑之间仍然是 http/ws 明文承载。
+      这不是"忘了开 HTTPS"，而是刻意的设计：局域网里自签证书的信任分发比
+      应用层公钥配对更麻烦，而且更容易被用户点掉警告而失去意义。
+
+      为把明文面收敛到最小，这里不使用 android:usesCleartextTraffic="true"（那会对所有域名放行），
+      而是用 networkSecurityConfig 只放行**私有网段**：
+      10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、169.254.0.0/16（链路本地）。
+      公网地址默认仍必须走 HTTPS——将来接公网中继时应使用 wss 或自有加密通道。
+    -->
+    <application
+        android:label="DSH Mobile"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

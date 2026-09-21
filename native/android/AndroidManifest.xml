@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DSH Mobile 安卓薄壳（第一阶段）。
+
+  ## 为什么是"薄壳"而不是重写
+
+  我们这几个月的成果**全在 Web 层**（`boot.js` 八千多行：滑动、抽屉、文件面板、
+  预览、公式、预览桥……）。薄壳只是给这些内容一个**原生窗口**：
+  加载 `https://<地址>:<端口>/mobile/app`，其余一行不改 ✓。
+
+  ## 它一次解决三件事（都是 PWA 路线解决不了的）
+
+  1. **本地安装** ✓ —— 不走 Google 的 WebAPK 铸造（PWA 装不上就是卡在那一步）；
+  2. **证书固定** ✓ —— 只认我们那张本机 CA（见 `MainActivity.pinCa`），
+     于是**不用**在系统里装 CA、**没有**"网络可能受到监控"的常驻提示；
+  3. **地址可编辑** ✓ —— 地址变了在 APP 里改一下即可，不必重装、不必重新配对。
+
+  ## 权限:两个,都是必要的
+
+  1. `INTERNET` ✓ 唯一的联网权限;
+  2. `POST_NOTIFICATIONS` ✓ —— 安卓 13 起"发系统通知"要**运行时**授权,
+     而 WebView **不实现** Web Notification API ✗,所以通知只能走原生
+     (见 MainActivity 类注释 §通知 ✓)。少了它,用户点"允许通知"不会有任何系统弹窗。
+
+  除此之外**一个都不申请** ✓(没有存储/相机/定位/通讯录)。
+  而且**禁止明文流量**（`usesCleartextTraffic="false"` ✓）——
+  我们的手机入口本来就是 HTTPS，明文一律拒绝，少一个被降级的可能。
+-->
+<!--
+  ★ 版本号**故意不写在这里** ✓ —— 清单里写死的 versionCode / versionName
+  会**覆盖** aapt2 link 的同名参数 ✗（本轮就栽在这 ✓：构建日志明明打了新版本号 ✓，
+  aapt2 dump badging 读出来还是 0.1.0 ✗）。
+  现在由 scripts/build-apk.mjs 传入 ✓ —— 版本名里带构建戳（形如 0.1.0+BUILD-… ✓），
+  用户在安卓的"应用信息"里就能看出装的是哪一版 ✓。
+  ★ 注意：XML 注释里**不能出现连续两个短横** ✗（本轮也栽了 ✓，aapt2 直接报
+  "not well-formed (invalid token)" ✓）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.dshm.shell">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 安卓 13(TIRAMISU)起"发系统通知"是运行时权限。壳用原生通知,
+         因为 WebView 不实现 Web Notification API(网页那半在 APK 里必然失败)。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 只在这台手机自己用：不加任何第三方 SDK，也不申请存储/相机等权限 ✓ -->
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="false"
+        android:supportsRtl="true"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

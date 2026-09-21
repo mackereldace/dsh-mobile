@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-mobile/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh-mobile 线协议：帧格式、握手状态机、密钥派生、逐帧 AEAD、逻辑流多路复用（三端共享）",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

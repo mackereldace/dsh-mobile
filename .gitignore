@@ -1,0 +1,25 @@
+# ── macOS ──
+.DS_Store
+
+# ── Node / pnpm ──
+node_modules/
+
+# ── 构建产物 ──
+# apps/shell 是 Flutter 应用，build/ 有 2.0 G，绝不可入库
+apps/shell/build/
+apps/shell/.dart_tool/
+native/android/build/
+dist/
+
+# ── 签名材料与安装包（★ 绝不入库）──
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
+*.p12
+*.pfx
+
+# ── IDE ──
+.idea/
+*.iml

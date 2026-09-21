@@ -1,0 +1,786 @@
+/**
+ * 配对页 HTML —— **由 scripts/gen-pairing-page.mjs 自动生成，请勿手工编辑**。
+ * 源文件：packages/host/src/pairing-page.html
+ *
+ * 生成时间：2026-09-17T05:53:51.384Z
+ * 大小：34411 字节
+ */
+export const PAIRING_PAGE_HTML = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>DSH Mobile · 配对</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #16181d;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --card: #f7f8fa;
+        --accent: #4d6bfe;
+        --accent-fg: #ffffff;
+        --warn: #b45309;
+        --danger: #b91c1c;
+        --ok: #047857;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115;
+          --fg: #e8eaed;
+          --muted: #9aa0aa;
+          --line: #262a31;
+          --card: #171a20;
+          --accent: #6b85ff;
+          --accent-fg: #0b0d11;
+          --warn: #fbbf24;
+          --danger: #f87171;
+          --ok: #34d399;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap { max-width: 560px; margin: 0 auto; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 15px; margin: 24px 0 8px; color: var(--muted); font-weight: 600; }
+      p { margin: 8px 0; }
+      .muted { color: var(--muted); font-size: 13px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        margin: 12px 0;
+      }
+      button {
+        font: inherit;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--bg);
+        color: var(--fg);
+        padding: 11px 16px;
+        min-height: 44px; /* 触控目标下限 */
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 600; }
+      button.danger { color: var(--danger); }
+      button:disabled { opacity: .5; cursor: default; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .code {
+        font-size: 34px;
+        letter-spacing: 8px;
+        text-align: center;
+        font-weight: 700;
+        margin: 4px 0 0;
+      }
+      .fp {
+        font-size: 13px;
+        word-break: break-all;
+        line-height: 1.7;
+        text-align: center;
+      }
+      textarea {
+        width: 100%;
+        font: inherit;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--bg);
+        color: var(--fg);
+        min-height: 84px;
+      }
+      .dev { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+      .dev:last-child { border-bottom: 0; }
+      .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+      .badge.ok { color: var(--ok); border-color: currentColor; }
+      .badge.warn { color: var(--warn); border-color: currentColor; }
+      .badge.danger { color: var(--danger); border-color: currentColor; }
+      .note { font-size: 13px; color: var(--muted); }
+      .err { color: var(--danger); font-size: 14px; }
+      .ok { color: var(--ok); }
+      .hide { display: none !important; }
+      ol { padding-left: 20px; margin: 8px 0; }
+      li { margin: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      屏上错误提示：脚本一旦抛错（含语法错误导致整段不执行的情况），
+      这里会显示原因。手机上没有控制台，用户只能靠屏上信息，
+      因此这段"兜底提示"是排障的唯一入口，必须放在最前面。
+    -->
+    <div id="crash" style="display:none;margin:12px;padding:12px;border:1px solid #b91c1c;border-radius:10px;color:#b91c1c;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap"></div>
+    <script>
+      window.addEventListener('error', function (event) {
+        var box = document.getElementById('crash')
+        if (!box) return
+        box.style.display = 'block'
+        box.textContent = '页面脚本出错：' + (event.message || '未知错误') +
+          (event.filename ? '\\n位置：' + event.filename + ':' + event.lineno + ':' + event.colno : '')
+      })
+      window.addEventListener('unhandledrejection', function (event) {
+        var box = document.getElementById('crash')
+        if (!box) return
+        box.style.display = 'block'
+        box.textContent = '页面脚本未处理的错误：' + ((event.reason && event.reason.message) || String(event.reason))
+      })
+      // 若 3 秒后仍停在"正在加载"，说明启动流程没有跑完，直接告知用户
+      setTimeout(function () {
+        var subtitle = document.getElementById('subtitle')
+        if (subtitle && subtitle.textContent === '正在加载…') {
+          var box = document.getElementById('crash')
+          if (box && box.style.display === 'none') {
+            box.style.display = 'block'
+            box.textContent = '页面初始化没有完成（脚本可能未能执行）。请强制刷新（桌面 Ctrl/Cmd+Shift+R）；若仍失败，请把本框内容反馈给开发者。'
+          }
+        }
+      }, 3000)
+    </script>
+    <div class="wrap">
+      <h1>DSH Mobile</h1>
+      <p class="muted" id="subtitle">正在加载…</p>
+
+      <!-- 手机侧：配对入口 -->
+      <section id="phone" class="hide">
+        <div class="card">
+          <h2 style="margin-top:0">在这台手机上配对</h2>
+          <ol>
+            <li>在<strong>电脑</strong>上打开 <span class="mono" id="desktop-url">…</span>，点「生成配对码」</li>
+            <li>把电脑上显示的配对链接复制过来，粘到下面</li>
+          </ol>
+          <p class="note" id="desktop-url-note"></p>
+          <textarea id="link" placeholder="dshmobile://pair?d=..." autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="primary" id="do-pair">确认配对</button>
+            <button id="scan-qr">扫码配对</button>
+          </div>
+          <p class="err" id="phone-err"></p>
+          <p class="note" id="phone-ok"></p>
+        </div>
+        <div class="card">
+          <div class="row" style="justify-content:space-between;align-items:center">
+            <div>
+              <strong>连接</strong>
+              <div class="muted" id="conn-state">未连接</div>
+            </div>
+            <button class="primary" id="open-gui">打开 DSH 界面</button>
+          </div>
+          <p class="note" id="conn-detail"></p>
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">已配对的电脑</h2>
+          <div id="phone-hosts" class="muted">（无）</div>
+        </div>
+      </section>
+
+      <!-- 电脑侧：配对控制台 -->
+      <section id="desktop" class="hide">
+        <div class="card">
+          <h2 style="margin-top:0">1. 生成配对码</h2>
+          <div class="row">
+            <button class="primary" id="gen">生成配对码</button>
+            <button id="refresh">刷新</button>
+          </div>
+          <div id="pairing" class="hide" style="margin-top:12px">
+            <div class="code mono" id="code">------</div>
+            <p class="muted" style="text-align:center;margin-top:0">把这 6 位数字与手机上显示的对照</p>
+            <p class="muted">配对链接（也可让手机扫码）：</p>
+            <textarea id="payload" readonly style="min-height:64px"></textarea>
+            <div class="row" style="margin-top:8px">
+              <button id="copy">复制链接</button>
+              <span class="note" id="copy-ok"></span>
+            </div>
+            <p class="note" id="expires"></p>
+            <div class="card" style="background:var(--bg);margin-top:12px">
+              <p class="muted" style="margin-top:0">手机请打开这个地址（<strong>必须 HTTPS</strong>）：</p>
+              <p class="mono" id="phone-url" style="word-break:break-all;margin:4px 0"></p>
+              <p class="note" style="margin-bottom:0">
+                电脑继续留在这个页面（本机地址 127.0.0.1）操作即可——
+                生成配对码、确认指纹都必须在电脑本机完成。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 style="margin-top:0">2. 确认设备指纹</h2>
+          <p class="note">
+            手机提交请求后会出现在这里。<strong>务必比对手机上显示的指纹与本页是否逐段一致</strong>——
+            不一致说明请求来自别的设备，请点「拒绝」。
+          </p>
+          <div id="pending" class="muted">（暂无待确认设备）</div>
+        </div>
+
+        <div class="card">
+          <h2 style="margin-top:0">3. 已授权设备</h2>
+          <div id="devices" class="muted">（无）</div>
+        </div>
+      </section>
+
+      <p class="err" id="fatal"></p>
+      <p class="note" style="margin-top:24px">
+        说明：本页的配对操作只能从电脑本机发起或确认；手机只能提交配对请求。
+        隧道全程端到端加密，电脑身份由配对时比对的指纹固定。
+      </p>
+    </div>
+
+    <script>
+      'use strict'
+      var API = ''
+      // phoneBaseUrl：手机应访问的基地址（来自 manifest，见 generatePairing 的说明）
+      var state = { profile: null, tunnel: null, code: null, timer: null, phoneBaseUrl: null }
+
+      function $(id) { return document.getElementById(id) }
+      function show(id, visible) { $(id).classList.toggle('hide', !visible) }
+      function text(id, value) { $(id).textContent = value }
+
+      function formatFingerprint(hex) {
+        if (!hex) return ''
+        return (hex.match(/.{1,4}/g) || []).join('-').toUpperCase()
+      }
+
+      async function api(path, options) {
+        var response = await fetch(API + path, Object.assign({ headers: { 'content-type': 'application/json' } }, options || {}))
+        var body = null
+        try { body = await response.json() } catch (e) { body = null }
+        if (!response.ok) {
+          var message = body && body.message ? body.message : 'HTTP ' + response.status
+          throw new Error(message)
+        }
+        return body
+      }
+
+      // ───────────────────────── 手机侧 ─────────────────────────
+
+      var STORE_KEY = 'dsh-mobile.host'
+
+      function readStored() {
+        try { var raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : null } catch (e) { return null }
+      }
+
+      /** 解析配对链接，取出宿主指纹、票据与候选地址。 */
+      function parseLink(value) {
+        var trimmed = String(value || '').trim()
+        // 用 startsWith 而不是 slice：曾经写成 slice(0, 11)，而 'dshmobile:' 只有 10 个字符，
+        // 于是比较恒为假——手机端**永远**解析不了任何配对链接，表现是"手机就是配不上"。
+        // 这类"差一位"的常量错误语法上完全合法，只有真机流程才能发现。
+        if (!trimmed.startsWith('dshmobile:')) throw new Error('这不是 DSH 的配对链接')
+        var query = trimmed.split('?')[1] || ''
+        var params = new URLSearchParams(query)
+        var payload = params.get('d')
+        if (!payload) throw new Error('配对链接缺少数据字段')
+        var normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+        while (normalized.length % 4 !== 0) normalized += '='
+        var binary = atob(normalized)
+        var bytes = new Uint8Array(binary.length)
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        return JSON.parse(new TextDecoder().decode(bytes))
+      }
+
+      async function doPair() {
+        text('phone-err', '')
+        text('phone-ok', '')
+        try {
+          var ticket = parseLink($('link').value)
+          if (ticket.expiresAt && Date.parse(ticket.expiresAt) <= Date.now()) throw new Error('配对码已过期，请在电脑上重新生成')
+
+          // claim 由手机发起：指纹必须与公钥自洽，服务端会校验
+          var device = await ensureDeviceKey()
+          await api('/mobile/pair/claim', {
+            method: 'POST',
+            body: JSON.stringify({
+              ticket: ticket.ticket,
+              deviceId: device.deviceId,
+              deviceSigningKey: device.publicKey,
+              fingerprint: device.fingerprint,
+              name: guessDeviceName(),
+              platform: 'web',
+            }),
+          })
+
+          // 把配置写下来后跳转到 DSH 界面：boot.js 会自动发起隧道连接并持续重试。
+          //
+          // 为什么不轮询配对状态：/mobile/pair/status 与其它管理端点一样只允许
+          // 电脑本机访问（安全模型使然）。手机的"等待批准"就体现在隧道连不上这件事上——
+          // 电脑一点允许，下一次重试就会成功。这样既不需要放宽权限，
+          // 也不需要为设备管理额外实现一套 Remote 命名空间。
+          //
+          // 存储形状必须与 boot.js 完全一致（含 pairingTicket）：boot.js 的
+          // readStoredHost() 直接把它当配置用，票据能省掉一次 URL 解析；
+          // 而 pinnedHostFingerprint 是防中间人的关键——丢了它 boot.js 会接受
+          // 任何自签的宿主身份。
+          localStorage.setItem(STORE_KEY, JSON.stringify({
+            baseUrl: location.origin,
+            tunnelUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/mobile/ws',
+            pairingTicket: ticket.ticket,
+            pairingCode: ticket.code,
+            pinnedHostFingerprint: ticket.hostFingerprint,
+          }))
+          text('phone-ok', '已提交。请在电脑上核对指纹并点「允许此设备」——允许后本页会自动进入 DSH 界面。')
+          renderPhoneHosts()
+          // 给电脑端一点确认时间后进入界面（界面会自行重连直到成功）。
+          //
+          // 形状约定：?pair= 必须是**整个 ticket 对象**的 base64url(UTF-8 JSON)，
+          // 与 boot.js 的 readUrlConfig() 一一对应。这里曾只传 ticket.ticket 裸串，
+          // 结果手机进入 GUI 后解析失败、拿不到指纹而连不上——两处必须一起改。
+          var encoded = encodeTicketPayload(ticket)
+          setTimeout(function () { location.href = '/mobile/app?pair=' + encodeURIComponent(encoded) }, 2500)
+        } catch (error) {
+          text('phone-err', String(error && error.message ? error.message : error))
+        }
+      }
+
+      function guessDeviceName() {
+        var ua = navigator.userAgent
+        var match = /Android[^;]*;\\s*([^)]+)\\)/.exec(ua) || /\\((iPhone|iPad)[^)]*\\)/.exec(ua)
+        return (match && match[1] ? match[1].trim() : '手机浏览器').slice(0, 40)
+      }
+
+      /** 生成并保存设备签名密钥（P-256，浏览器本地）。 */
+      async function ensureDeviceKey() {
+        var KEY = 'dsh-mobile.device-key'
+        var stored = localStorage.getItem(KEY)
+        if (stored) {
+          try {
+            var parsed = JSON.parse(stored)
+            var raw = unb64u(parsed.publicKey)
+            var digest = new Uint8Array(await crypto.subtle.digest('SHA-256', raw))
+            return { deviceId: parsed.deviceId, publicKey: parsed.publicKey, fingerprint: hex(digest.subarray(0, 16)) }
+          } catch (e) { /* 存储损坏则重新生成 */ }
+        }
+        var pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+        var pub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+        var jwk = await crypto.subtle.exportKey('jwk', pair.privateKey)
+        var publicKey = b64u(pub)
+        var deviceId = 'web-' + b64u(crypto.getRandomValues(new Uint8Array(9)))
+        localStorage.setItem(KEY, JSON.stringify({ deviceId: deviceId, publicKey: publicKey, privateKeyJwk: jwk }))
+        var d = new Uint8Array(await crypto.subtle.digest('SHA-256', pub))
+        return { deviceId: deviceId, publicKey: publicKey, fingerprint: hex(d.subarray(0, 16)) }
+      }
+
+      function hex(bytes) {
+        var out = ''
+        for (var i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0')
+        return out
+      }
+      function b64u(bytes) {
+        var s = ''
+        for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+        return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '')
+      }
+      function unb64u(v) {
+        var n = String(v).replace(/-/g, '+').replace(/_/g, '/')
+        while (n.length % 4 !== 0) n += '='
+        var bin = atob(n); var out = new Uint8Array(bin.length)
+        for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+        return out
+      }
+
+      /**
+       * 把整个 ticket 编成 ?pair= 参数的取值。
+       *
+       * 为什么不是 encodeURIComponent(JSON.stringify(ticket))：ticket 里有中文/特殊字符时
+       * 百分号编码会让 URL 变得很长，而且 base64url 与 boot.js 的解码路径完全对称。
+       * 与 boot.js 的 JSON.parse(fromUtf8(unb64u(token))) 严格对应。
+       */
+      function encodeTicketPayload(ticket) {
+        var json = JSON.stringify(ticket)
+        var utf8 = new TextEncoder().encode(json)
+        return b64u(utf8)
+      }
+
+      /** 建立加密隧道（与 boot.js 同一套协议，这里只用于展示连接状态）。 */
+      async function connectTunnel() {
+        var stored = readStored()
+        if (!stored) throw new Error('尚未配对')
+        var boot = window.__DSH_MOBILE_BOOT__
+        if (!boot || !boot.tunnel) {
+          // boot.js 只在电脑端注入的页面里存在；本页是独立页面，因此这里只做可达性检查
+          var manifest = await api('/mobile/manifest')
+          text('conn-state', '已配对')
+          text('conn-detail', '主机指纹 ' + formatFingerprint(manifest.hostFingerprint) + '；打开 DSH 界面即会自动建立加密隧道。')
+          renderPhoneHosts()
+          return
+        }
+        await boot.tunnel.connect()
+        text('conn-state', '已连接')
+      }
+
+      function renderPhoneHosts() {
+        var stored = readStored()
+        var host = $('phone-hosts')
+        if (!stored) { host.textContent = '（无）'; return }
+        host.innerHTML = ''
+        var div = document.createElement('div')
+        div.className = 'dev'
+        var left = document.createElement('div')
+        var name = document.createElement('div')
+        name.innerHTML = '<strong>' + escapeHtml(location.host) + '</strong>'
+        var fp = document.createElement('div')
+        fp.className = 'mono muted'
+        fp.style.fontSize = '12px'
+        fp.textContent = formatFingerprint(stored.pinnedHostFingerprint)
+        left.appendChild(name); left.appendChild(fp)
+        var button = document.createElement('button')
+        button.className = 'danger'
+        button.textContent = '解除'
+        button.onclick = function () {
+          localStorage.removeItem(STORE_KEY)
+          localStorage.removeItem('dsh-mobile.device-key')
+          location.reload()
+        }
+        div.appendChild(left); div.appendChild(button)
+        host.appendChild(div)
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        })
+      }
+
+      function openGui() {
+        var stored = readStored()
+        if (!stored) { text('conn-detail', '请先完成配对'); return }
+        // 走插件自己的 /mobile/app 外壳。**绝不能走根路径**：那是 DSH 的 token/cookie
+        // 认证入口（唯一的一条），插件曾用 path:'/' 抢占它，导致 token 兑换永不执行、
+        // 任何浏览器打开都是 401 死循环。详见 packages/host/src/cordis.ts 的事故注释。
+        location.href = '/mobile/app'
+      }
+
+      function scanQr() {
+        // 用系统相机/扫码 App 扫电脑屏幕上的二维码更简单；这里给出可复制的降级路径
+        text('phone-err', '请用手机相机扫描电脑屏幕上的二维码，或把配对链接复制粘贴到上面的输入框。')
+      }
+
+      // ───────────────────────── 电脑侧 ─────────────────────────
+
+
+      /**
+       * 复制配对链接。
+       *
+       * 为什么不能只依赖 navigator.clipboard：该 API **只在安全上下文可用**
+       * （HTTPS 或 localhost）。本页在局域网里是普通 HTTP，因此
+       * navigator.clipboard 是 undefined——按钮点了完全没反应，
+       * 且不报错、不提示，看起来就像"按钮坏了"。
+       *
+       * 因此这里按可靠性降级：
+       *   1) navigator.clipboard（安全上下文）
+       *   2) 选中 textarea + document.execCommand('copy')（旧 API，但在 HTTP 下可用）
+       *   3) 仅选中文本，并明确提示用户手动复制（Ctrl/Cmd+C）
+       */
+      function copyPayload() {
+        var field = $('payload')
+        var value = field.value
+        if (!value) {
+          text('copy-ok', '请先生成配对码')
+          return
+        }
+
+        function selectOnly() {
+          field.focus()
+          field.select()
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(value).then(
+            function () { text('copy-ok', '已复制') },
+            function () { fallback() },
+          )
+          return
+        }
+        fallback()
+
+        function fallback() {
+          selectOnly()
+          var copied = false
+          try {
+            copied = document.execCommand('copy')
+          } catch (error) {
+            copied = false
+          }
+          text('copy-ok', copied ? '已复制' : '已选中，请按 Ctrl/Cmd+C 复制')
+        }
+      }
+
+      async function generatePairing() {
+        text('fatal', '')
+        try {
+          var created = await api('/mobile/pair/code', { method: 'POST' })
+          state.code = created.ticket.code
+          text('code', created.ticket.code)
+          $('payload').value = created.qrPayload
+          // 手机地址由**宿主**给出（manifest.phoneBaseUrl）。页面不猜端口：
+          // 手机侧必须 HTTPS（普通 HTTP 页面不是安全上下文，crypto.subtle 不存在），
+          // 而 HTTPS 端口与明文端口不同，猜错会让用户照着一个连不上的地址去开。
+          text('phone-url', state.phoneBaseUrl || '（宿主未配置手机地址，检查安装参数 --phone-base-url）')
+          text('expires', '有效期至 ' + new Date(created.expiresAt).toLocaleTimeString())
+          show('pairing', true)
+          startPolling()
+        } catch (error) {
+          text('fatal', String(error && error.message ? error.message : error))
+        }
+      }
+
+      function startPolling() {
+        if (state.timer !== null) clearInterval(state.timer)
+        state.timer = setInterval(refreshConsole, 1500)
+        refreshConsole()
+      }
+
+      async function refreshConsole() {
+        try {
+          var pending = await api('/mobile/pair/pending')
+          renderPending(pending.pairings || [])
+          var devices = await api('/mobile/devices')
+          renderDevices(devices.devices || [], devices.connected || 0)
+        } catch (error) {
+          text('fatal', String(error && error.message ? error.message : error))
+        }
+      }
+
+      function renderPending(rows) {
+        var waiting = rows.filter(function (row) { return row.state === 'claimed' || row.state === 'open' })
+        var container = $('pending')
+        container.innerHTML = ''
+        if (waiting.length === 0) {
+          container.className = 'muted'
+          container.textContent = '（暂无待确认设备）'
+          return
+        }
+        container.className = ''
+        waiting.forEach(function (row) {
+          var div = document.createElement('div')
+          div.className = 'card'
+          div.style.background = 'var(--bg)'
+          var title = document.createElement('div')
+          title.innerHTML = '<strong>' + escapeHtml(row.name || row.deviceId || '未知设备') + '</strong>'
+          div.appendChild(title)
+          if (row.model) {
+            var model = document.createElement('div')
+            model.className = 'muted'
+            model.textContent = row.model + (row.platform ? ' · ' + row.platform : '')
+            div.appendChild(model)
+          }
+          if (row.fingerprint) {
+            var label = document.createElement('p')
+            label.className = 'muted'
+            label.style.margin = '10px 0 4px'
+            label.textContent = '设备指纹（与手机比对）'
+            div.appendChild(label)
+            var fp = document.createElement('div')
+            fp.className = 'fp mono'
+            fp.textContent = formatFingerprint(row.fingerprint)
+            div.appendChild(fp)
+          }
+          var actions = document.createElement('div')
+          actions.className = 'row'
+          actions.style.marginTop = '12px'
+          var allow = document.createElement('button')
+          allow.className = 'primary'
+          allow.textContent = '允许此设备'
+          allow.onclick = function () { confirmPairing(row.code, row.deviceId, true) }
+          var deny = document.createElement('button')
+          deny.className = 'danger'
+          deny.textContent = '拒绝'
+          deny.onclick = function () { confirmPairing(row.code, row.deviceId, false) }
+          actions.appendChild(allow); actions.appendChild(deny)
+          div.appendChild(actions)
+          container.appendChild(div)
+        })
+      }
+
+      async function confirmPairing(code, deviceId, approve) {
+        try {
+          await api('/mobile/pair/confirm', { method: 'POST', body: JSON.stringify({ code: code, deviceId: deviceId, approve: approve }) })
+          refreshConsole()
+        } catch (error) {
+          text('fatal', String(error && error.message ? error.message : error))
+        }
+      }
+
+      function renderDevices(rows, connected) {
+        var container = $('devices')
+        container.innerHTML = ''
+        if (rows.length === 0) {
+          container.className = 'muted'
+          container.textContent = '（无）'
+          return
+        }
+        container.className = ''
+        var summary = document.createElement('p')
+        summary.className = 'muted'
+        summary.textContent = '共 ' + rows.length + ' 台，当前在线 ' + connected + ' 台'
+        container.appendChild(summary)
+        rows.forEach(function (row) {
+          var div = document.createElement('div')
+          div.className = 'dev'
+          var left = document.createElement('div')
+          var name = document.createElement('div')
+          name.innerHTML = '<strong>' + escapeHtml(row.name) + '</strong>'
+          left.appendChild(name)
+          var meta = document.createElement('div')
+          meta.className = 'muted'
+          meta.style.fontSize = '12px'
+          var caps = row.capabilities || {}
+          var ability = []
+          if (caps.fsRead) ability.push('只读')
+          if (caps.fsWrite) ability.push('可写')
+          if (caps.fsShell) ability.push('可执行')
+          meta.textContent = row.authorization + (ability.length ? ' · ' + ability.join('/') : '')
+          left.appendChild(meta)
+          var fp = document.createElement('div')
+          fp.className = 'mono muted'
+          fp.style.fontSize = '12px'
+          fp.textContent = formatFingerprint(row.fingerprint)
+          left.appendChild(fp)
+          div.appendChild(left)
+
+          var actions = document.createElement('div')
+          actions.className = 'row'
+          if (row.authorization !== 'revoked') {
+            var write = document.createElement('button')
+            write.textContent = caps.fsWrite ? '收回写权限' : '授予写权限'
+            write.onclick = function () { updateDevice(row.deviceId, { capabilities: { fsWrite: !caps.fsWrite } }) }
+            actions.appendChild(write)
+            var revoke = document.createElement('button')
+            revoke.className = 'danger'
+            revoke.textContent = '撤销'
+            revoke.onclick = function () { revokeDevice(row.deviceId) }
+            actions.appendChild(revoke)
+          } else {
+            var badge = document.createElement('span')
+            badge.className = 'badge danger'
+            badge.textContent = '已撤销'
+            actions.appendChild(badge)
+          }
+          div.appendChild(actions)
+          container.appendChild(div)
+        })
+      }
+
+      async function updateDevice(deviceId, update) {
+        try {
+          await api('/mobile/devices/update', { method: 'POST', body: JSON.stringify({ deviceId: deviceId, update: update }) })
+          refreshConsole()
+        } catch (error) {
+          text('fatal', String(error && error.message ? error.message : error))
+        }
+      }
+
+      async function revokeDevice(deviceId) {
+        if (!confirm('撤销后该设备会立即断开，且必须重新配对。确定吗？')) return
+        try {
+          await api('/mobile/devices/revoke', { method: 'POST', body: JSON.stringify({ deviceId: deviceId }) })
+          refreshConsole()
+        } catch (error) {
+          text('fatal', String(error && error.message ? error.message : error))
+        }
+      }
+
+      /**
+       * 找出"电脑控制台"的地址。
+       *
+       * 背景：DSH 只绑 loopback，手机走的是本机代理端口，因此两个地址的端口不同：
+       *   电脑控制台 = http://127.0.0.1:<DSH端口>/mobile
+       *   手机入口   = http://<局域网IP>:<代理端口>/mobile
+       * 手机无法访问前者，但它需要知道前者是什么，才能正确引导用户。
+       *
+       * 探测方法：逐个尝试候选地址上的管理端点（只有电脑本机能得到 200）。
+       * 候选来自常见约定：与当前端口相同（若当前就是 DSH 端口），
+       * 以及 3080（默认端口）。全部失败时不误导用户，只提示"电脑上的本机地址"。
+       */
+      async function probeDesktopUrl() {
+        var host = location.hostname
+        var port = location.port || '80'
+        var candidates = []
+        // 同端口（当手机上访问的恰好就是 DSH 端口时成立）
+        candidates.push('http://127.0.0.1:' + port)
+        // 常见默认端口
+        if (port !== '3080') candidates.push('http://127.0.0.1:3080')
+        for (var i = 0; i < candidates.length; i++) {
+          try {
+            var response = await fetch(candidates[i] + '/mobile/pair/pending', { method: 'GET' })
+            if (response.ok) return candidates[i] + '/mobile'
+          } catch (error) {
+            /* 跨源失败或不可达：继续下一个 */
+          }
+        }
+        return undefined
+      }
+
+      // ───────────────────────── 启动 ─────────────────────────
+
+      async function boot() {
+        // 手机应访问的基地址（HTTPS）由宿主给出，页面不猜端口。
+        // 必须在**所有分支之前**读取：早先把它放在"已配对"分支里，
+        // 结果电脑端（尚未配对）拿不到值，提示变成"宿主未配置手机地址"。
+        try {
+          var manifestForPhoneUrl = await api('/mobile/manifest')
+          state.phoneBaseUrl = manifestForPhoneUrl.phoneBaseUrl || null
+        } catch (error) {
+          state.phoneBaseUrl = null
+        }
+
+        // 判定自己是电脑还是手机：能访问 loopback 管理端点的是电脑。
+        var local = false
+        try {
+          await api('/mobile/pair/pending')
+          local = true
+        } catch (error) {
+          local = false
+        }
+
+        if (local) {
+          text('subtitle', '配对控制台（本页在电脑上打开）')
+          show('desktop', true)
+          $('gen').onclick = generatePairing
+          $('refresh').onclick = function () {
+            text('fatal', '')
+            refreshConsole()
+          }
+          $('copy').onclick = copyPayload
+          refreshConsole()
+        } else {
+          text('subtitle', '在这台手机上接入电脑上的 DeepSeek Harness')
+          show('phone', true)
+          $('do-pair').onclick = doPair
+          $('scan-qr').onclick = scanQr
+          $('open-gui').onclick = openGui
+          renderPhoneHosts()
+          probeDesktopUrl().then(function (desktopUrl) {
+            if (desktopUrl !== undefined) {
+              text('desktop-url', desktopUrl)
+              text('desktop-url-note', '（该地址只能在电脑本机打开，手机打不开——这是刻意的安全设计）')
+            } else {
+              text('desktop-url', '127.0.0.1:<DSH端口>/mobile')
+              text('desktop-url-note', '请在电脑上用它自己的本机地址打开配对页（形如 http://127.0.0.1:3080/mobile）。')
+            }
+          })
+          var stored = readStored()
+          if (stored) {
+            text('conn-state', '已配对')
+            text('conn-detail', '主机指纹 ' + formatFingerprint(stored.pinnedHostFingerprint))
+          }
+        }
+      }
+
+      boot().catch(function (error) {
+        text('fatal', String(error && error.message ? error.message : error))
+      })
+    </script>
+  </body>
+</html>
+`

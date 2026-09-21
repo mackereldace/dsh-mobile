@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-mobile/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh-mobile 浏览器客户端：注入 DSH 传输层的 boot 脚本（纯 WebCrypto，零依赖）",
+  "type": "module",
+  "files": [
+    "src/boot.js"
+  ],
+  "dependencies": {
+    "@dsh-mobile/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@dsh-mobile/host": "workspace:*"
+  },
+  "main": "src/boot.js",
+  "exports": {
+    ".": "./src/boot.js",
+    "./boot.js": "./src/boot.js"
+  }
+}

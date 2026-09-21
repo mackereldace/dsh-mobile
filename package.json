@@ -1,0 +1,33 @@
+{
+  "name": "dsh-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DSH Mobile — 让手机安全地接入电脑上的 DeepSeek Harness",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types \"packages/*/test/**/*.test.ts\"",
+    "test:vectors": "node --experimental-strip-types packages/protocol/test/emit-vectors.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "node scripts/build-lib.mjs",
+    "build:check": "node scripts/build-lib.mjs --check",
+    "check:prod": "node scripts/check-production.mjs",
+    "check:relay-volume": "node scripts/check-relay-volume.mjs",
+    "check:relay-isolation": "node scripts/check-relay-isolation.mjs",
+    "check:relay-backhaul": "node scripts/check-relay-backhaul.mjs",
+    "check:ipv6": "node scripts/check-ipv6-path.mjs",
+    "check:device": "node scripts/check-device-channel.mjs",
+    "check:relay": "node scripts/check-relay.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-api-gateway": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.20.2",
+    "js-yaml": "^5.4.2",
+    "typescript": "5.9.3"
+  }
+}

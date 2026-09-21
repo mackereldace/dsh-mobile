@@ -1,0 +1,48 @@
+{
+  "name": "@dsh-mobile/host",
+  "version": "0.1.0",
+  "private": false,
+  "description": "DSH 宿主插件：手机端加密配对、设备注册表与 /mobile 隧道（把手机浏览器接入 DSH 全部业务 API）",
+  "type": "module",
+  "main": "lib/cordis.js",
+  "exports": {
+    ".": {
+      "types": "./lib/cordis.d.ts",
+      "default": "./lib/cordis.js"
+    },
+    "./protocol": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "dsh": {
+    "bundle": false
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-api-gateway": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1"
+  },
+  "dependencies": {
+    "@dsh-mobile/protocol": "workspace:*"
+  },
+  "types": "lib/cordis.d.ts",
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-boot.mjs",
+    "copy-boot": "node scripts/copy-boot.mjs"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-api-gateway": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    }
+  }
+}

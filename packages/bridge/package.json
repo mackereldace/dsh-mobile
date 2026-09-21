@@ -1,0 +1,27 @@
+{
+  "name": "@dsh-mobile/bridge",
+  "version": "0.0.1",
+  "private": true,
+  "description": "把 DSH 自带的文档预览能力（ctx.sidebarRight.openResource）暴露给手机外壳的桥",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-api-session-controller"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}

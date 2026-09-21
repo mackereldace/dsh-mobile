@@ -1,0 +1,227 @@
+{
+  "$comment": "由 packages/protocol/test/emit-vectors.ts 生成。Dart 端必须逐字节复现本文件中的全部值；任何不一致都说明两端密码学实现有差异，必须在合并前修复。",
+  "generatedAt": "2026-09-16T09:41:03.176Z",
+  "symmetric": {
+    "ikm": "ERERERERERERERERERERERERERERERERERERERERERE",
+    "salt": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+    "derived": {
+      "dsh-mobile/v1/c2s": "sA5sv2oDgsnq4HeJ4sa0D5tOJi--Ka3NDqIM-D1hb_A",
+      "dsh-mobile/v1/s2c": "uyyto6dw54mTDMnHJqL-N9RtXAYFNHD_pWKYBcclSKg",
+      "dsh-mobile/v1/confirm-client": "XwLsfYWnerW2apHZKH8MD7SwcwaLSD-EXhr2GgeILpY",
+      "dsh-mobile/v1/hs": "VJD3GJ_ZnIV37pn8Nfc8aUukdFNB4ZAM4_ZUT_TbQis"
+    },
+    "confirmMac": "GCqlIPTenhNRuN6k-svh4g",
+    "transcriptHash": "CcGzZdcFVPwRNOiFUy2L0YfE9UPVSzDAyYxrv8VA2x8"
+  },
+  "frame": {
+    "key": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+    "nonceBase": "3q2-7w",
+    "counter": "42",
+    "payload": "eyJlbmRwb2ludCI6InNlc3Npb24vY3JlYXRlIiwicGF5bG9hZCI6eyJjd2QiOiIvdG1wIn19",
+    "frame": "IAEAAABGAAAAAAAAACptjbsnnl0ohcq0prOH6JP2CdO0Ivgb6RlDyY7GD1_7uStPfS5zlieiV2H17aiFf-CijyT07zeZJVbCYv7qliagDa49dr3R",
+    "expectedPlaintext": "{\"endpoint\":\"session/create\",\"payload\":{\"cwd\":\"/tmp\"}}"
+  },
+  "handshake": {
+    "hostSigningKey": "BD76DmnpqAqT1dbVZbVB-8iZdN7MshpJ6EM9ybR--F39weOMWo-4vjp1Y6zTkjYBqKS4qmF-uW1Agqyx90SYRTU",
+    "devicePublicKey": "yr8kGNeiNen1XjsY09ntYNxBj8j2L05EotZWu9kGy2s",
+    "events": [
+      {
+        "step": "keygen",
+        "hostSigningKey": "BD76DmnpqAqT1dbVZbVB-8iZdN7MshpJ6EM9ybR--F39weOMWo-4vjp1Y6zTkjYBqKS4qmF-uW1Agqyx90SYRTU",
+        "hostFingerprint": "7a7161dbfd77c4df219a6ecf97be182b",
+        "hostFingerprintFormatted": "7A71-61DB-FD77-C4DF-219A-6ECF-97BE-182B",
+        "devicePublicKey": "yr8kGNeiNen1XjsY09ntYNxBj8j2L05EotZWu9kGy2s",
+        "deviceSigningKey": "BNVKykeX8rW5twfIJXYtxW5S1MrTy-fHBrIhBgZiWiDOuJ4JEM7Kv--IiEeHzAArgrJ-Df-7ZEJICwn1Dc4Z0Io",
+        "deviceFingerprint": "8cf25d167a3584c4017e958eb85ad5c4"
+      },
+      {
+        "step": "client-hello",
+        "payload": {
+          "protocolVersion": 1,
+          "deviceId": "dev-vector-0001",
+          "ephemeralPublicKey": "rwgKRm7PdyUU6TmO1fqEm_gh-WEdoVv41BpgrLNMQnk",
+          "clientNonce": "XPs1GWI-N9iw8rUwobWLTZxq3HOSTeQKeS4CagmbYi4"
+        }
+      },
+      {
+        "step": "server-hello",
+        "payload": {
+          "protocolVersion": 1,
+          "hostId": "host-vector-0001",
+          "ephemeralPublicKey": "6oQsCOySurnTdV6VMZxrBAJOh16Ip6w_yd-ig5m3sF0",
+          "serverNonce": "4TpV_XkuGAdrFhQ_3yWsTJUHBfvfIKWZt7bFXyg1lic",
+          "serverNonceBase": "yHUpyg",
+          "hostSigningKey": "BD76DmnpqAqT1dbVZbVB-8iZdN7MshpJ6EM9ybR--F39weOMWo-4vjp1Y6zTkjYBqKS4qmF-uW1Agqyx90SYRTU",
+          "hostFingerprint": "7a7161dbfd77c4df219a6ecf97be182b",
+          "signature": "XHr1m-4M4MRnV4g7wkXb1iWGymeo0xLrX3D2NTow5km_5Mmu6B9CP5LQlkht4bpxLkMVCRg-Qarf_QFUkMmVXQ"
+        }
+      },
+      {
+        "step": "handshake-key",
+        "value": "XXgaPs4fvuEO0yaxIHMwi7-TW7M_kRcMAs0fVHzsb5w"
+      },
+      {
+        "step": "server-hello-sealed",
+        "payload": {
+          "e": "6oQsCOySurnTdV6VMZxrBAJOh16Ip6w_yd-ig5m3sF0",
+          "sh": "AgEAAAHgAAAAAAAAAAGzHOBjL30n33XpgMseKMFb4v4x0ekeDAhXF2AeAsUDMr-zcsqjVIqvj6bmojEj828mhk8gRrgwxU4TrqOQPeA6rbxlZIeVrAA-jSLms2EIDy58QWK33o1p47th1rgg0ghNynTjt1RCec6dbS4q537W3uNQYiY7vpTmbX9ZoGpsYvmhBEivJoILDV--MtMEkce5a0FRgBrFt6mZmuDsVVL-rZIp7tTbkkZgdPHLE71rBPzhfAktgaDH0Tl-tu5XYk5xP8iQvR_xrNC37CAWMNei8Nnix-98MhJlaBri3EaFpYpruhhgwTBbbLalfHmATNZ-ZuU17zQRUgV22ywWV0mGqYk3eS0CFGShj6VSj9JJ7MIWTrlMk60Yr-LleqHq4YTSuF4clIctBvxsjR5d_uH_qorE073UoNUZIl1hH7DCVxm2lxf-l0UkYWjWPuwWSr0IJtX0p4XBZG0N-44y8uC-6_ynS47AaVLMdbTXzzdtWg0jp2f9VuDiEFhqnzfXF22Kx_t5OMVifexrRSEI66WFrfmne6ByyJxvnjaMmTxvwe7Z0zqYdUEGnidu4vfeb7-zp85mkjjsVDAvEeGAH6oSHKdFKlrWGqJ0w8Z5ar48qPXdO6bRl-9ENZfASKd5mKQ"
+        }
+      },
+      {
+        "step": "client-auth",
+        "payload": {
+          "signature": "x8kDt_kghjbA0Q8E8xfzRxA_YcYPDIlpXsq3zghraeHBVSY3L9H2JzqQCGTt7cHHslWOqk1gr8ePGMdREHUCLQ",
+          "confirm": "Pcfa35OT23DqMc5IkGJm-A",
+          "clientNonceBase": "nAl5dQ"
+        }
+      },
+      {
+        "step": "server-auth-ok",
+        "payload": {
+          "deviceId": "dev-vector-0001",
+          "sessionId": "9735f0cd086f939d86a28f66274cd599",
+          "capabilities": {
+            "fsRead": true,
+            "fsWrite": false,
+            "fsShell": false,
+            "phoneFs": false,
+            "phoneControl": false
+          },
+          "authorization": "persistent",
+          "idleTimeoutMs": 300000,
+          "serverNonceBase": "yHUpyg",
+          "confirm": "bhfvuKEKc6k2XoGQKwRN1Q"
+        }
+      },
+      {
+        "step": "session",
+        "sessionId": "9735f0cd086f939d86a28f66274cd599",
+        "clientSessionId": "9735f0cd086f939d86a28f66274cd599",
+        "clientNonceBase": "nAl5dQ",
+        "serverNonceBase": "yHUpyg",
+        "capabilities": {
+          "fsRead": true,
+          "fsWrite": false,
+          "fsShell": false,
+          "phoneFs": false,
+          "phoneControl": false
+        },
+        "keys": {
+          "clientToServer": "5Ab0B_95i_dRrJW7_fPCGwutJiLOM8rRHdNrPsZ2-Jg",
+          "serverToClient": "2HLmtC7I6lC_T8XNngQO12fxI0VmMNyqtQfGIyzEmIE",
+          "confirmClient": "WzuW3OfI3_cZOJmzre2UInezwcd3N-n7mkpngspdMHQ",
+          "confirmServer": "t7pIcFTVVqG-RnEOQ2ZjsHgJcZRUMdaU6D0uTlI6A38"
+        }
+      }
+    ]
+  },
+  "mux": {
+    "messages": [
+      {
+        "direction": "client->host",
+        "message": {
+          "type": "open",
+          "streamId": 1,
+          "endpoint": "session/history",
+          "payload": {
+            "sessionId": "s-1",
+            "limit": 50
+          }
+        }
+      },
+      {
+        "direction": "host->client",
+        "message": {
+          "type": "item",
+          "streamId": 1,
+          "value": {
+            "seq": 1,
+            "text": "第一页"
+          }
+        }
+      },
+      {
+        "direction": "host->client",
+        "message": {
+          "type": "item",
+          "streamId": 1,
+          "value": {
+            "seq": 2,
+            "text": "第二页"
+          }
+        }
+      },
+      {
+        "direction": "host->client",
+        "message": {
+          "type": "end",
+          "streamId": 1
+        }
+      }
+    ],
+    "values": [
+      {
+        "seq": 1,
+        "text": "第一页"
+      },
+      {
+        "seq": 2,
+        "text": "第二页"
+      }
+    ],
+    "endpoint": "session/history",
+    "payload": {
+      "sessionId": "s-1",
+      "limit": 50
+    }
+  },
+  "enums": {
+    "protocolVersion": 1,
+    "errorCodes": [
+      "mobile/protocol-version",
+      "mobile/handshake-malformed",
+      "mobile/handshake-signature",
+      "mobile/handshake-confirm",
+      "mobile/device-unknown",
+      "mobile/device-revoked",
+      "mobile/device-expired",
+      "mobile/pairing-ticket-invalid",
+      "mobile/pairing-pending",
+      "mobile/pairing-rejected",
+      "mobile/capability-denied",
+      "mobile/replay-detected",
+      "mobile/decrypt-failed",
+      "mobile/payload-too-large",
+      "mobile/backpressure",
+      "mobile/internal"
+    ],
+    "frameTypes": {
+      "ClientHello": 1,
+      "ServerHello": 2,
+      "ClientAuth": 3,
+      "ServerAuthOk": 4,
+      "Ping": 16,
+      "Pong": 17,
+      "LinkError": 18,
+      "Revoked": 19,
+      "ReauthRequired": 20,
+      "RpcRequest": 32,
+      "RpcResponse": 33,
+      "StreamOpen": 34,
+      "StreamItem": 35,
+      "StreamEnd": 36,
+      "StreamError": 37,
+      "StreamCancel": 38,
+      "UploadStart": 64,
+      "UploadChunk": 65,
+      "UploadEnd": 66,
+      "UploadCancel": 67
+    },
+    "frameFlags": {
+      "None": 0,
+      "Json": 1,
+      "Ack": 2,
+      "Final": 4
+    }
+  }
+}

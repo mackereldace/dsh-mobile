@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置。
+
+  ## 为什么这里放行明文流量
+
+  dsh-mobile 的隧道在**应用层**做端到端加密：X25519 临时密钥协商 + HKDF-SHA256 派生 +
+  AES-256-GCM 逐帧认证加密（见 docs/protocol.md）。承载层是局域网内的 http/ws，
+  这**不是"忘了开 HTTPS"**，而是刻意的取舍：
+
+  - 局域网里给每台电脑签发并让手机信任证书，比"二维码带外交换公钥"更麻烦，
+    而且用户很容易在证书警告上点"继续"，届时 TLS 只是心理安慰；
+  - 应用层加密 + 设备公钥配对（TOFU 固定宿主指纹）在本场景下提供的保证更强：
+    它同时解决了"传输保密"和"这是哪台设备"两件事。
+
+  ## 为什么不能靠"枚举 IP"来收敛明文面
+
+  局域网 IP 是任意的（192.168.x.x / 10.x.x.x / 172.x.x.x 里的任意地址，
+  用户也可能用 100.64/10 等网段）。Android 的 network-security-config **不支持 CIDR**，
+  只能逐个写字面量域名——枚举不可能覆盖真实部署，写了等于没写。
+
+  因此这里采取两条互补措施：
+
+  1. `base-config` 放行明文，保证任意局域网地址都能连（否则 Android 9+ 直接拒绝，
+     表现为"网页打不开、隧道建不起来"）；
+  2. 真正的安全性由协议层保证：隧道载荷全部端到端加密，且宿主身份用配对时的
+    指纹固定（TOFU），指纹不匹配会明确拒绝并提示可能存在中间人。
+
+  ## 将来接公网（M4）时必须收紧
+
+  公网中继场景不应继续依赖明文 http。届时做法：
+  把 base-config 改回 `cleartextTrafficPermitted="false"`，
+  并为中继域名单独开 domain-config，或直接使用 wss + 自有加密通道。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

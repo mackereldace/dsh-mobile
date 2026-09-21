@@ -1,0 +1,599 @@
+/**
+ * Cordis 插件入口：把 @dsh-mobile/host 挂进 DSH 的 web profile。
+ *
+ * 关键点是"只用官方扩展点"：
+ *  - `ctx.webServer.register / registerUpgrade`：挂 HTTP 与 WebSocket 路由；
+ *  - `ctx.webServer.tapIndex`：往 index.html 注入 shim 脚本，使其**先于**应用 bundle 执行
+ *    （这是 Flutter WebView 无法保证"启动前注入"的唯一可靠解法）；
+ *  - `ctx.typertGateway.invoke / stream`：把隧道内的调用转给 DSH 既有业务 API，
+ *    因此会话/工作区/文件/设置/凭据/skill/权限/上下文用量全部无需重写。
+ *
+ * 宿主身份（用于 TOFU 固定）持久化在 `$DSH_HOME/storages/dsh-mobile/host-identity.json`，
+ * 私钥**只存本机**；换机或删文件会导致已配对手机的指纹校验失败（这是刻意的安全性质）。
+ */
+
+import { createHash, createPrivateKey } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import type { Context } from '@deepseek-ai/cordis'
+// 类型侧导入：这两行没有运行时开销，作用是加载 DSH 包的 `declare module` 声明合并，
+// 让 ctx.webServer / ctx.typertGateway 在本插件里类型可见。
+import type {} from '@deepseek-ai/dsh-api-gateway'
+import type {} from '@deepseek-ai/dsh-host-webserver'
+import { generateP256KeyPair } from '@dsh-mobile/protocol'
+
+import { DeviceStore } from './devices.ts'
+import { detectLanIp, isAddressPresent } from './lan.ts'
+import {
+  createMobileHost,
+  DEFAULT_CONFIG,
+  type HostIdentity,
+  type MobileHost,
+  type MobileHostConfig,
+  type RemoteGateway,
+} from './index.ts'
+
+/** Cordis 插件名（与包名一致，便于排障）。 */
+export const name = 'mobile-host'
+
+/** 依赖的宿主服务。缺失时 Cordis 不会激活本插件，而不是让它在半可用状态下报错。 */
+export const inject = ['webServer', 'typertGateway']
+
+/** 插件配置（与 MobileHostConfig 一致，另加 dshHome 覆盖）。 */
+export interface Config extends Partial<MobileHostConfig> {
+  /** DSH home 目录；省略时跟随 `$DSH_HOME` 与 `~/.dsh`。 */
+  dshHome?: string
+  /** 对外声明的主机名（仅用于展示）。 */
+  hostName?: string
+  /** 允许授予的最大能力位。默认仅有只读能力。 */
+  capabilityCeiling?: {
+    fsRead?: boolean
+    fsWrite?: boolean
+    fsShell?: boolean
+    phoneFs?: boolean
+    phoneControl?: boolean
+  }
+  /** 是否往 index.html 注入 shim（默认开启）。 */
+  injectShim?: boolean
+  /** 客户端 boot 脚本路径；省略时尝试从插件包内的 lib/boot.js 读取。 */
+  bootScriptPath?: string
+  /**
+   * 本部署额外服务的 authority（局域网地址），例如 `['10.0.0.5:3080']`。
+   * 必须与手机实际访问的 authority 一致，否则 /mobile 路由会以 403 拒绝。
+   */
+  trustedHosts?: string[]
+  /**
+   * 写进配对码的对外基地址，例如 `http://10.0.0.5:3081`。
+   *
+   * 为什么必须可配：DSH 只绑 loopback，局域网访问要经本机代理，
+   * 因此**手机能到的是代理端口，而不是 DSH 端口**。若配对码里嵌的是自动探测到的
+   * `http://<ip>:<DSH端口>`，手机会照着连——连不上（那个端口只对回环开放）。
+   * 安装脚本会用 `--trusted-host` 的值自动填好这一项。
+   */
+  publicBaseUrl?: string
+  /**
+   * **额外的**手机访问基地址（非局域网：自建中继、覆盖网、IPv6 等）。
+   *
+   * 会随配对票据的 `endpoints` 一起下发给手机，成为它的**候选端点**之一。
+   * 手机侧不需要为新增端点改代码——它按顺序逐个尝试（见客户端 `deriveTunnelUrls`）。
+   * 例：`['https://relay.example.com']`。
+   */
+  extraEndpoints?: string[]
+  /**
+   * **手机**应访问的基地址（HTTPS），如 `https://10.34.221.181:3443`。
+   *
+   * 手机侧必须 HTTPS：普通 HTTP 页面不是安全上下文，`crypto.subtle` 不存在，
+   * 配对与隧道都无法工作。安装脚本会用 `--phone-base-url` 写入。
+   */
+  phoneBaseUrl?: string
+}
+
+/** 解析 DSH home。 */
+function resolveDshHome(explicit?: string): string {
+  if (explicit !== undefined && explicit.length > 0) return explicit
+  const fromEnv = process.env['DSH_HOME']
+  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv
+  const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '.'
+  return join(home, '.dsh')
+}
+
+/**
+ * 载入或创建宿主身份。
+ *
+ * 私钥以 JSON 存于本机（DSH home 的 storages 目录，权限 0600）。
+ * 不引入额外加密：这个文件与 DSH 自己的 `.credentials.yaml` 同级别，
+ * 若攻击者能读它，早已能读走模型 API Key，加密它并不提升实际安全性。
+ */
+export function loadOrCreateHostIdentity(options: { directory: string; hostName?: string }): HostIdentity {
+  const file = join(options.directory, 'host-identity.json')
+  mkdirSync(dirname(file), { recursive: true })
+  const existing = readJson<{ hostId?: string; hostName?: string; publicKey?: string; privateKeyPem?: string }>(file)
+  if (existing?.hostId !== undefined && existing.publicKey !== undefined && existing.privateKeyPem !== undefined) {
+    return {
+      hostId: existing.hostId,
+      hostName: existing.hostName ?? options.hostName ?? 'DeepSeek Harness',
+      signingKey: {
+        publicKey: existing.publicKey,
+        privateKey: createPrivateKey({ key: existing.privateKeyPem, format: 'pem', type: 'pkcs8' }),
+      },
+    }
+  }
+
+  const pair = generateP256KeyPair()
+  const privateKeyPem = (pair.privateKey as { export(config: { type: 'pkcs8'; format: 'pem' }): string }).export({
+    type: 'pkcs8',
+    format: 'pem',
+  })
+  const hostId = `host-${(pair.publicKey as string).slice(0, 12)}`
+  const identity = {
+    hostId,
+    hostName: options.hostName ?? 'DeepSeek Harness',
+    publicKey: pair.publicKey,
+    privateKeyPem,
+  }
+  writeFileSync(file, `${JSON.stringify(identity, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  return { hostId, hostName: identity.hostName, signingKey: { publicKey: pair.publicKey, privateKey: pair.privateKey } }
+}
+
+function readJson<T>(file: string): T | undefined {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as T
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 计算本机可用的连接地址（写入配对码，供手机选择）。
+ *
+ * ## 为什么不"激活时采样一次"
+ *
+ * 早期版本在插件启动时采样一次网络接口（与 DSH web 自身一致），代价是**换网络就得重启**：
+ * 换了 Wi-Fi 或 DHCP 续租换了地址后，配对码里仍嵌着旧地址，手机照着连必然失败。
+ *
+ * 现在把顺序反过来：**只要缓存的地址仍存在于某个网卡上就沿用**（稳定、不会每次生成都变），
+ * 一旦它消失了就立刻改用重新探测的地址。这样常见的网络变化不再需要重启 DSH。
+ *
+ * 探测走 `detectLanIp()`（与 `scripts/detect-lan-ip.mjs` 同一套排序规则），
+ * 它会排除 169.254/16 这类自分配地址——正是本机 `en0` 上那个"奇怪的 IP"。
+ */
+function sampleEndpoints(port: number): string[] {
+  const live = detectLanIp()
+  if (live !== undefined) return [`http://${live}:${port}`]
+
+  // 探测不到（例如全是自分配地址或只有回环）：退化到回环，至少配对码可用
+  return [`http://127.0.0.1:${port}`]
+}
+
+/**
+ * 带缓存的端点解析器：地址仍在网卡上就沿用，消失则重新探测。
+ *
+ * 之所以要缓存：同一个局域网地址在多次生成配对码之间不应跳变（用户可能已经
+ * 把上一个链接发出去了）。之所以要失效：换网络后必须立刻纠正。
+ */
+function createEndpointResolver(
+  logger: { info?: (message: string) => void } | undefined,
+  port: number,
+  configured: string | undefined,
+  /**
+   * 额外端点（非局域网：中继地址等）。
+   *
+   * 为什么放在配置里而不是写死代码：部署形态（自建中继 / 覆盖网 / IPv6 直连）
+   * 会变，而**手机侧不需要跟着改**——它拿到的是一份候选列表，逐个试。
+   * 这些地址会随配对票据的 `endpoints` 一起下发给手机。
+   */
+  extra: readonly string[] = [],
+) {
+  let cached = configured ?? detectLanIp()
+  if (configured !== undefined) return () => [configured, ...extra]
+  return (): string[] => {
+    if (configured !== undefined) return [configured, ...extra]
+    const previous = cached
+    if (previous !== undefined && !isAddressPresent(previous)) {
+      const reDetected = detectLanIp()
+      if (reDetected !== undefined && reDetected !== previous) {
+        logger?.info?.(`[mobile-host] 局域网地址已变化：${previous} → ${reDetected}（配对码将使用新地址）`)
+        cached = reDetected
+      }
+    }
+    if (cached === undefined) cached = detectLanIp()
+    const primary = cached === undefined ? `http://127.0.0.1:${port}` : `http://${cached}:${port}`
+    return [primary, ...extra]
+  }
+}
+
+/**
+ * 定位 DSH 前端 index.html。
+ *
+ * 用 createRequire 锚定 `@deepseek-ai/dsh-web-frontend`（与 DSH web-app 的做法一致），
+ * 这样 profile 的依赖布局变化时不会失效；解析不到时返回 undefined，
+ * 插件照常工作（只是手机端拿不到应用外壳）。
+ */
+function resolveDistIndex(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url)
+    const manifest = require.resolve('@deepseek-ai/dsh-web-frontend/package.json')
+    return join(dirname(manifest), 'dist', 'index.html')
+  } catch {
+    return undefined
+  }
+}
+
+/** 插件主体。 */
+export function apply(ctx: Context, config: Config = {}): void {
+  const dshHome = resolveDshHome(config.dshHome)
+  const dataDirectory = join(dshHome, 'storages', 'dsh-mobile')
+  const store = new DeviceStore({
+    directory: dataDirectory,
+    ...(config.auditLimit === undefined ? {} : { auditLimit: config.auditLimit }),
+  })
+  const identity = loadOrCreateHostIdentity({
+    directory: dataDirectory,
+    ...(config.hostName === undefined ? {} : { hostName: config.hostName }),
+  })
+
+  // 端口来自 webServer 的实际监听值（支持 --port 0 由系统分配）
+  const port = (ctx.webServer as unknown as { port?: number }).port ?? 3080
+  const endpoints = createEndpointResolver(
+    ctx.logger as unknown as { info?: (message: string) => void } | undefined,
+    port,
+    config.publicBaseUrl !== undefined && config.publicBaseUrl.length > 0 ? config.publicBaseUrl : undefined,
+    Array.isArray(config.extraEndpoints) ? config.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0) : [],
+  )
+
+  const gateway = ctx.typertGateway as unknown as RemoteGateway
+
+  // 复用 DSH 自己的 trustedHosts 配置：插件无法读取 Connection 的私有配置，
+  // 因此让部署方在插件配置里显式声明（install 脚本会打印出该加什么）。
+  const trustedHosts = config.trustedHosts ?? []
+
+  // 注入脚本：内容来自客户端插件包的构建产物；缺失时插件仍可用（只是手机浏览器页不会被注入）
+  // 必须用 fileURLToPath：仓库/安装路径可能含非 ASCII 字符，URL.pathname 会返回
+  // 百分号编码后的路径，existsSync 会失败——表现为 boot.js 静默消失、手机端无 shim。
+  const bootScriptPath = config.bootScriptPath ?? join(dirname(fileURLToPath(import.meta.url)), 'boot.js')
+  const bootScript =
+    existsSync(bootScriptPath)
+      ? () => {
+          const source = readFileSync(bootScriptPath, 'utf8')
+          return { source, sha256: createHash('sha256').update(source).digest('hex') }
+        }
+      : undefined
+
+  const mobileHost = createMobileHost({
+    config: { ...DEFAULT_CONFIG, ...config },
+    store,
+    identity,
+    gateway,
+    endpoints,
+    // 回源通道要用端口做环回请求（复用插件自己的 HTTP 路由，不另写一套）
+    selfPort: port,
+    dshVersion: process.env['DSH_VERSION'] ?? '0.1.5-rc.1',
+    ...(bootScript === undefined ? {} : { bootScript }),
+    trustedHosts,
+    ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0
+      ? {}
+      : { phoneBaseUrl: config.phoneBaseUrl }),
+    distIndex: resolveDistIndex,
+    renderIndex: (html) => ctx.webServer.renderIndex(html),
+    ...(config.capabilityCeiling === undefined
+      ? {}
+      : {
+          capabilityCeiling: {
+            fsRead: config.capabilityCeiling.fsRead ?? true,
+            fsWrite: config.capabilityCeiling.fsWrite ?? false,
+            fsShell: config.capabilityCeiling.fsShell ?? false,
+            phoneFs: config.capabilityCeiling.phoneFs ?? false,
+            phoneControl: config.capabilityCeiling.phoneControl ?? false,
+          },
+        }),
+  })
+
+  /**
+   * 把端侧通道暴露给 agent：注册 `phone_notify` 工具。
+   *
+   * ## 为什么用动态 import + try/catch
+   *
+   * 注册工具是**新增的可选能力**，而插件加载失败会**弄坏一切**（手机整条链路都靠它）。
+   * 两者的代价完全不对等，所以这里刻意做到"最坏情况只是少一个工具"：
+   *   · 动态 import：即便某个环境解析不到 `@deepseek-ai/dsh-tools`，也只是一个 rejected promise；
+   *   · try/catch：`ctx.tools` 不存在、或工具表不接受这次注册，都只打一行警告；
+   *   · 工具内部**只调 `mobileHost.deviceCall`**，不重复判定"发给谁/能力是否启用"。
+   *
+   * ## agent 侧看到什么
+   *
+   * 工具名 `phone_notify`：给手机发一条系统通知（手机需先在端侧通道里允许 `notify`）。
+   * 失败时把**原因**返回给 agent（而不是抛错），让 agent 能自己决定要不要换方式。
+   */
+  // 模块名用**变量**拼出来：`@deepseek-ai/dsh-tools` 是我们这个包之外的依赖，
+  // 编译期解析不到它的类型（仓库里没有它），但**运行期能解析**（实测：插件安装位置
+  // 能上溯到 DSH 的全局 node_modules）。写成变量既避免 tsc 报"找不到模块"，
+  // 也如实表达了"这是个运行期才确定的依赖"——比 @ts-ignore 干净。
+  const TOOLS_MODULE = '@deepseek-ai/dsh-tools'
+  /**
+   * 审批推送到手机（M2 的核心）。
+   *
+   * ## 为什么它值得做
+   *
+   * agent 需要你确认时，原先**只有坐在电脑前才知道** —— 你一离开，它就卡在那里等。
+   * 而"电脑 → 手机"的通道我已经建好并验证过了（`show` / `notify` + agent 工具），
+   * 所以这件事不需要新协议，只需要**在审批发生时往手机推一条**。
+   *
+   * ## 事件从哪来
+   *
+   * DSH 的审批在 `dsh-user-approval` 里发出：`session.append('approval/asked', { id, toolName, callId?, reason? })`
+   * —— 它挂在**会话事件**上（不是普通的 Cordis 事件）。所以这里**两条订阅通道都试**
+   * （`ctx.on(...)` 与 `ctx.events.on(...)`），并且把"实际用上了哪条"记进日志：
+   * 不同 DSH 版本可能只提供其中一条，静默不生效是最难查的形态（本项目吃过多次亏）。
+   *
+   * ## 三条纪律
+   *
+   * 1. **绝不影响审批本身**：整段包在 try/catch 里，推送失败只是少一条通知；
+   * 2. **失败要看得见**：注册成功/失败都打一行（`[dsh-mobile]` 前缀）；
+   * 3. **没开通知就退成横幅**：先试 `notify`（能在后台提醒 ✓），
+   *    用户没启用就退 `show`（页面可见时也能看到 ✓）；两个都没开就安静地不做 ✗。
+   */
+  function installApprovalPush(): void {
+    const notify = (payload: unknown): void => {
+      try {
+        const record = (payload ?? {}) as { toolName?: unknown; reason?: unknown; title?: unknown; summary?: unknown }
+        const tool = String(record.toolName ?? record.title ?? '').trim()
+        const reason = String(record.reason ?? record.summary ?? '').trim()
+        const text =
+          '电脑上的 agent 需要你确认' + (tool.length > 0 ? '：' + tool : '') + (reason.length > 0 ? '（' + reason.slice(0, 120) + '）' : '')
+        // ★ 先**落审计**再推送：这样"钩子到底有没有被触发"有据可查 ✓
+        //   （原先只打 console —— 而 DSH 可能跑在后台终端里，用户看不到 ✗；
+        //    于是"审批没通知"到底是"钩子没响"还是"通知发不出"完全分不清 ✗）
+        try {
+          mobileHost.recordDiagnostic('approval-push', text.slice(0, 80))
+        } catch (error) {
+          void error
+        }
+        // 先通知（后台也能提醒），没启用就退成页面横幅
+        const first = mobileHost.deviceCall('notify', text)
+        if (!first.ok) mobileHost.deviceCall('show', text)
+      } catch (error) {
+        console.warn('[dsh-mobile] 审批推送失败（不影响审批本身）：', error)
+      }
+    }
+
+    const channels: Array<[string, (() => void) | undefined]> = []
+    try {
+      const anyCtx = ctx as unknown as {
+        on?: (name: string, handler: (...args: unknown[]) => void) => unknown
+        events?: { on?: (name: string, handler: (...args: unknown[]) => void) => unknown }
+      }
+      if (typeof anyCtx.on === 'function') {
+        // ★ 正确的观察方式是 `session/event`（DSH 自己的宿主插件都这么写：
+        //   dsh-agent-instructions / dsh-agent-loop / dsh-agent-presets ✓✓），
+        //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
+        //   所以"注册成功"却永不触发（真实现象：手机上永远收不到审批通知 ✗）。
+        //   审批在会话日志里是 `approval/asked` ✓，于是这里按事件类型过滤 ✓。
+        const onSessionEvent = (_session: unknown, event: unknown): void => {
+          const record = (event ?? {}) as { type?: unknown; data?: { toolName?: unknown; reason?: unknown } }
+          const kind = String(record.type ?? '')
+          // ★ 先把**每一个**会话事件记进审计（截断）—— 这一步是为了分开两种可能：
+          //   "审批根本没发生" ✗ 与 "事件到了但我过滤的条件不对" ✗。
+          //   只看"有没有推送"，这两种在外部完全一样（都是"手机没收到"）✗。
+          try {
+            mobileHost.recordDiagnostic('session-event', kind.slice(0, 60) || '(no-type)')
+          } catch (error) {
+            void error
+          }
+          if (kind !== 'approval/asked') return
+          notify(record.data ?? {})
+        }
+        anyCtx.on('session/event', onSessionEvent)
+        channels.push(['ctx.on(session/event)', undefined])
+      }
+      // 兼容另外两个可能的事件名（不同 DSH 版本暴露的名字不一样；
+      // 多订一个的代价只是"可能多推一条"，而漏订的代价是"功能完全不工作" ✗）
+      if (typeof anyCtx.on === 'function') {
+        anyCtx.on('approval/asked', notify)
+        anyCtx.on('approval/request', notify)
+      }
+    } catch (error) {
+      console.warn('[dsh-mobile] 审批推送订阅失败（其余功能不受影响）：', error)
+    }
+    if (channels.length === 0) {
+      console.warn('[dsh-mobile] 审批推送**未挂载**：当前 DSH 未提供可用的会话事件订阅通道')
+    } else {
+      console.log(`[dsh-mobile] 审批推送已挂载（通道：${channels.map(([name]) => name).join(' + ')}）`)
+    }
+  }
+
+  void import(TOOLS_MODULE)
+    .then((module) => {
+      const defineTool = (module as { defineTool?: (options: unknown) => unknown }).defineTool
+      // ★ 用 `ctx.get('tools')` 而**不是** `ctx.tools`，也不往 `inject` 里加它：
+      //   `ctx.tools` 需要先在 `inject` 里声明；而声明一个"某个 DSH 版本可能没有"的服务，
+      //   会让插件在那种环境下**根本无法激活**——那比"少一个工具"严重得多。
+      //   `ctx.get()` 取不到就返回 undefined，失败**留在原地**（仍被下面的 catch 兜住）。
+      const tools = (ctx as unknown as { get?: (name: string) => { register?: (tool: unknown) => void } | undefined }).get?.(
+        'tools',
+      )
+      if (typeof defineTool !== 'function' || tools?.register === undefined) {
+        console.warn('[dsh-mobile] 当前 DSH 未提供工具注册能力，phone_notify 未注册（其余功能不受影响）')
+        mobileHost.setAgentToolStatus('skipped')
+        return
+      }
+      tools.register(
+        defineTool({
+          name: 'phone_notify',
+          description:
+            '给已配对的手机发一条系统通知（手机需先在 DSH 移动端允许 notify 能力）。' +
+            '适用于需要用户离开电脑时也能看到的提醒；失败会返回原因。',
+          parameters: {
+            text: { type: 'string', required: true, description: '通知正文（会显示在手机通知栏）' },
+          },
+          output: {
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ok: { type: 'boolean', required: true },
+                id: { type: 'string' },
+                reason: { type: 'string' },
+              },
+            },
+            render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
+          },
+          async execute(args: { text?: string }) {
+            const outcome = mobileHost.deviceCall('notify', String(args?.text ?? ''))
+            return outcome.ok ? { ok: true, id: outcome.id } : { ok: false, reason: outcome.reason }
+          },
+        }),
+      )
+      // ★ 通用端侧动作工具。`phone_notify` 保留（文档与验收都在用它），
+      //   但它只能发通知；而端侧通道现在有 5 个能力（提醒 / 通知 / 剪贴板 / 震动 / 打开链接），
+      //   一个一个做成工具会让工具表迅速膨胀，所以给一个带 `capability` 的通用入口。
+      //   能力名与白名单由宿主 `deviceCall` 校验，未知能力会**带着可用清单**返回原因 ✓。
+      tools.register(
+        defineTool({
+          name: 'phone_send',
+          description:
+            '对已配对的手机执行一个端侧动作。capability 取值：' +
+            'show=页面横幅（不需要权限）、notify=系统通知（需通知权限）、' +
+            'clipboard=把 text 放进手机剪贴板、vibrate=让手机震动（text 是毫秒数）、' +
+            'open=把 text 当作链接推到手机上（用户在横幅里点一下才打开，浏览器不允许无手势开新窗口）。' +
+            '手机需先在移动端逐项允许该能力，否则返回原因而不是抛错。',
+          parameters: {
+            capability: { type: 'string', required: true, description: 'show | notify | clipboard | vibrate | open' },
+            text: { type: 'string', required: true, description: '内容：文本 / 毫秒数 / 链接' },
+          },
+          output: {
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ok: { type: 'boolean', required: true },
+                id: { type: 'string' },
+                reason: { type: 'string' },
+              },
+            },
+            render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
+          },
+          async execute(args: { capability?: string; text?: string }) {
+            const outcome = mobileHost.deviceCall(String(args?.capability ?? ''), String(args?.text ?? ''))
+            return outcome.ok ? { ok: true, id: outcome.id } : { ok: false, reason: outcome.reason }
+          },
+        }),
+      )
+      mobileHost.setAgentToolStatus('registered')
+      console.log('[dsh-mobile] 已注册 agent 工具：phone_notify / phone_send（端侧动作，5 个能力）')
+    })
+    .catch((error: unknown) => {
+      console.warn('[dsh-mobile] 注册 phone_notify 失败（其余功能不受影响）：', error)
+      mobileHost.setAgentToolStatus('failed')
+    })
+
+  // 审批推送到手机（与工具注册无关，独立挂载；失败只影响这一条通知）
+  installApprovalPush()
+
+  // 1) HTTP 路由（/mobile/*）。用前缀路由一次接管，插件内部再细分，
+  //    避免与 DSH 自身的精确路由争夺 /api 之类的关键路径。
+  const disposeHttp = ctx.webServer.register({
+    kind: 'prefix',
+    path: '/mobile',
+    handler: (req, res) => {
+      if (!mobileHost.handleHttp(req, res)) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ code: 'mobile/not-found', message: `unknown mobile path ${req.url ?? ''}` }))
+      }
+    },
+  })
+
+  // 2) WebSocket 升级路由（精确路径由插件内部判定）
+  const disposeUpgrade = ctx.webServer.registerUpgrade({
+    path: '/mobile/ws',
+    handler: (req, socket) => mobileHost.handleUpgrade(req, socket),
+  })
+
+  // 3) 往 index.html 注入 shim：必须**先于**应用 bundle 执行，
+  //    这样 __DSH_TRANSPORT__ / __DSH_MOBILE__ 才能在 dsh-client-connection 读取之前就位。
+  const shimTag = '<script src="/mobile/boot.js" data-dsh-mobile="1"></script>'
+  const disposeInject =
+    config.injectShim === false
+      ? undefined
+      : ctx.webServer.tapIndex((html) => html.replace('<head>', `<head>\n    ${shimTag}`))
+
+  /**
+   * 4) 手机端应用外壳：挂在**本插件自己的前缀** `/mobile/app` 下。
+   *
+   * 为什么必须由插件来服务：DSH 的 `/` 要求 launch token 或绑定 authority 的 cookie，
+   * 手机两者都没有 → 401 → "配对成功但界面进不去"。
+   * DSH 的鉴权只挡这一个壳页面：`/assets/*`、`/plugins/*` 是静态 fallback（无鉴权），
+   * 业务调用走本插件隧道的设备密钥闸门。
+   *
+   * ## 为什么绝不能挂在 `/` 上（真实事故）
+   *
+   * 早期版本注册的是 `{ kind: 'prefix', path: '/' }`，并在非移动标记时自行返回 401，
+   * 注释里写"交回 DSH"——**这个意图在 API 上无法表达**：
+   * `dsh-host-webserver` 的分发是「最长前缀胜出 + 命中即 return」，`register()` 没有 `next()`，
+   * 被命中的 handler 独占响应生命周期。而 `dsh web` 打印的**唯一认证入口 URL** 其 pathname
+   * 恰好就是 `/`（`authenticatedUrl()` 强制 `pathname='/'` + `?token=`），
+   * 于是 token 兑换（`authorizeIndex`，位于 frontend-static 的 fallback 里）**永不执行**，
+   * cookie 永远铸造不出来 → **任何浏览器、任何 authority 打开都是 401 死循环**，
+   * 连提示语让你"reopen"的那条 URL 自己都打不开。
+   *
+   * 更糟的是我当时复用了与核心**逐字相同**的 401 文案，导致"谁发的 401"无法从响应区分，
+   * 把排查方向引向了凭证与重装。
+   *
+   * 因此本路由必须满足两条红线：
+   *  - 路径落在 `/mobile` 前缀内（最长前缀胜出，天然不碰任何核心路由）；
+   *  - **不改变 pathname `/` 的路由归属**（由 scripts/e2e-pairing.mjs 的不变量断言守住）。
+   */
+  let shellCache: { etag: string; body: Buffer } | undefined
+  const disposeShell = ctx.webServer.register({
+    kind: 'prefix',
+    path: '/mobile/app',
+    handler: (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+      // 路径本身就是标记；仍接受 ?mobile=1 作为兼容（旧链接/已收藏地址不至于失效）
+      if (url.pathname !== '/mobile/app' && url.pathname !== '/mobile/app/') {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ code: 'mobile/not-found', message: `unknown mobile path ${req.url ?? ''}` }))
+        return
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { allow: 'GET, HEAD' })
+        res.end()
+        return
+      }
+      const shell = mobileHost.getAppShell()
+      if (shell === undefined) {
+        res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html）\n')
+        return
+      }
+      // 按 ETag 缓存渲染结果：renderIndex 会跑全部注入，没必要每个请求都做一遍
+      if (shellCache?.etag !== shell.etag) {
+        shellCache = { etag: shell.etag, body: Buffer.from(shell.html, 'utf8') }
+      }
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        // no-store：外壳里带着本次启动的启动参数与注入，缓存住会让升级后的前端拿不到新资源
+        'cache-control': 'no-store, must-revalidate',
+        etag: shell.etag,
+        'x-content-type-options': 'nosniff',
+        // 自带可区分的标记：万一将来这里还要发错误码，也能一眼看出是谁发的
+        'x-dsh-mobile': 'app-shell',
+      })
+      res.end(req.method === 'HEAD' ? undefined : shellCache.body)
+    },
+  })
+
+  ctx.effect(() => () => {
+    disposeHttp()
+    disposeUpgrade()
+    disposeInject?.()
+    disposeShell()
+  })
+
+  ctx.logger?.info?.(
+    `[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
+      `隧道 ${'/mobile/ws'}，身份指纹见 /mobile/manifest（协议版本 1）`,
+  )
+}
