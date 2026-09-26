@@ -186,7 +186,8 @@ class MinimalWebSocket implements WebSocketConnection {
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk])
     try {
       for (;;) {
-        const frame = tryDecodeFrame(this.buffer)
+        // 把上限传进解码器：声明长度超限的帧必须在 `ingest` 拼缓冲之前就被拒绝。
+        const frame = tryDecodeFrame(this.buffer, this.maxMessageBytes)
         if (frame === undefined) {
           return
         }
@@ -291,8 +292,12 @@ export interface DecodedFrame {
 /**
  * 尝试从缓冲区解码一帧；数据不足时返回 undefined（等待更多字节）。
  * 导出以便单测直接验证解析逻辑。
+ *
+ * @param buffer - 已到达的字节。
+ * @param maxBytes - 单帧声明长度的上限（通常传 `maxMessageBytes`）。**在等待剩余字节之前**就先比对，
+ *   否则一个"声明 4 GiB 却慢慢发"的帧会让 `ingest` 的缓冲区无限拼接（见下方注释）。
  */
-export function tryDecodeFrame(buffer: Buffer): DecodedFrame | undefined {
+export function tryDecodeFrame(buffer: Buffer, maxBytes?: number): DecodedFrame | undefined {
   if (buffer.length < 2) return undefined
   const first = buffer.readUInt8(0)
   const second = buffer.readUInt8(1)
@@ -312,6 +317,14 @@ export function tryDecodeFrame(buffer: Buffer): DecodedFrame | undefined {
     if (big > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('websocket frame length overflows')
     length = Number(big)
     offset += 8
+  }
+
+  // ★ 预检：**先读声明长度、先比上限**，然后才去等 / 分配载荷缓冲。
+  // 修复前这里没有任何上限比对，`ingest` 会在 `buffer.length < offset + length` 处一直
+  // `Buffer.concat` 等下去——对端只要声明 40 MiB 以上（甚至逼近 MAX_SAFE_INTEGER）再慢慢发，
+  // 就能把宿主内存拖大。单帧长度本身就不可能超过单条消息上限，所以在这里拒绝不误伤正常帧。
+  if (maxBytes !== undefined && length > maxBytes) {
+    throw new Error(`websocket frame length ${length} exceeds limit ${maxBytes}`)
   }
 
   // 控制帧必须 ≤125 字节且不可分片（RFC6455 §5.5）

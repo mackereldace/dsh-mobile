@@ -34,7 +34,7 @@
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { snapshotChromeClones, sweepChromeClones, removeQuietly } from './chrome-clone-guard.mjs'
+import { snapshotChromeClones, sweepChromeClones } from './chrome-clone-guard.mjs'
 /** ★ Chrome `code_sign_clone` 残留守卫（见 chrome-clone-guard.mjs）：启动前拍快照、收尾时只删本次新增 ✓。 */
 let cloneSnapshot = null
 /** 拍快照：只在**第一次**启动 Chrome 之前拍 ✓ —— 多次启动时，最早那张快照才覆盖全部新增 ✓。 */
@@ -59,7 +59,26 @@ const DSH_PORT = Number(process.env['UI_DSH_PORT'] ?? 3673)
 const PROXY_PORT = Number(process.env['UI_PROXY_PORT'] ?? 3671)
 const TLS_PORT = Number(process.env['UI_TLS_PORT'] ?? 3672)
 const CDP_PORT = Number(process.env['UI_CDP_PORT'] ?? 9721)
-const LAN_IP = process.env['UI_LAN_IP'] ?? '10.34.221.181'
+/**
+ * ★★ round 140：局域网 IP **必须动态探测** ✗ —— 这里原来写死成 `10.34.221.181` ✓，
+ *   而本机现在的地址是 `10.34.255.229` ✓ ⇒ 这个脚本自己就把
+ *   `--trusted-host` 与"手机页面地址"都指向了一台**不存在的机器** ✗✗：
+ *   DSH 起来了 ✓、Chrome 起来了 ✓，而页面永远停在配对页 ✗ ⇒
+ *   `#dsh-mobile-files` 永远查不到 ✓ ⇒ 屏幕上只吐一句
+ *   "手机外壳未就绪，页面文本：(超时)" ✗ —— **看起来像产品坏了** ✓。
+ *   （同一个坑 `check-mobile-layout.mjs` 早就踩过并修好了 ✓，它注释里那段
+ *    "写死成 10.34.221.181 → 换网段后整套断言全红"✗ 说的就是这件事 ✓；
+ *    这个脚本当时漏掉了 ✗。）
+ * ⇒ 与 layout 套件**同一套写法** ✓：先看 `UI_LAN_IP` 覆盖 ✓，再退回探测脚本 ✓；
+ *   探测不出来就**直接报错退出** ✓，绝不回退到一个可能过期的旧地址 ✗。
+ */
+const LAN_IP =
+  (process.env['UI_LAN_IP'] ?? '').trim() ||
+  (await import('./detect-lan-ip.mjs')).detectLanIp()
+if (!/^\d+\.\d+\.\d+\.\d+$/.test(LAN_IP)) {
+  console.error('  ✗ 探测不到本机局域网 IP（可用 UI_LAN_IP=<ip> 指定）')
+  process.exit(2)
+}
 const WIDTH = Number(flag('width', '412'))
 const HEIGHT = Number(flag('height', '915'))
 const OUT = flag('out', join(tmpdir(), 'dshm-ui-shots'))
@@ -388,6 +407,16 @@ const post = async (path, body) => {
 }
 
 const shots = []
+/**
+ * ★★ round 142（第 ② 小活）：**"截图与它声称的状态不符"要记账** ✗。
+ *
+ * 事故：`files-inside` 那一步其实没进目录 ✓，于是它截出来的图与 `files-list`
+ *   **逐字节相同** ✗ —— 而脚本照样打印"完成" ✓、退出码 0 ✓ ⇒ **工具在骗人** ✗
+ *   （本项目吃过这一类："少了断言"与"断言全过"在屏幕上长得一模一样 ✗）。
+ * ⇒ 凡是有"点一下应该发生某件事"的步骤，都**核对结果** ✓；对不上就记在这里 ✓，
+ *   最后**退出码非 0** ✓（看得见 ✓）。
+ */
+const problems = []
 const shoot = async (name) => {
   const result = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   const data = result.result?.data
@@ -422,10 +451,134 @@ try {
     await sleep(1500)
   }
 
-  const ready = await evaluate(`!!document.getElementById('dsh-mobile-files')`)
-  if (ready !== true) {
-    console.error('[shoot-ui] 手机外壳未就绪，页面文本：' + String(await evaluate('(document.body.innerText||"").slice(0,200)')))
+  /**
+   * ★★ round 140：就绪检查从"**查一次**"改成"**轮询重试**" ✓（原来那句单次检查太脆 ✗）。
+   *
+   * ★ **判据一个字没改** ✗：还是 `#dsh-mobile-files` 在不在 ✓（那就是"手机外壳画出来了"✓）。
+   *   这里只加两件事 ✓：① 每 1 秒再查一次 ✓、最多 20 次 ✓（**不无限等** ✗）；
+   *   ② 把"**它到底在等什么**"打出来 ✓ —— 原来只有一句
+   *   `手机外壳未就绪，页面文本：(超时)` ✗（`evaluate` 超时返回的哨兵 ✓），
+   *   排障时等于没说 ✓；现在每次重试都带上 url / 标题 / boot 有没有跑起来 /
+   *   配置读到没有 / 隧道处在哪个状态 / 页面可见文本 ✓ ——
+   *   "页面停在配对页"（地址不对 ✗）与"隧道没连上"（对端问题 ✗）一眼可分 ✓。
+   *
+   * @returns `{ready, why}` ✓ —— `ready` 就是原来那个判据 ✓。
+   */
+  const describeReadiness = async () => {
+    const raw = await evaluate(`(function(){
+      var boot = globalThis.__DSH_MOBILE_BOOT__;
+      var config = null;
+      try { config = boot && typeof boot.getConfig === 'function' ? boot.getConfig() : null } catch (e) {}
+      var tunnelState = null;
+      try { tunnelState = boot && typeof boot.state === 'function' ? boot.state() : null } catch (e) {}
+      return JSON.stringify({
+        ready: document.getElementById('dsh-mobile-files') !== null,
+        url: location.origin + location.pathname,
+        title: String(document.title || ''),
+        boot: typeof boot,
+        configured: config !== null && config !== undefined ? '有配置' : '无配置',
+        tunnel: tunnelState,
+        text: String((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 160)
+      })
+    })()`)
+    if (typeof raw !== 'string' || raw.charAt(0) !== '{') {
+      // `evaluate` 超时/异常时返回的是 `(超时)` / `(异常) …` 这种哨兵 ✓ —— 照样说清楚 ✓
+      return { ready: false, why: '页面还没响应 ✗（evaluate 返回 ' + String(raw).slice(0, 60) + '）' }
+    }
+    let info
+    try {
+      info = JSON.parse(raw)
+    } catch (error) {
+      return { ready: false, why: '就绪探针返回的不是 JSON：' + String(raw).slice(0, 60) }
+    }
+    return {
+      ready: info.ready === true,
+      why:
+        'url=' + info.url +
+        '｜标题=' + JSON.stringify(info.title) +
+        '｜boot=' + info.boot +
+        '｜配置=' + info.configured +
+        '｜隧道=' + JSON.stringify(info.tunnel) +
+        '｜页面文本=' + JSON.stringify(info.text),
+    }
+  }
+  const READY_TRIES = 20
+  let readyInfo = null
+  for (let attempt = 1; attempt <= READY_TRIES; attempt++) {
+    readyInfo = await describeReadiness()
+    if (readyInfo.ready === true) {
+      if (attempt > 1) console.log(`  · 手机外壳第 ${attempt} 次查到就绪 ✓（前 ${attempt - 1} 次还在等 ✓）`)
+      break
+    }
+    console.log(`  · 等手机外壳就绪 ${attempt}/${READY_TRIES}：${readyInfo.why}`)
+    if (attempt < READY_TRIES) await sleep(1000)
+  }
+  if (readyInfo === null || readyInfo.ready !== true) {
+    console.error(`[shoot-ui] 手机外壳未就绪（等了约 ${READY_TRIES} 秒 ✗）。它在等什么：`)
+    console.error('  · ' + String(readyInfo === null ? '(探针没跑)' : readyInfo.why))
     process.exit(1)
+  }
+
+  /**
+   * ★★ round 140：**可选**的"冒充壳"桩 ✓（`UI_FAKE_SHELL=1` 才生效 ✓，默认**关** ✗）。
+   *
+   * ## 为什么需要它（否则截出来的图**不是手机上的样子** ✗）
+   * 我们有一批 CSS 是**只在壳里**生效的 ✓（`html[data-dshm-shell="android"]` 前缀 ✓）：
+   *   · DSH 设置弹窗的**内容头（「打开配置文件」+ ×）被整条藏掉** ✓；
+   *   · 导航**紧凑化**（行高 34px ✓）并多出**第 5 项「连接与设备」** ✓；
+   *   · 我们那一页里的「改地址」「默认链接」两组 ✓（判据是 `shellBridge() !== undefined` ✓）。
+   * 无头 Chrome 里没有壳 ✗ ⇒ 上面这些**全都不出现** ✗ ⇒ 截出来的"设置页"是
+   * **电脑端长相** ✓（标题栏 + × + 40px 导航 + 只有 4 项 ✗）——
+   * 拿它去评审"手机上好不好看"就是**看错了东西** ✗✗。
+   * 这与验收脚本的做法**完全一致** ✓：`check-mobile-layout.mjs` / `check-device-channel.mjs`
+   * 都是往 `window` 塞一个假 `DshmShell` ✓ 再显式调 `installBackHook()` ✓
+   * （后者顺带把 `data-dshm-shell` 标记补上 ✓，见 boot.js 的 `markShellRoot` ✓）。
+   *
+   * ## 两条边界
+   *   ① **默认不开** ✗ —— 只有显式 `UI_FAKE_SHELL=1` 时才装 ✓，
+   *      所以"截真实浏览器长相"这条老用法一个字没变 ✓；
+   *   ② 桩只提供**真壳本来就有的**那几个方法 ✓（名字与 `MainActivity.ShellBridge` 一致 ✓），
+   *      **不改任何布局** ✗ —— 布局差异全都来自"有壳"这个事实本身 ✓。
+   * ⚠️ 它**不**开 `?debug=1` ✗：那个开关会同时把屏幕上那个调试框画出来 ✓（占上方约 40vh ✗），
+   *    截图会被它盖住 ✗。所以"只有 ?debug=1 才出现的那几行"（安全区 / 键盘让位 /
+   *    导航栏三数 / 设备 ID / 电脑指纹）**在这套图里看不到** ✗ —— 评审那几条时要另看原文 ✓。
+   */
+  /**
+   * ★★ round 144：把"冒充壳"抽成一个函数 ✓ —— `dbg` 那一节要**重新导航**（`?debug=1` ✓），
+   *   而导航会清掉 `globalThis.DshmShell` ✗ ⇒ 必须能再装一次 ✓（否则键盘模拟与
+   *   `[外壳]` 那一行全都是空的 ✗）。
+   */
+  const installFakeShell = async () => {
+    return await evaluate(`(function(){
+      try {
+        globalThis.DshmShell = {
+          version: function(){ return '0.1.0+BUILD-SHOOT' },
+          /**
+           * ★★ round 142（第 ④ 条）：IME 高度改成**可变的** ✓ ——
+           *   键盘那一节要模拟"壳报 ime=300"✓，而假壳的 insets() 每秒会被
+           *   pullShellInsets 轮询一次 ✓ ⇒ 写死 0 的话，直接 setProperty 出来的
+           *   键盘高度会被**下一轮轮询冲掉** ✗（测出来的东西随时会变 ✓）。
+           *   现在由 __dshmFakeIme 控制 ✓：改它 + apk.pull() = 走**线上那条路** ✓
+           *   （壳推 insets ⇒ applyShellInsets ⇒ 让位量重算 ✓）。
+           */
+          insets: function(){ return JSON.stringify({seen:true,top:48,bottom:0,ime:Number(globalThis.__dshmFakeIme||0),density:3,edgeToEdge:true,gestureBottom:0,systemGestureBottom:0}) },
+          platform: function(){ return JSON.stringify({android:'17',sdk:37,edgeToEdge:true}) },
+          setBackAvailable: function(){},
+          notify: function(){ return 'ok' },
+          changeAddress: function(){},
+          log: function(){},
+          endpoints: function(){ return JSON.stringify({slots:[{label:'学校',url:'https://' + location.host + '/mobile/app'}],timeoutMs:2000,pinned:null}) },
+          setEndpointSlots: function(){}
+        };
+        var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
+        var installed = api && typeof api.installBackHook === 'function' ? api.installBackHook() : false;
+        return JSON.stringify({installed:installed===true, marker:document.documentElement.getAttribute('data-dshm-shell')});
+      } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
+    })()`)
+  }
+  if ((process.env['UI_FAKE_SHELL'] ?? '') === '1') {
+    console.log('  · 冒充壳（UI_FAKE_SHELL=1）：' + String(await installFakeShell()))
+    await sleep(600)
   }
 
   console.log(`[shoot-ui] 移动视口 ${WIDTH}×${HEIGHT}，输出到 ${OUT}`)
@@ -461,13 +614,19 @@ try {
         head: box('#dsh-mobile-sheet-head'),
         title: box('.dshm-sheet-title'),
         close: box('#dsh-mobile-sheet-close'),
-        gear: box('#dsh-mobile-sheet-gear'),
+        /**
+         * ★★ round 142（本轮第 ③ 条）：齿轮**已经删掉** ✗ —— 这里顺手把它变成一条
+         *   可打印的**审计**（gearGone + 头部按钮数 ✓），而不是留一个恒为 null
+         *   的 gear 字段让人以为"探针坏了" ✗。头部按钮数必须是 **1**（只剩关闭键 ✓）。
+         */
+        gearGone: document.getElementById('dsh-mobile-sheet-gear')===null,
+        headButtons: (function(){var h=document.getElementById('dsh-mobile-sheet-head');return h===null?-1:h.querySelectorAll('button').length})(),
         sub: box('.dshm-sheet-sub'),
         foot: box('#dsh-mobile-sheet-foot'),
         askbar: box('[data-dshm-askbar]'),
         // 图标的**实际绘制范围**（viewBox 用户单位）：若中心不是 (12,12)，
         // 图标在按钮里看起来就是歪的 —— 而按钮几何完全对称时，这是唯一可疑处。
-        gearBBox: (function(){var svg=document.querySelector('#dsh-mobile-sheet-gear svg');if(!svg)return null;var b=svg.getBBox();return {x:+b.x.toFixed(2),y:+b.y.toFixed(2),w:+b.width.toFixed(2),h:+b.height.toFixed(2)}})(),
+        closeBBox: (function(){var svg=document.querySelector('#dsh-mobile-sheet-close svg');if(!svg)return null;var b=svg.getBBox();return {x:+b.x.toFixed(2),y:+b.y.toFixed(2),w:+b.width.toFixed(2),h:+b.height.toFixed(2)}})(),
         headDisplay: cs?cs.display:null,
         headColumns: cs?cs.gridTemplateColumns:null,
         bodyOverflowY: (function(){var b=document.getElementById('dsh-mobile-sheet-body');return b?getComputedStyle(b).overflowY:null})()
@@ -484,11 +643,44 @@ try {
     await shoot('files-list')
     console.log(`  （工作区按钮 ${String(opened)} 个）`)
 
-    // 再进一层目录：看面包屑、返回、以及目录内的排布
-    const entered = await evaluate(
-      `(function(){var r=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry]'));for(var i=0;i<r.length;i++){if(r[i].getAttribute('data-dshm-fs-kind')==='dir'){r[i].click();return r[i].innerText}}return false})()`,
+    /**
+     * ★★ round 142（第 ② 小活）：**真的进到子目录里** ✓。
+     *
+     * 原来这里是 `r[i].click()` —— 点的是**整行容器**（`[data-dshm-fs-entry]` ✗），
+     * 而行内真正带点击处理器的是行首那块 `.dshm-file-head` ✓。实测：点了之后
+     * **什么都没发生** ✓（面包屑还停在工作区根 ✓）⇒ 截出来的 `files-inside.png`
+     * 与 `files-list.png` **逐字节相同** ✗ = 工具在骗人 ✗。
+     * ⇒ 两处一起改 ✓：
+     *   ① 点**行内真的能点的那个元素** ✓（与 check-mobile-layout / check-device-channel
+     *      进目录用的是同一个判据 ✓ —— 不是这里另发明一套 ✗）；
+     *   ② 点完**核对面包屑真的变了** ✓；没变就**报错 + 退出码非 0** ✓，
+     *      绝不再悄无声息地截一张同款 ✗。
+     */
+    const crumbBefore = String(
+      await evaluate(`(function(){var c=document.querySelector('.dshm-crumb-path');return c?c.textContent:'(没有面包屑)'})()`),
     )
-    await sleep(1400)
+    const entered = await evaluate(`(function(){
+      var rows=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry]'))
+      for(var i=0;i<rows.length;i++){
+        if(rows[i].getAttribute('data-dshm-fs-kind')!=='dir') continue
+        var head=rows[i].querySelector('.dshm-file-head')||rows[i]
+        head.click()
+        return String(rows[i].innerText||'').replace(/\s+/g,' ').slice(0,30)
+      }
+      return false })()`)
+    await sleep(1700)
+    const crumbAfter = String(
+      await evaluate(`(function(){var c=document.querySelector('.dshm-crumb-path');return c?c.textContent:'(没有面包屑)'})()`),
+    )
+    if (entered === false || crumbAfter === crumbBefore) {
+      problems.push(`「进入目录」没有生效：面包屑 ${JSON.stringify(crumbBefore)} → ${JSON.stringify(crumbAfter)}（点了 ${String(entered)}）`)
+      console.error(
+        `  ✗ [进入目录] 没生效：面包屑 ${JSON.stringify(crumbBefore)} → ${JSON.stringify(crumbAfter)}（点了 ${String(entered)}）` +
+          ' —— files-inside.png 会与 files-list.png 同款 ✓ 已按失败记账 ✓',
+      )
+    } else {
+      console.log(`  ✓ [进入目录] ${crumbBefore} → ${crumbAfter}`)
+    }
     await shoot('files-inside')
     if (entered !== false) console.log(`  （进入目录：${String(entered).slice(0, 30)}）`)
     // 路径行探针：文字 / 颜色 / 尺寸 / 是否被裁掉
@@ -511,42 +703,113 @@ try {
     const entered = await evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('button')).find(function(x){return (x.innerText||'').trim()==='选择'});if(!b)return '(没有「选择」按钮)';b.click();return 'ok'})()`)
     await sleep(800)
     await shoot('multi-enter')
-    const chipsVisible = `Array.prototype.filter.call(document.querySelectorAll('.dshm-cap-chip'),function(c){return c.offsetParent!==null}).length`
-    const before = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,50):''),chips:${chipsVisible},rows:document.querySelectorAll('.dshm-file').length,selecting:document.body.dataset.dshmSelecting||'(无标记)'})})()`)
+    /**
+     * ★★ round 138：**端侧通道从文件面板底部搬进了那一屏** ✓
+     *   （用户原话："右侧端侧通道的功能能不能也挪到设置里"✓）。
+     *
+     * 现在的摆放：文件面板底部只剩**一行入口** `#dshm-conn-entry`（文案「端侧能力」✓），
+     * 5 项能力住在**点入口之后的「端侧能力」那一屏**里 ✓。
+     *
+     * ★ round 142：那一屏现在是**长横条 + 右侧开关** ✓（不再是胶囊 ✗）——
+     *   所以这里数 `[data-dshm-cap-row]` / `[data-dshm-cap-switch]` ✓，
+     *   并顺带报一次旧胶囊的残余数（必须是 0 ✓）。
+     *
+     * ⇒ 这个探针必须跟着改 ✗：它原来只数"文件面板里的胶囊"✓，
+     *   搬走之后那个数**永远是 0** ✗ —— 将来排障的人看到 `chips:0`
+     *   会以为端侧通道没了 ✗（这一行存在的意义正是别让人误判 ✓）。
+     *   现在两件事都报 ✓：**入口在不在 / 可不可见** ✓
+     *   + **那一屏里有几行/几颗开关**（没打开时就是 0 ✓ —— 那是正常的 ✓，
+     *   因为那一屏是按需渲染的 ✓）。
+     */
+    const capsProbe = `(function(){
+      var e=document.getElementById('dshm-conn-entry');
+      var rows=document.querySelectorAll('#dsh-mobile-sheet [data-dshm-cap-row]');
+      var switches=document.querySelectorAll('#dsh-mobile-sheet [data-dshm-cap-switch]');
+      var visible=0; for(var i=0;i<switches.length;i++){ if(switches[i].offsetParent!==null) visible++ }
+      return {
+        entryInDom:e!==null,
+        entryVisible:e!==null&&e.offsetParent!==null,
+        entryText:e===null?null:String(e.textContent||'').trim(),
+        capRows:rows.length,
+        capSwitches:switches.length,
+        capSwitchesVisible:visible,
+        legacyChips:document.querySelectorAll('.dshm-cap-chip').length
+      }
+    })()`
+    const before = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,50):''),caps:${capsProbe},rows:document.querySelectorAll('.dshm-file').length,selecting:document.body.dataset.dshmSelecting||'(无标记)'})})()`)
     const ticked = await evaluate(`(function(){var h=[].slice.call(document.querySelectorAll('.dshm-file-head'));var n=0;for(var i=0;i<Math.min(2,h.length);i++){h[i].click();n++}return n})()`)
     await sleep(700)
     await shoot('multi-selected')
-    const after = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,50):''),chips:${chipsVisible}})})()`)
+    const after = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,50):''),caps:${capsProbe}})})()`)
     console.log(`  （进入多选：${entered} | 之前：${before}）`)
     console.log(`  （勾了 ${ticked} 行 → 之后：${after}）`)
     await evaluate(`(function(){var b=[].slice.call(document.querySelectorAll('#dsh-mobile-sheet-foot button')).find(function(x){return /取消/.test(x.innerText||'')});if(b)b.click()})()`)
     await sleep(800)
-    const back = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,40):''),chips:${chipsVisible}})})()`)
+    const back = await evaluate(`(function(){var f=document.getElementById('dsh-mobile-sheet-foot');return JSON.stringify({foot:(f?f.innerText.replace(/\\s+/g,' ').slice(0,40):''),caps:${capsProbe}})})()`)
     await shoot('multi-exit')
     console.log(`  （取消后：${back}）`)
   }
 
-  if (want('settings')) {
+  /**
+   * ★★ round 142（本轮第 ① 条）：`--shot caps` = **只显示端侧能力的那一屏** ✓。
+   *   从文件面板底部那行入口进去 ✓（用户："只打开端侧能力的那一块，而不是整个设置页"✓），
+   *   拍一张，再点同一个入口回来 ✓（入口本身就是开关 ✓；齿轮已经没有了 ✗）。
+   *   这张图要回答的是"5 项是不是长横条 + 右侧开关 ✓、屏上有没有混进别的东西 ✗"。
+   */
+  if (want('caps')) {
     await evaluate(`document.getElementById('dsh-mobile-files').click()`)
-    await sleep(1200)
-    const opened = await evaluate(`(function(){var g=document.getElementById('dsh-mobile-sheet-gear');if(!g)return false;g.click();return true})()`)
+    await sleep(1400)
+    await evaluate(`(function(){var e=document.getElementById('dshm-conn-entry');if(e)e.click()})()`)
+    await sleep(1300)
+    await shoot('caps')
+    const inner = await evaluate(`(function(){
+      var s=document.getElementById('dsh-mobile-sheet')
+      var rows=s===null?[]:[].slice.call(s.querySelectorAll('[data-dshm-cap-row]'))
+      var titles=s===null?[]:[].slice.call(s.querySelectorAll('.dshm-set-title')).map(function(t){return String(t.textContent||'').trim()})
+      var text=s===null?'':String(s.innerText||'').replace(/\\s+/g,' ').slice(0,150)
+      return JSON.stringify({title:(document.querySelector('.dshm-sheet-title')||{}).textContent||'',
+        rows:rows.length, labels:rows.map(function(r){return String((r.querySelector('.dshm-set-label')||{}).textContent||'').trim()}),
+        titles:titles, danger:s===null?0:s.querySelectorAll('.dshm-set-danger').length,
+        legacyChips:document.querySelectorAll('.dshm-cap-chip').length, text:text})
+    })()`)
+    console.log(`  （端侧能力那一屏：${String(inner)}）`)
+    await evaluate(`(function(){var e=document.getElementById('dshm-conn-entry');if(e)e.click()})()`)
+    await sleep(1100)
+    await shoot('caps-back')
+  }
+
+  /**
+   * ★★ round 142（本轮第 ③ 条）：`--shot settings` 现在走的是**唯一**那条路 ✓ ——
+   *   DSH 左侧栏 → 设置 →「连接与设备」✓（文件面板右上角那颗齿轮已经删掉了 ✗）。
+   *   ⚠️ 必须带 `UI_FAKE_SHELL=1` 跑 ✗：那第五个导航项**只在有壳时才注入** ✓，
+   *   否则这一屏根本进不去（会在日志里报 `no-conn-nav` ✓）。
+   */
+  if (want('settings')) {
+    await evaluate(`(function(){if(typeof window.__dshmBack==='function')window.__dshmBack()})()`)
+    await sleep(800)
+    await evaluate(`(function(){if(document.body.dataset.dshMobileDrawer!=='open'){var n=document.getElementById('dsh-mobile-nav');if(n)n.click()}})()`)
+    await sleep(900)
+    const opened = await evaluate(`(function(){
+      var col=document.querySelector('[class*=sidebarCol]');
+      if(col===null) return 'no-sidebar';
+      var buttons=col.querySelectorAll('button');
+      for(var i=0;i<buttons.length;i++){
+        if(/^设置/.test(String(buttons[i].textContent||'').trim())){ buttons[i].click(); return 'opened' }
+      }
+      return 'no-settings-button';
+    })()`)
+    await sleep(1500)
+    const clicked = await evaluate(`(function(){
+      var cell=document.querySelector('[data-dshm-conn-nav="1"]');
+      if(cell===null) return 'no-conn-nav(有壳吗？UI_FAKE_SHELL=1)';
+      cell.click(); return 'clicked';
+    })()`)
     await sleep(1000)
     await shoot('settings')
     const text = await evaluate(
-      `(function(){var b=document.getElementById('dsh-mobile-sheet-body');return b?b.innerText.replace(/\\s+/g,' ').slice(0,160):'(无)'})()`,
+      `(function(){var h=document.querySelector('[data-dshm-panel]');return h?h.innerText.replace(/\\s+/g,' ').slice(0,160):'(无)'})()`,
     )
-    console.log(`  （齿轮：${opened} | 设置内容：${String(text)}）`)
-    // 再点一次应**返回文件视图**（齿轮是开关）
-    const back = await evaluate(`(function(){
-      var g=document.getElementById('dsh-mobile-sheet-gear');if(!g)return null;
-      g.click();
-      var t=document.querySelector('.dshm-sheet-title');
-      var ws=document.querySelectorAll('.dshm-ws').length;
-      return JSON.stringify({title:t?t.textContent:'', workspaces:ws, gearActive:g.dataset.active||'0'})
-    })()`)
-    await sleep(900)
-    await shoot('settings-back')
-    console.log(`  （再点齿轮 → ${String(back)}）`)
+    console.log(`  （侧栏设置：${opened} → 连接与设备：${clicked} | 内容：${String(text)}）`)
   }
 
   if (want('copy')) {
@@ -617,19 +880,34 @@ try {
     })()`)
     await sleep(500)
     await shoot('multi-select')
-    // 探针：底栏几何 / 计数 / 端侧开关（**必须还在 DOM 里**，只是被收起）
+    /**
+     * 探针：底栏几何 / 计数 / 端侧通道入口（**必须还在 DOM 里**，只是被收起 ✓）。
+     *
+     * ★★ round 138：被守的元素换了一个 ✗ —— 端侧通道**从文件面板底部搬进了那一屏** ✓
+     *   （用户："右侧端侧通道的功能能不能也挪到设置里"✓）。面板底部现在只剩
+     *   **一行入口**（`#dshm-conn-entry` = 「端侧能力」✓），5 项能力住在点入口之后那一屏里 ✓。
+     *   所以这里探的是**入口**（原来探 `.dshm-caps` ✗ —— 搬走之后它恒为
+     *   `capsInDom:false` ✗，打印出来会像"端侧通道没了" ✗），
+     *   另外顺带报一下那一屏里有几行/几颗开关（没进去过就是 0 ✓，正常 ✓）。
+     */
     const probeMulti = await evaluate(`(function(){
       function box(sel){var e=document.querySelector(sel);if(!e)return null;var r=e.getBoundingClientRect();
         return {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}}
-      var caps=document.querySelector('.dshm-caps')
+      var entry=document.getElementById('dshm-conn-entry')
+      var capRows=document.querySelectorAll('#dsh-mobile-sheet [data-dshm-cap-row]')
+      var capSwitches=document.querySelectorAll('#dsh-mobile-sheet [data-dshm-cap-switch]')
       return JSON.stringify({
         bar: box('#dsh-mobile-sheet-select'),
         count: (document.getElementById('dshm-select-count')||{}).textContent||null,
         selectedRows: document.querySelectorAll('.dshm-file[data-selected="1"]').length,
         visibleChecks: document.querySelectorAll('.dshm-file[data-selecting="1"] .dshm-file-check').length,
         moreButtonsVisible: [].slice.call(document.querySelectorAll('.dshm-file-more')).filter(function(m){return getComputedStyle(m).display!=='none'}).length,
-        capsInDom: caps!==null,
-        capsDisplay: caps?getComputedStyle(caps).display:null,
+        entryInDom: entry!==null,
+        entryDisplay: entry?getComputedStyle(entry).display:null,
+        entryText: entry===null?null:String(entry.textContent||'').trim(),
+        capRows: capRows.length,
+        capSwitches: capSwitches.length,
+        legacyChips: document.querySelectorAll('.dshm-cap-chip').length,
         barButtons: [].slice.call(document.querySelectorAll('#dsh-mobile-sheet-select button')).map(function(b){return b.textContent.trim()})
       })
     })()`)
@@ -651,38 +929,42 @@ try {
       var cancel=bs.filter(function(x){return x.textContent.trim()==='取消'})[0];
       if(cancel) cancel.click();
       var bar=document.getElementById('dsh-mobile-sheet-select');
-      var caps=document.querySelector('.dshm-caps');
-      return JSON.stringify({barHidden:bar?bar.hidden:null, capsDisplay:caps?getComputedStyle(caps).display:null})
+      // ★ round 138：守的是**「端侧能力」入口**（端侧通道已搬进设置页 ✓，见上面那段说明 ✓）
+      var entry=document.getElementById('dshm-conn-entry');
+      return JSON.stringify({barHidden:bar?bar.hidden:null, entryDisplay:entry?getComputedStyle(entry).display:null, entryText:entry===null?null:String(entry.textContent||'').trim()})
     })()`)
     console.log(`  （退出多选 → ${String(restored)}）`)
   }
 
-  if (want('statusbar')) {
-    /**
-     * 会话页底部那条「N 轮 M 步 / token 用量」。
-     *
-     * 它由 DSH 自己的 `StatsPills` 渲染，而 `stats.steps === 0` 时**整体不渲染** ——
-     * 所以欢迎页上量不到它（不是"量失败"，是它真的不在 DOM 里）。要量它就得先
-     * 打开一个**真实会话**：`--sessions auto` 会把一份生产会话日志只读复制进临时家目录。
-     *
-     * 探针把"结构"而不是"观感"写下来：类名后缀、`aria-label`、几何、父链。
-     * 改 UI 的正确姿势是先钉死这些，再动一行 CSS ✓。
-     */
+  /**
+   * ★★ round 142（第 ④ 条）：打开一个**真有统计数据的会话** ✓ —— 抽成一个 helper ✓。
+   *
+   * 为什么必须抽出来 ✗：`statusbar`（量底部状态栏）与 `kb`（键盘弹起那一屏）**都要它** ✓，
+   * 抄两遍就是"同一个动线两份实现"✗ —— 而且那条动线有 6 次重试与会话行探测 ✓，
+   * 两份一定会漂 ✓（本项目对这条零容忍 ✓）。
+   *
+   * 判据用 `[data-composer-stats]` 的 **textContent** ✓（它被我们 `visibility:hidden`
+   * 收起后 `innerText` 恒为空 ✗ —— 用 innerText 会永远等不到 ✓）。
+   *
+   * ★ 幂等 ✓：已经开着有数据的会话就直接返回 ✓（整轮跑多个 `--shot` 时不会重复折腾 ✓）。
+   *
+   * @param onDrawerOpen - 可选回调 ✓，在**抽屉开着**那一刻调用（`statusbar` 用它打印侧栏结构 ✓）。
+   */
+  const openSessionWithStats = async ({ onDrawerOpen } = {}) => {
+    const already = await evaluate(`(function(){
+      var r=document.querySelector('[data-composer-stats]')
+      return r!==null&&r!==undefined&&(r.textContent||'').length>0 })()`)
+    if (already === true) return { clicked: '(已经开着)', opened: false }
+
     await evaluate(`(function(){var n=document.getElementById('dsh-mobile-nav');if(n)n.click()})()`)
     await sleep(1300)
-    const sidebar = await evaluate(`(function(){
-      function rows(sel){return [].slice.call(document.querySelectorAll(sel)).slice(0,6).map(function(e){
-        var r=e.getBoundingClientRect()
-        return {tag:e.tagName,cls:String(e.className).slice(0,34),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),text:(e.innerText||'').replace(/\\s+/g,' ').slice(0,34)}})}
-      return JSON.stringify({projects:rows('[class*="_projectRow"]'),sessions:rows('[class*="_sessionRow"]'),titles:rows('[class*="_title"]')})
-    })()`)
-    console.log('  [侧栏结构] ' + String(sidebar).slice(0, 900))
+    if (typeof onDrawerOpen === 'function') await onDrawerOpen()
 
-    // 展开目标工作区 → 点第一个会话行（DSH 侧栏的工作区行点击 = 展开/收起会话列表）。
+    // 展开目标工作区 → 点会话行（DSH 侧栏的工作区行点击 = 展开/收起会话列表）。
     // 工作区**按标题选**：`--sessions auto` 复制的会话属于哪个工作区，就点哪个 ——
     // 点错行会打开一个没被复制过来的会话，表现是"会话打不开"，与我们要测的东西无关 ✗。
     const wantTitle = copiedSessions.length > 0 ? copiedSessions[0].title : undefined
-    const expanded = await evaluate(`(function(){
+    await evaluate(`(function(){
       var title=${JSON.stringify(wantTitle ?? null)}
       var rows=[].slice.call(document.querySelectorAll('[class*="_projectRow"]'))
       var target=null
@@ -691,14 +973,7 @@ try {
       if(!target) return '(没有工作区行)'
       target.click(); return (target.innerText||'').replace(/\\s+/g,' ').slice(0,24) })()`)
     await sleep(1500)
-    /**
-     * 挨个试会话行，直到宿主那行（`[data-composer-stats]`）出现在 DOM 里。
-     *
-     * 为什么不能只点第一个：会话行的 DOM 不暴露 session id（只有 `role="treeitem"`），
-     * 而**空会话根本不渲染状态栏** —— 点错了就会拍出一张"没有状态栏"的图，
-     * 与"我们把状态栏改没了"完全同形 ✗。
-     * 判定用 **textContent**：那行被我们 `visibility:hidden` 收起后 `innerText` 恒为空 ✗。
-     */
+
     let clicked = '(没有会话行)'
     for (let i = 0; i < 6; i++) {
       const row = await evaluate(`(function(){
@@ -716,6 +991,63 @@ try {
     }
     await evaluate(`(function(){var b=document.getElementById('dsh-mobile-drawer-backdrop');if(b)b.click()})()`)
     await sleep(1000)
+    return { clicked, opened: true }
+  }
+
+  /**
+   * ★★ round 144：**假壳报 IME 高度** ✓ —— 走 `__dshmFakeIme` + `apk.pull()` =
+   *   **线上那条路** ✓（`applyShellInsets` ✓），而不是直接 setProperty 那个 CSS 变量 ✗
+   *   （让位逻辑与诊断行都在那条路上 ✓，绕过它等于没验 ✓）。
+   *   `kb` 与 `dbg` 两节都要用 ✓ ⇒ 提成一份 ✓。
+   */
+  const setFakeIme = async (px) =>
+    evaluate(`(function(){
+      globalThis.__dshmFakeIme = ${px}
+      var api=globalThis.__DSH_MOBILE_BOOT__&&globalThis.__DSH_MOBILE_BOOT__.apk
+      if(api&&api.pull) api.pull()
+      return Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard'))||0) })()`)
+
+  /**
+   * ★★ round 144：**收掉能力授权条** ✓ —— 它一出现就盖在屏幕上方 ✓，截图会被它糊掉 ✓。
+   *   ★ 必须**循环**几次 ✗：能力是**逐个**征询的 ✓（先「提醒」再「通知」✓）。
+   */
+  const dismissAskbars = async () => {
+    for (let i = 0; i < 5; i++) {
+      const how = await evaluate(`(function(){
+        var bar=document.querySelector('[data-dshm-askbar]')
+        if(bar===null) return 'none'
+        var bs=bar.querySelectorAll('button')
+        for(var j=0;j<bs.length;j++){ if(bs[j].textContent.trim()==='不用'){ bs[j].click(); return 'dismissed' } }
+        if(bs.length>0){ bs[bs.length-1].click(); return 'dismissed-last' }
+        return 'no-button' })()`)
+      if (how === 'none') return i === 0 ? 'none' : `after-${i}`
+      await sleep(1000)
+    }
+    return 'still-there'
+  }
+
+  if (want('statusbar')) {
+    /**
+     * 会话页底部那条「N 轮 M 步 / token 用量」。
+     *
+     * 它由 DSH 自己的 `StatsPills` 渲染，而 `stats.steps === 0` 时**整体不渲染** ——
+     * 所以欢迎页上量不到它（不是"量失败"，是它真的不在 DOM 里）。要量它就得先
+     * 打开一个**真实会话**：`--sessions auto` 会把一份生产会话日志只读复制进临时家目录。
+     *
+     * 探针把"结构"而不是"观感"写下来：类名后缀、`aria-label`、几何、父链。
+     * 改 UI 的正确姿势是先钉死这些，再动一行 CSS ✓。
+     */
+    const sessionInfo = await openSessionWithStats({
+      onDrawerOpen: async () => {
+        const sidebar = await evaluate(`(function(){
+          function rows(sel){return [].slice.call(document.querySelectorAll(sel)).slice(0,6).map(function(e){
+            var r=e.getBoundingClientRect()
+            return {tag:e.tagName,cls:String(e.className).slice(0,34),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),text:(e.innerText||'').replace(/\\s+/g,' ').slice(0,34)}})}
+          return JSON.stringify({projects:rows('[class*="_projectRow"]'),sessions:rows('[class*="_sessionRow"]'),titles:rows('[class*="_title"]')})
+        })()`)
+        console.log('  [侧栏结构] ' + String(sidebar).slice(0, 900))
+      },
+    })
     await shoot('statusbar')
 
     const probe = await evaluate(`(function(){
@@ -912,7 +1244,190 @@ try {
     await shoot('statusbar-dialog')
     await evaluate(`(function(){var b=document.getElementById('dshm-stats-usage');if(b)b.click()})()`)
     await sleep(500)
-    console.log(`  （打开的工作区：${String(expanded)} | 会话行：${String(clicked)}）`)
+    console.log(`  （打开的工作区：${String(sessionInfo.clicked)} | 会话行：${String(sessionInfo.clicked)}）`)
+  }
+
+  if (want('kb')) {
+    /**
+     * ★★ round 142（第 ④ 条）：**键盘弹起那一屏** ✓。
+     *
+     * 用户原话（本轮第 4 条）："键盘弹起时，输入框右侧会出现一条很短的竖滚动条，
+     *   而且把上下文那一行顶得离键盘很远" ✗。
+     *
+     * 这一屏要回答三个问题（全都是**量出来的**，不是看感觉 ✓）：
+     *   ① **哪一层在滚**（`scrollHeight > clientHeight` ✓，以及它有没有带竖滚动条
+     *      —— 判据是 `offsetWidth - clientWidth > 0` ✓，这就是"看得见的那条竖条"✓）；
+     *   ② "上下文行底边 → 键盘顶边"在**开/关**键盘两种情况下的**数字对照** ✓；
+     *   ③ 到底是**高度**的账还是**宽度**的账 ✓（两个方向的溢出量都打出来 ✓）。
+     *
+     * 键盘怎么模拟：与 `check-mobile-layout.mjs` **同一个旋钮** ✓ ——
+     *   `--dshm-keyboard` ✓（真机上由壳把 IME 高度写进去 ✓，见 boot.js 的 `write('--dshm-keyboard', insets.ime)` ✓）。
+     *   验收里直接设成 300px ✓，键盘顶边 = `innerHeight - 300` ✓。
+     * ★ 还额外**真的聚焦**输入框 ✓（"键盘弹起"在真机上就是"输入框获得焦点"✓）——
+     *   只设变量不聚焦，会漏掉"聚焦本身引起的滚动/让位"✗。
+     */
+    const session = await openSessionWithStats()
+    console.log(`  · 键盘那一节：会话=${JSON.stringify(session)}`)
+    /**
+     * 收掉能力授权条 ✓ —— 它一出现就盖在屏幕上方 ✓，键盘那一节的截图会被它糊掉 ✓。
+     * ★ 必须**循环**几次 ✗：能力是**逐个**征询的 ✓（先「提醒」再「通知」✓），
+     *   点掉一条之后下一条才出现 ✓（第一版只点一次 ⇒ 第二张图里还是有一条 ✗）。
+     *   `UI_FAKE_SHELL=1` 让网页认为"有壳" ✓ ⇒ 授权条会弹 ✓；这一节与它无关 ✓。
+     */
+    console.log('  · 收掉能力授权条：' + String(await dismissAskbars()))
+
+    const readKbState = async () =>
+      JSON.parse(
+        String(
+          await evaluate(`(function(){
+        function round(v){return Math.round(v)}
+        function box(el){if(el===null||el===undefined)return null;var r=el.getBoundingClientRect()
+          return {x:round(r.left),y:round(r.top),w:round(r.width),h:round(r.height),bottom:round(r.bottom),right:round(r.right)}}
+        var kb=Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard'))||0)
+        var keyboardTop=round(window.innerHeight-kb)
+        var stats=document.getElementById('dshm-stats')
+        var center=document.querySelector('[class*="centerCol"]')
+        var seat=document.querySelector('[class*="composerSeat"]')
+        var stack=document.querySelector('[class*="composerStack"]')
+        var input=center===null?null:center.querySelector('[contenteditable="true"], textarea')
+        var chain=[],node=stats
+        while(node!==null&&node!==undefined&&node!==document.body&&chain.length<14){
+          var cs=getComputedStyle(node)
+          chain.push({
+            tag:node.tagName, id:node.id||'', cls:String(node.className||'').split(' ')[0].slice(0,26),
+            oy:cs.overflowY, maxH:cs.maxHeight, h:cs.height,
+            sh:node.scrollHeight, ch:node.clientHeight, overY:node.scrollHeight-node.clientHeight,
+            sw:node.scrollWidth, cw:node.clientWidth, overX:node.scrollWidth-node.clientWidth,
+            sbW:node.offsetWidth-node.clientWidth, box:box(node)
+          })
+          node=node.parentElement
+        }
+        var scrollers=[]
+        var all=document.querySelectorAll('body *')
+        for(var i=0;i<all.length;i++){
+          var el=all[i]
+          var c=getComputedStyle(el)
+          if(!/(auto|scroll)/.test(c.overflowY)) continue
+          if(el.scrollHeight-el.clientHeight<=1) continue
+          scrollers.push({tag:el.tagName,id:el.id||'',cls:String(el.className||'').split(' ')[0].slice(0,26),
+            overY:el.scrollHeight-el.clientHeight, sbW:el.offsetWidth-el.clientWidth, box:box(el)})
+        }
+        var host=document.querySelector('[data-composer-stats]')
+        function scrollOf(el){if(el===null||el===undefined)return null;var c=getComputedStyle(el)
+          return {sh:el.scrollHeight,ch:el.clientHeight,overY:el.scrollHeight-el.clientHeight,
+            sw:el.scrollWidth,cw:el.clientWidth,overX:el.scrollWidth-el.clientWidth,
+            sbW:el.offsetWidth-el.clientWidth,oy:c.overflowY,maxH:c.maxHeight,box:box(el)}}
+        return JSON.stringify({
+          kb:kb, viewport:window.innerHeight, keyboardTop:keyboardTop,
+          statsOn:stats===null?null:stats.dataset.on,
+          statsBox:box(stats), hostBox:box(host), inputBox:box(input),
+          seat:scrollOf(seat), stack:scrollOf(stack), center:scrollOf(center),
+          centerPad:center===null?null:round(parseFloat(getComputedStyle(center).paddingBottom)||0),
+          statsToKeyboard:stats===null?null:keyboardTop-round(stats.getBoundingClientRect().bottom),
+          statsToViewportBottom:stats===null?null:round(window.innerHeight-stats.getBoundingClientRect().bottom),
+          inputToKeyboard:input===null?null:keyboardTop-round(input.getBoundingClientRect().bottom),
+          activeElement:String(document.activeElement&&(document.activeElement.className||document.activeElement.tagName)||'').slice(0,30),
+          chain:chain, scrollers:scrollers
+        })
+      })()`),
+        ),
+      )
+
+    await shoot('kb-closed')
+    const closed = await readKbState()
+    console.log('  [键盘收起] ' + JSON.stringify(closed))
+
+    /**
+     * ★ 真聚焦 + 让**假壳**报 ime=300 ✓（与真机同序：聚焦 ⇒ IME 弹出 ⇒ 壳推 insets ✓）。
+     *   ★ 走 `__dshmFakeIme` + `apk.pull()` = **线上那条路** ✓（`applyShellInsets` ✓）——
+     *   而不是直接 setProperty 那个 CSS 变量 ✗：本轮第 ④ 条的修正逻辑就在那条路上 ✓
+     *   （见 boot.js 的 `syncKeyboardPad` ✓），绕过它就等于没验 ✓。
+     */
+    await evaluate(`(function(){
+      var center=document.querySelector('[class*="centerCol"]')
+      var input=center===null?null:center.querySelector('[contenteditable="true"], textarea')
+      if(input){ input.focus() }
+      return true })()`)
+    console.log(`  · 假壳报 ime=300 ⇒ --dshm-keyboard=${String(await setFakeIme(300))}px`)
+    await sleep(900)
+    await shoot('kb-open')
+    const open = await readKbState()
+    console.log('  [键盘弹起] ' + JSON.stringify(open))
+
+    /**
+     * ★★ 第二态：**多行输入**（用户报的那一屏多半就是它 ✓）。
+     *
+     * 为什么必须单独量这一态 ✗：空输入框时 composer 只有 131px ✓，
+     * 键盘（300px）之后还剩 569px ✓ —— 怎么摆都不会溢出 ✓（上面那一态就是"看着没事"✓）。
+     * 而**输入框一长**，文本框那一层会顶到自己的上限（我们写的 `min(20vh,140px)` ✓），
+     * 整块 composer 跟着长高 ✓ ⇒ 与键盘抢那 569px ✓ —— 那才是"右侧多出一条很短的小竖条 +
+     * 上下文那行被顶开"最可能的现场 ✓。
+     * 打字用 `document.execCommand('insertText')` ✓（= 真机键盘打字走的那条路 ✓，
+     * React 的受控 contenteditable 也吃这一下 ✓；直接改 textContent 不会触发 React ✓）。
+     */
+    const typeIntoComposer = async (text) =>
+      evaluate(`(function(){
+        var center=document.querySelector('[class*="centerCol"]')
+        var input=center===null?null:center.querySelector('[contenteditable="true"], textarea')
+        if(input===null) return 'no-input'
+        input.focus()
+        var ok=document.execCommand('insertText', false, ${JSON.stringify(text)})
+        return ok===true?'typed':'execCommand-false' })()`)
+
+    await setFakeIme(0)
+    await sleep(500)
+    const typed = await typeIntoComposer('这是一段很长的输入，用来把输入框撑到上限。'.repeat(13))
+    await sleep(900)
+    await shoot('kb-multiline-closed')
+    const multiClosed = await readKbState()
+    console.log(`  [多行·键盘收起] typed=${String(typed)}｜` + JSON.stringify(multiClosed))
+
+    await setFakeIme(300)
+    await sleep(900)
+    await shoot('kb-multiline-open')
+    const multiOpen = await readKbState()
+    console.log('  [多行·键盘弹起] ' + JSON.stringify(multiOpen))
+
+    /**
+     * ★★ 第三态（**真机最可能的那一态** ✓）：**系统把 WebView 变矮了** ✓。
+     *
+     * 为什么必须量这一态 ✗：上面两态都是"布局视口 869 不动 + 壳报 ime=300"✓ ——
+     *   那是 `adjustNothing` 那一类壳的行为 ✓，此时我们那条 `padding-bottom: --dshm-keyboard`
+     *   正好把 composer 顶到键盘上方 ✓（实测 4px ✓，**没问题**✓）。
+     * 而 Android 上更常见的是**系统直接 resize WebView** ✓（`adjustResize`/edge-to-edge + IME ✓）：
+     *   布局视口自己就矮了 300px ✓，**同时壳还照样报 ime=300** ✓ ⇒
+     *   那 300px 会被**算两遍**（系统一次 ✓ + 我们那条 padding 又一次 ✓）——
+     *   composer 被顶到键盘上方 ~300px ✓（= 用户说的"上下文那行离键盘很远"✗），
+     *   聊天记录那一层也被压掉两遍 ✓（= 那条**很短**的小竖条 ✓）。
+     * 模拟方式：`Emulation.setDeviceMetricsOverride` 把视口高度改成 869-300=569 ✓
+     *   （= 系统 resize ✓），**同时**保留 `--dshm-keyboard: 300px` ✓（= 壳如实上报 ✓）。
+     *   ★ 这一态里"键盘顶边"就是**视口底边**（569 ✓）—— 所以判据读
+     *     `statsToViewportBottom` ✓，而不是 `innerHeight - kb`（那是上面两态的算法 ✓）。
+     */
+    await send('Emulation.setDeviceMetricsOverride', { width: 400, height: 569, deviceScaleFactor: 2, mobile: true })
+    await evaluate(`(function(){
+      var center=document.querySelector('[class*="centerCol"]')
+      var input=center===null?null:center.querySelector('[contenteditable="true"], textarea')
+      if(input){ input.focus() }
+      return true })()`)
+    await sleep(400)
+    console.log(`  · 收掉能力授权条（resize 那一屏之前再确认一次）：${String(await dismissAskbars())}`)
+    console.log(`  · 系统 resize 到 569 之后，假壳再报 ime=300 ⇒ --dshm-keyboard=${String(await setFakeIme(300))}px`)
+    await sleep(700)
+    await shoot('kb-resized')
+    const resized = await readKbState()
+    console.log('  [系统 resize + 壳报 ime=300] ' + JSON.stringify(resized))
+
+    // 收尾：视口还原 ✓、键盘归零 ✓、输入框失焦 ✓（别把状态留给下一个 --shot ✓）
+    await send('Emulation.setDeviceMetricsOverride', { width: WIDTH, height: HEIGHT, deviceScaleFactor: 2, mobile: true })
+    await evaluate(`(function(){
+      var center=document.querySelector('[class*="centerCol"]')
+      var input=center===null?null:center.querySelector('[contenteditable="true"], textarea')
+      if(input){ input.blur() }
+      return true })()`)
+    await sleep(300)
+    await setFakeIme(0)
+    await sleep(700)
   }
 
   if (want('bigdir')) {
@@ -1329,6 +1844,151 @@ try {
     await shoot('native-settings')
   }
 
+  if (want('dbg')) {
+    /**
+     * ★★ round 144：**调试面板那四张图** ✓（用户真机反馈"太混乱 / 出不来"✗）。
+     *
+     * 出四张：① `?debug=1` 默认态（只有关键行 ✓ 日志折叠 ✓）
+     *        ② 展开日志态 ✓  ③ 键盘弹起时的 `?debug=1` ✓（只留那条栏 ✓）
+     *        ④ 点掉调试之后的正常态 ✓（用面板上那个「关掉调试并刷新」按钮 ✓，不是地址栏 ✓）。
+     *
+     * ★ 顺带把**命中测试**打出来 ✓（`document.elementFromPoint` ✓ —— 判据是"这一点上最上层是谁"✓）：
+     *   ☰ / 📁 / 输入框 / 统计行 四个点 × 键盘收起与弹起两种状态 ✓。
+     */
+    const openWithDebug = async () => {
+      /**
+       * ★ 必须导航到**应用自己的那个地址** ✗（`/mobile` 不带票据时是**配对页** ✓ ——
+       *   第一版就踩了这个：`/mobile?debug=1` 落回配对页 ⇒ 什么都量不到 ✓）。
+       *   取当下 location 的 origin+pathname ✓，再加 `?debug=1` ✓。
+       */
+      const appUrl = String(await evaluate(`location.origin + location.pathname`))
+      await send('Page.navigate', { url: `${appUrl}?debug=1` })
+      await sleep(3000)
+      let info = null
+      for (let attempt = 1; attempt <= 20; attempt++) {
+        info = await describeReadiness()
+        if (info.ready === true) break
+        await sleep(1000)
+      }
+      // ★ 导航会清掉假壳 ✗ ⇒ 再装一次 ✓（键盘模拟与 [外壳] 那行都靠它 ✓）
+      if ((process.env['UI_FAKE_SHELL'] ?? '') === '1') console.log('  · 重新冒充壳：' + String(await installFakeShell()))
+      await sleep(600)
+      return info
+    }
+    /** 命中测试：问"这一点上最上层是谁"，并标出它是不是调试面板里的东西 ✓。 */
+    const hitProbe = async (label, selector) =>
+      JSON.parse(
+        String(
+          await evaluate(`(function(){
+        function box(el){var r=el.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}}
+        var el=${JSON.stringify(selector)}===null?null:document.querySelector(${JSON.stringify(selector)})
+        if(el===null) return JSON.stringify({label:${JSON.stringify(label)},found:false})
+        var at=box(el)
+        var hit=document.elementFromPoint(at.x,at.y)
+        var inDebug=hit!==null&&hit.closest!==undefined&&hit.closest('#dshm-kb-debug,#dshm-upload-debug,#dshm-debug-actions')!==null
+        return JSON.stringify({label:${JSON.stringify(label)},found:true,at:at,
+          hit:hit===null?null:(hit.tagName.toLowerCase()+(hit.id?'#'+hit.id:'')+'.'+String(hit.className||'').split(' ')[0]).slice(0,48),
+          hitIsTarget:hit===el||(el.contains!==undefined&&el.contains(hit)),
+          blockedByDebug:inDebug}) })()`),
+        ),
+      )
+    const dbgReady = await openWithDebug()
+    console.log(`  · ?debug=1 就绪=${JSON.stringify(dbgReady)}`)
+    const session = await openSessionWithStats()
+    console.log(`  · 会话=${JSON.stringify(session)}`)
+    console.log('  · 收掉能力授权条：' + String(await dismissAskbars()))
+    const state = await evaluate(`(function(){
+      function shown(el){return el!==null&&el!==undefined&&getComputedStyle(el).display!=='none'}
+      var bar=document.getElementById('dshm-kb-debug')
+      var log=document.getElementById('dshm-upload-debug')
+      var actions=document.getElementById('dshm-debug-actions')
+      var row=document.getElementById('dshm-kb-text')
+      return JSON.stringify({
+        barShown:shown(bar), logShown:shown(log), actionsShown:shown(actions),
+        barText:String(row===null?'':row.textContent||'').replace(/\s+/g,' ').slice(0,200),
+        logLines:String((log||{}).textContent||'').split(String.fromCharCode(10)).length,
+        toggle:String((document.getElementById('dshm-kb-toggle')||{}).textContent||''),
+        flag:String(localStorage.getItem('dsh-mobile.debug')),
+        expandedFlag:String(localStorage.getItem('dsh-mobile.debug.log'))
+      }) })()`)
+    console.log('  [默认态] ' + String(state))
+    await shoot('dbg-default')
+    console.log('  [命中·键盘收起] ' + JSON.stringify([
+      await hitProbe('☰ 侧栏', '#dsh-mobile-nav'),
+      await hitProbe('📁 文件', '#dsh-mobile-files'),
+      await hitProbe('输入框', '[contenteditable="true"]'),
+      await hitProbe('统计行', '#dshm-stats'),
+      await hitProbe('展开按钮', '#dshm-kb-toggle'),
+      await hitProbe('关掉调试按钮', '#dshm-kb-off'),
+    ]))
+
+    // ② 展开日志 ✓
+    await evaluate(`(function(){var b=document.getElementById('dshm-kb-toggle');if(b)b.click();return true})()`)
+    await sleep(600)
+    const expanded = await evaluate(`(function(){
+      function shown(el){return el!==null&&el!==undefined&&getComputedStyle(el).display!=='none'}
+      return JSON.stringify({
+        logShown:shown(document.getElementById('dshm-upload-debug')),
+        actionsShown:shown(document.getElementById('dshm-debug-actions')),
+        toggle:String((document.getElementById('dshm-kb-toggle')||{}).textContent||''),
+        expandedFlag:String(localStorage.getItem('dsh-mobile.debug.log'))
+      }) })()`)
+    console.log('  [展开态] ' + String(expanded))
+    await shoot('dbg-expanded')
+
+    // ③ 键盘弹起（展开的日志要自动让位 ⇒ 只剩那条栏 ✓）
+    await setFakeIme(300)
+    await evaluate(`(function(){
+      var input=document.querySelector('[contenteditable="true"]')
+      if(input) input.focus()
+      return true })()`)
+    await sleep(800)
+    const kb = await evaluate(`(function(){
+      function shown(el){return el!==null&&el!==undefined&&getComputedStyle(el).display!=='none'}
+      return JSON.stringify({
+        logShown:shown(document.getElementById('dshm-upload-debug')),
+        barShown:shown(document.getElementById('dshm-kb-debug')),
+        keyboard:getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard').trim()
+      }) })()`)
+    console.log('  [键盘弹起] ' + String(kb))
+    await shoot('dbg-keyboard')
+    console.log('  [命中·键盘弹起] ' + JSON.stringify([
+      await hitProbe('☰ 侧栏', '#dsh-mobile-nav'),
+      await hitProbe('📁 文件', '#dsh-mobile-files'),
+      await hitProbe('输入框', '[contenteditable="true"]'),
+      await hitProbe('统计行', '#dshm-stats'),
+      await hitProbe('关掉调试按钮', '#dshm-kb-off'),
+    ]))
+    await setFakeIme(0)
+    await sleep(400)
+
+    // ④ 用**面板上那个按钮**关掉调试并刷新 ✓（不是地址栏 ✓）
+    const escapeBox = JSON.parse(
+      String(
+        await evaluate(`(function(){
+          var b=document.getElementById('dshm-kb-off')
+          if(b===null) return JSON.stringify({found:false})
+          var r=b.getBoundingClientRect()
+          return JSON.stringify({found:true,x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}) })()`),
+      ),
+    )
+    if (escapeBox.found === true) {
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: escapeBox.x, y: escapeBox.y, button: 'left', clickCount: 1 })
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: escapeBox.x, y: escapeBox.y, button: 'left', clickCount: 1 })
+    }
+    await sleep(6000)
+    const afterOff = await evaluate(`(function(){
+      return JSON.stringify({
+        flag:String(localStorage.getItem('dsh-mobile.debug')),
+        expandedFlag:String(localStorage.getItem('dsh-mobile.debug.log')),
+        url:String(location.pathname+location.search),
+        barStillThere:document.getElementById('dshm-kb-debug')!==null,
+        logStillThere:document.getElementById('dshm-upload-debug')!==null
+      }) })()`)
+    console.log('  [点掉调试之后] ' + String(afterOff))
+    await shoot('dbg-off')
+  }
+
   if (want('files-empty')) {
     // 空态：把工作区切到一个空目录
     const empty = join(tmpdir(), 'dshm-ui-empty')
@@ -1338,6 +1998,10 @@ try {
   }
 
   console.log(`[shoot-ui] 完成：${shots.length} 张`)
+  if (problems.length > 0) {
+    console.error(`[shoot-ui] 有 ${problems.length} 处"截图与它声称的状态不符"（见上面每一条 ✗）：`)
+    for (const problem of problems) console.error('  - ' + problem)
+  }
 } finally {
   try {
     ws.close()
@@ -1345,4 +2009,4 @@ try {
     /* 忽略 */
   }
 }
-process.exit(0)
+process.exit(problems.length === 0 ? 0 : 1)

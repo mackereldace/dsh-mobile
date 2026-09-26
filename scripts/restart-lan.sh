@@ -126,6 +126,21 @@ health_report() {
         echo "  DSH 信任栅栏 /api [${v6}] : ${code}（非 403 即已放行）"
       fi
     fi
+    # Tailscale 的 /api 栅栏同样**单独测**：它是第三条独立 authority
+    # （手机在校外时就走这条，局域网通不代表它通）。
+    ts_ip="$(node "${SCRIPT_DIR}/detect-tailscale-ip.mjs" 2>/dev/null || true)"
+    if [ -n "$ts_ip" ]; then
+      code="$(curl -sk -m 5 -H "x-forwarded-for: ${lan_ip}" -H 'content-type: application/json' \
+        -o /dev/null -w '%{http_code}' -X POST "https://${ts_ip}:${TLS_PORT}/api" -d '{}' 2>/dev/null)" || code=000
+      code="${code:-000}"
+      if [ "$code" = "403" ]; then
+        echo "  DSH 信任栅栏 /api ${ts_ip} : ✗ 403 —— 缺 --trusted-host ${ts_ip}:${TLS_PORT}（手机在校外走 Tailscale 时会中招）"; ok=1
+      elif [ "$code" = "000" ]; then
+        echo "  DSH 信任栅栏 /api ${ts_ip} : 000（不可达，无法判定）"
+      else
+        echo "  DSH 信任栅栏 /api ${ts_ip} : ${code}（非 403 即已放行）"
+      fi
+    fi
   else
     echo "  局域网地址                          : ✗ 未探测到"; ok=1
   fi
@@ -134,8 +149,11 @@ health_report() {
   configured=""
   configured_tls=""
   if [ -f "$patch" ]; then
-    configured="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$patch" | head -1 || true)"
-    configured_tls="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$patch" | tail -1 || true)"
+    # ★ 只能取**本机局域网 IP** 的 authority（再 head/tail）。
+    #   Tailscale 那条也是 IPv4 形式（`100.x.y.z:3443`），会直接顶掉 `tail -1`，
+    #   于是体检永远报"配置一致性 ⚠️"、重启也每次都判定不符而重装（吵，且掩盖真变化）。
+    configured="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$patch" | grep -F "${lan_ip}:" | head -1 || true)"
+    configured_tls="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$patch" | grep -F "${lan_ip}:" | tail -1 || true)"
   fi
   # 两个 authority 都要比对：只比第一个，正是"3443 丢了却报绿"的原因。
   if [ -n "$lan_ip" ] && { [ "$configured" != "${lan_ip}:${PROXY_PORT}" ] || [ "$configured_tls" != "${lan_ip}:${TLS_PORT}" ]; }; then
@@ -195,6 +213,21 @@ fi
 AUTHORITY="${LAN_IP}:${PROXY_PORT}"
 TLS_AUTHORITY="${LAN_IP}:${TLS_PORT}"
 
+# ── 学校 / 局域网这条 HTTPS 端点（本轮新增 ✓）───────────────────────────
+#
+# 为什么需要它 ✗：手机侧原有的候选端点只剩 `TS_AUTHORITY` 一条 ✓，而**学校那条
+# 是明文 HTTP**（`http://${LAN_IP}:${PROXY_PORT}` ✓）—— 混合内容 + 清单里的
+# `usesCleartextTraffic="false"` 双重不可用 ⇒ 学校槽根本用不了 ✗。
+# 所以要把**同一个局域网地址的 TLS 端口**（`https://${TLS_AUTHORITY}` ✓）
+# 作为候选端点广告给手机 ✓（手机在校内走它，比绕 Tailscale 快得多 ✓）。
+#
+# ★ 只给 `--extra-endpoint` ✓，不给 `--trusted-host` ✗ —— `TLS_AUTHORITY` 本来
+#   就已经在下面那行 `--trusted-host` 里了 ✓（重复给会写重，没意义 ✓）。
+# ★ 加它**不影响** `publicBaseUrl` ✓：安装脚本里 `publicBaseUrl = trustedHosts[0]` ✓，
+#   而这条端点派生出的 authority（`${TLS_AUTHORITY}` ✓）**已在** trustedHosts 里 ✓
+#   ⇒ `withEndpointAuthorities` 直接跳过、不追加、更不插队 ✓（见该函数注释 ✓）。
+LAN_ARGS=(--extra-endpoint "https://${TLS_AUTHORITY}")
+
 # ── 公网 IPv6（可选但免费）：手机在蜂窝网上拿到的往往就是 IPv6 地址，
 #    电脑只要有全局 IPv6 就能直连——不需要服务器、不需要域名。
 #    IPv6 的 authority **必须带方括号**（Host 头就是这个形式，插件也按这个形式匹配）。
@@ -204,12 +237,27 @@ V6_TLS_AUTHORITY=""
 if [ -n "$LAN_IPV6" ]; then
   V6_TLS_AUTHORITY="[${LAN_IPV6}]:${TLS_PORT}"
 fi
+
+# ── Tailscale（可选但免费）：手机在校外时经 Tailscale 回到本机。
+#    Tailscale 给的是 **IPv4**（100.64.0.0/10 网段），本机已有 TLS 反向代理监听 *:3443，
+#    所以 authority 直接写 `ip:端口` —— **不加方括号**。这一点与上面的 IPv6 恰好相反：
+#    方括号是 IPv6 字面量的写法，写成 `[100.x.y.z]:3443` 插件既不匹配也解析不了。
+#    这条地址同时要**广告给手机**（--extra-endpoint）：手机侧 deriveTunnelUrls 按序自动尝试。
+#    探测失败（没装/没登录 Tailscale）时整段跳过，局域网与中继路径完全不受影响。
+TS_IP="$(node "${SCRIPT_DIR}/detect-tailscale-ip.mjs" 2>/dev/null || true)"
+TS_AUTHORITY=""
+if [ -n "$TS_IP" ]; then
+  TS_AUTHORITY="${TS_IP}:${TLS_PORT}"
+fi
 PATCH_FILE="${DSH_HOME_RESOLVED}/profiles/web/cordis.patch.yml"
 CONFIGURED=""
 CONFIGURED_TLS=""
 if [ -f "$PATCH_FILE" ]; then
-  CONFIGURED="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$PATCH_FILE" | head -1 || true)"
-  CONFIGURED_TLS="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$PATCH_FILE" | tail -1 || true)"
+  # ★ 只取**本机局域网 IP** 的 authority（再 head/tail）。
+  #   Tailscale 那条同样是 IPv4 形式（`100.x.y.z:3443`）且写在后面，会把 `tail -1` 抢走 ——
+  #   那样每次重启都会判定"配置不符"而重装（无害但吵，而且掩盖真正的变化）。
+  CONFIGURED="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$PATCH_FILE" | grep -F "${LAN_IP}:" | head -1 || true)"
+  CONFIGURED_TLS="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$PATCH_FILE" | grep -F "${LAN_IP}:" | tail -1 || true)"
 fi
 # ★ 必须把 **两个** authority 都比一遍，并且重装时把两个都传上。
 #   这里曾经只比第一个、只传一个，而 install-host-plugin 是**覆盖式**写入：
@@ -220,6 +268,40 @@ fi
 NEED_V6=0
 if [ -n "$V6_TLS_AUTHORITY" ] && [ -f "$PATCH_FILE" ]; then
   grep -qF "$V6_TLS_AUTHORITY" "$PATCH_FILE" || NEED_V6=1
+fi
+# Tailscale 同理单独比对；但它是 IPv4 形式，会被上面的 IPv4 正则抓到，
+# 所以要认**受信列表条目**的准确写法（`'ip:端口'` 带引号），
+# 否则 extraEndpoints 里那行 `'https://ip:端口'` 会让检查误判为"已受信"。
+NEED_TS=0
+if [ -n "$TS_AUTHORITY" ] && [ -f "$PATCH_FILE" ]; then
+  grep -qF "'${TS_AUTHORITY}'" "$PATCH_FILE" || NEED_TS=1
+fi
+# ★ 学校/局域网这条 TLS 同一个道理，也必须**整串带引号**匹配 ✓：
+#   它同样是 IPv4 形式，会被上面的 IPv4 正则抓到；而 extraEndpoints 里那行
+#   `'https://ip:端口'` 含同样的 `ip:端口` 子串 ⇒ 用不带引号的 `grep -F` 会把它
+#   误判成"已受信"✗（少了 trustedHosts 那一条，手机侧就是 403 "一直重连中"✗）。
+#   认 `'ip:端口'` 这个准确写法才可靠 ✓。
+#
+# ★ 再加一条（**这一条才是本轮真正会变化的那个量** ✓）：学校端点还要**真的被广告出去**
+#   —— 即 extraEndpoints 这个列表里得有 `'https://ip:端口'` ✓。
+#   为什么必须有它 ✗：上面那条"受信条目"**今天就已经在了** ✓（`TLS_AUTHORITY`
+#   一直是 `--trusted-host` 的第二个参数 ✓）⇒ 只看它的话 NEED_LAN 恒为 0 ✗，
+#   于是"学校槽"这条新端点要等到**别的**原因（文件过期 / 换网）触发重装才会被写上 ✗
+#   —— 用户跑一次重启却发现手机上学校槽还是用不了 ✓，正是最难查的那种"改了没生效"✗。
+#
+#   ★★ 但**不能**拿整文件去 grep 这个串 ✗ —— 实测踩到：`phoneBaseUrl: 'https://ip:端口'`
+#   与它**逐字相同** ✓，于是"已广告"的判据会被 phoneBaseUrl 骗过去 ✗
+#   ⇒ 学校端点永远写不上 ✗（而且在配置里看起来一切正常 ✗）。
+#   所以必须先**只取 extraEndpoints 那一个列表**再比 ✓。
+extra_endpoints_of() {
+  awk '/^[[:space:]]+extraEndpoints:[[:space:]]*$/ { inside = 1; next }
+       inside && /^[[:space:]]+-/ { print; next }
+       inside { inside = 0 }' "$1" 2>/dev/null || true
+}
+NEED_LAN=0
+if [ -f "$PATCH_FILE" ]; then
+  grep -qF "'${TLS_AUTHORITY}'" "$PATCH_FILE" || NEED_LAN=1
+  extra_endpoints_of "$PATCH_FILE" | grep -qF "'https://${TLS_AUTHORITY}'" || NEED_LAN=1
 fi
 
 # ── 插件**文件**是否过期 ────────────────────────────────────────────────
@@ -260,16 +342,26 @@ if [ "$NEED_FILES" = "1" ]; then
   echo "[restart-lan] 插件文件已过期（仓库里改过、profile 里还是旧的），需要重装"
 fi
 
-if [ "$CONFIGURED" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" ] || [ "$NEED_V6" = "1" ] || [ "$NEED_FILES" = "1" ]; then
-  echo "[restart-lan] 配置地址不符（profile=${CONFIGURED:-无}/${CONFIGURED_TLS:-无} / 本机=${AUTHORITY}/${TLS_AUTHORITY}${V6_TLS_AUTHORITY:+ / IPv6=${V6_TLS_AUTHORITY}}），同步插件配置…"
+if [ "$CONFIGURED" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" ] || [ "$NEED_V6" = "1" ] || [ "$NEED_TS" = "1" ] || [ "$NEED_LAN" = "1" ] || [ "$NEED_FILES" = "1" ]; then
+  echo "[restart-lan] 配置地址不符（profile=${CONFIGURED:-无}/${CONFIGURED_TLS:-无} / 本机=${AUTHORITY}/${TLS_AUTHORITY}${V6_TLS_AUTHORITY:+ / IPv6=${V6_TLS_AUTHORITY}}${TS_AUTHORITY:+ / Tailscale=${TS_AUTHORITY}}），同步插件配置…"
   # bash 3.2（macOS 自带）在 set -u 下展开空数组会报错，用 ${arr[@]+"${arr[@]}"} 这个惯用写法
   V6_ARGS=()
   if [ -n "$V6_TLS_AUTHORITY" ]; then
     V6_ARGS=(--trusted-host "$V6_TLS_AUTHORITY")
   fi
+  # Tailscale 这条要**两样都给**（与 IPv6 那条不同）：
+  #   --trusted-host   → 手机直连该 authority 时不被 /api 栅栏 403；
+  #   --extra-endpoint → 把它作为**候选端点**广告给手机（否则手机根本不知道有这条路）。
+  # 安装脚本侧另有一条不变量兜底：http(s) 端点的 authority 一定会被补进 trustedHosts。
+  TS_ARGS=()
+  if [ -n "$TS_AUTHORITY" ]; then
+    TS_ARGS=(--trusted-host "$TS_AUTHORITY" --extra-endpoint "https://${TS_AUTHORITY}")
+  fi
   node "${SCRIPT_DIR}/install-host-plugin.mjs" --dsh-home "$DSH_HOME_RESOLVED" \
     --trusted-host "$AUTHORITY" --trusted-host "$TLS_AUTHORITY" \
     ${V6_ARGS[@]+"${V6_ARGS[@]}"} \
+    ${TS_ARGS[@]+"${TS_ARGS[@]}"} \
+    ${LAN_ARGS[@]+"${LAN_ARGS[@]}"} \
     --phone-base-url "https://${TLS_AUTHORITY}" \
     || { echo "[restart-lan] ✗ 同步配置失败" >&2; exit 1; }
 fi
@@ -280,6 +372,8 @@ echo "  DSH_HOME       : ${DSH_HOME_RESOLVED}"
 echo "  DSH 端口       : ${DSH_PORT}（仅 loopback）"
 echo "  代理端口       : ${PROXY_PORT}（0.0.0.0）"
 echo "  受信 authority : ${AUTHORITY}"
+echo "  学校/局域网    : https://${TLS_AUTHORITY}（已作为候选端点广告给手机 ✓）"
+[ -n "$TS_AUTHORITY" ] && echo "  Tailscale      : ${TS_AUTHORITY}（已受信并作为候选端点广告给手机）"
 echo "  Ctrl-C 会同时停掉 DSH 与代理。"
 echo
 

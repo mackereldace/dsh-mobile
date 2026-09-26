@@ -187,18 +187,23 @@ test('手机表面（/mobile/app）会注册轮询定时器', () => {
 
 test('★ 定时器回调执行不抛错（`unsupported` 未声明那个 bug 的回归守卫）', () => {
   const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: ['show', 'notify'] })
-  assert.ok(surface.intervals.length > 0)
+  // noUncheckedIndexedAccess 下 `intervals[0]` 是 `(() => void) | undefined`：
+  // 先把元素取出来并让 `assert.ok` 收窄类型，再去调用。
+  // （也顺带把"一个定时器都没注册"这种失败在断言文案里说清楚。）
+  const onTick = surface.intervals[0]
+  assert.ok(onTick !== undefined, '端侧通道应至少注册一个轮询定时器')
   // 逐次调用定时器回调。修复前这里是 ReferenceError: unsupported is not defined，
   // 而且抛在 poll() 之前 —— 端侧通道从来没有轮询过一次。
   for (let tick = 0; tick < 3; tick++) {
-    assert.doesNotThrow(() => surface.intervals[0](), `第 ${tick + 1} 次定时器回调不应抛错`)
+    assert.doesNotThrow(() => onTick(), `第 ${tick + 1} 次定时器回调不应抛错`)
   }
 })
 
 test('定时器回调真的走到轮询逻辑（调试框里能看到轮询痕迹）', async () => {
   const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: ['show', 'notify'] })
-  assert.ok(surface.intervals.length > 0)
-  surface.intervals[0]()
+  const onTick = surface.intervals[0]
+  assert.ok(onTick !== undefined, '端侧通道应至少注册一个轮询定时器')
+  onTick()
   // poll() 是 async：等微任务与等待隧道的那一轮跑完
   await new Promise((resolve) => setTimeout(resolve, 30))
   const box = surface.boxText()

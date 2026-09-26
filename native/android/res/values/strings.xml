@@ -11,4 +11,32 @@
     <string name="action_try_default">用默认地址试</string>
     <string name="notify_channel">电脑上的提醒</string>
     <string name="notify_channel_desc">电脑上的 DSH 需要你确认、或任务跑完时，在这里提醒你。</string>
+
+    <!-- ── 扫码配对（round 143 ✓）：深链 + 壳内扫码，两个入口一份实现 ✓ ──────────
+         因果：交接文档 §4.3 ④「配对没有扫码：未做 ✗」。
+         三条文案上的口径（**都不是随手写的** ✗）：
+           ① 「扫码配对」这颗按钮长在「电脑地址」框上 ✓ —— 那正是首次/打不开时出现的界面 ✓；
+           ② 每一条失败文案都**指明退路**（把带 ?pair= 的地址粘进来 ✓）——
+              这就是"相机被拒 ⇒ 降级回 B"那条路径在用户眼里的样子 ✓，绝不只说"失败了"✗；
+           ③ 不承诺"输 6 位配对码"✗ —— 6 位码是**网页那半**的入口 ✓，壳这个框只吃地址 ✓。
+    -->
+    <string name="action_scan">扫码配对</string>
+    <string name="scan_title">扫码配对</string>
+    <string name="scan_hint">把电脑配对页上的二维码放进画面里</string>
+    <string name="scan_hint_manual">扫不到？返回后在「电脑地址」里粘贴带 ?pair= 的地址，一样能配对。</string>
+    <string name="scan_cancel">取消</string>
+    <string name="scan_success">扫到了，正在配对…</string>
+    <string name="scan_permission_denied">没有相机权限，扫不了码。请在「电脑地址」里粘贴带 ?pair= 的地址配对。</string>
+    <string name="scan_camera_failed">相机打不开（可能被别的应用占着）。请在「电脑地址」里粘贴带 ?pair= 的地址配对。</string>
+    <string name="scan_unavailable">打不开扫码界面。请在「电脑地址」里粘贴带 ?pair= 的地址配对。</string>
+    <string name="scan_denied_hint">扫不了码（没拿到相机权限，或相机被占用）。可以这样配对：在电脑配对页上复制那条链接（形如 https://电脑IP:3443/mobile/app?pair=…），粘到下面这个框里再点「打开」。</string>
+    <string name="pair_link_unreadable">这条内容里没有配对票据。请在电脑上重新生成二维码，或者把带 ?pair= 的地址粘进来。</string>
+    <!-- 扫码/深链在日志里的来源标记 ✓（手机排障只有 logcat 这一条路 ✓） -->
+    <string name="how_deep_link">系统扫码器深链</string>
+    <string name="how_in_shell_scan">壳内扫码</string>
+    <string name="how_pasted_link">粘贴的深链</string>
+    <string name="slot_ticket">票据端点</string>
+    <string name="slot_last_good">上次成功的地址</string>
+    <string name="slot_configured">已有候选</string>
+    <string name="slot_default">默认地址</string>
 </resources>

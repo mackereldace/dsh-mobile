@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -106,6 +106,49 @@ describe('workspace-files：分块写入（上传的宿主侧）', () => {
     assert.equal(chunk.bytes, source.length)
     assert.equal(chunk.eof, true)
     assert.deepEqual(Buffer.from(chunk.data, 'base64'), source)
+  })
+
+  it('★ 拒绝写入指向工作区外的符号链接（终段不能跟随链接写穿工作区根）', async () => {
+    // 工作区内放一个终段符号链接，指向区外的真实文件。
+    // `resolveGuarded(path, roots, false)` 只 realpath 父目录，修复前 `open(link,'w')`
+    // 会跟随链接、把内容写进 outside —— 这就是本测试守的那条写穿路径。
+    const victim = join(outside, 'escaped.bin')
+    writeFileSync(victim, '原始内容')
+    const link = join(root, 'out-link.bin')
+    symlinkSync(victim, link)
+
+    await assert.rejects(
+      () => writeChunk(link, 0, Buffer.from('payload').toString('base64'), true, [root]),
+      (error: unknown) => error instanceof WorkspaceFilesError && error.code === 'files/outside-workspace',
+    )
+    // 关键：拒绝必须发生在 open() **之前**，区外文件一个字节都不能被动过。
+    assert.equal(readFileSync(victim, 'utf8'), '原始内容')
+  })
+
+  it('★ 断链的符号链接也拒绝（realpath 失败不等于可以放行——open 会替它创建目标）', async () => {
+    const never = join(outside, 'never-created.bin')
+    const link = join(root, 'dangling-link.bin')
+    symlinkSync(never, link)
+
+    await assert.rejects(
+      () => writeChunk(link, 0, Buffer.from('payload').toString('base64'), true, [root]),
+      (error: unknown) => error instanceof WorkspaceFilesError && error.code === 'files/outside-workspace',
+    )
+    // 若放行，open(link,'w') 会在区外把 never-created.bin 创建出来。
+    assert.equal(existsSync(never), false, '区外文件不得被创建')
+  })
+
+  it('指向工作区内的符号链接仍可写（pnpm 工作区里合法链接很多，不能一刀切拒绝）', async () => {
+    const target = join(root, 'in-link-target.bin')
+    writeFileSync(target, Buffer.alloc(2))
+    const link = join(root, 'in-link.bin')
+    symlinkSync(target, link)
+
+    const source = payload(64)
+    const result = await writeChunk(link, 0, source.toString('base64'), true, [root])
+    assert.equal(result.written, source.length)
+    assert.deepEqual(readFileSync(target), source, '写入应穿透到区内的真实目标')
+    assert.deepEqual(readFileSync(link), source)
   })
 })
 

@@ -16,7 +16,7 @@
  */
 
 import type { KeyObject } from 'node:crypto'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomInt } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
@@ -362,6 +362,97 @@ export function createMobileHost(options: {
         pendingByTicket.delete(entry.ticket.ticket)
       }
     }
+  }
+
+  /**
+   * ── 短码配对（`/mobile/p/<6 位码>`）的**猜码限速**（T2）──────────────────
+   *
+   * ## 为什么必须限速
+   *
+   * 6 位码只有 90 万个取值，而配对码默认只活 5 分钟。这条"码 → 票据"的路此前**完全不限速**，
+   * 于是同一个局域网（或经中继回源）上的人可以在有效期内把 90 万种可能都试一遍，
+   * 拿到票据后就能以"待确认设备"的身份出现在电脑端的待确认列表里。人工比对指纹仍是最后一道闸，
+   * 但让攻击者免费站到那道闸前本身就不该被允许。
+   *
+   * ## 判据：只记失败 + 短窗口 + 冷却
+   *
+   * - 60 秒窗口内失败 10 次 ⇒ 冷却 5 分钟（= 配对码默认有效期，足以让本次配对作废）；
+   * - 成功一次即**整桶清零** —— 用户在手机上敲错两次之后正常输入，不该继续被惩罚；
+   * - 只对"码无效 / 已过期"计数，命中时不计数（限速针对猜码，不针对正常配对）。
+   *
+   * ## 来源键为什么这样取
+   *
+   * 规则与 `isLoopbackRequest` 一致：socket 是回环、且带 `x-forwarded-for`（局域网代理注入的
+   * 真实来源）时才采信该头的第一段，否则按 socket 地址。这样局域网里每台设备各自一个计数桶，
+   * 一台设备狂试不会连坐别的设备；同时直连的非回环客户端**无法**靠伪造该头换桶。
+   *
+   * ## 已知代价（写清楚，别当成没这回事）
+   *
+   * 经**中继回源**来的请求，socket 恒为回环，且回源通道会主动剥掉 `x-forwarded-for`
+   * （防伪造，见 `startRelayHttpBackhaul`）⇒ 这些请求**共用同一个桶**：远程的恶意猜码
+   * 会让同一条中继上的正常配对也一起进入冷却。在"能区分来源"与"限速真的有效"之间，
+   * 这里选偏安全的一侧 —— 配对本就要人在电脑前人工确认，冷却 5 分钟只是重新生成一个码。
+   */
+  const CODE_GUESS_WINDOW_MS = 60_000
+  const CODE_GUESS_MAX_FAILURES = 10
+  const CODE_GUESS_COOLDOWN_MS = 5 * 60_000
+  /** 每个来源一个桶；`blockedUntil` 为 0 表示未在冷却中。 */
+  const codeGuessBuckets = new Map<string, { failures: number; windowStart: number; blockedUntil: number }>()
+
+  /** 取"猜码"的来源键（采信 `x-forwarded-for` 的条件同 `isLoopbackRequest`）。 */
+  function pairingSourceKey(req: IncomingMessage): string {
+    const raw = req.socket.remoteAddress ?? ''
+    const normalized = raw.startsWith('::ffff:') ? raw.slice(7) : raw
+    const socketIsLoopback = normalized === '::1' || normalized === '127.0.0.1' || normalized.startsWith('127.')
+    const forwarded = req.headers['x-forwarded-for']
+    if (socketIsLoopback && typeof forwarded === 'string' && forwarded.length > 0) {
+      const first = forwarded.split(',')[0]?.trim() ?? ''
+      if (first.length > 0) return first.startsWith('::ffff:') ? first.slice(7) : first
+    }
+    return normalized.length > 0 ? normalized : 'unknown'
+  }
+
+  /** 该来源还剩多少毫秒冷却；0 表示可以继续尝试。 */
+  function pairingGuessCooldownMs(req: IncomingMessage, now: number): number {
+    const bucket = codeGuessBuckets.get(pairingSourceKey(req))
+    if (bucket === undefined) return 0
+    return bucket.blockedUntil > now ? bucket.blockedUntil - now : 0
+  }
+
+  /** 记一次猜码失败；达到阈值即让整桶进入冷却（并**留一条**日志 + 审计）。 */
+  function notePairingGuessFailure(req: IncomingMessage, now: number): void {
+    const key = pairingSourceKey(req)
+    const bucket = codeGuessBuckets.get(key)
+    if (bucket === undefined || now - bucket.windowStart > CODE_GUESS_WINDOW_MS) {
+      codeGuessBuckets.set(key, { failures: 1, windowStart: now, blockedUntil: 0 })
+    } else {
+      bucket.failures += 1
+      if (bucket.failures >= CODE_GUESS_MAX_FAILURES) {
+        bucket.failures = 0
+        bucket.windowStart = now
+        bucket.blockedUntil = now + CODE_GUESS_COOLDOWN_MS
+        // 冷却**只记一次**（不是每个被挡的请求都记）：否则猜码本身就能把审计刷满，
+        // 把真正的历史挤掉——那等于攻击者顺手毁了取证材料。
+        console.warn(`[dsh-mobile] 短码配对猜码过多：来源 ${key} 已冷却 ${CODE_GUESS_COOLDOWN_MS / 1000} 秒`)
+        store.record({
+          deviceId: '(host)',
+          kind: 'deny',
+          detail: `短码配对猜码过多，来源 ${key} 已冷却 ${CODE_GUESS_COOLDOWN_MS / 1000} 秒`,
+          ok: false,
+        })
+      }
+    }
+    // 无界增长防护：只在桶数异常多时清理"窗口已过且不在冷却"的桶
+    if (codeGuessBuckets.size > 1024) {
+      for (const [bucketKey, entry] of codeGuessBuckets) {
+        if (entry.blockedUntil <= now && now - entry.windowStart > CODE_GUESS_WINDOW_MS) codeGuessBuckets.delete(bucketKey)
+      }
+    }
+  }
+
+  /** 猜码成功：整桶清零。 */
+  function notePairingGuessSuccess(req: IncomingMessage): void {
+    codeGuessBuckets.delete(pairingSourceKey(req))
   }
 
   /** 能力位收窄：请求 ∩ 已授予 ∩ 宿主上限。缺省按"不请求"处理，避免静默放权。 */
@@ -855,6 +946,52 @@ export function createMobileHost(options: {
     return undefined
   }
 
+  /**
+   * 把一条 **claim** 登记成设备记录（幂等 ✓ —— 允许时登记一次、握手成功时再登记一次 ✓）。
+   *
+   * ## ★ 为什么"点允许"这一刻就要登记（本轮修的那条路）
+   *
+   * 原先是**只有握手成功**（`resolveByTicket`）才 `store.upsert` ✗。于是电脑端点了
+   * 「允许此设备」之后发生的是：
+   *   · 「待确认设备」里那一行**消失了** ✓（state 变 `approved` ✓，而配对页只渲染
+   *     `claimed`/`open` ✓）—— 看起来像"已经处理好了"✓；
+   *   · 「已授权设备」列表**仍然是空的** ✗（设备还没握手 ⇒ 从没登记过 ✓）。
+   * 用户看到的就是"允许以后不出现新的已授权设备"✗，而**真正**的原因（手机那边握手没成功）
+   * 在这块界面上**一点痕迹都没有** ✗✗ —— 两个问题叠在一起，现象完全不可分辨 ✗。
+   *
+   * 现在"允许"这一步就把设备登记下来 ✓：
+   *   · 列表**立刻**可见 ✓、可撤销 ✓、审计可追溯 ✓；
+   *   · 手机真正连上来时 `resolveByTicket` 再登记一次（幂等 ✓，并补上 `lastSeenAt` ✓）。
+   *
+   * ## 指纹仍然是人工比对的那一把
+   * 登记用的 `deviceSigningKey` / `fingerprint` 就是 claim 里提交、并在电脑端**显示给人比对**
+   * 的那一份 ✓ —— 登记时刻提前，不改变"比对的是谁" ✓。
+   *
+   * 重新配对时保留电脑端原先授予的能力位（理由同 `resolveByTicket` ✓）。
+   */
+  function registerClaimedDevice(
+    claim: PairClaimRequest,
+    kind: 'pair' | 'authorize',
+    detail: string,
+  ): DeviceRecord {
+    const previous = store.get(claim.deviceId)
+    const record: DeviceRecord = {
+      deviceId: claim.deviceId,
+      devicePublicKey: claim.devicePublicKey ?? '',
+      deviceSigningKey: claim.deviceSigningKey,
+      fingerprint: claim.fingerprint,
+      name: claim.name,
+      ...(claim.model === undefined ? {} : { model: claim.model }),
+      ...(claim.platform === undefined ? {} : { platform: claim.platform }),
+      pairedAt: previous?.pairedAt ?? new Date().toISOString(),
+      authorization: 'persistent',
+      capabilities: previous?.capabilities ?? { ...DEFAULT_CAPABILITIES },
+    }
+    store.upsert(record)
+    store.record({ deviceId: claim.deviceId, kind, detail, ok: true })
+    return record
+  }
+
   /** 按配对票据解析设备（含首次登记与重新配对时更新公钥）。 */
   function resolveByTicket(hello: ClientHelloPayload): HostDeviceCredentials {
     {
@@ -876,26 +1013,11 @@ export function createMobileHost(options: {
       }
       // 重新配对时保留电脑端原先授予的能力位：设备换了密钥不等于用户同意放宽/收紧权限，
       // 静默重置会让已授予的 fsWrite 等权限莫名消失（或反向地悄悄放权）。
-      const previous = store.get(claim.deviceId)
-      const record: DeviceRecord = {
-        deviceId: claim.deviceId,
-        devicePublicKey: claim.devicePublicKey ?? '',
-        deviceSigningKey: claim.deviceSigningKey,
-        fingerprint: claim.fingerprint,
-        name: claim.name,
-        ...(claim.model === undefined ? {} : { model: claim.model }),
-        ...(claim.platform === undefined ? {} : { platform: claim.platform }),
-        pairedAt: previous?.pairedAt ?? new Date().toISOString(),
-        authorization: 'persistent',
-        capabilities: previous?.capabilities ?? { ...DEFAULT_CAPABILITIES },
-      }
-      store.upsert(record)
-      store.record({
-        deviceId: claim.deviceId,
-        kind: 'pair',
-        detail: previous === undefined ? '配对完成并完成首次连接' : '重新配对：已更新设备公钥，保留原有授权',
-        ok: true,
-      })
+      const record = registerClaimedDevice(
+        claim,
+        'pair',
+        store.get(claim.deviceId) === undefined ? '配对完成并完成首次连接' : '重新配对：已更新设备公钥，保留原有授权',
+      )
       pendingByTicket.delete(entry.ticket.ticket)
       return {
         deviceId: record.deviceId,
@@ -956,7 +1078,16 @@ export function createMobileHost(options: {
 
     createPairing() {
       purgeExpired()
-      const code = String(Math.floor(100000 + Math.random() * 900000))
+      /**
+       * 6 位配对码必须来自**密码学随机源**（T2 / 评估 §3②）。
+       *
+       * 原先是 `Math.floor(100000 + Math.random() * 900000)`：`Math.random` 不是 CSPRNG，
+       * 状态可被观测/预测，而配对码是**唯一**把手机接入这台电脑的短凭据。
+       *
+       * 用 `randomInt(100000, 1_000_000)`：区间上界**排他**（所以写 1000000 而不是 999999），
+       * 实现用拒绝采样，**不存在取模偏差**；取值范围是 [100000, 999999]，恰好 90 万个。
+       */
+      const code = String(randomInt(100000, 1_000_000))
       const ticketKey = randomTicket()
       const expiresAt = new Date(Date.now() + config.pairingTtlMs).toISOString()
       const ticket: PairingTicket = {
@@ -1002,6 +1133,16 @@ export function createMobileHost(options: {
       const entry = pendingByCode.get(code)
       if (entry === undefined || entry.claim === undefined || entry.claim.deviceId !== deviceId) return false
       entry.state = approve ? 'approved' : 'rejected'
+      /**
+       * ★ 点「允许此设备」= **真的**把设备登记为已授权 ✓（本轮修的那条路 ✓）。
+       *
+       * 原先这里只改内存里的 pending state ✗ ⇒ 列表要等手机握手成功才出现 ✗，
+       * 于是"允许了却什么都没发生"（用户原话："允许以后不出现新的已授权设备"✓）。
+       * 登记与握手成功走**同一个** `registerClaimedDevice` ✓（一个概念一套实现 ✓）。
+       */
+      if (approve) {
+        registerClaimedDevice(entry.claim, 'authorize', '电脑端已允许：设备已登记为已授权（等待手机完成握手）')
+      }
       store.record({
         deviceId,
         kind: 'pair-confirm',
@@ -1494,11 +1635,8 @@ export function createMobileHost(options: {
     const endpoint = `${url}${url.includes('?') ? '&' : '?'}room=${encodeURIComponent(room)}`
     const selfPort = options.selfPort ?? 3080
 
-    /** 经中继回源时**必须拒绝**的路径前缀/精确路径。 */
-    const REFUSED_EXACT = new Set(['/mobile/pair/code', '/mobile/pair/confirm', '/mobile/pair/pending', '/mobile/pair/status'])
-    const REFUSED_PREFIX = ['/mobile/devices', '/mobile/audit', '/mobile/debug']
-    const isRefused = (path: string): boolean =>
-      REFUSED_EXACT.has(path) || REFUSED_PREFIX.some((prefix) => path.startsWith(prefix))
+    /** 经中继回源时**必须拒绝**的路径（判据与理由见模块级 `isRefusedRelayBackhaulPath`）。 */
+    const isRefused = isRefusedRelayBackhaulPath
 
     let socket: WebSocket | undefined
     let stopped = false
@@ -1634,11 +1772,97 @@ export function createMobileHost(options: {
     stopRelayHttpBackhaul,
 
     handleUpgrade(req, socket) {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+      /**
+       * ★ base 用**常量**，不拿 `Host` 头去拼 —— 这里只需要 `pathname`。
+       *
+       * 为什么不能拼 Host：`new URL('/mobile/ws', 'http://' + req.headers.host)` 在畸形 Host
+       * （空串、`user:pass@x`、含空格等）上会**直接抛 TypeError**，而这个异常是从 upgrade
+       * 处理器里抛出去的 ⇒ 变成进程级未捕获异常，准入检查反倒成了一条 DoS 面。
+       * Host 的信任判定在下面用 `parseAuthority` 显式做（它自己 try/catch，返回 undefined）。
+       */
+      const url = new URL(req.url ?? '/', 'http://localhost')
       if (url.pathname !== TUNNEL_PATH) {
         socket.destroy()
         return
       }
+
+      /**
+       * ── Host / Origin 栅栏（T6：与 `handleHttp` 对齐）──────────────────────
+       *
+       * ## 为什么升级路径也要栅栏
+       *
+       * `handleHttp` 有这道栅栏，`handleUpgrade` 却**完全没有** —— 同一台电脑上两条准入
+       * 路径判据不一致：能挡住 `/mobile/manifest` 的跨源请求，却挡不住 `/mobile/ws` 的升级。
+       * 浏览器对 WebSocket **不做同源限制**（接不接受由服务端决定），所以恶意页面可以把
+       * `ws://<内网地址>:<端口>/mobile/ws` 当跳板（DNS rebinding）：隧道本身仍要求设备密钥，
+       * 但"谁能站到握手面前"不该比 HTTP 侧更宽。
+       *
+       * ## 判据（宽严必须与真机对齐）
+       *
+       * - **没有 Origin ⇒ 放行**（保持既有行为）：原生壳 / 非浏览器客户端本来就不发 Origin，
+       *   而 DNS rebinding **只可能来自浏览器** —— 浏览器一定会发 Origin。
+       *   一刀切要求 Origin 会把真机壳挡在门外（卡片明确警告过这一点）。
+       * - **有 Origin ⇒ 必须"本机受信"**：
+       *   ① 请求 Host 必须是回环或受信 authority（与 `handleHttp` 完全一致）——
+       *      否则 `Host: evil.example.com`（解析到本机）这种经典 rebinding 仍然成立；
+       *   ② Origin 必须与请求 Host **同 hostname 且同端口**（分别比较，理由见 handleHttp），
+       *      或者 Origin 本身就在受信集合里（保留反代场景：浏览器 Origin 是域名、
+       *      Host 被反代改写成回环地址）。
+       * - 受信集合 = 部署方声明的 `trustedHosts` ∪ `phoneBaseUrl` ∪ **中继 authority**。
+       *   把 `phoneBaseUrl` 算进来，是因为它就是"手机该访问的那个 authority"（见 manifest）；
+       *   只配了它、没配 trustedHosts 的部署不该因此连不上隧道。
+       *   ★ 中继 authority 必须算进来（T6 实测踩到）：手机远程时**应用外壳本身就是经中继回源
+       *   下发的**，页面的 Origin 是**中继**；而 boot.js 的候选端点回退会让它带着这个 Origin
+       *   去连局域网端点（`check-relay-e2e` 的"配对走局域网"阶段正是这条）。
+       *   中继地址来自部署配置（`relayUrl` / `relayHttpUrl`），不是攻击者可控的来源；
+       *   不把它算进来，结果是**正常手机被误伤**（实测：所有候选端点都连不上），
+       *   而不是挡住了攻击者 —— 这正是卡片警告的那类误伤。
+       *
+       * 拒绝时**必须留日志**：这条路径的失败在手机侧只表现为"隧道连不上"，
+       * 不记日志就完全查不出是栅栏拒的 —— 那是本项目最难排查的一类症状。
+       * （这里只 `console.warn` 而不写审计：升级请求可以被任意跨源页面大量触发，
+       * 每条都落审计等于给攻击者一个刷掉历史的开关。）
+       */
+      const originHeader = req.headers.origin
+      if (typeof originHeader === 'string' && originHeader.length > 0) {
+        const refuse = (reason: string): void => {
+          console.warn(
+            `[dsh-mobile] 拒绝 WebSocket 升级：${reason}（Host=${req.headers.host ?? '(无)'} Origin=${originHeader}）`,
+          )
+          try {
+            socket.write('HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n')
+          } catch {
+            /* socket 可能已经断开 */
+          }
+          socket.destroy()
+        }
+
+        const trustedUpgradeHosts = [...(options.trustedHosts ?? [])]
+        if (options.phoneBaseUrl !== undefined && options.phoneBaseUrl.length > 0) {
+          trustedUpgradeHosts.push(options.phoneBaseUrl)
+        }
+        for (const relayEndpoint of [config.relayUrl, config.relayHttpUrl]) {
+          if (typeof relayEndpoint === 'string' && relayEndpoint.length > 0) trustedUpgradeHosts.push(relayEndpoint)
+        }
+
+        const authority = parseAuthority(req.headers.host)
+        if (authority === undefined) {
+          refuse('Host 头缺失或无法解析')
+          return
+        }
+        if (!isLoopbackHostname(authority.hostname) && !matchesTrusted(authority, trustedUpgradeHosts)) {
+          refuse(`Host ${req.headers.host} 不在回环或受信集合内`)
+          return
+        }
+        const originUrl = parseAuthority(originHeader)
+        const sameAsHost =
+          originUrl !== undefined && originUrl.hostname === authority.hostname && originUrl.port === authority.port
+        if (!sameAsHost && !(originUrl !== undefined && matchesTrusted(originUrl, trustedUpgradeHosts))) {
+          refuse(`Origin ${originHeader} 与 Host 不同源、也不在受信集合内`)
+          return
+        }
+      }
+
       const connection = acceptWebSocket(socket, req, { maxMessageBytes: config.maxMessageBytes })
       if (connection === undefined) {
         socket.destroy()
@@ -2242,8 +2466,31 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
      */
       const shortMatch = /^\/mobile\/p\/([0-9]{6})$/.exec(url.pathname)
       if (req.method === 'GET' && shortMatch !== null) {
+        /**
+         * 猜码限速（T2）：**先看冷却，再查码**。
+         *
+         * 顺序很重要：冷却期内连"这个码对不对"都不回答（429 而不是 404），
+         * 否则限速只压低了请求频率，码空间照样能被枚举完（90 万个取值并不大）。
+         */
+        const cooldownMs = pairingGuessCooldownMs(req, Date.now())
+        if (cooldownMs > 0) {
+          const retryAfter = String(Math.ceil(cooldownMs / 1000))
+          res.writeHead(429, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            'retry-after': retryAfter,
+          })
+          res.end(
+            '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">' +
+              '<body style="font:16px/1.7 -apple-system,system-ui;padding:24px;background:#15171a;color:#e8eaed">' +
+              '<h3>尝试次数过多</h3><p>输入错误的配对码次数过多，请稍后再试，或在电脑上重新生成一个配对码。</p></body>',
+          )
+          return true
+        }
         const payload = service.pairingPayloadForCode(shortMatch[1] ?? '')
         if (payload === undefined) {
+          // 只对"码无效/已过期"计一次失败；命中时走下面的清零分支
+          notePairingGuessFailure(req, Date.now())
           res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
           res.end(
           '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -2252,6 +2499,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         )
           return true
         }
+        notePairingGuessSuccess(req)
         res.writeHead(302, { location: '/mobile/app?pair=' + encodeURIComponent(payload), 'cache-control': 'no-store' })
         res.end()
         return true
@@ -2333,6 +2581,48 @@ export function matchesTrusted(authority: ParsedAuthority, trustedHosts: readonl
     }
   }
   return false
+}
+
+/** 经回源必须拒绝的精确路径。 */
+const RELAY_BACKHAUL_REFUSED_EXACT = new Set([
+  '/mobile/pair/code',
+  '/mobile/pair/confirm',
+  '/mobile/pair/pending',
+  '/mobile/pair/status',
+])
+
+/** 经回源必须拒绝的路径前缀。 */
+const RELAY_BACKHAUL_REFUSED_PREFIX = ['/mobile/devices', '/mobile/audit', '/mobile/debug', '/mobile/device']
+
+/**
+ * 中继回源通道**必须拒绝**的路径（T3 / 评估 §3②）。
+ *
+ * ## 这条判据为什么存在
+ *
+ * 回源通道是把中继送来的请求用**环回 fetch** 打到插件自己的 HTTP 路由上（复用真实路由，不另写一套），
+ * 于是 `isLoopbackRequest` 会把它们判成"人在电脑前"—— `LOCAL_ONLY` 那些端点（配对码、配对确认、
+ * 设备管理、审计、诊断、**端侧控制**）本来只对回环开放，经这条通道就会变成可达。
+ * 回源的暴露面必须与"同局域网的人直接访问代理"**等价**，不能更大。
+ *
+ * ## 为什么选"补拒绝名单"而不是"默认拒绝 + 白名单"（评估给的两个选项里选①）
+ *
+ * 白名单看起来更稳，但回源通道同时要送**页面本身**：`/mobile/app`、`/mobile/boot.js`、
+ * `/mobile/sw.js`、`/assets/*`、`/plugins/*`……其中后两类根本不是本插件的路由
+ * （`handleHttp` 直接 `return false` 交给 DSH 的静态管线），数量随上游版本变化。
+ * 白名单漏一条，症状是**手机整页打不开**（只有真机看得见），而这正是卡片警告的"误伤正常手机"。
+ * 拒绝名单只列"明确不该经回源暴露"的端点；它漏了会退化成"暴露面比局域网大"（安全问题），
+ * 但不会把手机弄断线。两者都不完美，这里把风险放在**可枚举、可回归测试**的一侧。
+ *
+ * ## 为什么用前缀 `/mobile/device` 而不是再补两条精确路径
+ *
+ * 评估发现漏网的正是 `/mobile/device/call` 与 `/mobile/device/status` **两条**，
+ * 而漏网的原因恰恰是"按精确路径逐条维护名单"。整个 `/mobile/device/*` 命名空间的语义就是
+ * "电脑 → 手机"的端侧控制，**没有任何一条**应该经回源暴露；用前缀可以从结构上避免
+ * "以后再加一条又忘了补名单"。手机侧也不需要这些 HTTP 路径：它走的是**隧道内**的
+ * `mobile/device/*` RPC（见 `invokeLocalEndpoint`），与这里判的 HTTP 路径不是一回事。
+ */
+export function isRefusedRelayBackhaulPath(path: string): boolean {
+  return RELAY_BACKHAUL_REFUSED_EXACT.has(path) || RELAY_BACKHAUL_REFUSED_PREFIX.some((prefix) => path.startsWith(prefix))
 }
 
 /** 生成高熵随机票据（base64url，32 字节）。 */

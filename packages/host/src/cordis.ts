@@ -26,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from './devices.ts'
+import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent } from './lan.ts'
 import {
   createMobileHost,
@@ -270,7 +271,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     endpoints,
     // 回源通道要用端口做环回请求（复用插件自己的 HTTP 路由，不另写一套）
     selfPort: port,
-    dshVersion: process.env['DSH_VERSION'] ?? '0.1.5-rc.1',
+    // 真实运行时版本（诊断字段）。**不要**再写死任何具体版本 ✗：
+    // 原先是 `process.env['DSH_VERSION'] ?? '0.1.5-rc.1'`，而 DSH 从不设置
+    // `DSH_VERSION`（全包 grep 命中 0 次）→ 升级后手机会永远报旧版本（见 dsh-version.ts）。
+    dshVersion: resolveDshRuntimeVersion({ dshHome }),
     ...(bootScript === undefined ? {} : { bootScript }),
     trustedHosts,
     ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0

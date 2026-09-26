@@ -101,11 +101,52 @@ V6_TLS_AUTHORITY=""
 if [ -n "$LAN_IPV6" ]; then
   V6_TLS_AUTHORITY="[${LAN_IPV6}]:${TLS_PORT}"
 fi
+
+# ── Tailscale（可选但免费）：手机在校外时经 Tailscale 回到本机，走同一个 TLS 端口 ──
+#
+# Tailscale 给的是 **IPv4**（100.64.0.0/10 网段），所以 authority 直接写 `ip:端口`，
+# **不加方括号** —— 与上面 IPv6 那条恰好相反（方括号是 IPv6 字面量的写法）。
+# 它同样要喂给"两个消费者"：装插件（让 /mobile/* 认它）+ 启动 dsh（让 /api 栅栏放行）。
+# 探测不到（没装/没登录 Tailscale）时两处都跳过，局域网、IPv6、中继路径完全不受影响。
+TS_IP="$(node "${SCRIPT_DIR}/detect-tailscale-ip.mjs" 2>/dev/null || true)"
+TS_AUTHORITY=""
+if [ -n "$TS_IP" ]; then
+  TS_AUTHORITY="${TS_IP}:${TLS_PORT}"
+fi
 # 需要给"两个消费者"的同一份参数：装插件 + 启动 dsh
 TRUST_ARGS=(--trusted-host "${AUTHORITY}" --trusted-host "${TLS_AUTHORITY}")
 if [ -n "$V6_TLS_AUTHORITY" ]; then
   TRUST_ARGS+=(--trusted-host "${V6_TLS_AUTHORITY}")
 fi
+if [ -n "$TS_AUTHORITY" ]; then
+  TRUST_ARGS+=(--trusted-host "${TS_AUTHORITY}")
+fi
+# 但"广告端点"只该给**装插件**那一步：手机侧据此拿到候选端点。喂给 `dsh web` 是无效参数。
+TS_INSTALL_ARGS=()
+if [ -n "$TS_AUTHORITY" ]; then
+  TS_INSTALL_ARGS=(--extra-endpoint "https://${TS_AUTHORITY}")
+fi
+# 给下面"手工修复命令"用的同一份文字（探测不到 Tailscale 时为空串，命令照样成立）
+TS_HINT=""
+if [ -n "$TS_AUTHORITY" ]; then
+  TS_HINT="--trusted-host ${TS_AUTHORITY} --extra-endpoint https://${TS_AUTHORITY}"
+fi
+
+# ── 学校 / 局域网这条 HTTPS 端点（本轮新增 ✓）───────────────────────────
+#
+# 为什么需要它 ✗：手机侧的候选端点原先是**只有 Tailscale 一条** ✓，而学校那条
+# 是明文 HTTP（`http://${LAN_IP}:${PROXY_PORT}` ✓）—— 混合内容 + 清单里的
+# `usesCleartextTraffic="false"` 双重不可用 ⇒ 学校槽用不了 ✗。
+# 修法就是把**同一个局域网地址的 TLS 端口**作为候选端点广告给手机 ✓
+# （手机在校内直连它，不必绕 Tailscale ✓）。
+#
+# ★ 与 `TS_INSTALL_ARGS` 同一形态、同一个消费者（**只喂装插件那一步** ✓）：
+#   它是"广告端点"参数，喂给 `dsh web` 是无效参数 ✗（见上面那条注释 ✓）。
+# ★ 只给 `--extra-endpoint` ✓，**不重复给** `--trusted-host` ✗ ——
+#   `TLS_AUTHORITY` 早就在 `TRUST_ARGS` 里受信了 ✓。
+LAN_INSTALL_ARGS=(--extra-endpoint "https://${TLS_AUTHORITY}")
+# 手工修复命令里的那一份（与 TS_HINT 同一个用途 ✓ —— 少了它，用户照抄命令会漏掉学校这条 ✗）
+LAN_HINT="--extra-endpoint https://${TLS_AUTHORITY}"
 
 # ── 配置一致性检查 ────────────────────────────────────────────────────
 # 插件的 trustedHosts 与 publicBaseUrl 是**安装时**按当时的 IP 写进 profile 的。
@@ -116,8 +157,13 @@ DSH_HOME_RESOLVED="${DSH_HOME:-$HOME/.dsh}"
 PATCH_FILE="${DSH_HOME_RESOLVED}/profiles/web/cordis.patch.yml"
 CONFIGURED_AUTHORITY=""
 if [ -f "$PATCH_FILE" ]; then
-  CONFIGURED_AUTHORITY="$(grep -oE "^\s+-\s+'?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'?" "$PATCH_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' || true)"
-  CONFIGURED_TLS="$(grep -oE "^\s+-\s+'?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'?" "$PATCH_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' || true)"
+  # ★ 先按**本机局域网 IP** 过滤，再取 head/tail。
+  #   这里原本是"直接取第一条/最后一条"，而 Tailscale 那条也是 IPv4 形式、且写在后面 ——
+  #   于是 `tail -1` 会把它当成"当前配置的 TLS authority"，每次启动都误报"配置不一致"。
+  #   判据必须是"属于本机 LAN_IP"，而不是"在文件里排第几"：以后再加第三、第四条 authority
+  #   （IPv6 早已是一条）时，取位置的做法必然重犯。
+  CONFIGURED_AUTHORITY="$(grep -oE "^\s+-\s+'?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'?" "$PATCH_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | grep -F "${LAN_IP}:" | head -1 || true)"
+  CONFIGURED_TLS="$(grep -oE "^\s+-\s+'?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'?" "$PATCH_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | grep -F "${LAN_IP}:" | tail -1 || true)"
 fi
 
 if [ -n "$CONFIGURED_AUTHORITY" ] && { [ "$CONFIGURED_AUTHORITY" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" ]; }; then
@@ -130,13 +176,15 @@ if [ -n "$CONFIGURED_AUTHORITY" ] && { [ "$CONFIGURED_AUTHORITY" != "$AUTHORITY"
     echo "    SYNC=1：正在用新地址重装插件配置…"
     node "${SCRIPT_DIR}/install-host-plugin.mjs" --dsh-home "$DSH_HOME_RESOLVED" \
       "${TRUST_ARGS[@]}" \
+      ${TS_INSTALL_ARGS[@]+"${TS_INSTALL_ARGS[@]}"} \
+      ${LAN_INSTALL_ARGS[@]+"${LAN_INSTALL_ARGS[@]}"} \
       --phone-base-url "https://${TLS_AUTHORITY}" >/dev/null 2>&1 \
       && echo "    已更新为 ${AUTHORITY}" \
       || { echo "    重装失败，请手动执行下面的命令" >&2; }
   else
     echo "    修复（二选一）："
     echo "      SYNC=1 RESTART=1 bash scripts/start-lan.sh          # 自动重装并重启"
-    echo "      node scripts/install-host-plugin.mjs --trusted-host ${AUTHORITY} --trusted-host ${TLS_AUTHORITY} --phone-base-url https://${TLS_AUTHORITY} && RESTART=1 bash scripts/start-lan.sh"
+    echo "      node scripts/install-host-plugin.mjs --trusted-host ${AUTHORITY} --trusted-host ${TLS_AUTHORITY} ${TS_HINT} ${LAN_HINT} --phone-base-url https://${TLS_AUTHORITY} && RESTART=1 bash scripts/start-lan.sh"
     echo
   fi
 fi
@@ -165,6 +213,8 @@ echo "局域网地址     : ${LAN_IP}"
 echo "DSH 端口       : ${DSH_PORT}（仅 loopback）"
 echo "代理端口       : ${PROXY_PORT}（0.0.0.0）"
 echo "受信 authority : ${AUTHORITY} 与 ${TLS_AUTHORITY}"
+echo "学校/局域网    : https://${TLS_AUTHORITY}/mobile（已作为候选端点广告给手机 ✓）"
+[ -n "$TS_AUTHORITY" ] && echo "Tailscale      : ${TS_AUTHORITY}（校外入口 https://${TS_AUTHORITY}/mobile）"
 echo
 
 # 端口占用前置检查：避免"代理起来了、DSH 却因端口被占而失败"的半死状态。

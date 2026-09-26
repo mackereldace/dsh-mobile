@@ -22,7 +22,8 @@
  * 接在隧道的一元 RPC 委派上，则天然要求设备认证。
  */
 
-import { chmod, copyFile, cp, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
+import type { Stats } from 'node:fs'
+import { chmod, copyFile, cp, lstat, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, sep } from 'node:path'
 
 /** 单次读取的字节上限（1 MiB）。客户端按块拉取后拼成完整文件。 */
@@ -101,6 +102,27 @@ function toEntry(name: string, path: string, info: { isDirectory(): boolean; isF
 }
 
 /**
+ * 判断一个**已经 `realpath` 过**的路径是否落在任一工作区根之内。
+ *
+ * 比较用 `sep` 后缀（`root + sep`）而不是裸 `startsWith(root)`：
+ * 后者会把 `/work-恶意` 误判成 `/work` 的子路径。这段判据与 `resolveGuarded` 共用同一份实现，
+ * 避免"两处安全比较写法不一致"这种最危险的分叉。
+ */
+async function isWithinRoots(realPath: string, roots: readonly string[]): Promise<boolean> {
+  for (const root of roots) {
+    let realRoot: string
+    try {
+      realRoot = await realpath(root)
+    } catch {
+      continue
+    }
+    const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep
+    if (realPath === realRoot || realPath.startsWith(prefix)) return true
+  }
+  return false
+}
+
+/**
  * 解析并校验一个路径。
  *
  * @param path - 待校验路径。
@@ -126,16 +148,48 @@ async function resolveGuarded(path: string, roots: readonly string[], mustExist:
   // 父目录校验通过后，拼回原始的最后一段（它可能是新名字）
   const resolved = mustExist ? real : join(real, basename(path))
 
-  for (const root of roots) {
-    let realRoot: string
-    try {
-      realRoot = await realpath(root)
-    } catch {
-      continue
-    }
-    const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep
-    if (resolved === realRoot || resolved.startsWith(prefix)) return resolved
+  if (await isWithinRoots(resolved, roots)) return resolved
+  throw new WorkspaceFilesError('files/outside-workspace', '该路径不在 DSH 的工作区范围内')
+}
+
+/**
+ * 写路径的**终段**守卫：`resolveGuarded(path, roots, false)` 只 `realpath` 了父目录，
+ * 再 `join(realParent, basename(path))`。若终段本身是一个符号链接，
+ * `open()` 会**跟随链接**——于是 `工作区内/链接 → 工作区外/文件` 就成了"写穿工作区根"的口子。
+ * `readChunk` 走 `mustExist=true`，整条路径都被 `realpath` 解析过，读路径没有这个问题。
+ *
+ * ## 判据为什么不是"是符号链接就拒绝"
+ *
+ * pnpm 工作区里合法符号链接很多，一刀切会把**正常写文件**也拦住。
+ * 所以这里只挡"**最终落点在工作区根之外**"的链接：`realpath` 解析终段后，
+ * 用与 `resolveGuarded` 同一份 `isWithinRoots` 判据比较。
+ *
+ * 断链的符号链接（`realpath` 失败）**无法证明落点在区内**，按拒绝处理——
+ * 不能因为"解析不出来"就放行：`open(link, 'w')` 恰恰会在链接目标处**创建**文件。
+ *
+ * @param resolved - `resolveGuarded(..., false)` 的返回值（父目录已 realpath、终段未解析）。
+ * @param roots - 允许的工作区根。
+ */
+async function assertWriteTargetInRoot(resolved: string, roots: readonly string[]): Promise<void> {
+  let info: Stats
+  try {
+    info = await lstat(resolved)
+  } catch {
+    // 终段还不存在：正常的"新建文件"，父目录已由 resolveGuarded 校验过
+    return
   }
+  if (!info.isSymbolicLink()) return
+
+  let target: string
+  try {
+    target = await realpath(resolved)
+  } catch {
+    console.warn(`[mobile-host] 拒绝写入断链符号链接：${resolved}`)
+    throw new WorkspaceFilesError('files/outside-workspace', '该路径不在 DSH 的工作区范围内（符号链接无法解析）')
+  }
+  if (await isWithinRoots(target, roots)) return
+
+  console.warn(`[mobile-host] 拒绝写入指向工作区外的符号链接：${resolved} → ${target}`)
   throw new WorkspaceFilesError('files/outside-workspace', '该路径不在 DSH 的工作区范围内')
 }
 
@@ -315,7 +369,9 @@ export async function readChunk(
  * 三个必须守住的行为：
  *   1. **路径仍受工作区根约束**（与读一致）——上传不能成为"往任意位置写文件"的后门；
  *   2. `offset === 0` 且 `truncate` 为真时**截断**，否则从该偏移续写（支持断点续传与分块）；
- *   3. 目录会被拒绝——避免"上传同名文件把目录覆盖掉"这种意外。
+ *   3. 目录会被拒绝——避免"上传同名文件把目录覆盖掉"这种意外；
+ *   4. **终段是符号链接时必须先验落点**：`resolveGuarded(..., false)` 只解析父目录，
+ *      不挡住"链接指向工作区外"这一条写穿路径（见 `assertWriteTargetInRoot`）。
  *
  * @param path - 目标文件（可以还不存在，父目录必须存在且在工作区内）。
  * @param offset - 写入偏移。
@@ -330,6 +386,8 @@ export async function writeChunk(
   roots: readonly string[],
 ): Promise<{ path: string; written: number; size: number; eof: boolean }> {
   const real = await resolveGuarded(path, roots, false)
+  // 必须在 open() 之前：open 一旦跟随链接，写入就已经发生了（再检查也追不回来）。
+  await assertWriteTargetInRoot(real, roots)
   const buffer = Buffer.from(String(data ?? ''), 'base64')
   const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
   let handle

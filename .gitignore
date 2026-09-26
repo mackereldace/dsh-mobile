@@ -11,6 +11,16 @@ apps/shell/.dart_tool/
 native/android/build/
 dist/
 
+# ── TypeScript 编译产物（由 `npm run build` 生成；不入库，见 14-项目评估 T1）──
+# ★ 规则必须**精确到这两个目录**：`packages/bridge/lib/`（桥的浏览器半，**手写**、连 src 都没有）
+#   与 `apps/shell/lib/`（Flutter 的 Dart 源码目录）都是**源码**，绝不能被 `packages/*/lib/` 这种宽规则吞掉。
+#   代价（已知且可接受）：全新 clone 后必须先 `npm run build` 才能安装插件（`install-host-plugin.mjs` 从 lib 复制）。
+packages/host/lib/
+packages/protocol/lib/
+
+# ── 浏览器走查工具的临时产物（harness 生成，不入库）──
+.playwright-mcp/
+
 # ── 签名材料与安装包（★ 绝不入库）──
 *.apk
 *.aab

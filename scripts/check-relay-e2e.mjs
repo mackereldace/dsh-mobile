@@ -20,7 +20,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { snapshotChromeClones, sweepChromeClones, removeQuietly } from './chrome-clone-guard.mjs'
 /** ★ Chrome `code_sign_clone` 残留守卫（见 chrome-clone-guard.mjs）：启动前拍快照、收尾时只删本次新增 ✓。 */
 let cloneSnapshot = null
@@ -34,8 +34,23 @@ import { join } from 'node:path'
 const REPO='/Volumes/Data/workspace/工程设计/dsh-mobile'
 const sleep=(ms)=>new Promise(r=>setTimeout(r,ms))
 const HOME='/tmp/e2e-dsh-home', RELAY=4320, RELAY_TLS=4321, TOKEN='e2e-relay-token'
-const DSH=3653, PROXY=3651, TLS=3652, LAN='10.34.221.181'
-const ok=(c,l,d)=>console.log((c?'  ✓ ':'  ✗ ')+l+(d!==undefined?'  ['+d+']':''))
+const DSH=3653, PROXY=3651, TLS=3652
+/**
+ * ★ 局域网 IP **必须动态探测** ✓ —— 这里曾经写死成 `10.34.221.181`。
+ *   换网段之后整套断言全红（TLS 入口 HTTP 000 → 配对/隧道连环塌），
+ *   而红的是**脚本自己** ✗：产品侧早就跟着地址变了（证据：`tls/lan-cert.pem`
+ *   的 SAN 已经是新 IP ✓）。所以先看 `DSH_LAN_IP` 覆盖，再退回探测脚本 ✓。
+ */
+const LAN=(process.env.DSH_LAN_IP||'').trim()||execFileSync(process.execPath,[join(REPO,'scripts/detect-lan-ip.mjs')],{encoding:'utf8'}).trim()
+if(!/^\d+\.\d+\.\d+\.\d+$/.test(LAN)){console.error('  ✗ 探测不到本机局域网 IP（可用 DSH_LAN_IP=<ip> 指定）');process.exit(2)}
+/**
+ * ★ 断言必须**计数** ✓ —— 这个脚本的结尾曾经是无条件 `process.exit(0)`：
+ *   5 条断言红了退出码仍是 0 ⇒ "红着也能被当成通过" ✗（本项目最怕的假绿）。
+ *   现在失败即非 0 ✓，并加断言下限（防"断言被删掉仍全绿"，与 check-mobile-layout 同一纪律 ✓）。
+ */
+let checks=0, problems=0
+const ok=(c,l,d)=>{checks++;if(!c)problems++;console.log((c?'  ✓ ':'  ✗ ')+l+(d!==undefined?'  ['+d+']':''))}
+const EXPECTED_MIN_CHECKS=16
 const tlsDir=join(homedir(),'.dsh/storages/dsh-mobile/tls')
 let relay,dsh,proxy,chrome,chromeDir
 try {
@@ -48,6 +63,22 @@ try {
   ok(true,'中继已启动（明文 4320 / TLS 4321）')
 
   // ② 测试家目录：装插件 + 追加 relay 配置
+  /**
+   * ★★ round 139：**安装之前先把 profile 目录建好** ✓（与 `check-mobile-layout.mjs`
+   * 的同一写法 ✓：那句 `mkdirSync(join(DSH_HOME,'profiles','web'),{recursive:true})` ✓）。
+   *
+   * 为什么必须补这一句 ✗（这是一条"最阴"的脆弱点 ✓）：
+   *   `HOME` 是**固定路径** `/tmp/e2e-dsh-home` ✓，而 `/tmp` 会被系统周期性清掉 ✓ ——
+   *   清掉之后 `install-host-plugin.mjs` 的 `preflight()` 会直接失败 ✓
+   *   （它的判据是"profile 目录在不在"✓，报的是"请先用该 profile 启动一次 DSH"✗），
+   *   而本套件用的是 `stdio:'ignore'` ✓ ⇒ 屏幕上只剩一句 "Command failed" ✗，
+   *   看起来像产品坏了 ✓✓。
+   *   round 139 就是这样撞上的：重跑两次**都**失败（⇒ 不是偶发 ✓），
+   *   手工建好这个目录之后同一条命令 exit 0 ✓✓。
+   * ★ 只建目录、只动这一件事 ✓ —— 断言与判据一个字没改 ✗（这条修复的全部内容就是
+   *   "让它在干净状态下也能起来" ✓）。
+   */
+  mkdirSync(join(HOME,'profiles','web'),{recursive:true})
   execFileSync(process.execPath,[join(REPO,'scripts/install-host-plugin.mjs'),'--dsh-home',HOME,'--profile','web',
     '--trusted-host',`${LAN}:${PROXY}`,'--trusted-host',`${LAN}:${TLS}`,'--phone-base-url',`https://${LAN}:${TLS}`],{stdio:'ignore'})
   const patch=join(HOME,'profiles/web/cordis.patch.yml')
@@ -160,6 +191,25 @@ markChromeLaunch()
 } finally {
   for(const p of [chrome,dsh,proxy,relay]){try{process.kill(-p.pid,'SIGKILL')}catch{try{p?.kill('SIGKILL')}catch{}}}
   await sleep(500); if(chromeDir) rmSync(chromeDir,{recursive:true,force:true})
+  /**
+   * ★★ round 139：收尾把**本套件自己的**临时家目录也清掉 ✓（与 `check-mobile-layout.mjs`
+   * 一致 ✓ —— 那边是 `if (EXPLICIT_HOME === undefined) removeQuietly(DSH_HOME)` ✓）。
+   *
+   * 为什么值得清 ✗：不清的话它会在 `/tmp` 里留 ~几十 MB（那个家目录里有装好的插件 ✓、
+   * 证书 ✓、会话夹具 ✓），而且**下一个人看到这个残留目录**会以为"它一直在这儿"✓ ——
+   * 上一轮那条"最阴"的失败正是这个残留消失之后才暴露的 ✓。
+   * ★ 两条边界，都写清楚 ✗：
+   *   ① **只清 `HOME` 这一个我们自己写死的路径** ✓（它就是这个套件的家目录 ✓，
+   *      没有任何别的进程会用 ✓）—— 绝不 `rm -rf /tmp` 或按通配删别的东西 ✗；
+   *   ② 清之前先确认**它确实长得像我们的家目录** ✓（有 `profiles/web` ✓）——
+   *      万一将来有人把 `HOME` 改成别的路径 ✓，这一条能拦住"把别人的东西删掉"✗。
+   */
+  try {
+    if (existsSync(join(HOME,'profiles','web'))) rmSync(HOME,{recursive:true,force:true})
+  } catch { /* 清不掉不算失败 ✗（临时目录而已 ✓） */ }
   sweepChromeClones(cloneSnapshot ?? new Set())
 }
-process.exit(0)
+const belowFloor=checks<EXPECTED_MIN_CHECKS
+if(belowFloor) console.log(`  ✗ 断言数 ${checks} 低于下限 ${EXPECTED_MIN_CHECKS}（是不是有断言被删掉了？）`)
+console.log(`\n结果：${checks-problems} ✓ / ${problems} ✗（共 ${checks} 条，下限 ${EXPECTED_MIN_CHECKS}）`)
+process.exit(problems>0||belowFloor?1:0)

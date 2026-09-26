@@ -46,6 +46,12 @@ function parseArgs(argv) {
     relayToken: undefined,
     relayHttpUrl: undefined,
     relayPoolSize: undefined,
+    // ⚠️ `--extra-endpoint` 是**纯追加**语义：它只往里加候选端点，**命令行无法删除已存在的端点**。
+    //    这是有意的取舍 —— 宁可多留一个死候选，也不愿"某次重装少传一个参数"就静默丢掉一条路
+    //    （本项目为此已经发生过三次事故，见 readPreservedKeys 的长注释）。
+    //    代价与运维办法：换中继域名后，旧域名会作为**死候选**留在列表里，手机每次重连会白试一次
+    //    再回落 —— 表现为"多一次延迟"，不是"连不上"。**要删除端点请直接编辑 cordis.patch.yml**
+    //    （删掉那一行后重装即可），别用"少传一个参数"表达删除。
     extraEndpoints: [],
   }
   for (let i = 0; i < argv.length; i++) {
@@ -146,6 +152,8 @@ const MARKER_END = '# <<< dsh-mobile host plugin <<<'
  *
  * 前两次同类事故是 `3443` 与 `phoneBaseUrl` 被抹掉（手机"一直重连中"）。
  * 所以这里改成**保留式合并**：现有配置里的中继键一律沿用，除非命令行显式覆盖。
+ * `extraEndpoints` 更进一步是**纯追加**（见 patchBlock）：它只是"候选端点"，
+ * 多留一条不会有副作用，而少一条就是一条路静默失效。
  */
 function readPreservedKeys(patchFile) {
   const preserved = { extraEndpoints: [], trustedHosts: [] }
@@ -182,24 +190,115 @@ function readPreservedKeys(patchFile) {
   preserved.relayToken = scalar('relayToken')
   preserved.relayHttpUrl = scalar('relayHttpUrl')
   preserved.relayPoolSize = scalar('relayPoolSize')
-  const listMatch = /^\s+extraEndpoints:\s*\n((?:\s+-\s*'?[^'\n]+'?\s*\n?)+)/m.exec(text)
-  if (listMatch !== null) {
-    for (const line of listMatch[1].split('\n')) {
-      const item = /^\s+-\s*'?([^'\n]+?)'?\s*$/.exec(line)
-      if (item !== null) preserved.extraEndpoints.push(item[1].trim())
+  /**
+   * ★ extraEndpoints 与 trustedHosts **同一形态：逐行循环** ✓。
+   *
+   * 这里原先是一条大正则 ✗，而它**只抓得回第 1 条** ✓ —— 两个坑都实测过：
+   *
+   * 1. **大正则的 `\s*` 会把换行也吃掉** ✗：
+   *    `/^\s+extraEndpoints:\s*\n((?:\s+-\s*'?[^'\n]+'?\s*\n?)+)/m` 里，组内第 1 次
+   *    迭代末尾那个 `\s*` 贪婪地把 `\n` **加上第 2 行的缩进**一起吞掉 ⇒ 第 2 次迭代
+   *    再也匹配不到 `\s+-` ⇒ **列表到此为止** ✗（实测：写进去 `['a','b']`，
+   *    读回来只有 `['a']` ✓）。
+   *    `trustedHosts` 早先正是同一个 bug，已经改成逐行循环 ✓ ——
+   *    **extraEndpoints 当时漏改了** ✗。
+   *
+   * 2. **整文件 grep 这个串也不行** ✗：`phoneBaseUrl: 'https://ip:端口'` 与
+   *    "学校端点"的字符串**逐字相同** ✓ ⇒ "这条端点配置过没有"会被 `phoneBaseUrl`
+   *    骗成"有" ✗（实测：整文件 `grep -F "'https://10.34.255.229:3443'"` 命中的
+   *    就是 `phoneBaseUrl` 那一行 ✓）。
+   *
+   * 所以只能：先定位到 `extraEndpoints:` 那一行，再**逐行**读它下面的 `- ` 条目 ✓。
+   *
+   * ★ 为什么这件事在本轮从"潜在"变成"必须"：`restart-lan.sh` 现在一次广告
+   *   **两条**端点（学校 HTTPS ✓ + Tailscale ✓）✗ —— 只抓第 1 条 ⇒ 第 2 条会在
+   *   下一次重装时**静默消失** ✗ ⇒ 用户要的"两个默认链接"自己退化成一条 ✗
+   *   （回归测试见 `packages/host/test/install-script.test.ts` 里那两条 ★ 用例 ✓）。
+   *
+   * ⚠️ 与 `trustedHosts` 同一限制（**刻意保持一致** ✓）：列表**中间**出现注释行或
+   *    其它非 `- ` 行会被当作列表结束 ✓。我们写出来的块里不会有这种行 ✓。
+   */
+  const endpointLines = text.split('\n')
+  for (let i = 0; i < endpointLines.length; i++) {
+    if (!/^\s+extraEndpoints:\s*$/.test(endpointLines[i])) continue
+    for (let j = i + 1; j < endpointLines.length; j++) {
+      const item = /^\s+-\s*'?([^'\n]+?)'?\s*$/.exec(endpointLines[j])
+      if (item === null) break
+      preserved.extraEndpoints.push(item[1].trim())
     }
+    break
   }
   return preserved
 }
 
+/**
+ * 取一个端点的 authority（`URL.host`，IPv6 会带方括号，与 `trustedHosts` 的写法一致）。
+ *
+ * 只认 `http://` / `https://`；`ws://` / `wss://`（中继的 `wss://域名/attach`）返回 undefined。
+ */
+function authorityOfEndpoint(endpoint) {
+  let url
+  try {
+    url = new URL(endpoint)
+  } catch {
+    return undefined // 连 URL 都解析不了：广告方自己写错了，这里不猜
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+  return url.host === '' ? undefined : url.host
+}
+
+/**
+ * 把端点派生出的 authority **追加**到显式受信列表之后（去重）。
+ *
+ * ## 不变量：凡是被广告出去的 endpoint，其 authority 必须同时在 `trustedHosts` 里
+ *
+ * 两份配置来自不同的键、由不同的调用方维护，很容易出现"端点广告了、trust 没跟上"：
+ * 手机按候选取到它 → DSH 信任栅栏 **403** → 表现为"一直重连中"，
+ * 而电脑端看配置却觉得一切正常。`05-项目进度与改动评估.md` 里那三次事故
+ * （`3443` / `phoneBaseUrl` / `relayUrl` 被覆盖式重装抹掉）都是同一类"以为只改 A、其实少了 B"。
+ *
+ * 只从 `http://` / `https://` 派生：`ws://` / `wss://`（中继的 `wss://域名/attach`）
+ * **不派生** —— 中继拓扑下域名**不需要**进 trust：手机只连中继，中继经**回源通道**
+ * （回环）访问本机，而栅栏本就把回环请求当"人在电脑前"
+ * （结论见 `07-非局域网中继方案设计.md` §5）。
+ *
+ * ⚠️ 只追加、**绝不插到前面**：`patchBlock` 用 `trustedHosts[0]` 推导 `publicBaseUrl`
+ *    （配对码里要嵌的那个地址），插到前面会把它换掉 —— 又是一次静默的行为变更。
+ *
+ * @returns {{ hosts: string[], added: string[] }} `added` 仅用于日志
+ */
+function withEndpointAuthorities(trustedHosts, extraEndpoints) {
+  const hosts = [...trustedHosts]
+  const seen = new Set(hosts)
+  const added = []
+  for (const endpoint of extraEndpoints) {
+    const authority = authorityOfEndpoint(endpoint)
+    if (authority === undefined || seen.has(authority)) continue
+    seen.add(authority)
+    hosts.push(authority)
+    added.push(authority)
+  }
+  return { hosts, added }
+}
+
 function patchBlock(trustedHosts, preserved) {
+  // 端点列表先算出来：`trustedHosts` 要从它派生（见 withEndpointAuthorities 的说明）。
+  //
+  // ⚠️ 这里是**追加**合并，而不是原先的"命令行给了就整体覆盖"：
+  //   `restart-lan.sh` 现在每次都会为 Tailscale 传一条 `--extra-endpoint`，
+  //   若按覆盖语义，中继那条 `https://<域名>` 会在下一次重启时被静默挤掉 ——
+  //   正是本项目已经发生过三次的那类事故（保留式合并只做了一半）。
+  //   要**删除**某个端点请直接编辑配置，别用"少传一个参数"表达删除。
+  const extraEndpoints = [...new Set([...(preserved?.extraEndpoints ?? []), ...args.extraEndpoints])]
+  const { hosts, added } = withEndpointAuthorities(trustedHosts, extraEndpoints)
+  if (added.length > 0) log(`为 extraEndpoints 补了 ${added.length} 条 trust：${added.join('、')}`)
   // 配对码里要嵌"手机能访问到的地址"：DSH 只绑 loopback，手机走的是代理端口，
   // 因此把首个受信 authority 直接作为 publicBaseUrl（形如 http://<ip>:<代理端口>）。
-  const publicBaseUrl = trustedHosts.length > 0 ? `http://${trustedHosts[0]}` : undefined
+  const publicBaseUrl = hosts.length > 0 ? `http://${hosts[0]}` : undefined
   const lines = []
-  if (trustedHosts.length > 0) {
+  if (hosts.length > 0) {
     lines.push('        trustedHosts:')
-    for (const entry of trustedHosts) lines.push(`          - '${entry}'`)
+    for (const entry of hosts) lines.push(`          - '${entry}'`)
   }
   if (publicBaseUrl !== undefined) lines.push(`        publicBaseUrl: '${publicBaseUrl}'`)
   // 手机侧必须 HTTPS（安全上下文 / WebCrypto 前提），端口与明文端口不同，单独一项
@@ -210,7 +309,6 @@ function patchBlock(trustedHosts, preserved) {
   const relayToken = args.relayToken ?? preserved?.relayToken
   const relayHttpUrl = args.relayHttpUrl ?? preserved?.relayHttpUrl
   const relayPoolSize = args.relayPoolSize ?? preserved?.relayPoolSize
-  const extraEndpoints = args.extraEndpoints.length > 0 ? args.extraEndpoints : (preserved?.extraEndpoints ?? [])
   if (extraEndpoints.length > 0) {
     lines.push('        extraEndpoints:')
     for (const entry of extraEndpoints) lines.push(`          - '${entry}'`)

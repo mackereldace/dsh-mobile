@@ -254,7 +254,17 @@ test('经加密隧道完成一元 RPC 与流式 RPC', async () => {
       lastError?: string
       tunnel?: {
         sessionId?: string
-        rpc: (endpoint: string, payload: unknown) => Promise<{ rpcId: string; ok: boolean; value?: unknown }>
+        /**
+         * 一元 RPC 的返回值是 **DSH 自己的 `server-response` 信封**，不是扁平形状：
+         * `{ type: 'server-response', rpcId, result: { ok: true, value } }`
+         * （失败时 `result` 为 `{ ok: false, error }`，见 `packages/host/src/tunnel.ts:418-456`）。
+         * 早先这里标成 `{ rpcId, ok, value }`，与真实契约少一层 `result`，类型标注本身就是错的。
+         */
+        rpc: (endpoint: string, payload: unknown) => Promise<{
+          type: 'server-response'
+          rpcId: string
+          result: { ok: boolean; value?: unknown }
+        }>
         openStream: (endpoint: string, payload: unknown) => AsyncIterable<unknown>
       }
     }

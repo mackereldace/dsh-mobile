@@ -15,14 +15,18 @@
      于是**不用**在系统里装 CA、**没有**"网络可能受到监控"的常驻提示；
   3. **地址可编辑** ✓ —— 地址变了在 APP 里改一下即可，不必重装、不必重新配对。
 
-  ## 权限:两个,都是必要的
+  ## 权限:三个,每一个都写清了为什么（★ round 143 起是三个 ✗ —— 见下）
 
   1. `INTERNET` ✓ 唯一的联网权限;
   2. `POST_NOTIFICATIONS` ✓ —— 安卓 13 起"发系统通知"要**运行时**授权,
      而 WebView **不实现** Web Notification API ✗,所以通知只能走原生
      (见 MainActivity 类注释 §通知 ✓)。少了它,用户点"允许通知"不会有任何系统弹窗。
+  3. `CAMERA` ✓ —— ★★ **round 143 新加的唯一一条** ✗（"扫码配对"✓）。
+     完整理由、有没有不加的替代、以及被拒绝时怎么降级,逐条写在下面
+     `<uses-permission android:name="android.permission.CAMERA" />` 上方那一段注释里 ✓ ——
+     **改权限之前先读那一段** ✓。
 
-  除此之外**一个都不申请** ✓(没有存储/相机/定位/通讯录)。
+  除了这三条,**一个都不申请** ✓(没有存储/定位/通讯录/后台定位)。
   而且**禁止明文流量**（`usesCleartextTraffic="false"` ✓）——
   我们的手机入口本来就是 HTTPS，明文一律拒绝，少一个被降级的可能。
 -->
@@ -43,13 +47,92 @@
          因为 WebView 不实现 Web Notification API(网页那半在 APK 里必然失败)。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 只在这台手机自己用：不加任何第三方 SDK，也不申请存储/相机等权限 ✓ -->
+    <!--
+      ★★ round 143：`CAMERA`（"扫码配对"✓）——★ 这是**权限白名单的改动** ✗
+
+      ## 改之前是什么、现在是什么
+
+      此前白名单是**两条**（`INTERNET` + `POST_NOTIFICATIONS` ✓），而且它在三处都写着
+      "只有两条"：本文件的注释 ✓、`MainActivity.saveFile` 的注释 ✓、
+      `scripts/check-apk.mjs` 的白名单断言 ✓。**本轮把它变成三条** ✗ ——
+      所以这里必须把"为什么非加不可"讲透 ✓（不能只改数字 ✗）。
+
+      ## 为什么必须加（三条，缺一条都解释不通 ✗）
+
+      1. **用户明确要的是"扫码配对"** ✓ —— 壳里要**自己**开相机取帧、自己解码 ✓；
+         而没有 `CAMERA` 权限时 `Camera.open()` **直接抛** ✗
+         （不是"给一张黑图"✗，是 `RuntimeException` ✓ —— 没有权限就一定是崩溃或空白 ✓）；
+      2. **不能用"系统相机应用"绕过** ✗：`MediaStore.ACTION_IMAGE_CAPTURE` 拍一张**照片**
+         再解，一是要求用户"拍屏幕"✓（体验差且多半拍不清 ✓），二是它回来的照片要落盘
+         ⇒ 又要 `FileProvider` + 临时文件 ✓，三是**不是一个"扫码界面"** ✗（用户要的是扫码 ✓）；
+      3. **Web 那半也拿不到它** ✗：网页里的 `<input capture>` / `getUserMedia` 在
+         Android WebView 里都要宿主先给 `onPermissionRequest` ✓ ——
+         而那条路**最终同样要在清单里声明 `CAMERA`** ✓（绕不开 ✓），
+         却把"预览 + 解码"拆到两个进程/两套生命周期里 ✗（更复杂、更不可控 ✓）。
+      ⇒ 结论：`CAMERA` 是"扫码"这件事在安卓上的**前置条件**，不是可选优化 ✓。
+
+      ## 有没有不加权限的替代（有 ✓ —— 而且**它就是 B 那条路** ✓）
+
+      **有** ✓：`dshmobile://pair` 深链 ✓ —— 手机**自己的系统相机 / 任意扫码器**扫那张二维码 ✓
+      ⇒ 点链接 ⇒ 直接进我们的壳 ✓。这条路**零新权限** ✓，而且**本轮已经做了** ✓
+      （见下面那个 VIEW + BROWSABLE intent-filter ✓）。
+      ⇒ 所以本权限的定位是"**可选的增强**" ✓：给了更顺手（在壳里扫 ✓），
+        不给也**照样能配对** ✓（B 那条深链 ✓ / 粘一条带 `?pair=` 的地址 ✓）。
+      这也是为什么"拒绝授权"**不许**落到死路 ✗ —— 见下一条。
+
+      ## 拒绝授权 / 相机打不开 ⇒ 降级路径（三层，逐层可读 ✓）
+
+      1. 壳内扫码起不来（`ScanActivity` 里 `requestPermissions` 被拒 ✓、
+         或 `Camera.open()` 抛异常 ✓）⇒ **不崩** ✓：`ScanActivity` 把原因
+         （`camera-denied` / `camera-unavailable` ✓）放进 `setResult` 回传 ✓，
+         `MainActivity.onScanResult` 收到后**弹回「电脑地址」框** ✓，
+         提示语写明"把带 `?pair=` 的地址粘进来"✓（见 strings.xml 的 `scan_denied_hint` ✓）；
+      2. 用户直接**不看**这个框 ⇒ 还有**深链**那条路 ✓（他随时可以再用系统相机扫一次 ✓）；
+      3. 两条都不走 ⇒ 手输地址 ✓（首启就有这个框 ✓）——**与加权限之前一模一样** ✓。
+
+      ★ 一句话：**没有这个权限时，壳的功能与 round 142 完全相同** ✓（一个都不少 ✓）。
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      ★ 这台机器**没有相机**也照样能装 ✓（`required="false"` ✓）。
+      为什么单列这一条 ✗：`CAMERA` 权限会让 Google Play（以及部分系统的安装器 ✓）
+      **隐式**推断"本应用需要相机硬件"✗ ⇒ 一台没相机的设备会被判"不兼容"✓。
+      写 `required="false"` 把这层隐式推断**显式否掉** ✓。
+      ★ 它不是权限 ✓（`uses-feature` 不产生任何授权 ✓）——
+        权限白名单仍然只有上面那三条 ✓。
+    -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- 只在这台手机自己用：除了下面那条扫码用的相机权限，不申请存储/定位/通讯录等 ✓
+         （★ round 143 之前这里写的是"不申请存储/相机等权限"✗ —— 现在多了一条相机 ✓，
+           理由见上面那段 ✓。**存 储仍然一个都不申请** ✓：写"下载"目录走 MediaStore 系统代写 ✓。） -->
+    <!--
+      ★ android:enableOnBackInvokedCallback="true"（round 121，用户报"侧滑直接退出 App"✗）
+
+      这一句决定的是"系统要不要把返回交给 OnBackInvokedCallback"。官方文档（
+      https://developer.android.com/guide/navigation/custom-back/predictive-back-gesture ）
+      的原话是 **Predictive back is enabled by default** ✓，并且明确写着
+      **intercepting back events from KeyEvent.KEYCODE_BACK is no longer supported** ✗ ——
+      也就是说：预测式返回开着的时候，**返回不再是一枚按键事件** ✓（onKeyDown 收不到 ✗），
+      拦截它的唯一办法就是注册 OnBackInvokedCallback ✓（MainActivity.registerBackCallback ✓）。
+
+      为什么仍然**显式**写出来（而不是靠平台默认值）：
+        · 这个开关是 Android 13 引入的 ✓ —— 在那之前没有预测式返回，
+          这台设备上"默认值是多少"取决于系统版本与目标 SDK 的组合 ✓；
+        · 写上 true 之后，13 / 14 / 15+ 上是**同一条行为** ✓ ——
+          不会出现"这台手机能按层级返回、那台点一下直接退出"这种没法验收的局面 ✓；
+        · 它同时也是**文档**：壳里注册了 OnBackInvokedCallback ✓，
+          这里写着 true ⇒ 下一个人一眼能看出"返回这条路是刻意接管的" ✓。
+      注意：它不是权限 ✓，权限白名单不受它影响 ✓。
+    -->
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="false"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
@@ -62,6 +145,53 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              ★★ round 143：**扫码配对的深链兜底**（B ✓，零新权限 ✓）
+
+              电脑那张二维码里编的是 `dshmobile://pair?d=<base64url(票据)>` ✓（宿主
+              `POST /mobile/pair/code` 的 `qrPayload` ✓）。手机**自己的系统相机 / 任意扫码器**
+              扫到它 ⇒ 点链接 ⇒ 系统按下面这个 filter 直接导进我们的壳 ✓ ——
+              于是"没有壳内扫码器"这件事有了兜底 ✓（交接文档 §4.3 ④ ✓）。
+
+              三个**缺一不可**的东西 ✓：
+                · `VIEW` ✓ —— "看一个 URI"这个动作 ✓（扫码器点的就是它 ✓）；
+                · `BROWSABLE` ✓ —— ★ 少了它，**从浏览器/扫码器点过来的链接会被丢掉** ✗
+                  （它们是"浏览上下文"里发起的 ✓）；
+                · `DEFAULT` ✓ —— 少了它，隐式 intent 匹配不上 ✗（Activity 拿不到它 ✓）。
+              `scheme` + `host` 一起写 ⇒ **只认** `dshmobile://pair` ✓（不乱认 `dshmobile:`
+              底下的其它东西 ✗）。`path` 不写 ⇒ 带不带路径都进得来 ✓（更宽 ✓，反正
+              `MainActivity` 只认 `d=` 那个查询参数 ✓）。
+
+              ★ 冷启动走 `onCreate` ✓、App 已在前台走 `onNewIntent` ✓ —— 两条入口
+                `MainActivity` 都处理了 ✓（少了后者就是"App 开着的时候扫码没反应"✗）。
+              ★ 处理完会把 intent 擦掉 ✓（免得重建时重复触发 ✗）。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="dshmobile" android:host="pair" />
+            </intent-filter>
         </activity>
+
+        <!--
+          ★★ round 143：**壳内扫码界面**（A ✓）
+
+          · `exported="false"` ✓ —— 只有我们自己能拉起它 ✓（它不是外部入口 ✓，
+            外面那条入口是上面那个深链 filter ✓）。少了它，任何应用都能直接开我们的相机预览 ✗；
+          · `configChanges` 与 MainActivity 同一套 ✓ —— **旋转不重建** ✓：
+            重建就要重新 `Camera.open()` ✓（扫码界面闪一下黑屏 ✗、还可能抢不到相机 ✗），
+            我们自己在 `surfaceChanged` 里重算预览尺寸与显示方向 ✓（见 ScanActivity ✓）；
+          · `theme` 与 MainActivity 一致 ✓（无 ActionBar ✓）；
+          · ★ 它**不算**"第二条常驻界面" ✗：只有"电脑地址"框上的「扫码配对」
+            或深链走到这里才会出现 ✓，扫完/取消就 `finish` ✓。
+          · ★ 它**没有** `launchMode` 的讲究 ✓（默认 standard ✓ —— 每次都开一个干净的实例 ✓，
+            相机状态跟着实例走 ✓，比复用更安全 ✓）。
+        -->
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
     </application>
 </manifest>

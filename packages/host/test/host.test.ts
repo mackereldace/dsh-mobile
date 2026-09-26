@@ -918,7 +918,11 @@ test('★ 网关特判端点 $events/result 必须走 dispatchRpc（转发事件
     assert.equal(result.ok, true, `调用应成功，实际：${JSON.stringify(result)}`)
     assert.deepEqual(result.value, { dispatched: true }, '应由 dispatchRpc 处理')
     assert.equal(env.dispatches.length, 1, '应恰好经过一次 dispatchRpc')
-    assert.equal(env.dispatches[0].endpoint, '$events/result')
+    // 上一行已断言恰好一次；这里显式收窄（noUncheckedIndexedAccess 下元素可能为 undefined），
+    // 避免用 `?.` 把断言变成恒真。
+    const dispatch = env.dispatches[0]
+    assert.ok(dispatch !== undefined, '应恰好经过一次 dispatchRpc')
+    assert.equal(dispatch.endpoint, '$events/result')
     // 一旦被当成普通 Remote 方法送进 invoke，就会在反射表里查找而必然失败 ——
     // 那正是"手机上的选择回不到电脑"的直接原因。
     assert.equal(

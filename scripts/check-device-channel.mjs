@@ -306,13 +306,22 @@ try {
       barText.slice(0, 46) || '（没有底栏）',
     )
     const capsRaw = String(await ev(`(function(){
-      var c=document.querySelector('.dshm-caps')
+      var c=document.querySelector('[data-dshm-conn-entry="1"]')
       return JSON.stringify({inDom:c!==null,display:c?getComputedStyle(c).display:null})
     })()`))
-    // ★ 端侧开关只能"收起"，绝不能删：它是端侧通道（提醒/通知/剪贴板…）在手机上**唯一**的授权入口
+    /**
+     * ★ 端侧开关只能"收起"，绝不能删：它是端侧通道（提醒/通知/剪贴板…）在手机上**唯一**的授权入口。
+     *
+     * ★★ round 138 换了被守的元素 ✓：5 颗胶囊已经**搬进设置页** ✓
+     * （用户："右侧端侧通道的功能能不能也挪到设置里"✓）——
+     * 文件面板底部现在留的是**一行「端侧能力」入口** ✓（点它一步进到那一节 ✓）。
+     * 所以这里守的对象从"胶囊块"换成"那一行入口" ✓：**语义一个字没变** ✗
+     *（仍然是"多选态只是把它收起、绝不 remove"✓），
+     * 而"5 颗开关一个不少"由**下一节那条新断言**正面钉住 ✓（不是靠这一条顺带 ✓）。
+     */
     ok(
       /"inDom":true/.test(capsRaw) && /"display":"none"/.test(capsRaw),
-      '端侧通道开关只是被收起（仍在 DOM 里，未被删除）',
+      '「端侧能力」入口只是被收起（仍在 DOM 里，未被删除 —— 那是端上唯一的授权入口 ✓）',
       capsRaw,
     )
 
@@ -392,19 +401,127 @@ try {
     const pickedAfter = await countText()
     ok(pickedAfter === '已选 0 项', '删掉的条目从选中集合里摘掉（剩下的才是还能操作的）', pickedAfter)
 
-    // 退出多选态（点「取消」）：底栏收起、端侧开关还原、工具栏回到「选择」。
-    // ★ 端侧开关必须**回来** —— 它是手机上唯一的授权入口，收起来不还原等于把端侧通道锁死。
+    // 退出多选态（点「取消」）：底栏收起、「端侧能力」入口还原、工具栏回到「选择」。
+    // ★ 入口必须**回来** —— 它是手机上通往端侧授权的唯一一条路 ✓，收起来不还原等于把端侧通道锁死。
     const restored = String(await ev(`(function(){
       var bs=[].slice.call(document.querySelectorAll('#dsh-mobile-sheet-select button'))
       bs.forEach(function(b){ if(b.textContent.trim()==='取消') b.click() })
       var bar=document.getElementById('dsh-mobile-sheet-select')
-      var caps=document.querySelector('.dshm-caps')
+      var caps=document.querySelector('[data-dshm-conn-entry="1"]')
       var toggle=[].slice.call(document.querySelectorAll('.dshm-files-toolbar button')).filter(function(b){return b.textContent.trim()==='选择'}).length
       return JSON.stringify({barHidden:bar?bar.hidden:null, capsDisplay:caps?getComputedStyle(caps).display:null, toggle: toggle}) })()`))
     ok(
       /"barHidden":true/.test(restored) && !/"capsDisplay":"none"/.test(restored) && /"toggle":1/.test(restored),
-      '点「取消」退出多选态：底栏收起、端侧开关还原、工具栏回到「选择」',
+      '点「取消」退出多选态：底栏收起、端侧入口还原、工具栏回到「选择」',
       restored,
+    )
+
+    /**
+     * ★★ round 138（E′）+ round 142（本轮第 ①② 条）：底部入口进的那一屏，**正面**判据 ✓。
+     *
+     * 为什么必须有这一条 ✗：上面那两条只回答"底栏那一块**没被删**"✓ ——
+     * 而"搬走了之后还在不在 / 搬干净了没有"**完全没人管** ✗✗。
+     * 这一条把三件事一起钉住 ✓：
+     *   ① 从文件面板底部那行「端侧能力」**一步**就能到那一屏（入口真的通 ✓）；
+     *   ② 到了之后 5 项**一项不少**（提醒/通知/剪贴板/震动/打开链接 ✓）——
+     *      round 142 起它们是**长横条 + 右侧开关** ✓（不再是胶囊 ✗）；
+     *   ③ ★ 那一屏**只有端侧能力** ✓：连接 / 默认链接 / 这台设备 / 端侧诊断 /
+     *      解除配对 **一个都不许出现** ✗（用户本轮第 ① 条的原话：
+     *      "只打开端侧能力的那一块，而不是整个设置页"✓）。
+     */
+    const capsEntryClicked = String(await ev(`(function(){
+      var e=document.querySelector('[data-dshm-conn-entry="1"]')
+      if(e===null) return 'no-entry'
+      e.click()
+      return 'clicked'
+    })()`))
+    await sleep(1300)
+    const capsInSettings = String(await ev(`(function(){
+      var host=document.getElementById('dsh-mobile-sheet')
+      if(host===null) return '{"error":"no-sheet"}'
+      var inner=document.getElementById('dsh-mobile-sheet-body')||host
+      var rows=[].slice.call(inner.querySelectorAll('[data-dshm-cap-row]'))
+      var switches=[].slice.call(inner.querySelectorAll('[data-dshm-cap-switch]'))
+      /**
+       * ★ 基准要取**行自己的父容器** ✗（第一版取的是那个全屏根节点的宽度 ✗）——
+       *   那个根节点是**整块全屏浮层**（≈视口宽 412px ✓），而面板本体只有 264px ✓，
+       *   于是"行宽 ≥ 根宽 − 24"必然 false ⇒ **假红** ✓（本轮真的红了一次 ✓）。
+       *   "有没有占满"只能拿它自己那个容器当基准 ✓（与 check-mobile-layout 同一口径 ✓）。
+       */
+      function parentWidth(el){return el.parentElement===null?0:el.parentElement.getBoundingClientRect().width}
+      var rowW=rows.length===0?0:parentWidth(rows[0])
+      var text=String(inner.innerText||'')
+      return JSON.stringify({
+        rows: rows.length,
+        switches: switches.length,
+        roles: switches.map(function(s){return String(s.getAttribute('role'))}),
+        ariaLabels: switches.map(function(s){return String(s.getAttribute('aria-label')||'')}),
+        checked: switches.map(function(s){return String(s.getAttribute('aria-checked'))}),
+        rowW: Math.round(rowW),
+        /** 横条的判据：**行占满正文宽** ✓（胶囊是并排的小块 ✗ ⇒ 宽度上就区分开了 ✓）。 */
+        rowFullWidth: rows.every(function(r){return r.getBoundingClientRect().width>=parentWidth(r)-1}),
+        /** 开关贴在行**最右**✓（这正是"一项设置"的样子 ✓，也是用户第 ② 条要的 ✓）。 */
+        switchRightAligned: switches.every(function(s){
+          var p=s.parentElement;
+          return p!==null && p.getBoundingClientRect().right-s.getBoundingClientRect().right<=6;
+        }),
+        labels: rows.map(function(r){var l=r.querySelector('.dshm-set-label');return String(l?l.textContent:'').trim()}),
+        /** ★ 五条"外来的"分组标题 —— 只允许剩下「端侧能力」自己那一个 ✓。 */
+        titles: [].slice.call(inner.querySelectorAll('.dshm-set-title')).map(function(t){return String(t.textContent||'').trim()}),
+        /** ★ 负面词表：整屏文本里出现任何一个都算"没隔离干净"✗。 */
+        text: text.replace(/\\s+/g,' ').slice(0,200),
+        hasUnpair: inner.querySelectorAll('.dshm-set-danger').length,
+        hasHint: inner.querySelectorAll('[data-dshm-conn-hint="1"]').length,
+        legacyChips: host.querySelectorAll('.dshm-cap-chip').length,
+        title: String((host.querySelector('.dshm-sheet-title')||{}).textContent||'')
+      })
+    })()`))
+    ok(
+      capsEntryClicked === 'clicked' && /"rows":5/.test(capsInSettings) && /"switches":5/.test(capsInSettings) &&
+        /"rowFullWidth":true/.test(capsInSettings) && /"switchRightAligned":true/.test(capsInSettings) &&
+        /"roles":\["switch","switch","switch","switch","switch"\]/.test(capsInSettings) &&
+        /"legacyChips":0/.test(capsInSettings) &&
+        ['提醒', '通知', '剪贴板', '震动', '打开链接'].every((label) => capsInSettings.includes(label)),
+      '★ 文件面板底部「端侧能力」入口**一步**进到那一屏，5 项一项不少（长横条 ✓ + role=switch ✓，旧胶囊剩 0 颗 ✓）',
+      `${capsEntryClicked}｜${capsInSettings}`,
+    )
+    /**
+     * ★★ 本轮第 ① 条的核心断言：那一屏是**被隔离出来**的 ✓。
+     *   判据取三层（任一层的漏都能被另一层抓住 ✓，防"只在文案上像"✗）：
+     *     · 分组标题**有且只有**「端侧能力」✓；
+     *     · 破坏性按钮（解除配对 ✓）**一个都没有**✗；
+     *     · 那一句"默认链接/学校"来源提示（hint）也不在 ✗。
+     *   反面清单写死在这里 ✓ —— 以后谁把别的分组塞回来，这条会**立刻变红** ✓。
+     */
+    const forbidden = ['连接', '默认链接', '这台设备', '端侧诊断', '解除配对']
+    const leaked = forbidden.filter((w) => capsInSettings.includes(w))
+    ok(
+      /"titles":\["端侧能力"\]/.test(capsInSettings) &&
+        /"hasUnpair":0/.test(capsInSettings) && /"hasHint":0/.test(capsInSettings) &&
+        leaked.length === 0,
+      '★ 那一屏**只显示端侧能力**：连接/默认链接/这台设备/端侧诊断/解除配对 一个都没跟着进来 ✓',
+      `标题=${(capsInSettings.match(/"titles":(\[[^\]]*\])/) || [])[1]}｜泄漏=${JSON.stringify(leaked)}｜配对按钮=${(capsInSettings.match(/"hasUnpair":(\d+)/) || [])[1]}｜hint=${(capsInSettings.match(/"hasHint":(\d+)/) || [])[1]}`,
+    )
+    /**
+     * 回到文件视图：**那个入口本身就是开关** ✓（round 142 起齿轮已经**没有**了 ✗）——
+     * 再点一次同一个入口 ✓。后面的多选/移动动线必须在**文件面板**上跑 ✓，
+     * 所以这一步的"真的回去了"也要量一下 ✓（标题回到「电脑文件目录」✓）。
+     */
+    await ev(`(function(){var e=document.querySelector('[data-dshm-conn-entry="1"]');if(e)e.click()})()`)
+    await sleep(1200)
+    const afterEntryToggle = String(await ev(`(function(){
+      var t=document.querySelector('.dshm-sheet-title')
+      var inner=document.getElementById('dsh-mobile-sheet-body')
+      return JSON.stringify({
+        title: t===null?null:String(t.textContent||''),
+        rows: inner===null?0:inner.querySelectorAll('.dshm-fs-entry').length,
+        capsRows: inner===null?0:inner.querySelectorAll('[data-dshm-cap-row]').length
+      })
+    })()`))
+    ok(
+      /"title":"电脑文件目录"/.test(afterEntryToggle) && /"capsRows":0/.test(afterEntryToggle),
+      '再点一次底部入口就**回到文件视图**（入口本身是开关 ✓ —— 齿轮已经不在了 ✓）',
+      afterEntryToggle,
     )
 
     // ── 移动：复用既有的「剪贴板 + 到目标目录点粘贴」动线（paste 本来收 sources[]）──
@@ -451,31 +568,97 @@ try {
   // 安全规范 §7 要求"撤销即时生效"，而此前只有电脑端能撤 ——
   // "想解除配对得先回到电脑前"这件事本身就是个安全缺口。
   console.log('\n【⑧ 设置视图：手机自己解除配对】')
-  await ev(`document.getElementById('dsh-mobile-files').click()`)
-  await sleep(1200)
-  const gearClicked = await ev("(function(){var g=document.getElementById('dsh-mobile-sheet-gear');if(!g)return false;g.click();return true})()")
-  await sleep(1200)
-  const settingsText = String(await ev("(function(){var b=document.getElementById('dsh-mobile-sheet-body');return b?b.innerText.replace(/\\s+/g,' '):''})()"))
-  ok(gearClicked === true, '面板头部有设置入口（齿轮）', gearClicked === true ? 'ok' : '找不到齿轮')
+  /**
+   * ★★ round 142（本轮第 ③ 条）：面板右上角那颗齿轮**已经彻底删掉** ✗ ——
+   *   设置页现在**只有一条路**：DSH 左侧栏 → 设置 →「连接与设备」✓
+   *   （用户："我们那个面板右上角的设置按钮可以删掉，只保留 DSH 左侧栏里的入口"✓）。
+   *
+   * 所以这一节的入口与 `check-mobile-layout` 的 `openConnSettingsViaDsh` **同一条动线** ✓：
+   *   ① 先把文件面板收掉（这一节不再经过文件面板 ✓）；
+   *   ② 装假壳 —— `[data-dshm-conn-nav="1"]` 只在**有壳**时才注入 ✓，
+   *      而 `installBackHook()` 顺带补上 `html[data-dshm-shell="android"]` ✓；
+   *   ③ 开 DSH 抽屉 → 点「设置」→ 点那第五个导航项 ✓。
+   */
+  const closedFiles = await ev(`(function(){
+    /**
+     * ★ 先把文件面板收掉 ✓（这一节不再经过文件面板 ✓）——
+     *   用**关闭键**而不是返回钩子 ✗：这一节之前**从没装过壳** ✓
+     *   （④b 那个假壳早就拆了 ✓），所以返回钩子根本不存在 ✓ ——
+     *   第一版写成"借 __dshmBack() 关面板"会拿到 'no-back' ✓（那不是在验产品 ✗，
+     *   是在验"壳在不在"✗）。
+     *   ★ 顺带也是"开抽屉会**无条件**把右边面板关掉"的兜底 ✓（boot.js 的 setDrawer ✓）。
+     */
+    var c=document.getElementById('dsh-mobile-sheet-close');
+    if(c){ c.click(); return 'closed-by-x' }
+    return 'no-panel'
+  })()`)
+  await sleep(900)
+  const shellStub = String(await ev(`(function(){
+    try {
+      globalThis.DshmShell = {
+        version: function(){ return '0.1.0+BUILD-VERIFY' },
+        insets: function(){ return JSON.stringify({seen:true,top:24,bottom:0,ime:0,density:3,edgeToEdge:true}) },
+        platform: function(){ return JSON.stringify({android:'17',sdk:37,edgeToEdge:true}) },
+        setBackAvailable: function(){},
+        notify: function(){ return 'ok' },
+        changeAddress: function(){},
+        endpoints: function(){ return JSON.stringify({slots:[],timeoutMs:2000,pinned:null}) },
+        log: function(){}
+      };
+      var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
+      var installed = api && typeof api.installBackHook === 'function' ? api.installBackHook() : false;
+      return JSON.stringify({installed:installed===true, marker:document.documentElement.getAttribute('data-dshm-shell')});
+    } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
+  })()`))
+  await sleep(500)
+  await ev("(function(){if(document.body.dataset.dshMobileDrawer!=='open'){var n=document.getElementById('dsh-mobile-nav');if(n)n.click()}})()")
+  await sleep(900)
+  const settingsBtn = await ev(`(function(){
+    var col=document.querySelector('[class*=sidebarCol]');
+    if(col===null) return 'no-sidebar';
+    var buttons=col.querySelectorAll('button');
+    for(var i=0;i<buttons.length;i++){
+      if(/^设置/.test(String(buttons[i].textContent||'').trim())){ buttons[i].click(); return 'opened' }
+    }
+    return 'no-settings-button';
+  })()`)
+  await sleep(1500)
+  const connNavClicked = await ev(`(function(){
+    var cell=document.querySelector('[data-dshm-conn-nav="1"]');
+    if(cell===null) return 'no-conn-nav(有壳吗？)';
+    cell.click();
+    return 'clicked';
+  })()`)
+  await sleep(900)
+  const settingsText = String(await ev("(function(){var h=document.querySelector('[data-dshm-panel]');return h?h.innerText.replace(/\\s+/g,' '):''})()"))
+  /**
+   * ★ 本轮第 ③ 条的两条断言（一起把"删干净"钉住 ✓）：
+   *   · 齿轮**不在 DOM 里** ✓（不是 `display:none` 那种藏 ✗），
+   *   · 面板头部**只剩一个按钮**（关闭 ✓）—— 这条防的是"换个 id 再塞回来"✗。
+   */
+  const gearAudit = String(await ev(`(function(){
+    var head=document.getElementById('dsh-mobile-sheet-head')
+    var btns=head===null?[]:[].slice.call(head.querySelectorAll('button'))
+    return JSON.stringify({
+      gear: document.getElementById('dsh-mobile-sheet-gear'),
+      gearAny: document.querySelectorAll('[id*=sheet-gear]').length,
+      ids: btns.map(function(b){return String(b.id||b.className||'')}),
+      count: btns.length
+    })
+  })()`))
+  ok(
+    shellStub.includes('"installed":true') && shellStub.includes('"marker":"android"') &&
+      settingsBtn === 'opened' && connNavClicked === 'clicked' && closedFiles === 'closed-by-x',
+    '★ 设置页从 **DSH 左侧栏**进去（抽屉 → 设置 →「连接与设备」✓）—— 有壳才会注入那第五项 ✓',
+    `${closedFiles}｜假壳=${shellStub}｜${settingsBtn}｜${connNavClicked}`,
+  )
+  ok(
+    /"gear":null/.test(gearAudit) && /"gearAny":0/.test(gearAudit) && /"count":1/.test(gearAudit),
+    '★ 文件面板右上角的齿轮**已经彻底删除**（DOM 里没有 ✓、头部只剩关闭键 ✓ —— 本轮第 ③ 条）',
+    gearAudit,
+  )
   ok(/解除配对/.test(settingsText) && /电脑指纹/.test(settingsText), '设置视图显示连接状态与本机凭据', settingsText.slice(0, 46))
   ok(/10\.|\[/.test(settingsText) || /地址/.test(settingsText), '设置视图显示当前地址（排障时第一眼要看的东西）', settingsText.slice(0, 30))
-
-  // 齿轮是**开关**：在设置页再点一次应回到文件视图（用户要的"再点一次返回工作目录"）
-  await ev("document.getElementById('dsh-mobile-sheet-gear').click()")
-  await sleep(1200)
-  const backTitle = String(await ev("(function(){var t=document.querySelector('.dshm-sheet-title');return t?t.textContent:''})()"))
-  const backWs = await ev("document.querySelectorAll('.dshm-ws').length")
-  const backBody = String(await ev("(function(){var b=document.getElementById('dsh-mobile-sheet-body');return b?b.innerText.replace(/\\s+/g,' '):''})()"))
-  // 空态也要算"回到文件视图"：这个临时家目录本来就没有工作区，
-  // 断言若硬要求"有工作区行"就会在**正确行为**上失败（第一版就是这样）。
-  ok(
-    backTitle === '电脑文件目录' && (Number(backWs) > 0 || /还没有工作区/.test(backBody)),
-    '设置页再点齿轮回到文件视图（齿轮是开关）',
-    `${backTitle} / ${backWs} 个工作区 / ${backBody.slice(0, 20)}`,
-  )
-  // 再切回设置，继续验下面的解除配对
-  await ev("document.getElementById('dsh-mobile-sheet-gear').click()")
-  await sleep(1200)
 
   // 两次点击确认（防误触），随后应清除本机凭据并回到配对页
   await ev("(function(){var b=document.querySelector('.dshm-set-danger');if(b)b.click()})()")

@@ -6,7 +6,9 @@
  *
  * Gradle + AGP 会带来一长串与 JDK 版本的耦合 ✗（这台机器上装的是 **JDK 26**，
  * 而 AGP 目前通常只认 17/21 ✓），还要多下 ~200 MB 的 Gradle 发行包 ✗。
- * 而我们这个壳**一个第三方依赖都没有** ✓（只用框架自带的 `android.webkit.WebView` ✓），
+ * 而我们这个壳**几乎没有第三方依赖** ✓（round 143 之前是**零** ✓，仅用框架自带的
+ * `android.webkit.WebView` ✓；现在多了一个**纯 Java 的** ZXing core ✓ ——
+ * 见下面 §第三方 jar ✓，它同样不需要 Gradle ✓），
  * 于是 build-tools 里那几件工具就够 ✓：
  *
  * ```
@@ -27,10 +29,23 @@
  *    壳用它做**证书固定** ✓（于是用户不用把 CA 装进系统信任库 ✓，
  *    也就没有"网络可能受到监控"那条常驻提示 ✓）。
  *
+ * ## 第三方 jar（round 143 起**有一个** ✗ —— 扫码解码用的 ZXing ✓）
+ *
+ * `native/android/libs/zxing-core-3.5.3.jar` ✓（Apache-2.0 ✓，纯 Java ✓，
+ * 来源/版本/sha256 见 `native/android/libs/README.md` ✓）。
+ * 它同时进两处 ✓：`javac -cp` ✓（编译期）与 `d8` 的输入 ✓（打包进 dex ✓）。
+ *
+ * ★ 两条硬规矩 ✗：
+ *   1. **构建时绝不联网** ✓ —— jar 是 vendor 进仓库的 ✓，脚本只读本地文件 ✓；
+ *   2. **sha256 对不上就构建失败** ✓（见 {@link ZXING_CORE_SHA256} ✓）——
+ *      "仓库里的 jar 被人换掉/改坏"这一类事故必须**在构建这一步**就红 ✗
+ *      （它一旦混进 APK，真机上是 `NoClassDefFoundError` 或者更糟 ✗，而本机验不了 ✗）。
+ *
  * 用法：`node scripts/build-apk.mjs [--out dist/dsh-mobile.apk]`
  */
 
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -44,6 +59,15 @@ const platform = process.env.DSHM_ANDROID_PLATFORM ?? 'android-35'
 const buildTools = process.env.DSHM_BUILD_TOOLS ?? '35.0.0'
 const androidJar = join(sdkRoot, 'platforms', platform, 'android.jar')
 const toolsDir = join(sdkRoot, 'build-tools', buildTools)
+
+/**
+ * ★★ 扫码解码库（round 143 ✓）—— 见 `native/android/libs/README.md` ✓。
+ * 版本与 sha256 **都钉死在这里** ✓：换版本要三处一起改 ✓（文件名 / 这两个常量 / README ✓）。
+ */
+const zxingJar = join(androidDir, 'libs', 'zxing-core-3.5.3.jar')
+const ZXING_CORE_VERSION = '3.5.3'
+const ZXING_CORE_SHA256 = '8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82'
+
 const outPath = (() => {
   const index = process.argv.indexOf('--out')
   return index >= 0 && process.argv[index + 1] !== undefined
@@ -86,6 +110,32 @@ for (const [label, path] of [
     )
   }
 }
+
+/**
+ * ★ 扫码解码库必须在、而且**必须是我们 vendor 的那一份** ✓（见文件头 §第三方 jar ✓）。
+ * 这一段刻意放在"下载/解压"之前 ✓：宁可构建刚开始就红 ✗，
+ * 也不要等 d8 跑到一半报一个"找不到类"✗ —— 那个报错完全指不到"jar 被换了"这个真因 ✓。
+ */
+if (!existsSync(zxingJar)) {
+  fail(
+    `找不到扫码解码库：${zxingJar}\n` +
+      `        它是 vendor 进仓库的（ZXing core ${ZXING_CORE_VERSION}，Apache-2.0 ✓）——\n` +
+      '        补回来的办法见 native/android/libs/README.md ✓（构建**不会**联网去拉 ✗）',
+  )
+}
+{
+  const actual = createHash('sha256').update(readFileSync(zxingJar)).digest('hex')
+  if (actual !== ZXING_CORE_SHA256) {
+    fail(
+      `扫码解码库的 sha256 对不上 ✗：\n` +
+        `        期望 ${ZXING_CORE_SHA256}\n` +
+        `        实际 ${actual}\n` +
+        '        说明这个 jar 被换过/改坏了 ✗ —— 见 native/android/libs/README.md ✓',
+    )
+  }
+  log(`扫码解码库已校验 ✓（ZXing core ${ZXING_CORE_VERSION}，sha256 ${actual.slice(0, 16)}… ✓）`)
+}
+
 
 rmSync(buildDir, { recursive: true, force: true })
 mkdirSync(join(buildDir, 'gen'), { recursive: true })
@@ -143,15 +193,31 @@ run(join(toolsDir, 'aapt2'), [
 ])
 log('资源与清单已链接 ✓')
 
-// ── ④ 编译 Java（只依赖框架，无第三方 ✓）
+// ── ④ 编译 Java（框架 + 那一个 vendor 进来的 jar ✓ —— 见文件头 §第三方 jar ✓）
 const sources = run('find', [join(androidDir, 'java'), join(buildDir, 'gen'), '-name', '*.java'])
   .split('\n')
   .filter((line) => line.trim() !== '')
-run('javac', ['--release', '11', '-cp', androidJar, '-d', join(buildDir, 'classes'), ...sources])
-log(`Java 已编译（${sources.length} 个源文件 ✓）`)
+/**
+ * ★ 类路径分隔符在 macOS/Linux 上是 `:` ✓（本脚本只在这两种系统上跑 ✓）。
+ * 把 jar 加进 `-cp` 是为了 `ScanActivity` 能 `import com.google.zxing.*` ✓；
+ * 真正把它**打进 dex** 的是下面第 ⑤ 步 ✓（两件事，别混 ✓）。
+ */
+const classPath = [androidJar, zxingJar].join(':')
+run('javac', ['--release', '11', '-cp', classPath, '-d', join(buildDir, 'classes'), ...sources])
+log(`Java 已编译（${sources.length} 个源文件 ✓，含壳里的扫码界面 ✓）`)
 
 // ── ⑤ dex（★ d8 要求输出目录**先存在** ✗ —— 不建就会报 'Output must be ... an existing directory' ✓）
 mkdirSync(join(buildDir, 'dex'), { recursive: true })
+/**
+ * ★ 输入有两部分 ✓：壳体自己的 `.class` ✓ + **整个 ZXing jar** ✓。
+ *
+ * 为什么是**整包**、而不是只挑 `qrcode` + `common` 那几十个类 ✗：
+ * 挑着 dex 一旦漏掉一个**间接引用**，真机扫码时就是 `NoClassDefFoundError` ✗ ——
+ * 而"真机扫码"这件事**本机验不了** ✗（没有相机、没有真机 ✓）。
+ * 代价是 classes.dex 大 **+458 KB** ✓（58 KB 的 APK → ~520 KB ✓）——
+ * 对一个"局域网下载、装一次"的壳，这个代价换"不会缺类"是划算的 ✓。
+ * 理由与实测数字写在 `native/android/libs/README.md` ✓。
+ */
 run(join(toolsDir, 'd8'), [
   '--release',
   '--min-api', '29',
@@ -160,6 +226,7 @@ run(join(toolsDir, 'd8'), [
   ...run('find', [join(buildDir, 'classes'), '-name', '*.class'])
     .split('\n')
     .filter((line) => line.trim() !== ''),
+  zxingJar,
 ])
 run('zip', ['-q', join(buildDir, 'base.apk'), 'classes.dex'], { cwd: join(buildDir, 'dex') })
 log('classes.dex 已放入 APK ✓')

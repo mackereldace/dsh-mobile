@@ -22,7 +22,7 @@ whenToUse: 在 工程设计/dsh-mobile 下开发、验收、或记录改动
 
 ```bash
 pnpm typecheck        # tsc --noEmit -p tsconfig.json
-pnpm test             # node --test packages/*/test/**/*.test.ts（13 个测试文件）
+pnpm test             # node --test packages/*/test/**/*.test.ts（**16** 个测试文件，2026-09-27 实测）
 pnpm build            # node scripts/build-lib.mjs
 pnpm build:check      # 构建校验
 pnpm check:prod       # ★ 生产自检：一条命令回答"现在到底好不好、缺什么"
@@ -75,7 +75,11 @@ node scripts/ui-preview.mjs     # 起真实 DSH + 代理 + 移动视口，自动
 
 ## ★ rounds 归档纪律
 
-改动按四类记进 `05-项目进度与改动评估.md`（已 271 KB）：
+改动按四类记（A 真正的产品能力 / B 修掉自己引入的缺陷 / C 纯弯路 / D ★ 最具长期价值——**"以后不会再这样"**）。
+
+**写到哪儿（2026-09-27 更正）**：新轮次写进 **`10-交接文档.md`**（§4.1x 按轮次追加）。
+`05-项目进度与改动评估.md` 已膨胀到 **288 KB**、"总体进度"总纲重复 **15 份**，
+只在必要时追加——它是历史日志，不是当前入口。`14-项目评估与整改清单.md` 是外部体检给的整改清单。
 
 | 类 | 含义 |
 |---|---|
@@ -99,6 +103,34 @@ scripts/                       ← 验收脚本矩阵
 ## 安全提醒
 
 `dist/` 下有 `dshm-debug.keystore`，且 `dist/` 已在 `.gitignore` 中。**不要把它加进版本控制。**
+
+## ★ 五条硬纪律（2026-09-27 补，每条都是血换的）
+
+1. **`boot.js` 只允许精确字符串替换**（禁下标切片 / 按注释整段替换——已两次造成 685/754 行死区）。
+   每改完**必跑** `grep -o "^  function [A-Za-z0-9_]*(" packages/client/src/boot.js | sort | uniq -d`
+   ⇒ **必须无输出**（同名函数后者胜出，症状只有"改了完全不生效"却全绿，两次死区唯一抓住它的就是这条）。
+2. **验收断言只许加、不许松**：`EXPECTED_MIN_CHECKS` 只能**上调**；
+   新行为必须做**变异验证**（把实现临时回退 ⇒ **恰好**新增那几条红、其余全绿 ⇒ 恢复后全绿）。
+3. **构建 ≠ 部署**：`pnpm build` 只写 `packages/*/lib`；**只有 `install-host-plugin.mjs` 才把
+   `boot.js` / APK 装进 profile**（"验收全绿、手机上还是旧的"就是这么来的）。
+   `scripts/restart-lan.sh` **只能人在终端跑**——从 agent 会话里跑会把 DSH 连同对话一起停掉。
+4. **两单不许同时改同一个文件**（`boot.js` / `packages/host/src/index.ts` 这类必须一个 agent 独占）；
+   成规模的实现/排查**派子智能体**，主线只做分派、复核与文档汇整。
+5. **`devices.json` 改完必须立刻重启**（`DeviceStore` 只在构造时 `load()` 一次、之后整张内存表覆盖写文件），
+   否则删掉的条目会被下一次 `touch()` 原样写回；用 `scripts/clean-devices.mjs` + 立刻重启。
+
+## ★ 这个技能长期没被用上（发现路径的坑，别再把文件搬走）
+
+它原本只躺在 `dsh-mobile/.dsh/skills/`，而**会话的工作目录是上一级 `工程设计/`**
+⇒ 技能发现看不到它 ⇒ 2026-09-26 之前**从没被任何 agent 加载过**（每轮派单都在手抄这些规矩）。
+现在有两处软链指向仓库里这一份（**单一事实来源不变**）：
+
+```
+~/.dsh/skills/dsh-mobile-verify                                 → 仓库里的 SKILL.md
+/Volumes/Data/workspace/工程设计/.dsh/skills/dsh-mobile-verify   → 同上
+```
+
+⇒ **要改内容就改仓库里那份**：`dsh-mobile/.dsh/skills/dsh-mobile-verify/SKILL.md`（软链自动跟随）。
 
 ## 相关技能
 
