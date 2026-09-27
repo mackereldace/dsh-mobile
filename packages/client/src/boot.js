@@ -6925,6 +6925,20 @@
        *      顶栏"空一下"的问题另行解决 ✓（不能用 z-index ✗）。
        */
       'body[data-dshm-dsh-preview="1"] #dsh-mobile-top { visibility: hidden; }',
+      /**
+       * ★★ round 169（用户实拍："预览只是让顶栏在状态栏的时间更短暂了些，**表现为闪烁**"✗）：
+       *   上面那条靠**标记**（JS 探测写的 ✓ —— 200ms 轮询 + 观察者 ✓，实测最多慢半拍 ✓）
+       *   ⇒ 预览刚出现的那一两百毫秒里顶栏还画着 ✓（而壳的 insets 还没上报 ⇒ 它先挤进状态栏 ✓）
+       *   = 用户看到的**闪烁** ✗。
+       * ⇒ 补一条**纯 CSS 的结构判据** ✓（`body:has(预览层)` ✓，与 round 167 抬 z-index 用的是同一条 ✓）：
+       *   DOM 里一出现预览层，**同一帧**就藏 ✓，不等任何 JS ✓。两条并存 ✓（哪条先成立都行 ✓）。
+       */
+      'body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) #dsh-mobile-top {',
+      '  visibility: hidden !important;',
+      '}',
+      'body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) [data-dshm-lineage-host] {',
+      '  opacity: 0 !important; pointer-events: none !important;',
+      '}',
       'body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }',
       /**
        * ★★ round 165（用户 B ✓）：**DSH 预览开着时，子代理入口也必须让开** ✗✗ ——
@@ -6963,7 +6977,19 @@
        *     —— 一步到位、零闪烁 ✓。
        * `!important` 与"body[attr] + #id"的特异度都压得过 `#dsh-mobile-sheet[data-open="1"]` ✓。
        */
-      'body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important; }',
+      /**
+       * ★★ round 169（**用户拍板后的最终形态** ✓）：这里原来有一条
+       *   `body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important; }` ✗ ——
+       *   round 158 用它实现"预览开着时**不画**面板" ✓（当时的理由：面板 z-index 85 > 右栏 25 ⇒
+       *   面板会盖在预览上 ✗）。**那条理由已经被 round 167 的"把右栏抬到 190"解决掉了** ✓
+       *   ⇒ 面板再也不需要在**显示**上做手脚 ✗。
+       * 而它留着反而制造了用户实拍的"**一起把文件面板返回，然后再拉起**"✗：
+       *   面板在预览期间被 `display:none` ✓ ⇒ 预览一关，它**重新出现**（还往往伴随
+       *   `restoreFilesAfterDshPreview` 里那次重开/重画 ✓）= 屏幕上就是"消失 → 再出现" ✗。
+       * ⇒ 现在：**面板一直画着**（被预览压在底下 ✓，用户看不见 ✓）、**状态一直 open** ✓、
+       *   预览一关**它本来就在** ✓（同一个节点、同一个目录、同一份滚动位置 ✓）——
+       *   这才是用户要的"**平滑回到打开前**" ✓（round 167/168 两轮下来，最后缺的就是这一条 ✓）。
+       */
       '.dshm-md-math { display: inline-block; vertical-align: baseline; }',
       '.dshm-md-math[data-display="1"] { display: block; margin: 10px 0; overflow-x: auto; text-align: center; }',
       '.dshm-md-math[data-dshm-math="pending"], .dshm-md-math[data-dshm-math="failed"] {',

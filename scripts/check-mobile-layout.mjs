@@ -5609,9 +5609,9 @@ try {
         previewLayerBox.found === true &&
         previewLayerBox.w >= 400 &&
         previewLayerBox.h >= 800 &&
-        sheetDuringPreview === 'none' &&
+        sheetDuringPreview !== 'none' &&
         centerHit.indexOf('"inPreview":true') >= 0,
-      '★ 158-B-① DSH 预览那一层**真的盖住整屏**（宽度 ≥ 视口 80% ✓、高度 ≥ 视口一半 ✓），而且预览开着时**我们的文件面板一个像素都不画**（`display:none` ✓、`data-dshm-files` 仍是 `open` ✓）⇒ `elementFromPoint(屏幕中心)` 命中的是**预览**而不是面板 ✓（实测面板 z-index 85 > 右栏 25 ⇒ 不主动不画就一定会盖住预览 ✗）',
+      '★ 158-B-①（round 169 重钉 ✓）DSH 预览那一层**真的盖住整屏**（宽度 ≥ 视口 80% ✓、高度 ≥ 视口一半 ✓），而且预览开着时**我们的文件面板照旧画着**（状态全程 `open` ✓、`display` 不再是 `none` ✓）、却**被预览压在底下** ⇒ `elementFromPoint(屏幕中心)` 命中的是**预览**而不是面板 ✓。★ 判据从 round 158 的"不画面板（`display:none`）"换成了**层序证明** ✓：那时面板 z-index 85 > 右栏 25 ⇒ 只能靠"不画"躲开 ✗；round 167 把右栏抬到 190 之后 ✓，正确做法是**让面板老实待在底下** ✓ —— 这也是用户拍板的"平滑回到打开前"（面板不再"消失→再出现"✓）',
       `预览标记=${JSON.stringify(markerAfterTap)}｜预览层=${JSON.stringify(previewLayerBox)}｜面板 display=${JSON.stringify(sheetDuringPreview)}｜中心命中=${centerHit}`,
     )
 
@@ -13608,10 +13608,9 @@ try {
         previewChrome.lineageHost !== null &&
         previewChrome.lineageHost.opacity === '0' &&
         previewChrome.lineageHost.pointerEvents === 'none' &&
-        previewChrome.sheetDisplay === 'none' &&
         previewChrome.topVisibility === 'hidden' &&
         previewChrome.push === '0px',
-      '★★ 第 165 条（round 166 补）：**预览开着时，四个浮动件全部让开** ✓ —— 子代理入口 `opacity:0` + `pointer-events:none` ✓（用户报的"子代理在文件预览上方"就是它 ✗）、我们面板 `display:none` ✓、顶栏 `visibility:hidden` ✓、让位量归零 ✓（探针是一个**盖住视口的同形层** ✓，走的是线上那条 200ms 探测链 ✓，不是直接冒充标记 ✗）',
+      '★★ 第 165 条（round 166 补，round 169 修订 ✓）：**预览开着时，我们的浮动件让开** ✓ —— 子代理入口 `opacity:0` + `pointer-events:none` ✓（用户报的"子代理在文件预览上方"就是它 ✗）、顶栏 `visibility:hidden` ✓、让位量归零 ✓（探针是一个**盖住视口的同形层** ✓，走的是线上那条 200ms 探测链 ✓，不是直接冒充标记 ✗）。★ 面板那一条**不在本断言里** ✓：round 169 起面板**不再被藏**（改成被预览压在底下 ✓），层序由 158-B-① 用命中测试证明 ✓',
       `假预览层立起后：${JSON.stringify(previewChrome)}`,
     )
     // 收尾：撤掉假预览层 ✓，并等标记自己落回去 ✓（别把"预览开着"留给后面的断言 ✗）
