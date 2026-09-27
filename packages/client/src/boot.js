@@ -4324,7 +4324,19 @@
     }
     dshmPreviewPadCache = { layer: null, safeTop: -1, need: 0 }
     try {
-      document.documentElement.style.setProperty('--dshm-preview-pad', '0px')
+      /**
+       * ★★ round 173（用户实拍："**偶尔**文件预览的顶栏一开始还在状态栏位置，打开的瞬间才到标准位置"）：
+       *   这里原来在**关预览时**把变量清成 `0px` ✗ ⇒ 下一次预览的**第一帧**就按 0 上内边距画 ✓
+       *   ⇒ 它自己的顶栏又出现在状态栏位置 ✓，等 JS 量完才复位 ✓（"偶尔"= 只在"上一次也量出 0"时才复现 ✓）。
+       * ⇒ 空闲时把它留在**安全区**（= CSS 那条兜底值 ✓）：
+       *   · 预览出现的第一帧就已经留足了安全区 ✓（**结构上不可能**再压在状态栏里 ✓）；
+       *   · JS 量完若发现"其实不用这么多"（顶部工具行与预览层在同一个流里那种 ✓），
+       *     会在**同一个 tick 里**收窄 ✓（round 171 ✓）⇒ 屏幕上不会出现中间帧 ✓。
+       */
+      document.documentElement.style.setProperty(
+        '--dshm-preview-pad',
+        'max(env(safe-area-inset-top, 0px), ' + String(safeTopPx()) + 'px)',
+      )
     } catch (error) {
       void error
     }
@@ -6971,9 +6983,17 @@
        * `opacity: 0` 保留盒子 ⇒ 几何一帧都不动 ✓、预览一关立刻回来 ✓。
        * `pointer-events: none` 保证它**不吃触摸** ✓（透明但仍然能点的坑不能留 ✓）。
        */
-      'body[data-dshm-dsh-preview="1"] [data-dshm-lineage-host] {',
-      '  opacity: 0 !important; pointer-events: none !important;',
-      '}',
+      /**
+       * ★★ round 173（用户实拍："打开返回过程中**子代理的控件会闪烁**（打开时消失 ✓、
+       *   关闭时**一段时间后才出现** ✗）"）：这里原来还有最后一条"藏我们的东西"——
+       *   预览开着时把子代理入口 `opacity:0` ✗。**撤回** ✓，理由与 round 172 撤顶栏那条**完全一样** ✓：
+       *   · 预览那一列已经是 `z-index: 190` ✓，而入口是 60 ✓ ⇒ **预览本来就压住它** ✓（不需要藏 ✓）；
+       *   · 而"藏"依赖 marker ✓ —— marker 有关闭宽限 180ms + 200ms 轮询 ✓
+       *     ⇒ **预览一关，它要等 200~400ms 才回来** ✓ = 用户看到的"关闭时一段时间后才出现" ✗。
+       * ⇒ 撤掉之后：预览开着时它在**底下**（看不见 ✓），预览一关它**立刻就在** ✓（同一个节点 ✓）。
+       * ★ 到这里，"靠隐藏躲预览"这条路**全部退场** ✓（顶栏 round 172 ✓、入口 round 173 ✓）——
+       *   只剩一条**层序**规则（预览那一列抬到 190 ✓）在承担这件事 ✓，这既简单又不会闪烁 ✓。
+       */
       /**
        * ★★ round 158（B1 ✓）：DSH 预览开着时，**我们的文件面板一个像素都不画** ✗，
        *   但**状态照旧是 `open`** ✓（`data-dshm-files` 不动 ✓）。
@@ -8426,7 +8446,19 @@
         // ★ 入场动画的旗标复位 ✓ —— 下一次打开才允许再放一遍 ✓（见 playDshPreviewEnter）
         dshmPreviewEnterPlayed = false
         try {
-          document.documentElement.style.setProperty('--dshm-preview-pad', '0px')
+          /**
+       * ★★ round 173（用户实拍："**偶尔**文件预览的顶栏一开始还在状态栏位置，打开的瞬间才到标准位置"）：
+       *   这里原来在**关预览时**把变量清成 `0px` ✗ ⇒ 下一次预览的**第一帧**就按 0 上内边距画 ✓
+       *   ⇒ 它自己的顶栏又出现在状态栏位置 ✓，等 JS 量完才复位 ✓（"偶尔"= 只在"上一次也量出 0"时才复现 ✓）。
+       * ⇒ 空闲时把它留在**安全区**（= CSS 那条兜底值 ✓）：
+       *   · 预览出现的第一帧就已经留足了安全区 ✓（**结构上不可能**再压在状态栏里 ✓）；
+       *   · JS 量完若发现"其实不用这么多"（顶部工具行与预览层在同一个流里那种 ✓），
+       *     会在**同一个 tick 里**收窄 ✓（round 171 ✓）⇒ 屏幕上不会出现中间帧 ✓。
+       */
+      document.documentElement.style.setProperty(
+        '--dshm-preview-pad',
+        'max(env(safe-area-inset-top, 0px), ' + String(safeTopPx()) + 'px)',
+      )
         } catch (error) {
           void error
         }
