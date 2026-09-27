@@ -4512,6 +4512,18 @@
      * （万一标记没打上，几何事实还能兜住 ✓）。
      */
     var previewOpen = body.dataset.dshmDshPreview === '1'
+    /**
+     * ★★ round 178（**"还是闪"的真机制** ✓）：`data-dshm-preview-pending` = "**我们刚请求过预览、
+     *   它还没被认出来**" ✓（在 `openFileInDshPreview` 里、调桥**之前**就打上 ✓，四条路都会清 ✓）。
+     *   为什么必须有它 ✗：PDF 那一层要**渲染一会儿**才进 DOM ✓ ⇒ 这段"加载窗口"里探测器返回 null ✗
+     *   ⇒ 本函数的 `previewOpen` 就成了 false ✗ ⇒ 它**不但不推，还会去 `restoreTopChrome()`
+     *   把之前推下去的还原** ✗✗ ⇒ 等那一层真出现、我们再推上去 ⇒ **一还原一推 = 用户看到的"闪"** ✓✓。
+     *   ⇒ 把 pending 也算进"预览开着" ✓：从"点了文件"那一刻起，本函数就一直在**推** ✓，
+     *   而且 round 177 的短轮询（60ms ✓）保证**只要那一刻的元素一出现就被推** ✓。
+     * ★ 稳态无副作用 ✓：pending 只在"我们请求预览之后、它还没被认出来"这段里存在 ✓
+     *   （认出来 ⇒ `syncDshPreviewState` 清掉它 ✓；打不开 / 12s 超时 ⇒ 也清掉 ✓）。
+     */
+    if (!previewOpen && body.dataset.dshmPreviewPending === '1') previewOpen = true
     if (!previewOpen && layer !== null && layer !== undefined) {
       try {
         var lr = layer.getBoundingClientRect()
@@ -4536,21 +4548,35 @@
      */
     if (!previewOpen) {
       try {
-        var midHit = document.elementFromPoint(
-          Math.round(window.innerWidth / 2),
-          Math.round(window.innerHeight / 2),
-        )
-        var walk = midHit
-        for (var walkDepth = 0; walkDepth < 8 && walk !== null && walk !== undefined; walkDepth++) {
-          var wr = walk.getBoundingClientRect()
-          var walkId = String(walk.id || '')
-          var isOurs = walkId.indexOf('dsh-mobile') === 0 || walkId.indexOf('dshm-') === 0
-          if (!isOurs && wr.width >= window.innerWidth * 0.95 && wr.height >= window.innerHeight * 0.95) {
-            previewOpen = true
-            break
+        /**
+         * ★ round 178：这里原来用 `elementFromPoint`（**只拿最上面那一个** ✗）——
+         *   而"点了文件、预览还在加载"那段里，最上面那个往往是**我们自己的文件面板** ✗
+         *   （面板 256px 宽、正好盖住视口中心 ✓）⇒ 从它往上走只能走到我们自己的层和 body ✗
+         *   ⇒ 永远判不出"预览开着" ✗。改成 `elementsFromPoint`（**那一点上的所有层** ✓）：
+         *   预览层就算被我们的面板压着 ✓，也会出现在这个栈里 ✓ ⇒ 照样能认出来 ✓。
+         */
+        var stack = []
+        try {
+          stack = document.elementsFromPoint(
+            Math.round(window.innerWidth / 2),
+            Math.round(window.innerHeight / 2),
+          ) || []
+        } catch (error) {
+          stack = []
+        }
+        for (var si = 0; si < stack.length && !previewOpen; si++) {
+          var walk = stack[si]
+          for (var walkDepth = 0; walkDepth < 8 && walk !== null && walk !== undefined; walkDepth++) {
+            var wr = walk.getBoundingClientRect()
+            var walkId = String(walk.id || '')
+            var isOurs = walkId.indexOf('dsh-mobile') === 0 || walkId.indexOf('dshm-') === 0
+            if (!isOurs && wr.width >= window.innerWidth * 0.95 && wr.height >= window.innerHeight * 0.95) {
+              previewOpen = true
+              break
+            }
+            if (walk === document.body) break
+            walk = walk.parentElement
           }
-          if (walk === document.body) break
-          walk = walk.parentElement
         }
       } catch (error) {
         void error
@@ -8510,10 +8536,36 @@
                     '@' + Math.round(dr.top) + 'h' + Math.round(dr.height) + ':' + dpos,
                 )
               }
+              /**
+               * ★ round 178：再带上"**状态栏那一条带子里当下是谁**" ✓（两个 x 各取最上面 2 个 ✓）。
+               *   这一条是给"万一还闪"准备的 ✓ —— 那时这张图能直接点出**是哪一层**在状态栏里 ✗
+               *   （是预览层之外的工具行 ✓、还是别的 ✓），我就不用再猜 ✓。
+               */
+              var diagBand = []
+              try {
+                var diagY = Math.max(1, Math.min(Math.round(safeTopPx() / 2), safeTopPx() - 2))
+                var diagXs = [Math.round(window.innerWidth * 0.4), Math.round(window.innerWidth * 0.6)]
+                for (var dx = 0; dx < diagXs.length; dx++) {
+                  var dstack = document.elementsFromPoint(diagXs[dx], diagY) || []
+                  for (var ds = 0; ds < dstack.length && ds < 2; ds++) {
+                    var dnode = dstack[ds]
+                    var dr2 = dnode.getBoundingClientRect()
+                    diagBand.push(
+                      String(dnode.tagName || '').toLowerCase() + '.' +
+                        String(dnode.className || '').split(' ')[0] +
+                        '(' + Math.round(dr2.width) + '×' + Math.round(dr2.height) + ',top' + Math.round(dr2.top) +
+                        ',' + getComputedStyle(dnode).position + ')',
+                    )
+                  }
+                }
+              } catch (error) {
+                void error
+              }
               debugBoxLine(
                 '[preview] 升沿：pad=' + (diagPad === '' ? '(空)' : diagPad) +
                   '｜safeTop=' + String(safeTopPx()) + '｜layerTop=' + String(diagTop) +
-                  '｜层内 fixed/sticky=' + (diagKids.length === 0 ? '无' : diagKids.join('、')),
+                  '｜层内 fixed/sticky=' + (diagKids.length === 0 ? '无' : diagKids.join('、')) +
+                  '｜状态栏那条带子里=' + (diagBand.length === 0 ? '空' : diagBand.join(' / ')),
               )
             }
           } catch (error) {
