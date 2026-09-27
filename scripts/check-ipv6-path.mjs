@@ -31,7 +31,21 @@ import { explainMissingDsh, resolveDsh } from './resolve-dsh.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const PROXY_PORT = Number(process.env['IPV6_PROXY_PORT'] ?? 3901)
 const TLS_PORT = Number(process.env['IPV6_TLS_PORT'] ?? 3943)
-const LAN_IP = process.env['IPV6_LAN_IP'] ?? '10.34.221.181'
+/**
+ * ★★ 局域网 IP **必须动态探测** ✗ —— 这里原来回退到写死的 `10.34.221.181` ✓。
+ *   与 `e2e-pairing.mjs`、`check-mobile-layout.mjs:33`、`ui-preview.mjs` 是**同一个坑** ✓
+ *   （那台机器换过一次 DHCP 地址 ⇒ 写死的旧地址不通 ⇒ 临时实例只信任旧 authority ✗ ⇒ 断言全红 ✓，
+ *   而**看起来**像被测功能坏了 ✗）。仍然支持 `IPV6_LAN_IP` 覆盖 ✓（调试用 ✓）。
+ */
+const LAN_IP =
+  process.env['IPV6_LAN_IP'] ?? (await import(join(here, 'detect-lan-ip.mjs'))).detectLanIp()
+if (LAN_IP === undefined || LAN_IP.length === 0) {
+  console.error(
+    '[check-ipv6-path] 探测不到局域网 IP ⇒ 拒绝继续（**绝不回退到一个可能过期的旧地址** ✗）\n' +
+      '                 请显式指定：IPV6_LAN_IP=<你的局域网 IP> node scripts/check-ipv6-path.mjs',
+  )
+  process.exit(1)
+}
 const PHONE_IP = process.env['IPV6_PHONE_IP'] ?? '10.33.129.145' // 仅用于 x-forwarded-for
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

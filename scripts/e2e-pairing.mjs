@@ -42,7 +42,28 @@ import { explainMissingDsh, resolveDsh } from './resolve-dsh.mjs'
 // 随机端口会让票据端点与手机实际访问的 origin 不一致——那样测的就不是链路而是拒绝逻辑。
 const DSH_PORT = Number(process.env['E2E_DSH_PORT'] ?? 3600 + Math.floor(Math.random() * 300))
 const PROXY_PORT = Number(process.env['E2E_PROXY_PORT'] ?? DSH_PORT + 1)
-const LAN_IP = '10.34.221.181'
+/**
+ * ★★ 局域网 IP **必须动态探测** ✗ —— 这里原来写死成 `10.34.221.181` ✓。
+ *
+ * 后果（**本轮实测** ✓）：电脑换网络后 IP 变成 `10.34.255.229` ✓ ⇒ 这个临时实例只信任**旧** authority ✗
+ * ⇒ 走 `http://${LAN_IP}:${PROXY_PORT}/…` 的那三条断言（短码入口 302 ✓ / 带票据的 Location ✓ / 无效码 404 ✓）
+ * 全部报"HTTP 请求失败" ✗ —— 而它**看起来**像配对逻辑坏了 ✗（其实是那个地址已经不通了 ✓）。
+ *
+ * 这正是 `check-mobile-layout.mjs:33` 记过的**同一个坑** ✓ —— ★ **那次只改了一半** ✗，本脚本当时漏了 ✓
+ * （与 `extraEndpoints` 那次"只改了一半"同型 ✓）。现在照它的做法（`:41` ✓）交给项目自己的 `detect-lan-ip.mjs` ✓。
+ *
+ * 与 `check-mobile-layout.mjs` 的**差别**：这里**多一道判空** ✓ —— `detectLanIp()` 找不到时返回 `undefined`
+ * （见该模块末尾 ✓），带着 `undefined` 往下跑只会得到一堆看不懂的失败 ✗ ⇒ 探不到就**明确报错退出** ✓。
+ * 仍然支持 `E2E_LAN_IP` 覆盖 ✓（调试用 ✓）。
+ */
+const LAN_IP = process.env['E2E_LAN_IP'] ?? (await import('./detect-lan-ip.mjs')).detectLanIp()
+if (LAN_IP === undefined || LAN_IP.length === 0) {
+  console.error(
+    '[e2e] 探测不到局域网 IP ⇒ 拒绝继续（**绝不回退到一个可能过期的旧地址** ✗）\n' +
+      '      请显式指定：E2E_LAN_IP=<你的局域网 IP> node scripts/e2e-pairing.mjs',
+  )
+  process.exit(1)
+}
 const AUTHORITY = `${LAN_IP}:${PROXY_PORT}`
 const DESKTOP_URL = `http://127.0.0.1:${DSH_PORT}/mobile`
 // 手机侧必须走 HTTPS：普通 HTTP 页面不是安全上下文，crypto.subtle 不存在，

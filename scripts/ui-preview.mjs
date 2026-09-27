@@ -77,7 +77,20 @@ const PREVIEW_PROFILE = 'web'
 const SOURCE_HOME = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
 /** 本次预览真正使用的**临时**家目录（生产一个字节都不会被写）✓。 */
 const DSH_HOME = mkdtempSync(join(tmpdir(), 'ui-preview-home-'))
-const LAN_IP = process.env['LAN_IP'] ?? '10.34.221.181'
+/**
+ * ★★ 局域网 IP **必须动态探测** ✗ —— 这里原来回退到写死的 `10.34.221.181` ✓。
+ *   与 `e2e-pairing.mjs:45`、`check-mobile-layout.mjs:33` 是**同一个坑** ✓（后者的注释里记了全过程 ✓）。
+ *   写死的旧地址在换网后**不通** ✓ ⇒ 预览出来的"手机视角"里 authority 是错的 ✗，
+ *   而症状看起来像 UI 坏了 ✗。仍然支持 `LAN_IP` 覆盖 ✓（沿用旧名，调试用 ✓）。
+ */
+const LAN_IP = process.env['LAN_IP'] ?? (await import(join(here, 'detect-lan-ip.mjs'))).detectLanIp()
+if (LAN_IP === undefined || LAN_IP.length === 0) {
+  console.error(
+    '[ui-preview] 探测不到局域网 IP ⇒ 拒绝继续（**绝不回退到一个可能过期的旧地址** ✗）\n' +
+      '            请显式指定：LAN_IP=<你的局域网 IP> node scripts/ui-preview.mjs',
+  )
+  process.exit(1)
+}
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const { resolveDsh, explainMissingDsh } = await import(join(here, 'resolve-dsh.mjs'))
