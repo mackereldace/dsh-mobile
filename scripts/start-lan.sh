@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# 启动"手机可访问"的 DSH：DSH 绑 loopback + 本机局域网代理 + 受信 authority。
+# 启动"手机可访问"的 DSH：DSH 绑 loopback + 插件内局域网监听 + 受信 authority。
 #
 # 为什么要三步而不是一条 --host 0.0.0.0：
 #   DSH 刻意禁用 0.0.0.0 绑定（那会把 agent 的 bash/文件写能力直接暴露到网络）。
-#   因此局域网访问走本机 TCP 代理，并让 DSH 显式信任代理后的 authority。
+#   因此局域网访问由 **DSH 插件进程内**的 listener（C1：明文 3081 / TLS 3443）提供，
+#   并让 DSH 显式信任监听端口后的 authority。
+#   ★ 没有第三个进程了：原先的 scripts/lan-proxy.mjs 已废弃（仅保留文件本身，
+#     不再由任何脚本启动）；监听现在由 DSH 自己的进程承担。
+#   ★ listener 由 DSH 在**启动时**读取 profile 配置（config.listener），所以本脚本
+#     必须在 exec 之前把配置写好；"端口是否真的被插件接起来"由 restart-lan.sh
+#     的 health_report() 负责（判据：谁在监听 PROXY_PORT）。
 #
 # 用法：
-#   bash scripts/start-lan.sh                 # 自动探测局域网 IP，DSH 3080 / 代理 3081
+#   bash scripts/start-lan.sh                 # 自动探测局域网 IP，DSH 3080 / 监听 3081+3443
 #   RESTART=1 bash scripts/start-lan.sh       # 自动优雅停掉当前的 dsh 实例再启动
+#   SYNC=1 bash scripts/start-lan.sh          # 地址不符或 listener 未开时自动重装插件配置
 #   DSH_PORT=3080 PROXY_PORT=3081 bash scripts/start-lan.sh
 #   LAN_IP=10.0.0.5 bash scripts/start-lan.sh
 #   DSH_BIN=/path/to/dsh bash scripts/start-lan.sh   # 覆盖 dsh 入口（默认用全局安装）
-# 停止：Ctrl-C（会一并停掉代理）
+# 停止：Ctrl-C（插件内监听随 DSH 进程一起停止）
 #
 # dsh 入口由 scripts/resolve-dsh.mjs 解析（PATH → npm 全局前缀 → 常见默认目录），
 # 与 live-verify.ts 共用同一份逻辑；不再扫描 npx 缓存（多版本共存会导致"改了没生效"）。
@@ -147,6 +154,9 @@ fi
 LAN_INSTALL_ARGS=(--extra-endpoint "https://${TLS_AUTHORITY}")
 # 手工修复命令里的那一份（与 TS_HINT 同一个用途 ✓ —— 少了它，用户照抄命令会漏掉学校这条 ✗）
 LAN_HINT="--extra-endpoint https://${TLS_AUTHORITY}"
+# 手工修复命令：与下面的自动重装**逐参数一致**，含 listener 那四个参数 ——
+# 用户照抄它就能把插件内监听打开（漏掉 listener 就不算修复 ✗）。
+INSTALL_HINT="node scripts/install-host-plugin.mjs --trusted-host ${AUTHORITY} --trusted-host ${TLS_AUTHORITY} ${TS_HINT} ${LAN_HINT} --listener --listener-plain 0.0.0.0:${PROXY_PORT} --listener-tls 0.0.0.0:${TLS_PORT} --phone-base-url https://${TLS_AUTHORITY}"
 
 # ── 配置一致性检查 ────────────────────────────────────────────────────
 # 插件的 trustedHosts 与 publicBaseUrl 是**安装时**按当时的 IP 写进 profile 的。
@@ -156,6 +166,40 @@ LAN_HINT="--extra-endpoint https://${TLS_AUTHORITY}"
 DSH_HOME_RESOLVED="${DSH_HOME:-$HOME/.dsh}"
 PATCH_FILE="${DSH_HOME_RESOLVED}/profiles/web/cordis.patch.yml"
 CONFIGURED_AUTHORITY=""
+# 本次是否已经成功重装过配置（避免下面两处检查各装一次）
+CONFIG_SYNCED=0
+
+# 从 profile 里读 `listener: enabled: true`（C1：插件内监听开关）。
+# 判据必须**限定在 listener 这个块内**：整个 patch 文件里还有别的 `enabled:`，
+# 拿整文件 grep 会误判"已开启"。块的结束由缩进判定（同级或更浅的下一个键）。
+listener_enabled_of() {
+  awk '
+    match($0, /^[[:space:]]*/) { indent = RLENGTH }
+    /^[[:space:]]*listener:[[:space:]]*$/ { base = indent; inside = 1; next }
+    inside == 1 {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if (indent <= base) { inside = 0; next }
+      if ($0 ~ /^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*(#.*)?$/) found = 1
+    }
+    END { if (found == 1) print "1" }
+  ' "$1" 2>/dev/null || true
+}
+
+# 同一份"写插件配置"的动作：本脚本所有自动重装都走它，避免多处参数漂移。
+# ★ listener 那四个参数**每次都必须带上**：install-host-plugin.mjs 是覆盖式重写，
+#   它内部的保留逻辑能读回 trustedHosts / extraEndpoints / phoneBaseUrl 等已知键，
+#   但"这次不传、下次还在"不是本脚本可以依赖的契约。
+install_host_plugin() {
+  node "${SCRIPT_DIR}/install-host-plugin.mjs" --dsh-home "$DSH_HOME_RESOLVED" \
+    "${TRUST_ARGS[@]}" \
+    ${TS_INSTALL_ARGS[@]+"${TS_INSTALL_ARGS[@]}"} \
+    ${LAN_INSTALL_ARGS[@]+"${LAN_INSTALL_ARGS[@]}"} \
+    --listener \
+    --listener-plain "0.0.0.0:${PROXY_PORT}" \
+    --listener-tls "0.0.0.0:${TLS_PORT}" \
+    --phone-base-url "https://${TLS_AUTHORITY}"
+}
+
 if [ -f "$PATCH_FILE" ]; then
   # ★ 先按**本机局域网 IP** 过滤，再取 head/tail。
   #   这里原本是"直接取第一条/最后一条"，而 Tailscale 那条也是 IPv4 形式、且写在后面 ——
@@ -173,20 +217,64 @@ if [ -n "$CONFIGURED_AUTHORITY" ] && { [ "$CONFIGURED_AUTHORITY" != "$AUTHORITY"
   echo "      本次探测到的是   : ${AUTHORITY} / ${TLS_AUTHORITY}"
   echo "    继续的话，手机会拿到连不上的地址、或连上后被信任栅栏拒绝。"
   if [ "${SYNC:-0}" = "1" ]; then
-    echo "    SYNC=1：正在用新地址重装插件配置…"
-    node "${SCRIPT_DIR}/install-host-plugin.mjs" --dsh-home "$DSH_HOME_RESOLVED" \
-      "${TRUST_ARGS[@]}" \
-      ${TS_INSTALL_ARGS[@]+"${TS_INSTALL_ARGS[@]}"} \
-      ${LAN_INSTALL_ARGS[@]+"${LAN_INSTALL_ARGS[@]}"} \
-      --phone-base-url "https://${TLS_AUTHORITY}" >/dev/null 2>&1 \
-      && echo "    已更新为 ${AUTHORITY}" \
-      || { echo "    重装失败，请手动执行下面的命令" >&2; }
+    echo "    SYNC=1：正在用新地址重装插件配置（含 listener）…"
+    if install_host_plugin >/dev/null 2>&1; then
+      CONFIG_SYNCED=1
+      echo "    已更新为 ${AUTHORITY}"
+    else
+      echo "    重装失败，请手动执行下面的命令" >&2
+    fi
   else
     echo "    修复（二选一）："
     echo "      SYNC=1 RESTART=1 bash scripts/start-lan.sh          # 自动重装并重启"
-    echo "      node scripts/install-host-plugin.mjs --trusted-host ${AUTHORITY} --trusted-host ${TLS_AUTHORITY} ${TS_HINT} ${LAN_HINT} --phone-base-url https://${TLS_AUTHORITY} && RESTART=1 bash scripts/start-lan.sh"
+    echo "      ${INSTALL_HINT} && RESTART=1 bash scripts/start-lan.sh"
     echo
   fi
+fi
+
+# ── 插件内监听（listener）：配置必须在 `dsh web` 起来**之前**写好 ──────────
+#
+# ★ 判据问题（本文件末尾是 `exec`，执行完 shell 就被替换掉了）：
+#   `listener` 由 DSH 进程**启动时**读取（packages/host/src/cordis.ts 的
+#   `config.listener`，**默认关闭**）⇒ "把配置写进去"这件事只能发生在 exec 之前。
+#   而"端口是否真的被插件接起来了"在 exec 之后**无法**回头检查（shell 已经没了），
+#   所以那一条判据放在 restart-lan.sh 的 health_report() 里：
+#   它问的是"到底是谁在监听 PROXY_PORT"，并能识破占着端口的孤儿 lan-proxy.mjs。
+#
+# ★ 拿不准就**明说**，不许静默：若配置仍是关的，本次启动后不会有任何进程监听
+#   3081/3443，手机侧表现为"一直重连中"，而用户在电脑上看到的一切都正常。
+LISTENER_ENABLED=0
+if [ -f "$PATCH_FILE" ] && [ -n "$(listener_enabled_of "$PATCH_FILE")" ]; then
+  LISTENER_ENABLED=1
+fi
+if [ "$LISTENER_ENABLED" != "1" ] && [ "${SYNC:-0}" = "1" ] && [ "$CONFIG_SYNCED" != "1" ]; then
+  echo "[start-lan] profile 里 listener 未开启，SYNC=1：正在写入（含 listener）…"
+  if install_host_plugin >/dev/null 2>&1; then
+    CONFIG_SYNCED=1
+    if [ -n "$(listener_enabled_of "$PATCH_FILE")" ]; then
+      LISTENER_ENABLED=1
+      echo "[start-lan] ✓ listener 已写入 profile"
+    fi
+  else
+    echo "[start-lan] ✗ 写入 listener 配置失败" >&2
+  fi
+fi
+if [ "$LISTENER_ENABLED" != "1" ]; then
+  cat >&2 <<EOF
+
+⚠️  插件内监听（listener）当前**没有开启** —— 手机入口不会生效。
+
+    现状：${PATCH_FILE} 里没有 \`listener: enabled: true\`（缺失 = 关闭）。
+    影响：DSH 起来后没有进程监听 ${PROXY_PORT}（明文）/ ${TLS_PORT}（TLS），
+          手机会一直"重连中"；而电脑本机看一切正常，很难自己发现。
+    本次启动**不会**自动变好 —— 而且**下次启动也不会**，除非重装配置。
+
+    ★ listener 由 DSH 在**启动时**读取 ⇒ 必须"重装配置 + 重启 DSH"两步才生效。
+    修复（二选一）：
+      SYNC=1 RESTART=1 bash scripts/start-lan.sh          # 自动重装并重启
+      ${INSTALL_HINT} && RESTART=1 bash scripts/start-lan.sh
+
+EOF
 fi
 
 # ── 生成/校验 TLS 证书（手机侧 HTTPS 用）────────────────────────────────
@@ -211,23 +299,35 @@ fi
 echo "dsh            : ${DSH_BIN}"
 echo "局域网地址     : ${LAN_IP}"
 echo "DSH 端口       : ${DSH_PORT}（仅 loopback）"
-echo "代理端口       : ${PROXY_PORT}（0.0.0.0）"
+echo "手机入口端口   : ${PROXY_PORT}（明文 0.0.0.0）/ ${TLS_PORT}（TLS 0.0.0.0）——由 DSH 插件进程监听"
+if [ "$LISTENER_ENABLED" = "1" ]; then
+  echo "listener 配置  : 已开启（config.listener.enabled=true）"
+else
+  echo "listener 配置  : ✗ 未开启（本次启动手机入口不可用，见上方警告）"
+fi
 echo "受信 authority : ${AUTHORITY} 与 ${TLS_AUTHORITY}"
 echo "学校/局域网    : https://${TLS_AUTHORITY}/mobile（已作为候选端点广告给手机 ✓）"
 [ -n "$TS_AUTHORITY" ] && echo "Tailscale      : ${TS_AUTHORITY}（校外入口 https://${TS_AUTHORITY}/mobile）"
 echo
 
-# 端口占用前置检查：避免"代理起来了、DSH 却因端口被占而失败"的半死状态。
+# 端口占用前置检查：避免"监听起不来、DSH 却照常启动"的半死状态。
+#
+# ★ C1 之后 3081（明文）与 3443（TLS）都由 **DSH 自己的进程**监听，而插件里
+#   "监听失败只警告不抛错"（见 packages/host/src/lan-listener.ts 的注释，且端口被占时
+#   绝不偷偷换端口）⇒ 端口被占的后果就是手机入口静默不可用，所以这里必须前置拦住。
 #
 # RESTART=1 时自动停掉**本工具自己的**遗留进程：
 #   - 占用 DSH 端口的 dsh web（最常见的场景：本机已跑着一个只绑 loopback 的实例）；
-#   - 占用代理端口的**上一次运行留下的孤儿代理**——DSH 退出时代理会变成孤儿并继续
-#     占着端口，若只识别 dsh 就会出现"要我停掉它、但我不知道那是什么"的死循环。
+#   - 占用监听端口的 dsh web（C1 之后 DSH 自己就是那个监听者）；
+#   - **已废弃的旧版第三进程 lan-proxy.mjs**：DSH 退出时它会变成孤儿并继续占着
+#     3081/3443，于是"看起来一切正常、其实搬迁没生效"。它只是历史遗留物，
+#     不是本工具的正常组件 —— 这里保留的只是"能自动清理自己的遗留进程"这一点。
 #
-# 判据是进程命令行里是否含本工具的特征（dsh web / lan-proxy.mjs）。
+# 判据是进程命令行里是否含本工具的特征（dsh web / 已废弃的 lan-proxy.mjs）。
 # 其他占用者一律拒绝自动停止——宁可让用户手动处理，也不误杀无关进程。
 if command -v lsof >/dev/null 2>&1; then
-  for port in "$DSH_PORT" "$PROXY_PORT"; do
+  # TLS_PORT 也查：它现在同样是插件在监听，被孤儿占住时手机 HTTPS 入口会静默失效。
+  for port in "$DSH_PORT" "$PROXY_PORT" "$TLS_PORT"; do
     holder="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
     [ -n "$holder" ] || continue
 
@@ -236,7 +336,7 @@ if command -v lsof >/dev/null 2>&1; then
       case "$holder_cmd" in
         *dsh*web*|*lan-proxy.mjs*)
           case "$holder_cmd" in
-            *lan-proxy.mjs*) label="上次遗留的局域网代理" ;;
+            *lan-proxy.mjs*) label="已废弃的历史遗留进程 lan-proxy.mjs" ;;
             *) label="dsh web 实例" ;;
           esac
           echo "端口 ${port} 被${label}占用（PID ${holder}），按 RESTART=1 停止它…"
@@ -262,32 +362,25 @@ if command -v lsof >/dev/null 2>&1; then
     fi
 
     echo "[start-lan] 端口 ${port} 已被占用（PID ${holder}）。" >&2
-    echo "            想自动停掉 dsh 与遗留代理，用：RESTART=1 bash scripts/start-lan.sh" >&2
-    echo "            或换端口：DSH_PORT=3090 PROXY_PORT=3091 bash scripts/start-lan.sh" >&2
+    echo "            想自动停掉 dsh 与已废弃的遗留 lan-proxy，用：RESTART=1 bash scripts/start-lan.sh" >&2
+    echo "            或换端口：DSH_PORT=3090 PROXY_PORT=3091 TLS_PORT=3444 bash scripts/start-lan.sh" >&2
     exit 1
   done
 fi
 
-# 代理：后台运行，退出时一并清理
-node "${SCRIPT_DIR}/lan-proxy.mjs" --listen "0.0.0.0:${PROXY_PORT}" --target "127.0.0.1:${DSH_PORT}" \
-  --tls-listen "0.0.0.0:${TLS_PORT}" --cert "$CERT_FILE" --key "$KEY_FILE" &
-PROXY_PID=$!
-cleanup() {
-  echo
-  echo "正在停止代理（PID ${PROXY_PID}）…"
-  kill "$PROXY_PID" 2>/dev/null || true
-  wait "$PROXY_PID" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-sleep 1
-if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-  echo "[start-lan] 代理启动失败，已中止。" >&2
-  exit 1
-fi
+# ── 监听由插件进程承担（C1）────────────────────────────────────────────
+# 原先这里在后台起 scripts/lan-proxy.mjs（第三个进程）+ cleanup/trap。
+# 现在整段删除：明文 3081 与 TLS 3443 都由 DSH 进程内建的 listener 监听，
+# 它同样对每个请求注入 x-forwarded-for（见 lan-listener.ts 的 injectForwardedFor），
+# 且"端口被占时只上报、绝不偷偷换端口"。listener 的开关 /
+# 地址已在上面写进 profile（必须在 exec 之前），端口是否真的起来见
+# restart-lan.sh 的 health_report()。
+# ★ 也删掉了原来的 cleanup/trap：本脚本末尾是 exec（前台接管），exec 之后
+#   原来的那段 cleanup 本来就不会执行；DSH 退出时插件监听随之消失。
 
 cat <<EOF
-代理已就绪。
+
+监听由 DSH 插件进程提供：明文 ${PROXY_PORT} / TLS ${TLS_PORT}（第三个进程已废弃）。
 
 电脑请访问（本机）  ： http://127.0.0.1:${DSH_PORT}/mobile
 手机请访问（局域网）： https://${TLS_AUTHORITY}/mobile   ← 必须 HTTPS
@@ -308,10 +401,13 @@ cat <<EOF
   4.【电脑】回到配对页（会自动刷新），逐段比对手机上的指纹 → 点「允许此设备」
   5. 手机自动进入 DSH 界面；日常直接开 https://${TLS_AUTHORITY}/mobile/app
 
-现在启动 DSH（Ctrl-C 会同时停掉代理）…
+现在启动 DSH（前台；Ctrl-C 停止 DSH，插件内监听随之停止）…
 EOF
 echo
 
 # ★ 用 `"${TRUST_ARGS[@]}"` 而不是手写两个：IPv6 的 authority 必须也在这里出现，
 #   否则手机在蜂窝网下走 IPv6 时，插件路由能用而 DSH 的 /api 一律 403（见上面的注释）。
+# ★ listener（明文/TLS 监听）**不在这里传参**：它由 DSH 启动时读 profile 的
+#   config.listener（上面已确保写好）。exec 之后本脚本不再有机会校验，
+#   所以"端口到底有没有被插件接起来"只能由 restart-lan.sh 的体检来判。
 exec "$DSH_BIN" web --port "${DSH_PORT}" "${TRUST_ARGS[@]}"

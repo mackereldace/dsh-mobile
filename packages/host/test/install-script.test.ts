@@ -321,3 +321,123 @@ describe('install-host-plugin：被广告出去的 endpoint 必须同时在 trus
     assert.deepEqual(trustedHosts(dir), ['10.34.255.229:3081', '10.34.255.229:3443', ipv6], 'IPv6 那条被读丢了')
   })
 })
+
+/**
+ * C1：`listener`（插件进程内的局域网监听，把 `scripts/lan-proxy.mjs` 搬进插件）。
+ *
+ * 这里钉死两条**互相独立**的契约，它们分别对应两种真实事故：
+ *
+ *   1. **老部署的 patch 逐字节不变** —— 解析后 `enabled !== true` 时一个 `listener:` 块都不发。
+ *      否则每次 `restart-lan.sh` 都会往生产配置里塞新键，插件默认关闭的语义就没了。
+ *   2. **保留式合并** —— 这次命令行没给 listener 参数时，必须从现有配置里**读回**上次的值。
+ *      本脚本是覆盖式重写，`restart-lan.sh` 每次重启都调用它 —— 少了读回就等于
+ *      "跑一次重启 ⇒ 手机入口静默换端口/被关掉"（本项目已发生过三次的那类事故）。
+ *      与 `relayUrl` / `extraEndpoints` 同一套语义（见文件头与 `readPreservedKeys` 的注释）。
+ *
+ * 另注：`--no-listener` 那条**只**断言"没有 enabled: true"，不去重复断言"不发块" ——
+ * "不发块"这个形状由下面那条逐字节用例**唯一**守着，一个契约只在一个地方表达。
+ */
+/**
+ * C1 之前（也即"老部署"）该调用形态下 patch 的**完整逐字节**内容。
+ *
+ * 之所以硬编码全文而不是只 `assert.doesNotMatch(/listener/)`：这轮改动的核心承诺是
+ * "默认关闭 ⇒ 老部署的 patch **逐字节不变**"，只有全文比对才真的测到"逐字节"。
+ * 它对 `patchBlock` 的注释文案同样敏感 —— 这是**故意**的：那段文案也是 patch 的一部分。
+ */
+const OLD_DEPLOYMENT_PATCH = [
+  '# >>> dsh-mobile host plugin (managed by scripts/install-host-plugin.mjs) >>>',
+  '# 手机端接入：/mobile/ws 加密隧道、配对与设备管理端点，并往 index.html 注入 boot.js。',
+  '# 这条 insert 位于所有 bundle 层之后，因此 webServer / typertGateway 均已就绪。',
+  '- insert:',
+  '    - id: mobile-host',
+  "      name: '@dsh-mobile/host'",
+  '      config:',
+  '        trustedHosts:',
+  "          - '10.0.0.5:3081'",
+  "          - '10.0.0.5:3443'",
+  "        publicBaseUrl: 'http://10.0.0.5:3081'",
+  '    # 预览桥（round 99）：把 DSH 自带的文档预览（KaTeX / PDF / 图片）暴露给手机外壳。',
+  '    # 它**必须**在这里被声明 ✓ —— DSH 的客户端 bundle 注册要求"与 graph 行匹配" ✓，',
+  '    # 只在页面里 load 是无效的 ✗（见 packages/bridge/lib/client.js 的说明）。',
+  '    - id: mobile-preview-bridge',
+  "      name: '@dsh-mobile/bridge'",
+  '# <<< dsh-mobile host plugin <<<',
+  '',
+].join('\n')
+
+describe('install-host-plugin：listener（C1，进程内监听）配置', () => {
+  it('--listener 装上后，在 config: 下（8 空格缩进）写出 enabled/plain/tls', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--trusted-host', '10.0.0.5:3081',
+      '--listener',
+      '--listener-plain', '0.0.0.0:3081',
+      '--listener-tls', '0.0.0.0:3443',
+    ])
+    assert.deepEqual(readConfig(dir).listener, { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+    // 形状/缩进本身也是契约（插件读的是 config.listener，位置错了就等于没配）
+    assert.match(
+      patchText(dir),
+      /\n {8}listener:\n {10}enabled: true\n {10}plain: '0\.0\.0\.0:3081'\n {10}tls: '0\.0\.0\.0:3443'\n/,
+      'listener 块的缩进或形状不对',
+    )
+  })
+
+  it('--listener 不给 plain/tls ⇒ 用默认 0.0.0.0:3081 / 0.0.0.0:3443', () => {
+    const dir = freshHome()
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--listener'])
+    assert.deepEqual(readConfig(dir).listener, { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+  })
+
+  it('★★ 先 --listener 装、再「不带 listener 参数」重装（restart-lan.sh 就是这样）⇒ listener 配置必须原样留住', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--trusted-host', '10.0.0.5:3081',
+      '--listener',
+      '--listener-plain', '0.0.0.0:3081',
+      '--listener-tls', '0.0.0.0:3443',
+    ])
+    // 这一轮一个 listener 参数都不给（覆盖式重写最容易在这里把上一轮的配置抹掉）
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081'])
+    assert.deepEqual(
+      readConfig(dir).listener,
+      { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+      'listener 配置被抹掉了（没做保留式合并）',
+    )
+  })
+
+  it('★ 重装只给 --listener（不给端口）⇒ 现有配置读回的端口留住，不被默认值顶掉', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--trusted-host', '10.0.0.5:3081',
+      '--listener',
+      '--listener-plain', '0.0.0.0:9999',
+      '--listener-tls', '0.0.0.0:9998',
+    ])
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--listener'])
+    assert.deepEqual(
+      readConfig(dir).listener,
+      { enabled: true, plain: '0.0.0.0:9999', tls: '0.0.0.0:9998' },
+      '端口退回了默认值（「命令行 > 现有配置 > 默认」这条优先级被写错）',
+    )
+  })
+
+  it('--no-listener 能覆盖掉现有的 enabled: true（关掉要真的生效）', () => {
+    const dir = freshHome()
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--listener'])
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--no-listener'])
+    const listener = readConfig(dir).listener as { enabled?: boolean } | undefined
+    assert.notEqual(listener?.enabled, true, '--no-listener 没能覆盖已有配置里的 enabled: true')
+  })
+
+  it('★★ 老部署（从不带 listener 参数）的 patch 逐字节不变：一个 listener: 块都不发', () => {
+    const dir = freshHome()
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--trusted-host', '10.0.0.5:3443'])
+    // 逐字节比对：这就是"默认关闭 ⇒ 老部署行为一字不变"的全部含义
+    assert.equal(patchText(dir), OLD_DEPLOYMENT_PATCH, '老部署的 patch 被改动了（enabled !== true 时绝不能发 listener 块）')
+    // 显式 --no-listener 同理：enabled 不是 true ⇒ 一个块都不发
+    const off = freshHome()
+    installInto(off, ['--trusted-host', '10.0.0.5:3081', '--no-listener'])
+    assert.doesNotMatch(patchText(off), /^ {8}listener:\s*$/m, '--no-listener 仍写了 listener 块')
+  })
+})

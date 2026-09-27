@@ -16,6 +16,8 @@
  *   node scripts/install-host-plugin.mjs            # 安装（默认 profile=web）
  *   node scripts/install-host-plugin.mjs --uninstall
  *   node scripts/install-host-plugin.mjs --profile web --dsh-home ~/.dsh
+ *   node scripts/install-host-plugin.mjs --dsh-home ~/.dsh --listener \
+ *     --listener-plain 0.0.0.0:3081 --listener-tls 0.0.0.0:3443   # C1：插件进程内监听
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -53,6 +55,13 @@ function parseArgs(argv) {
     //    再回落 —— 表现为"多一次延迟"，不是"连不上"。**要删除端点请直接编辑 cordis.patch.yml**
     //    （删掉那一行后重装即可），别用"少传一个参数"表达删除。
     extraEndpoints: [],
+    // C1：插件进程内的局域网监听（把 scripts/lan-proxy.mjs 搬进插件）。
+    // 与中继那几项**同一类**：不是每次安装都该重算的，没给就沿用现有配置里的值
+    // （见 readPreservedKeys 的长注释 —— "没传就静默删掉"正是本项目发生过三次的事故）。
+    // `undefined` 表示"本次没表态"，由 patchBlock 按 命令行 > 现有配置 > 默认 解析。
+    listener: undefined,
+    listenerPlain: undefined,
+    listenerTls: undefined,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -68,10 +77,15 @@ function parseArgs(argv) {
     else if (arg === '--relay-http-url') out.relayHttpUrl = argv[++i]
     else if (arg === '--relay-pool-size') out.relayPoolSize = argv[++i]
     else if (arg === '--extra-endpoint') out.extraEndpoints.push(argv[++i])
+    else if (arg === '--listener') out.listener = true
+    else if (arg === '--no-listener') out.listener = false
+    else if (arg === '--listener-plain') out.listenerPlain = argv[++i]
+    else if (arg === '--listener-tls') out.listenerTls = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       console.log(
         '用法: node scripts/install-host-plugin.mjs [--profile web] [--dsh-home ~/.dsh] ' +
           '[--trusted-host <authority>]... [--phone-base-url https://<ip>:<tls端口>] ' +
+          '[--listener | --no-listener] [--listener-plain <host:port>] [--listener-tls <host:port>] ' +
           '[--uninstall] [--skip-verify]',
       )
       process.exit(0)
@@ -132,6 +146,45 @@ const PACKAGES = [
 /** patch 条目的标记注释：用于幂等识别我们插入的块。 */
 const MARKER_START = '# >>> dsh-mobile host plugin (managed by scripts/install-host-plugin.mjs) >>>'
 const MARKER_END = '# <<< dsh-mobile host plugin <<<'
+
+/** listener 端口的**默认**值（仅在命令行与现有配置都没给时使用）。 */
+const DEFAULT_LISTENER_PLAIN = '0.0.0.0:3081'
+const DEFAULT_LISTENER_TLS = '0.0.0.0:3443'
+
+/**
+ * 从**现有** `cordis.patch.yml` 里读回 `listener` 段（C1）。
+ *
+ * 与 `readPreservedKeys` 里其它键同一动机：`patchBlock` 是**覆盖式**重写，
+ * 而 `restart-lan.sh` 会在**每次重启**时重新调用本脚本 —— 若这次没显式传
+ * `--listener-plain/--listener-tls` 就把上次写下的监听地址丢掉，
+ * 那就是"跑一次重启 ⇒ 手机入口静默换端口"（本项目已发生过三次的那类事故）。
+ *
+ * 解析必须是**缩进作用域内**的：`enabled` / `plain` / `tls` 都是很普通的名字，
+ * 整文件 grep/正则很容易撞上同名键（`readPreservedKeys` 里 `extraEndpoints`
+ * 就是被 `phoneBaseUrl` 骗过一次）。所以这里先定位 `listener:` 那一行，
+ * 再只读它**更深缩进**的子行，遇到缩进回退即停。
+ *
+ * @returns {{ enabled?: boolean, plain?: string, tls?: string }} 没写过 listener 段时返回 `{}`
+ */
+function readPreservedListener(text) {
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const head = /^(\s+)listener:\s*$/.exec(lines[i])
+    if (head === null) continue
+    const indent = head[1].length
+    const out = {}
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() === '') continue
+      const field = /^(\s+)([A-Za-z]+):\s*'?([^'\n]+?)'?\s*$/.exec(lines[j])
+      if (field === null || field[1].length <= indent) break
+      if (field[2] === 'enabled') out.enabled = field[3].trim() === 'true'
+      else if (field[2] === 'plain') out.plain = field[3].trim()
+      else if (field[2] === 'tls') out.tls = field[3].trim()
+    }
+    return out
+  }
+  return {}
+}
 
 /**
  * 生成 patch 块。
@@ -228,6 +281,12 @@ function readPreservedKeys(patchFile) {
     }
     break
   }
+  // C1：listener 段（插件进程内监听）走**缩进作用域**解析，避免 `enabled`/`plain`/`tls`
+  // 这类普通名字与文件里别处的同名键串味（见 readPreservedListener 的说明）。
+  const listener = readPreservedListener(text)
+  preserved.listenerEnabled = listener.enabled
+  preserved.listenerPlain = listener.plain
+  preserved.listenerTls = listener.tls
   return preserved
 }
 
@@ -317,6 +376,25 @@ function patchBlock(trustedHosts, preserved) {
   if (relayToken !== undefined) lines.push(`        relayToken: '${relayToken}'`)
   if (relayHttpUrl !== undefined) lines.push(`        relayHttpUrl: '${relayHttpUrl}'`)
   if (relayPoolSize !== undefined) lines.push(`        relayPoolSize: ${relayPoolSize}`)
+  /**
+   * C1：插件进程内的局域网监听（把 `scripts/lan-proxy.mjs` 搬进插件）。
+   *
+   * 优先级：**命令行 > 现有配置读回 > 默认**（读回见 readPreservedKeys 的说明）。
+   *
+   * ★★ **发射规则**：解析后 `enabled` **不是 true 时一个 `listener:` 块都不发** ——
+   *    这样老部署（从不带 `--listener`）的 patch 与改动前**逐字节相同**，
+   *    DSH 那边的行为也就一字不变（插件侧 `config.listener?.enabled !== true` ⇒ 不起监听）。
+   *    ⚠️ 别改成"总是发块"：那会在**每一次** `restart-lan.sh` 里往生产配置塞新键。
+   */
+  const listenerEnabled = args.listener ?? preserved?.listenerEnabled ?? false
+  if (listenerEnabled === true) {
+    const listenerPlain = args.listenerPlain ?? preserved?.listenerPlain ?? DEFAULT_LISTENER_PLAIN
+    const listenerTls = args.listenerTls ?? preserved?.listenerTls ?? DEFAULT_LISTENER_TLS
+    lines.push('        listener:')
+    lines.push('          enabled: true')
+    if (listenerPlain !== undefined && listenerPlain.length > 0) lines.push(`          plain: '${listenerPlain}'`)
+    if (listenerTls !== undefined && listenerTls.length > 0) lines.push(`          tls: '${listenerTls}'`)
+  }
   const config = lines.length === 0 ? '' : `\n      config:\n${lines.join('\n')}`
   return `${MARKER_START}
 # 手机端接入：/mobile/ws 加密隧道、配对与设备管理端点，并往 index.html 注入 boot.js。

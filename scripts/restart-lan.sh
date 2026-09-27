@@ -18,16 +18,21 @@
 #    而且 launchd 会**反复重试**失败的提交，表现成"一直在启动 3691"，刷屏且难以收拾。
 #
 # 结论：**不值得**为"从会话内部重启"造机制。正确做法是把重启交回给人：
-# 由你在终端里跑，脚本在前台把 DSH 拉起来，Ctrl-C 同时收掉代理。
+# 由你在终端里跑，脚本在前台把 DSH 拉起来，Ctrl-C 一起收掉。
 # 本脚本因此带一道**自我保护**：检测到自己运行在 DSH 进程链里就拒绝执行。
 #
 # ## 用法
 #
-#   bash scripts/restart-lan.sh              # 重启（前台；Ctrl-C 一起停掉代理）
+#   bash scripts/restart-lan.sh              # 重启（前台；Ctrl-C 停止 DSH）
 #   bash scripts/restart-lan.sh --status      # 只做健康检查（只读，随时可跑）
 #
-# 前置：DSH_HOME（默认 ~/.dsh）、DSH_PORT（3080）、PROXY_PORT（3081）。
-# 重启前会自动把插件配置同步到**当前探测到的局域网地址**（换网络后无需手工改配置）。
+# 前置：DSH_HOME（默认 ~/.dsh）、DSH_PORT（3080）、PROXY_PORT（3081）、TLS_PORT（3443）。
+# 重启前会自动把插件配置同步到**当前探测到的局域网地址**（换网络后无需手工改配置），
+# 并确保 `listener`（C1：插件内监听）已开启。
+#
+# ★ 体检里有一条**决定性判据**："谁在监听 PROXY_PORT" —— 搬迁到插件之后，
+#   监听者必须是 DSH 自己的进程（`dsh web`），且不得有任何 lan-proxy.mjs 进程
+#   还活着。否则会出现"孤儿第三进程占着 3081、体检却全绿"的假成功（见 health_report）。
 
 set -euo pipefail
 
@@ -44,7 +49,7 @@ MODE="restart"
 for arg in "$@"; do
   case "$arg" in
     --status|--check-only) MODE="status" ;;
-    -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "[restart-lan] 未知参数：${arg}（用 --help 看用法）" >&2; exit 2 ;;
   esac
 done
@@ -52,6 +57,12 @@ done
 # ── 健康检查 ────────────────────────────────────────────────────────────
 health_report() {
   local ok=0 code lan_ip configured patch
+  # ★★ 这四个变量必须**无条件**先初始化：下面的 `case "$proxy_cmd"` 与
+  #    `[ "$holder_is_dsh" = "1" ]` 都在**分支之外**引用它们，而本文件是 `set -u`。
+  #    漏掉这一行 = 恰好在那条"最需要诊断"的路径上（端口没人监听 / 占用者不是
+  #    dsh web）带着 "未绑定的变量" abort，把"到底谁在监听、怎么修"一并吞掉。
+  #    已实测：删掉本行后，空端口场景死在 `case` 那行、非 dsh 占用者场景死在 `elif` 那行。
+  local proxy_pid="" proxy_cmd="" orphan_pids="" holder_is_dsh=0
   echo "── 健康检查 ──────────────────────────────────────────"
   if lsof -nP -iTCP:"$DSH_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "  DSH 端口 ${DSH_PORT}                    : 监听中"
@@ -59,9 +70,45 @@ health_report() {
     echo "  DSH 端口 ${DSH_PORT}                    : ✗ 未监听"; ok=1
   fi
   if lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "  代理端口 ${PROXY_PORT}                    : 监听中"
+    echo "  明文端口 ${PROXY_PORT}                    : 监听中"
   else
-    echo "  代理端口 ${PROXY_PORT}                    : ✗ 未监听（手机侧必然不可用）"; ok=1
+    echo "  明文端口 ${PROXY_PORT}                    : ✗ 未监听（手机侧必然不可用）"; ok=1
+  fi
+
+  # ★★ 决定性判据（C1：监听已搬进 DSH 插件进程）──────────────────────────
+  # 为什么非有不可：DSH 退出时**上一次遗留的孤儿 lan-proxy.mjs 仍然占着 3081**，
+  # 于是上面两条"监听中"、下面手机侧 /mobile 的 200 全部为真 —— 体检全绿、
+  # 看起来搬迁成功，实际跑的还是那个**该被停用**的第三进程。
+  # 所以这里必须问一句"**到底是谁**在监听 3081"，并且同时断言：
+  #   · 占用者就是 DSH 自己的进程（`dsh web`；插件内监听跑在这个进程里）；
+  #   · **没有任何**命令行含 lan-proxy.mjs 的进程还活着。
+  # 两条任一不满足 ⇒ 这一项红，并打印可直接照抄的修法。
+  proxy_pid="$(lsof -tiTCP:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  if [ -n "$proxy_pid" ]; then
+    proxy_cmd="$(ps -p "$proxy_pid" -o command= 2>/dev/null | sed 's/^ *//' || true)"
+  fi
+  case "$proxy_cmd" in *dsh*web*) holder_is_dsh=1 ;; esac
+  if command -v pgrep >/dev/null 2>&1; then
+    orphan_pids="$(pgrep -f 'lan-proxy\.mjs' 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' || true)"
+  else
+    # 没有 pgrep 时退回 ps + grep（`[g]rep` 是为了让它不匹配到自己）
+    orphan_pids="$(ps -Ao pid=,command= 2>/dev/null | grep -E 'lan-proxy\.mjs' | grep -v '[g]rep' | awk '{print $1}' | tr '\n' ' ' | sed 's/ *$//' || true)"
+  fi
+  if [ -n "$proxy_pid" ] && [ "$holder_is_dsh" = "1" ] && [ -z "$orphan_pids" ]; then
+    echo "  谁在监听 ${PROXY_PORT}                    : 插件内监听（DSH 进程 PID ${proxy_pid}）"
+  else
+    echo "  谁在监听 ${PROXY_PORT}                    : ✗ 不是插件在监听 —— 搬迁未生效"; ok=1
+    if [ -z "$proxy_pid" ]; then
+      echo "      该端口无人监听（同上面那条）。"
+    elif [ "$holder_is_dsh" != "1" ]; then
+      echo "      占用者 PID ${proxy_pid} 不是 dsh web：${proxy_cmd:-（读不到命令行）}"
+    fi
+    if [ -n "$orphan_pids" ]; then
+      echo "      已废弃的第三进程 lan-proxy.mjs 仍在运行：${orphan_pids}"
+    fi
+    echo "      修复：先杀掉遗留进程，再重启让 DSH 自己接管 ${PROXY_PORT}："
+    [ -n "$orphan_pids" ] && echo "        kill ${orphan_pids}"
+    echo "        RESTART=1 bash scripts/restart-lan.sh"
   fi
 
   code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${DSH_PORT}/mobile" 2>/dev/null)" || code=000
@@ -304,6 +351,29 @@ if [ -f "$PATCH_FILE" ]; then
   extra_endpoints_of "$PATCH_FILE" | grep -qF "'https://${TLS_AUTHORITY}'" || NEED_LAN=1
 fi
 
+# ── listener（C1：插件内监听）是否已开启 ────────────────────────────────
+#
+# ★ 它**不随地址变化**，所以要单独判一次。漏掉这一条就会出现：
+#   "地址都对、插件文件也不旧" ⇒ 永不重装 ⇒ listener 一直是关的，
+#   而 start-lan.sh 里已经是 exec（没有事后补救的机会），手机入口静默全灭。
+# 判据限定在 listener 块内（patch 文件里还有别的 `enabled:`，整文件 grep 会误判）。
+listener_enabled_of() {
+  awk '
+    match($0, /^[[:space:]]*/) { indent = RLENGTH }
+    /^[[:space:]]*listener:[[:space:]]*$/ { base = indent; inside = 1; next }
+    inside == 1 {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if (indent <= base) { inside = 0; next }
+      if ($0 ~ /^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*(#.*)?$/) found = 1
+    }
+    END { if (found == 1) print "1" }
+  ' "$1" 2>/dev/null || true
+}
+NEED_LISTENER=0
+if [ -f "$PATCH_FILE" ] && [ -z "$(listener_enabled_of "$PATCH_FILE")" ]; then
+  NEED_LISTENER=1
+fi
+
 # ── 插件**文件**是否过期 ────────────────────────────────────────────────
 #
 # 原先重装只由"配置地址不符"触发。于是最常见的场景会漏掉：
@@ -341,8 +411,11 @@ fi
 if [ "$NEED_FILES" = "1" ]; then
   echo "[restart-lan] 插件文件已过期（仓库里改过、profile 里还是旧的），需要重装"
 fi
+if [ "$NEED_LISTENER" = "1" ]; then
+  echo "[restart-lan] 插件内监听（listener）尚未在 profile 中开启，需要重装配置"
+fi
 
-if [ "$CONFIGURED" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" ] || [ "$NEED_V6" = "1" ] || [ "$NEED_TS" = "1" ] || [ "$NEED_LAN" = "1" ] || [ "$NEED_FILES" = "1" ]; then
+if [ "$CONFIGURED" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" ] || [ "$NEED_V6" = "1" ] || [ "$NEED_TS" = "1" ] || [ "$NEED_LAN" = "1" ] || [ "$NEED_FILES" = "1" ] || [ "$NEED_LISTENER" = "1" ]; then
   echo "[restart-lan] 配置地址不符（profile=${CONFIGURED:-无}/${CONFIGURED_TLS:-无} / 本机=${AUTHORITY}/${TLS_AUTHORITY}${V6_TLS_AUTHORITY:+ / IPv6=${V6_TLS_AUTHORITY}}${TS_AUTHORITY:+ / Tailscale=${TS_AUTHORITY}}），同步插件配置…"
   # bash 3.2（macOS 自带）在 set -u 下展开空数组会报错，用 ${arr[@]+"${arr[@]}"} 这个惯用写法
   V6_ARGS=()
@@ -362,6 +435,9 @@ if [ "$CONFIGURED" != "$AUTHORITY" ] || [ "$CONFIGURED_TLS" != "$TLS_AUTHORITY" 
     ${V6_ARGS[@]+"${V6_ARGS[@]}"} \
     ${TS_ARGS[@]+"${TS_ARGS[@]}"} \
     ${LAN_ARGS[@]+"${LAN_ARGS[@]}"} \
+    --listener \
+    --listener-plain "0.0.0.0:${PROXY_PORT}" \
+    --listener-tls "0.0.0.0:${TLS_PORT}" \
     --phone-base-url "https://${TLS_AUTHORITY}" \
     || { echo "[restart-lan] ✗ 同步配置失败" >&2; exit 1; }
 fi
@@ -370,13 +446,15 @@ echo
 echo "[restart-lan] 即将重启 DSH："
 echo "  DSH_HOME       : ${DSH_HOME_RESOLVED}"
 echo "  DSH 端口       : ${DSH_PORT}（仅 loopback）"
-echo "  代理端口       : ${PROXY_PORT}（0.0.0.0）"
+echo "  明文端口       : ${PROXY_PORT}（0.0.0.0）"
+echo "  TLS 端口       : ${TLS_PORT}（0.0.0.0）"
+echo "  监听者         : DSH 插件进程内建的 listener（C1；不再是外置 lan-proxy.mjs）"
 echo "  受信 authority : ${AUTHORITY}"
 echo "  学校/局域网    : https://${TLS_AUTHORITY}（已作为候选端点广告给手机 ✓）"
 [ -n "$TS_AUTHORITY" ] && echo "  Tailscale      : ${TS_AUTHORITY}（已受信并作为候选端点广告给手机）"
-echo "  Ctrl-C 会同时停掉 DSH 与代理。"
+echo "  Ctrl-C 停止 DSH，插件内监听随之停止。"
 echo
 
-# 交给 start-lan.sh：它负责停旧实例、起代理、启动 DSH
+# 交给 start-lan.sh：它负责停旧实例、写 listener 配置、启动 DSH
 exec env RESTART=1 DSH_HOME="$DSH_HOME_RESOLVED" DSH_PORT="$DSH_PORT" PROXY_PORT="$PROXY_PORT" \
   bash "${SCRIPT_DIR}/start-lan.sh"

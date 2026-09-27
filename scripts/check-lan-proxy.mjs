@@ -16,8 +16,21 @@
  *
  * 因此这里用"**复用同一连接**发多个请求"的方式验证——这正是浏览器与 curl 的关键差别。
  *
+ * ## ★ C1 之后：这个脚本**一个字都不用改**（只有前置条件变了）
+ *
+ * 监听已经搬进 DSH 插件进程（`packages/host/src/lan-listener.ts`，由 profile 里的
+ * `listener.enabled` 打开；`scripts/lan-proxy.mjs` 那个第三进程**已废弃**）。
+ * 本脚本断的是**行为**（每个请求都带真实来源），与"谁在监听"无关 ⇒ 断言原样成立。
+ *
+ * ⚠️ **不要试图在这里断言"是插件在监听"** —— 本脚本是**从局域网侧**发的请求，
+ * 而能区分身份的两个信息都拿不到：
+ *   · `/mobile/admin/selfcheck` 的 `listener` 段是 **LOCAL_ONLY**（局域网侧恒 403）；
+ *   · 明文监听是**裸 TCP 转发**，不改写响应 ⇒ 无法在响应里留"我是插件"的标记头。
+ * ⇒ **"谁在监听 3081"这条判据只能在本机做**，落在 `restart-lan.sh` 的 `health_report()`
+ *   （取端口占用者 PID，断言它是 `dsh web` 自己、且没有任何 `lan-proxy.mjs` 进程还活着）。
+ *
  * 用法：node scripts/check-lan-proxy.mjs [--port 3081] [--host 10.34.221.181]
- * 前置：代理已在监听（scripts/lan-proxy.mjs），且后端 DSH 在跑。
+ * 前置：**监听方已在跑**（C1 后为插件内监听，`listener.enabled: true` 且 DSH 已重启），且后端 DSH 在跑。
  */
 
 import { Agent, request } from 'node:http'
