@@ -8332,9 +8332,73 @@
           } catch (error) {
             void error
           }
-          // ★ 同一 tick 里按实测收窄（缓存会因为"换了层"而失效 ⇒ 它一定真的重算 ✓）
+          /**
+           * ★★ round 174（用户实拍："**还是偶发会有跑到状态栏上去**"✗）：光在同一 tick 里
+           *   重算**还不够** ✗ —— 预览自己的那条顶栏是 `fixed/sticky` 的 ✓（round 118 的注释里
+           *   就写着"内边距推不动它们，只能改 `top`"✓），而那条修正（`tuneDshTopChrome` ✓）
+           *   挂在 **200ms 心跳**上 ✓ ⇒ "**哪一帧轮到它，就哪一帧才复位**" ✓ = 用户说的"偶发" ✓✓。
+           *   `tuneDshPreviewSafeArea()` 内部**第一件事**就是调 `tuneDshTopChrome` ✓
+           *   ⇒ 只要它跑得够早、够多次，这条就补上 ✓。
+           * ⇒ 这里打**一串连发**（同一 tick ✓、下一帧 rAF ✓、+80ms ✓、+250ms ✓）：
+           *   预览层进来之后布局可能还在动（DSH 自己的入场动画 ✓、工具行被插进流里 ✓），
+           *   单发有可能量在"还没到位"的那一瞬间 ✓ ⇒ 连发把窗口压到 1~2 帧 ✓。
+           *   ★ 每一发都幂等 ✓（它只按**当下量到的** rect 写内边距与 `top` ✓），多发不会叠加位移 ✗。
+           */
+          var tuneBurst = function () {
+            try {
+              if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+            } catch (error) {
+              void error
+            }
+          }
+          tuneBurst()
           try {
-            if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+            if (typeof globalThis.requestAnimationFrame === 'function') {
+              globalThis.requestAnimationFrame(function () {
+                tuneBurst()
+              })
+            }
+          } catch (error) {
+            void error
+          }
+          try {
+            globalThis.setTimeout(tuneBurst, 80)
+            globalThis.setTimeout(tuneBurst, 250)
+          } catch (error) {
+            void error
+          }
+          /**
+           * ★★ round 174 诊断（**如实留痕** ✗）：把"升沿那一刻"的真实几何写一行进调试框 ✓ ——
+           *   这一条我已经连着猜了三轮 ✗（内边距 / 标记 / 过期值 ✓），而手机上我看不到 DOM ✗。
+           *   有这一行，用户打开 `?debug=1` 就能直接报出：
+           *     · `pad` = 那一刻给预览层留的上内边距 ✓；
+           *     · `layerTop` = 预览层自己的 top ✓；
+           *     · 层内 `fixed/sticky` 的细头部各自在哪 ✓（**它们才是"内边距推不动"的那一族** ✓）。
+           *   ⇒ 下一次要是还闪，读数会直接指出"是内边距不够 ✓"还是"是某个 fixed 头部没被改 top ✓"。
+           */
+          try {
+            var diagLayer = dshPreviewSurface()
+            if (diagLayer !== null && diagLayer !== undefined && typeof debugBoxLine === 'function') {
+              var diagPad = document.documentElement.style.getPropertyValue('--dshm-preview-pad')
+              var diagTop = Math.round(diagLayer.getBoundingClientRect().top)
+              var diagKids = []
+              var diagNodes = diagLayer.querySelectorAll('*')
+              for (var di = 0; di < diagNodes.length && diagKids.length < 4; di++) {
+                var dpos = getComputedStyle(diagNodes[di]).position
+                if (dpos !== 'fixed' && dpos !== 'sticky') continue
+                var dr = diagNodes[di].getBoundingClientRect()
+                diagKids.push(
+                  String(diagNodes[di].tagName || '').toLowerCase() + '.' +
+                    String(diagNodes[di].className || '').split(' ')[0] +
+                    '@' + Math.round(dr.top) + 'h' + Math.round(dr.height) + ':' + dpos,
+                )
+              }
+              debugBoxLine(
+                '[preview] 升沿：pad=' + (diagPad === '' ? '(空)' : diagPad) +
+                  '｜safeTop=' + String(safeTopPx()) + '｜layerTop=' + String(diagTop) +
+                  '｜层内 fixed/sticky=' + (diagKids.length === 0 ? '无' : diagKids.join('、')),
+              )
+            }
           } catch (error) {
             void error
           }
