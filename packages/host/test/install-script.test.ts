@@ -20,8 +20,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -38,7 +38,8 @@ const tempHomes: string[] = []
 
 before(() => {
   home = mkdtempSync(join(tmpdir(), 'dshm-install-'))
-  // 安装脚本要求 profile 目录已存在（真实流程里由 DSH 首次启动创建）
+  // 共享家目录照旧手建 profile：下面这些既有用例守的是"配置合并语义"，
+  // 与"profile 目录谁来建"无关（后者的专属用例是 bareHome()，见文件末尾）。
   mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
 })
 
@@ -51,6 +52,18 @@ after(() => {
 function freshHome(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dshm-install-'))
   mkdirSync(join(dir, 'profiles', 'web'), { recursive: true })
+  tempHomes.push(dir)
+  return dir
+}
+
+/**
+ * ★ 改动 A 用的"全新机器"家目录：**连 `profiles/web` 都不建**。
+ *
+ * 只有这一条路径能测到改动 A —— `freshHome()` 会先手建那个目录，
+ * 于是"安装器要不要自己建"这件事根本走不到（这正是三个验收夹具的旧做法）。
+ */
+function bareHome(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dshm-install-bare-'))
   tempHomes.push(dir)
   return dir
 }
@@ -73,6 +86,19 @@ function installInto(homeDir: string, extra: string[]): void {
     ],
     { stdio: 'ignore' },
   )
+}
+
+/**
+ * 跑一次安装并**收集输出**（探测失败那条路径要断言"打警告但不失败"）。
+ * 用 spawnSync 而不是 execFileSync：后者在非零退出时直接抛，拿不到 stderr 文案。
+ */
+function installIntoCaptured(homeDir: string, extra: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(
+    process.execPath,
+    [installer, '--dsh-home', homeDir, '--profile', 'web', '--skip-verify', ...extra],
+    { encoding: 'utf8' },
+  )
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
 const patchPath = (homeDir: string = home): string => join(homeDir, 'profiles', 'web', 'cordis.patch.yml')
@@ -439,5 +465,160 @@ describe('install-host-plugin：listener（C1，进程内监听）配置', () =>
     const off = freshHome()
     installInto(off, ['--trusted-host', '10.0.0.5:3081', '--no-listener'])
     assert.doesNotMatch(patchText(off), /^ {8}listener:\s*$/m, '--no-listener 仍写了 listener 块')
+  })
+})
+
+/**
+ * ★★ 换一台新机器（改动 A + 改动 B）。
+ *
+ * ## 两处实测出来的真问题
+ *
+ * **A：全新机器上"装插件"这一步直接失败** ✗。旧实现要求 `profiles/web` 已存在，
+ * 并提示"请先用该 profile 启动一次 DSH"—— 而实测：在全新 `DSH_HOME` 上跑 `dsh web`，
+ * DSH 正常起来、**并不会**创建那个目录（HOME 仍是空的）。也就是说 DSH 自己不需要它，
+ * 是安装器多要求了一个目录，于是迁移的第一步就死在那里。
+ * 旁证：三个验收夹具都各自 `mkdirSync(profiles/web)` 手建一次 —— 手建就够。
+ *
+ * **B：新机器签发的配对票据把手机指向一个到不了的地址** ✗。只传 `--listener` 时，
+ * 票据 `endpoints` 落到 `http://<ip>:<DSH 端口>`（如 3711），而 DSH 只绑 `127.0.0.1`
+ * ⇒ 手机根本连不上 ⇒ 配对必失败。手机该被指向的是**插件内的 TLS 监听**。
+ *
+ * ## 这几条用例守的契约
+ *
+ *   1. 缺 profile 目录 ⇒ **建**（但"构建产物存在性"那条检查不许被一起删掉）；
+ *   2. 既没有命令行、也没有可沿用的 ⇒ 用 `--lan-ip` / 探测结果写出
+ *      `trustedHosts`（明文 + TLS 两条）与 `phoneBaseUrl = https://<lan>:<TLS端口>`；
+ *   3. `--no-lan-autodetect` ⇒ 退回"什么都不写"的旧行为；
+ *   4. ★ **沿用语义不许被自动推导破坏**（有现有 trustedHosts 时仍沿用）；
+ *   5. 探测失败 ⇒ **警告但不失败**（不静默、也不 fail）。
+ *
+ * ⚠️ 这几条一律用 `--lan-ip` 注入地址，**绝不依赖真机网络**（否则测试会在别的机器上随机红绿）；
+ *    连"探测失败"也是注入的（`--lan-ip ''`），不是等真探测失败。
+ */
+describe('install-host-plugin：换新机器（profile 目录 + 手机入口地址自动推导）', () => {
+  /**
+   * ★ 改动 A 的唯一专属用例。
+   * 其余新用例都用 `freshHome()`（profile 已建）—— 这样"没建目录"这条路径
+   * 只有这一个用例覆盖，变异时读数才**恰好**是这一条红。
+   */
+  it('★ 全新 HOME（连 profiles/web 都没有）⇒ 安装成功，并替你建出 profile 目录', () => {
+    const dir = bareHome()
+    assert.equal(existsSync(join(dir, 'profiles', 'web')), false, '前置：这条用例的起点必须是空 HOME')
+    installInto(dir, ['--trusted-host', '10.0.0.5:3081', '--no-lan-autodetect'])
+    assert.ok(existsSync(join(dir, 'profiles', 'web')), 'profile 目录没被建出来（安装器又退回了 fail 行为）')
+    assert.ok(existsSync(patchPath(dir)), 'cordis.patch.yml 没写出来')
+    assert.deepEqual(trustedHosts(dir), ['10.0.0.5:3081'])
+  })
+
+  it('★★ 全新 HOME + --listener --lan-ip ⇒ trustedHosts 含明文/TLS 两条，phoneBaseUrl 是 https://<lan>:<TLS端口>', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--listener',
+      '--lan-ip', '10.9.8.7',
+      '--listener-plain', '0.0.0.0:3901',
+      '--listener-tls', '0.0.0.0:3902',
+    ])
+    assert.deepEqual(trustedHosts(dir), ['10.9.8.7:3901', '10.9.8.7:3902'], '手机入口的两条 authority 没写出来')
+    assert.equal(readConfig(dir).phoneBaseUrl, 'https://10.9.8.7:3902', 'phoneBaseUrl 必须是 https://<lan>:<TLS端口>')
+    // ★ HTTPS 那条还必须进 extraEndpoints：票据的 endpoints = publicBaseUrl + extraEndpoints，
+    //   而手机壳**跳过明文**端点 ⇒ 只写 publicBaseUrl 的话新机器票据里一条能用的 HTTPS 都没有。
+    assert.deepEqual(extraEndpoints(dir), ['https://10.9.8.7:3902'], '票据端点里没有 HTTPS（手机壳会跳过明文那条）')
+    // publicBaseUrl 的推导沿用旧逻辑（trustedHosts[0] + http）
+    assert.equal(readConfig(dir).publicBaseUrl, 'http://10.9.8.7:3901')
+    // listener 块本身照旧
+    assert.deepEqual(readConfig(dir).listener, { enabled: true, plain: '0.0.0.0:3901', tls: '0.0.0.0:3902' })
+  })
+
+  it('★ 端口取自**本次解析出的** listener 端口（命令行 > 读回 > 默认）——不给端口时用默认 3081/3443', () => {
+    const dir = freshHome()
+    installInto(dir, ['--listener', '--lan-ip', '10.9.8.7'])
+    assert.deepEqual(trustedHosts(dir), ['10.9.8.7:3081', '10.9.8.7:3443'], '默认 listener 端口没被用上（另算了一遍端口）')
+    assert.equal(readConfig(dir).phoneBaseUrl, 'https://10.9.8.7:3443')
+  })
+
+  it('★ --no-lan-autodetect ⇒ 退回旧行为：trustedHosts / phoneBaseUrl 都不写', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--listener',
+      '--listener-plain', '0.0.0.0:3901',
+      '--listener-tls', '0.0.0.0:3902',
+      '--no-lan-autodetect',
+    ])
+    assert.deepEqual(trustedHosts(dir), [], '--no-lan-autodetect 仍写了 trustedHosts')
+    assert.equal(readConfig(dir).phoneBaseUrl, undefined, '--no-lan-autodetect 仍写了 phoneBaseUrl')
+    assert.deepEqual(extraEndpoints(dir), [], '--no-lan-autodetect 仍写了 extraEndpoints')
+    // 关掉的只是"推导"，listener 本身照旧要写
+    assert.equal((readConfig(dir).listener as { enabled?: boolean } | undefined)?.enabled, true)
+  })
+
+  it('★ 给了 --trusted-host ⇒ 不做自动推导（不会多出探测地址那两条）', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--listener',
+      '--lan-ip', '10.9.8.7',
+      '--trusted-host', '10.0.0.5:3081',
+      '--listener-plain', '0.0.0.0:3901',
+    ])
+    assert.deepEqual(trustedHosts(dir), ['10.0.0.5:3081'])
+  })
+
+  /**
+   * ★★ **不破坏沿用**（改动 B 的护栏）。
+   *
+   * `restart-lan.sh` 每次重启都会重跑本脚本。已有配置时若拿探测/注入的地址去覆盖它，
+   * 就不是"补上手机入口"而是"每次重启都可能把手机入口换掉" ✗ ——
+   * 同一类覆盖式事故本项目已经发生过三次（见 readPreservedKeys 的长注释）。
+   *
+   * `--lan-ip` 是**刻意给的**：让变异 M3（无条件覆盖）在**任何网络环境下**都能确定性地红，
+   * 而不是"恰好这台机器探测得到地址才红"。
+   */
+  it('★★ 已有 trustedHosts 时不传 --trusted-host ⇒ 仍然沿用（自动推导/--lan-ip 都不许顶掉它）', () => {
+    const dir = freshHome()
+    installInto(dir, [
+      '--trusted-host', '10.34.255.229:3081',
+      '--trusted-host', '10.34.255.229:3443',
+      '--listener',
+    ])
+    // restart-lan.sh 的形态：这一轮不给 --trusted-host
+    installInto(dir, ['--listener', '--lan-ip', '10.9.8.7'])
+    assert.deepEqual(
+      trustedHosts(dir),
+      ['10.34.255.229:3081', '10.34.255.229:3443'],
+      '沿用被自动推导覆盖了（这正是"跑一次重启就把手机入口抹掉"那类事故）',
+    )
+    // phoneBaseUrl 同理：沿用现有配置，不被推导值顶掉
+    assert.equal(readConfig(dir).phoneBaseUrl, undefined)
+  })
+
+  it('★ 探测失败（拿不到地址）⇒ 打警告但**不失败**，退回旧行为', () => {
+    const dir = freshHome()
+    const result = installIntoCaptured(dir, [
+      '--listener',
+      '--lan-ip', '', // ★ 注入点：确定性地表示"拿不到局域网地址"，不依赖真机网络
+      '--listener-plain', '0.0.0.0:3901',
+      '--listener-tls', '0.0.0.0:3902',
+    ])
+    assert.equal(result.status, 0, `探测失败不该让安装失败（能装上去、只是手机连不上）\nstderr=${result.stderr}`)
+    assert.match(result.stderr, /警告/, '探测失败必须**打警告**，不许静默')
+    assert.match(result.stderr, /--lan-ip/, '警告里要给出可操作的补救参数 --lan-ip')
+    assert.match(result.stderr, /--phone-base-url/, '警告里要给出可操作的补救参数 --phone-base-url')
+    assert.deepEqual(trustedHosts(dir), [], '探测失败时不该写 trustedHosts')
+    assert.equal(readConfig(dir).phoneBaseUrl, undefined, '探测失败时不该写 phoneBaseUrl')
+    // listener 仍然照写（装插件这件事本身没失败）
+    assert.equal((readConfig(dir).listener as { enabled?: boolean } | undefined)?.enabled, true)
+  })
+
+  it('★ 日志要说清"替你决定了什么"（写了哪个地址、为什么）', () => {
+    const dir = freshHome()
+    const result = installIntoCaptured(dir, [
+      '--listener',
+      '--lan-ip', '10.9.8.7',
+      '--listener-plain', '0.0.0.0:3901',
+      '--listener-tls', '0.0.0.0:3902',
+    ])
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /已替你把手机入口地址写进配置/, '替用户做决定就必须在日志里挑明')
+    assert.match(result.stdout, /10\.9\.8\.7:3901/, '日志里要出现写了哪个明文地址')
+    assert.match(result.stdout, /https:\/\/10\.9\.8\.7:3902/, '日志里要出现写了哪个 phoneBaseUrl')
   })
 })

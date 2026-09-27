@@ -30,8 +30,20 @@ function markChromeLaunch() {
 }
 
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
-const REPO='/Volumes/Data/workspace/工程设计/dsh-mobile'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+/**
+ * ★ 仓库根**从脚本自身位置推导** ✓（跨机迁移轮；★ 别占用 `round 152` —— 那是"扫码配对"那一轮）。
+ *
+ * 原先这里是写死的 `/Volumes/Data/workspace/工程设计/dsh-mobile` ✗ ——
+ * 换一台机器、或把仓库 clone 到别的目录之后，这个脚本会去**不存在的路径**找
+ * `scripts/relay.mjs` / `scripts/detect-lan-ip.mjs` 而直接报错 ✗
+ * （与本文件上面那条"写死局域网 IP"是同一类坑 ✓）。
+ *
+ * 必须走 `fileURLToPath`：仓库路径含**中文**，用 `URL.pathname` 会拿到**百分号编码**后的路径 ✗
+ * （`e2e-pairing.mjs` 记过这个坑 ✓）。写法与 `check-lan-listener.mjs` 的 `REPO` 完全一致 ✓。
+ */
+const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const sleep=(ms)=>new Promise(r=>setTimeout(r,ms))
 const HOME='/tmp/e2e-dsh-home', RELAY=4320, RELAY_TLS=4321, TOKEN='e2e-relay-token'
 const DSH=3653, PROXY=3651, TLS=3652

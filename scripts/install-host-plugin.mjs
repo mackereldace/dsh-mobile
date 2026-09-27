@@ -26,6 +26,9 @@ import { resolve } from 'node:path'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bootStamp, buildBootPayload } from './boot-payload.mjs'
+// ★ 改动 B：局域网地址一律用工程自己这一份探测（打分/排除规则的坑都记在它的头注释里）。
+//   刻意不在这里手写网卡枚举 —— 那正是它诞生的原因（曾选中 APIPA 169.254.x.x）。
+import { detectLanIp } from './detect-lan-ip.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = dirname(here)
@@ -62,6 +65,13 @@ function parseArgs(argv) {
     listener: undefined,
     listenerPlain: undefined,
     listenerTls: undefined,
+    // ★ 改动 B：全新机器上"手机该连哪儿"的自动推导。
+    //   `lanIp === undefined` ⇒ 本次没表态，走 detect-lan-ip.mjs 自动探测；
+    //   给了值（含**空串**）⇒ 一律不再探测。空串是**测试用的注入点**：
+    //   它表示"拿不到地址"，用来确定性地走"探测失败"那条路径（否则测试会依赖真机网络）。
+    lanIp: undefined,
+    // ★ 关掉自动推导，退回"什么都不写"的旧行为（给**已有配置**的机器用）。
+    autoDetectLan: true,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -81,11 +91,16 @@ function parseArgs(argv) {
     else if (arg === '--no-listener') out.listener = false
     else if (arg === '--listener-plain') out.listenerPlain = argv[++i]
     else if (arg === '--listener-tls') out.listenerTls = argv[++i]
+    // ★ 改动 B：`--lan-ip` 是"显式指定手机该连的局域网地址"的**注入点**（跳过探测）；
+    //   漏写值 ⇒ 空串 ⇒ 等同"探测失败"（见 derivePhoneEntry），不会静默退回真实探测。
+    else if (arg === '--lan-ip') out.lanIp = argv[++i] ?? ''
+    else if (arg === '--no-lan-autodetect') out.autoDetectLan = false
     else if (arg === '--help' || arg === '-h') {
       console.log(
         '用法: node scripts/install-host-plugin.mjs [--profile web] [--dsh-home ~/.dsh] ' +
           '[--trusted-host <authority>]... [--phone-base-url https://<ip>:<tls端口>] ' +
           '[--listener | --no-listener] [--listener-plain <host:port>] [--listener-tls <host:port>] ' +
+          '[--lan-ip <本机局域网IP> | --no-lan-autodetect] ' +
           '[--uninstall] [--skip-verify]',
       )
       process.exit(0)
@@ -150,6 +165,149 @@ const MARKER_END = '# <<< dsh-mobile host plugin <<<'
 /** listener 端口的**默认**值（仅在命令行与现有配置都没给时使用）。 */
 const DEFAULT_LISTENER_PLAIN = '0.0.0.0:3081'
 const DEFAULT_LISTENER_TLS = '0.0.0.0:3443'
+
+/**
+ * 解析本次**生效**的 listener 配置：命令行 > 现有配置读回 > 默认。
+ *
+ * ★ 全脚本**只此一处**做这件事 ✓。`patchBlock` 写块 ✓、写后往返自检 ✓、
+ *   以及改动 B 的手机入口地址推导 ✓ —— 三处必须拿**同一套**结果 ✗，
+ *   否则会出现"日志说 3713、配置里写 3443"这种只在手机上才现形的脱节 ✗
+ *   （改动 B 的端口就取自这里，不再自己算一遍）。
+ *
+ * @returns {{ enabled: boolean, plain: string, tls: string }}
+ */
+function resolveListener(preserved) {
+  return {
+    enabled: (args.listener ?? preserved?.listenerEnabled ?? false) === true,
+    plain: args.listenerPlain ?? preserved?.listenerPlain ?? DEFAULT_LISTENER_PLAIN,
+    tls: args.listenerTls ?? preserved?.listenerTls ?? DEFAULT_LISTENER_TLS,
+  }
+}
+
+/**
+ * 从监听地址里取出端口：`0.0.0.0:3081` → `3081`，`[::]:3081` → `3081`。
+ *
+ * 取**最后一个**冒号之后的部分：IPv6 的 `[::]:3081` 有三个冒号，
+ * 按第一个切会切出 `:]:3081` 这种垃圾，而 `trustedHosts` 是逐字参与 Host 比对的。
+ *
+ * @returns {string | undefined} 拿不到合法端口时返回 undefined（调用方据此不写该项）
+ */
+function portOfListenerAddress(address) {
+  if (typeof address !== 'string') return undefined
+  const text = address.trim()
+  const index = text.lastIndexOf(':')
+  if (index < 0) return undefined
+  const port = text.slice(index + 1).trim()
+  return /^\d+$/.test(port) ? port : undefined
+}
+
+/** 探测失败时的统一警告（★ 刻意**不 fail** —— 退回旧行为，但绝不静默）。 */
+function warnNoPhoneEntry(reason) {
+  warn(
+    `${reason} ⇒ 手机入口地址**没有**写进配置，手机侧届时会连不上（配对票据里会是没有的地址）。\n` +
+      '        请用 `--lan-ip <本机局域网IP>` 或 `--phone-base-url https://<IP>:<TLS端口>` 显式指定。',
+  )
+}
+
+/**
+ * ★★ 改动 B：全新机器上自动推导"手机该连哪儿"。
+ *
+ * ## 要解决的事故
+ *
+ * 新电脑上只跑 `--listener`（没传 `--trusted-host` / `--phone-base-url`）时，
+ * 旧行为是"什么都不写" ⇒ 配对票据里的 `endpoints` 落到 `http://<ip>:<DSH 端口>`
+ * （例如 3711）—— 而 DSH 自己只绑 `127.0.0.1` ⇒ **手机根本连不上** ⇒ 配对必失败。
+ * 手机真正该被指向的是**插件内的 TLS 监听**（`https://<lan>:<TLS端口>`）。
+ *
+ * ## 只在"既没有命令行、也没有可沿用的"这条路径上跑
+ *
+ * 调用方（`updatePatch`）保证：只有 `--trusted-host` 一条都没给、
+ * 且现有配置里也读不回任何 authority 时才调用本函数。
+ * ★ 有现有配置时的"沿用"语义**原样不动** —— 那是防"跑一次重启就把手机入口抹掉"的护栏，
+ *   同一类事故本项目已经发生过三次（见 `readPreservedKeys` 的长注释）。
+ *
+ * ## 端口
+ *
+ * 明文 / TLS 端口取自 `resolveListener`（命令行 > 读回 > 默认 3081/3443），
+ * **不另算一遍**；`phoneBaseUrl` 用 **HTTPS**（手机侧安全上下文 / WebCrypto 的前提，
+ * 见 `patchBlock` 里同一句话的注释），`publicBaseUrl` 仍由 `patchBlock` 按 `trustedHosts[0]` 推导；
+ * 同一个 HTTPS 地址还会进 `extraEndpoints` —— 因为票据的 `endpoints` 是
+ * `publicBaseUrl` + `extraEndpoints`，而明文那条会被手机壳跳过（详见返回值处的长注释）。
+ *
+ * ## 可注入、可关闭
+ *
+ *   · `--lan-ip <ip>`：显式指定，跳过探测；
+ *   · `--lan-ip ''`：注入"拿不到地址"，用于确定性地测探测失败路径；
+ *   · `--no-lan-autodetect`：整个关掉（调用方处理），退回旧行为。
+ *
+ * @returns {{ lanIp: string, hosts: string[], phoneBaseUrl?: string, endpoint?: string } | undefined}
+ *          推导不出来（探测失败 / 端口解析失败）时返回 undefined，**不抛不 fail**。
+ */
+function derivePhoneEntry(preserved) {
+  const listener = resolveListener(preserved)
+  if (!listener.enabled) {
+    // 端口照样解析（默认 3081/3443），但必须说清这个前提 —— 否则用户会以为我们在替
+    // 一个没人监听的端口背书。第三方 lan-proxy 的部署形态下这两个端口确实有人听。
+    log('提醒：本次没开插件内监听（--listener），下面写的入口端口假定由其它进程提供（例如 lan-proxy.mjs）')
+  }
+  /** @type {string} */
+  let lanIp
+  if (args.lanIp !== undefined) {
+    lanIp = String(args.lanIp).trim()
+    if (lanIp.length === 0) {
+      warnNoPhoneEntry('--lan-ip 给的是空值，视为拿不到局域网地址')
+      return undefined
+    }
+    log(`手机入口地址：使用 --lan-ip 显式指定的 ${lanIp}（跳过自动探测）`)
+  } else {
+    const detected = detectLanIp()
+    if (detected === undefined || String(detected).trim().length === 0) {
+      warnNoPhoneEntry('自动探测本机局域网地址失败（没有可用的 IPv4 网卡）')
+      return undefined
+    }
+    lanIp = String(detected).trim()
+    log(
+      `手机入口地址：自动探测到本机局域网地址 ${lanIp}` +
+        `（scripts/detect-lan-ip.mjs；要换用 --lan-ip，要关掉自动推导用 --no-lan-autodetect）`,
+    )
+  }
+  const plainPort = portOfListenerAddress(listener.plain)
+  const tlsPort = portOfListenerAddress(listener.tls)
+  const tlsAuthority = tlsPort === undefined ? undefined : `${lanIp}:${tlsPort}`
+  const hosts = []
+  if (plainPort !== undefined) hosts.push(`${lanIp}:${plainPort}`)
+  if (tlsAuthority !== undefined) hosts.push(tlsAuthority)
+  if (hosts.length === 0) {
+    warnNoPhoneEntry(`listener 端口解析不出端口号（plain='${listener.plain}'，tls='${listener.tls}'）`)
+    return undefined
+  }
+  const phoneBaseUrl = tlsAuthority === undefined ? undefined : `https://${tlsAuthority}`
+  if (phoneBaseUrl === undefined) {
+    warnNoPhoneEntry(`listener 的 TLS 端口解析不出来（tls='${listener.tls}'），phoneBaseUrl 没法推导（手机必须 HTTPS）`)
+  }
+  /**
+   * ★★ 为什么 HTTPS 那条还要同时进 `extraEndpoints`：
+   *
+   * 配对票据里的 `endpoints` **不是** `phoneBaseUrl`，而是
+   * `publicBaseUrl` + `extraEndpoints` 两份拼出来的（见 host 侧 `createEndpointResolver`）。
+   * 而 `publicBaseUrl` 沿用现有逻辑只能是 `http://<hosts[0]>`（明文那一条）。
+   *
+   * 手机壳那边**明文端点是直接跳过的**（`PairLink.isCleartext`；本机真实票据
+   * `["http://10.34.255.229:3081", "https://100.123.136.82:3443", "https://10.34.255.229:3443"]`
+   * 第 ① 条就是这么被跳过的）。所以只写 `publicBaseUrl` 的话，新机器的票据里
+   * **一条能用的 HTTPS 都没有** ✗ ⇒ 手机仍然配对必失败 ✗ ——
+   * 正是本改动要修的那个现象。生产配置里那两条 `https` 也是走 `extraEndpoints` 来的，
+   * 这里与它保持一致。authority 已在 `hosts` 里，不会重复。
+   */
+  const endpoint = phoneBaseUrl
+  log(
+    `★★ 已替你把手机入口地址写进配置：trustedHosts += ${hosts.join('、')}` +
+      `${phoneBaseUrl === undefined ? '；phoneBaseUrl 未写（无 TLS 端口）' : `；phoneBaseUrl = ${phoneBaseUrl}`}` +
+      `${endpoint === undefined ? '' : `；extraEndpoints += ${endpoint}（配对票据的 endpoints 就取自这里 + publicBaseUrl）`}`,
+  )
+  log('    依据：手机只能走局域网，而 DSH 自己只绑回环（127.0.0.1）；上面这些是本次解析出的监听端口。')
+  return { lanIp, hosts, phoneBaseUrl, endpoint }
+}
 
 /**
  * 从**现有** `cordis.patch.yml` 里读回 `listener` 段（C1）。
@@ -340,7 +498,7 @@ function withEndpointAuthorities(trustedHosts, extraEndpoints) {
   return { hosts, added }
 }
 
-function patchBlock(trustedHosts, preserved) {
+function patchBlock(trustedHosts, preserved, derived) {
   // 端点列表先算出来：`trustedHosts` 要从它派生（见 withEndpointAuthorities 的说明）。
   //
   // ⚠️ 这里是**追加**合并，而不是原先的"命令行给了就整体覆盖"：
@@ -348,7 +506,11 @@ function patchBlock(trustedHosts, preserved) {
   //   若按覆盖语义，中继那条 `https://<域名>` 会在下一次重启时被静默挤掉 ——
   //   正是本项目已经发生过三次的那类事故（保留式合并只做了一半）。
   //   要**删除**某个端点请直接编辑配置，别用"少传一个参数"表达删除。
-  const extraEndpoints = [...new Set([...(preserved?.extraEndpoints ?? []), ...args.extraEndpoints])]
+  // ★ 改动 B 推导出的那条 https 也并进来（纯追加，见 derivePhoneEntry 里的长注释）：
+  //   它必须出现在**票据的 endpoints 里**，否则新机器的票据只有一条被壳跳过的明文。
+  const extraEndpoints = [
+    ...new Set([...(preserved?.extraEndpoints ?? []), ...args.extraEndpoints, ...(derived?.endpoint === undefined ? [] : [derived.endpoint])]),
+  ]
   const { hosts, added } = withEndpointAuthorities(trustedHosts, extraEndpoints)
   if (added.length > 0) log(`为 extraEndpoints 补了 ${added.length} 条 trust：${added.join('、')}`)
   // 配对码里要嵌"手机能访问到的地址"：DSH 只绑 loopback，手机走的是代理端口，
@@ -360,8 +522,9 @@ function patchBlock(trustedHosts, preserved) {
     for (const entry of hosts) lines.push(`          - '${entry}'`)
   }
   if (publicBaseUrl !== undefined) lines.push(`        publicBaseUrl: '${publicBaseUrl}'`)
-  // 手机侧必须 HTTPS（安全上下文 / WebCrypto 前提），端口与明文端口不同，单独一项
-  const phoneBaseUrl = args.phoneBaseUrl ?? preserved?.phoneBaseUrl
+  // 手机侧必须 HTTPS（安全上下文 / WebCrypto 前提），端口与明文端口不同，单独一项。
+  // 优先级：**命令行 > 现有配置读回 > 改动 B 的自动推导**（后者只在全新机器的路径上存在）。
+  const phoneBaseUrl = args.phoneBaseUrl ?? preserved?.phoneBaseUrl ?? derived?.phoneBaseUrl
   if (phoneBaseUrl !== undefined) lines.push(`        phoneBaseUrl: '${phoneBaseUrl}'`)
   // 中继：命令行优先，其次沿用现有配置（见 readPreservedKeys 的说明）
   const relayUrl = args.relayUrl ?? preserved?.relayUrl
@@ -386,10 +549,10 @@ function patchBlock(trustedHosts, preserved) {
    *    DSH 那边的行为也就一字不变（插件侧 `config.listener?.enabled !== true` ⇒ 不起监听）。
    *    ⚠️ 别改成"总是发块"：那会在**每一次** `restart-lan.sh` 里往生产配置塞新键。
    */
-  const listenerEnabled = args.listener ?? preserved?.listenerEnabled ?? false
-  if (listenerEnabled === true) {
-    const listenerPlain = args.listenerPlain ?? preserved?.listenerPlain ?? DEFAULT_LISTENER_PLAIN
-    const listenerTls = args.listenerTls ?? preserved?.listenerTls ?? DEFAULT_LISTENER_TLS
+  const listener = resolveListener(preserved)
+  if (listener.enabled === true) {
+    const listenerPlain = listener.plain
+    const listenerTls = listener.tls
     lines.push('        listener:')
     lines.push('          enabled: true')
     if (listenerPlain !== undefined && listenerPlain.length > 0) lines.push(`          plain: '${listenerPlain}'`)
@@ -415,17 +578,38 @@ function log(message) {
   console.log(`[install-host] ${message}`)
 }
 
+/** ★ 警告走 **stderr**：调用方（部署脚本 / 测试）可以单独看它，且不 fail（见 warnNoPhoneEntry）。 */
+function warn(message) {
+  console.warn(`[install-host] 警告：${message}`)
+}
+
 function fail(message) {
   console.error(`[install-host] 错误：${message}`)
   process.exit(1)
 }
 
-/** 检查前置条件：profile 存在、构建产物存在。 */
+/** 检查前置条件：profile 目录（缺了就**建**）、构建产物存在。 */
 function preflight() {
+  /**
+   * ★ 改动 A：profile 目录不存在时**建出来**，不再 fail 退出。
+   *
+   * 原先这里要求 `profiles/<name>` 已存在，并提示"请先用该 profile 启动一次 DSH"✗ ——
+   * **那句提示是错的** ✗：实测在全新 `DSH_HOME` 上跑 `dsh web`，DSH 正常起来，
+   * 而且**并不会**创建这个目录（HOME 仍是空的）✓。也就是说 DSH 自己不需要它，
+   * 是我们安装器多要求了一个目录 ✗，于是"换一台新电脑"的第一步就死在这里。
+   *
+   * 旁证 ✓：三个验收夹具（check-device-channel / check-mobile-layout / check-lan-listener）
+   * 都各自 `mkdirSync(profiles/web, {recursive:true})` 手动建一次，然后插件就能被加载 ✓ ——
+   * 它们本来就证明"手建就够"。这里把它变成安装器自己的职责 ✓。
+   *
+   * ⚠️ 下面那段**构建产物存在性**检查是另一回事，必须原样保留 ✗：
+   *    它拦的是"没 build 就装"，装上的是半成品 —— 那个检查是对的 ✓。
+   */
   if (!existsSync(profileDir)) {
-    fail(
-      `找不到 profile 目录：${profileDir}\n` +
-        `        请先用该 profile 启动一次 DSH（例如 \`dsh web\`），让它自动初始化。`,
+    mkdirSync(profileDir, { recursive: true })
+    log(
+      `profile 目录不存在，已创建：${profileDir}` +
+        `（DSH 自己不会建它；三个验收夹具也都是手建的）`,
     )
   }
   for (const pkg of PACKAGES) {
@@ -512,12 +696,35 @@ function updatePatch() {
   //   显式清空要用 `--clear-trusted-hosts`，那是刻意行为，与「忘了带参数」必须分开。
   let trustedHosts = args.trustedHosts
   let reusedTrustedHosts = false
+  /** @type {{ lanIp: string, hosts: string[], phoneBaseUrl?: string } | undefined} */
+  let derivedEntry
   if (trustedHosts.length === 0 && preserved.trustedHosts.length > 0) {
     trustedHosts = preserved.trustedHosts
     reusedTrustedHosts = true
     log(`未提供 --trusted-host，沿用已有 ${trustedHosts.length} 条受信 authority（避免抹掉手机入口）`)
+    // ★ 别让 `--lan-ip` 在这种情形下**静默不生效** —— 用户给了参数却看不出它没用，
+    //   下一轮就会以为"自动推导坏了"。要换地址请显式传 --trusted-host（那是刻意行为）。
+    if (args.lanIp !== undefined) {
+      log(`（已有可沿用的受信列表，本次 --lan-ip ${args.lanIp} 不生效；要换地址请显式传 --trusted-host）`)
+    }
+  } else if (trustedHosts.length === 0) {
+    /**
+     * ★★ 改动 B 的**触发条件**：命令行没给、现有配置里也读不回 ⇒ 这才是"全新机器"。
+     *
+     * 为什么必须是 `else if`（而不是"没给就推导"）✗：上面那条"沿用"是**防事故的护栏** ——
+     * `restart-lan.sh` 每次重启都会重跑本脚本，若拿探测结果去覆盖已有 authority，
+     * 就不是"补上手机入口"而是"每次重启都可能把手机入口换成探测到的那张网卡的地址" ✗
+     * （本项目已发生过三次同类事故，见 readPreservedKeys）。
+     * 测试里有一条 ★ 用例专门守它（`不破坏沿用`），变异 M3 就是把它改成无条件覆盖。
+     */
+    if (args.autoDetectLan) {
+      derivedEntry = derivePhoneEntry(preserved)
+      if (derivedEntry !== undefined) trustedHosts = derivedEntry.hosts
+    } else {
+      log('--no-lan-autodetect：跳过手机入口地址的自动推导（trustedHosts / phoneBaseUrl 都不写，与旧行为一致）')
+    }
   }
-  writeFileSync(patchFile, `${base}${patchBlock(trustedHosts, preserved)}`, 'utf8')
+  writeFileSync(patchFile, `${base}${patchBlock(trustedHosts, preserved, derivedEntry)}`, 'utf8')
   // ★ 写完立刻自检：原有的 authority 一条都不能少。
   //   少了就是手机入口 403，而配置热加载意味着**破坏是即时的**——
   //   宁可在这里报错退出，也不要静默地把线上入口关掉。
@@ -528,6 +735,14 @@ function updatePatch() {
     //   第一版没区分这两种情况，于是把"换地址"误判成"丢配置"，直接 fail 退出。
     const lost = reusedTrustedHosts ? preserved.trustedHosts.filter((host) => !written.includes(host)) : []
     if (lost.length > 0) fail(`配置自检失败：沿用路径下丢失受信 authority ${lost.join('、')}`)
+    // ★ 改动 B 自检：**自动推导写下的入口地址一条都不能少** ——
+    //   少了就是"脚本报成功、手机连不上"，正是这个脚本最怕的失败形态（同 C1 那次）。
+    const derivedLost =
+      derivedEntry === undefined ? [] : derivedEntry.hosts.filter((host) => !written.includes(host))
+    if (derivedLost.length > 0) fail(`配置自检失败：自动推导的手机入口地址没写进配置：${derivedLost.join('、')}`)
+    if (derivedEntry !== undefined) {
+      log('配置自检通过：自动推导的手机入口地址已写入（trustedHosts 与 phoneBaseUrl）')
+    }
   }
   /**
    * ★★ C1 写完立刻自检：**`listener` 块的"往返"必须与本次意图一致** ✓。
@@ -545,9 +760,9 @@ function updatePatch() {
    *   · 本次意图是**关** ⇒ 解析回来**不许**是 true ✗（否则用户以为关了、重启后它却起来了 ✓）。
    */
   {
-    // ★ 与 `patchBlock` 里**同一个**优先级表达式（命令行 > 现有配置 > 默认 false）——
-    //   两边必须一字不差地一致，否则这条自检会在正确的路径上误报 ✗。
-    const wanted = (args.listener ?? preserved.listenerEnabled ?? false) === true
+    // ★ 与 `patchBlock` / `derivePhoneEntry` 里**同一个**解析函数（命令行 > 现有配置 > 默认）——
+    //   三处必须一致，否则这条自检会在正确的路径上误报 ✗（改动 B 起改成共用一个函数）。
+    const wanted = resolveListener(preserved).enabled
     const written = readPreservedListener(readFileSync(patchFile, 'utf8'))
     if (wanted && written.enabled !== true) {
       fail(

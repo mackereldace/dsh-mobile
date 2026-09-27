@@ -37,6 +37,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ★ 仓库根：同样**从脚本自身位置推导** ✓（跨机迁移轮；★ 别占用 `round 152` —— 那是"扫码配对"那一轮）。
+#   原先下面那条"拒绝执行"提示里写死了 `/Volumes/Data/workspace/工程设计/dsh-mobile` ✗ ——
+#   换机器 / 换目录后，这段提示会把用户指到**不存在的路径** ✗（脚本本身没事，提示害人）。
+#   所有路径变量都**必须加引号**：仓库路径含**中文**，且可能含空格 ✗。
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DSH_PORT="${DSH_PORT:-3080}"
 PROXY_PORT="${PROXY_PORT:-3081}"
 # 手机真正的入口是 **TLS** 端口：明文 HTTP 下浏览器没有 `crypto.subtle`，
@@ -229,19 +234,23 @@ if [ "${ALLOW_FROM_SESSION:-0}" != "1" ]; then
     _cmd="$(ps -o command= -p "$_pid" 2>/dev/null || true)"
     case "$_cmd" in
       *dsh*web*)
-        cat >&2 <<'REFUSE'
+        # ★ 这里由 `'REFUSE'` 改为 `REFUSE`（去掉单引号）**是故意的** ✓：
+        #   下面那段提示要用 `${REPO_DIR}` / `${SCRIPT_DIR}` 展开 ✗ —— 引号版 heredoc 不展开变量 ✗。
+        #   安全性已人工核对：本段正文里**没有** `$`、反引号、反斜杠 ✓（有的话会被误展开）。
+        #   路径一律**带引号**打印：仓库路径含中文、且可能含空格 ✓。
+        cat >&2 <<REFUSE
 [restart-lan] ⛔ 拒绝执行：本脚本正运行在**某个 DSH 进程内部**（进程链里出现了 dsh web）。
 
 重启 DSH 会连带终止执行本脚本的那个会话，结果只是"重启到一半"。
 
 请改为在**你自己的终端**里执行：
 
-    cd /Volumes/Data/workspace/工程设计/dsh-mobile
-    bash scripts/restart-lan.sh
+    cd "${REPO_DIR}"
+    bash "${SCRIPT_DIR}/restart-lan.sh"
 
 只查看状态（只读、随时可跑）：
 
-    bash scripts/restart-lan.sh --status
+    bash "${SCRIPT_DIR}/restart-lan.sh" --status
 REFUSE
         exit 3
         ;;
