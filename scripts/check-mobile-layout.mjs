@@ -68,7 +68,150 @@ const flagIndex = process.argv.indexOf('--dsh-home')
 const EXPLICIT_HOME = flagIndex >= 0 ? process.argv[flagIndex + 1] : undefined
 const DSH_HOME = EXPLICIT_HOME ?? mkdtempSync(join(tmpdir(), 'ml-home-'))
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/**
+ * ── 临时分段计时（`ML_TIMING=1` 时在结尾打印一份，不改任何判据）────────────────
+ * 只做**观测**：记录每次 `sleep` / CDP `send` / `evaluate` 的调用点行号与耗时，
+ * 以及相邻两条 `check` 之间的墙钟间隔（= "这条断言前面等了多久"）。
+ * 行号靠 `new Error().stack` 里的调用帧取，调用点都是本文件里内联的 `await` ✓。
+ */
+const T = { t0: Date.now(), sleep: new Map(), send: new Map(), cdp: new Map(), gaps: [], last: { label: '(开始)', at: Date.now() } }
+const callerLine = () => {
+  // 帧序：0=「Error」✓、1=`callerLine` 自己 ✓、2=直接调用它的那个（`sleep`/`check`/`send`/`evaluate` ✓）、
+  // 3=**真正的调用点** ✓（第一版取了 [2] ⇒ 所有 sleep 都记成 `sleep` 自己的行号 ✗，读出来是一堆同一个数 ✓）。
+  const frame = (new Error().stack ?? '').split('\n')[3] ?? ''
+  const m = frame.match(/check-mobile-layout\.mjs:(\d+):/)
+  return m === null ? 0 : Number(m[1])
+}
+const bump = (map, line, ms) => {
+  const cur = map.get(line) ?? { n: 0, ms: 0 }
+  cur.n += 1
+  cur.ms += ms
+  map.set(line, cur)
+}
+/** 手工检查点（`mark('夹具')` ✓）—— 只记"距上一个是多少毫秒" ✓。 */
+T.marks = []
+T.lastMark = { name: '(开始)', at: Date.now() }
+T.mark = (name) => {
+  const at = Date.now()
+  T.marks.push({ name, ms: at - T.lastMark.at, from: T.lastMark.name })
+  T.lastMark = { name, at }
+}
+const sleep = async (ms) => {
+  const line = callerLine()
+  const at = Date.now()
+  await new Promise((r) => setTimeout(r, ms))
+  bump(T.sleep, line, Date.now() - at)
+}
+/**
+ * ★★ 验收提速（round 159）：**就地轮询** —— 条件成立就立刻继续，不成立才等到上限。
+ *
+ * ## 为什么这样改**不会**让断言变松
+ *   · **上限就是原来那个固定 `sleep` 的毫秒数** ✓ ⇒ 慢环境（条件真的要那么久才成立）
+ *     与原来**逐字等价** ✓：原来等 1600ms 再量，现在最多也等 1600ms 再量 ✓；
+ *   · 探测函数**只读**（`evaluate` 里的读操作 / 页面里的 `querySelector` ✓）⇒
+ *     轮询本身不改变被量的状态 ✗，也不会替被测对象"多做一步" ✓；
+ *   · 条件用的**就是紧随其后那条断言自己的判据** ✓ ⇒ 早退只可能发生在
+ *     "那条断言已经成立"的时候 ✓ —— 它拦不住任何真实的红 ✗（不成立就照旧等满 ✓）；
+ *   · `probe` 抛错一律当"还没成立" ✓（与"量不到就继续等"一致 ✓，绝不静默判绿 ✗）。
+ *
+ * ★ 只许用在"**等某个条件出现**"的地方 ✗ —— "**让一段时间过去**（计数器要涨、
+ *   轮询周期要走满）"那种窗口**不许**用它（那是判据本身，见 152-⑥/153-② ✓）。
+ */
+const waitFor = async (probe, timeoutMs, stepMs = 150) => {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    let ok = false
+    try {
+      ok = (await probe()) === true
+    } catch {
+      ok = false
+    }
+    if (ok === true) return true
+    const left = deadline - Date.now()
+    if (left <= 0) return false
+    // 裸 setTimeout（不进 `sleep` 的计时 ✓ —— 那是给"固定等待"看的账 ✗）
+    await new Promise((r) => setTimeout(r, Math.min(stepMs, left)))
+  }
+}
+
+/**
+ * ★★ 第二类（round 159）：等「**下一个动作要用的那个东西**」出现 ✓。
+ *
+ * ## 与第一类（`settle`）的区别，以及为什么它同样不会让断言变松 ✓
+ *   `settle` 等的是"**紧随其后那条断言自己的判据**"✓；这里等的是**刺激的前置条件** ✗ ——
+ *   例如"下一步要点的那个按钮出现了"✓、"要读的那个列表有几行了"✓。判据不是某条断言的判据 ✗，
+ *   但安全性来自**同一个论证** ✓：
+ *     1. **上限 = 原来那个 `sleep` 的毫秒数** ✓ ⇒ "条件在 N 毫秒内成不成立"这一步两边**是同一个判据** ✓，
+ *        慢环境下最坏也等满 N ✓（原来等满 N 再点，条件没成立那一下就是空点 ⇒ 断言变红 ✓；现在一样红 ✓）；
+ *     2. 条件**单调** ✓（控件出现/列表有行/刷新落地 ⇒ 不会自己消失 ✓）⇒ 早退之后那一下动作
+ *        与"等满 N 再动作"**打在同一状态上** ✓ ⇒ 结果一致 ✓；
+ *     3. 所以它既**不会把红变绿** ✗（条件没成立照样等满 N ✓），也**不会把绿变红** ✗（早退时条件已成立 ✓）。
+ *   ★ 探测**只读** ✓：只做 `querySelector` / 读 dataset ✓ —— 不点、不写、不替被测对象做任何一步 ✓。
+ */
+const waitForExpr = (expression, timeoutMs, stepMs = 120) =>
+  waitFor(async () => {
+    try {
+      return (await evaluate(expression)) === true
+    } catch {
+      return false
+    }
+  }, timeoutMs, stepMs)
+
+/**
+ * ★★ 「**就地轮询**」——固定 `await sleep(N)` 的可压缩版本 ✓。
+ *
+ * 用法：把原来
+ *     `await sleep(1600)` / `const x = await read()` / `check(判据(x), …)`
+ * 换成
+ *     `const x = await settle(read, 判据, 1600)` / `check(判据(x), …)`
+ * —— **`check` 那一行一字不改** ✓（判据一个字都没动 ✓）。
+ *
+ * ## 为什么这样改**不会**让断言变松（逐条）
+ *   1. **上限 = 原来那个 `sleep` 的毫秒数** ✓ ⇒ 慢环境下最多也等这么久再量 ✓，
+ *      与原来**逐字等价** ✓（原来等 1600ms 量一次，现在最坏也是等满 1600ms 量一次 ✓）；
+ *   2. `probe` 只读 ✓、`ok` 用的**就是紧随其后那条断言自己的判据** ✓ ⇒
+ *      早退只可能发生在"那条断言已经成立"的时候 ✓，拦不住任何真实的红 ✗；
+ *   3. 返回的是**满足 `ok` 的那一次读数** ✓ —— 它本身就是刚读到的 ✓（不是轮询过程中的旧值 ✗）；
+ *      到点仍未成立时**再如实量一次** ✓（= 原来 `sleep(N)` 之后那一次读 ✓，读数同样新鲜 ✓）；
+ *   4. `probe` 抛错 / `ok` 抛错一律当"还没成立" ✓ ⇒ 只会让它等满上限 ✓，绝不会静默判绿 ✗；
+ *      到点后仍抛错则**原样抛出** ✓（与原来 `await read()` 直接抛错一致 ✓）。
+ *
+ * ## 适用范围（★ 只许这两种 ✓）
+ *   · 「**等某个条件出现**」✓ —— 条件一旦成立就不再翻转（单调 ✓）：控件出现、列表加载完、
+ *     刷新落地、拨号计数涨到位 …… 这些"等到就好"的窗口 ✓；
+ *   · ✗ **不许**用于"**让一段时间过去**"✓：计数器必须涨够、轮询周期必须走满、
+ *     固定窗口内的增量要观察 —— 那是**判据本身** ✓（套件里那几处 9.6s / 2.5s 窗口
+ *     全部**原样保留** ✗，见 152-⑥ / 153-② ✓）。
+ */
+const settle = async (probe, ok, timeoutMs, stepMs = 120) => {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    let value
+    let probed = true
+    try {
+      value = await probe()
+    } catch (error) {
+      // 还没到上限：当"还没成立"继续等 ✓（探针在页面切换的那一瞬间会 evaluate 失败 ✓）
+      if (Date.now() >= deadline) throw error
+      probed = false
+      value = undefined
+    }
+    let good = false
+    try {
+      // ★ `await ok(...)`：判据本身可能是 async 的 ✓（少数判据里带 `await` 的读 ✓，
+      //   例如 `String((await swipeState()).last) === 'close-files'` ✓）——
+      //   同步判据在 `await` 下行为不变 ✓。
+      good = probed && (await ok(value)) === true
+    } catch {
+      good = false
+    }
+    if (good === true) return value
+    const left = deadline - Date.now()
+    if (left <= 0) return probe()
+    // 裸 setTimeout（不进 `sleep` 的计时账 ✓ —— 那是给"固定等待"看的 ✓）
+    await new Promise((r) => setTimeout(r, Math.min(stepMs, left)))
+  }
+}
 
 /**
  * 全局兜底超时。
@@ -524,6 +667,9 @@ const EXPECTED_MIN_CHECKS = 370
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
+  const at = Date.now()
+  T.gaps.push({ label, line: callerLine(), ms: at - T.last.at, prev: T.last.label })
+  T.last = { label, at }
   console.log(`  ${ok ? '✓' : '✗'} ${label}${detail === undefined ? '' : `（${detail}）`}`)
   if (!ok) problems.push(label)
 }
@@ -712,6 +858,7 @@ if (!/token=/.test(dshOut)) {
   console.error(`实例未就绪：\n${dshOut.slice(-800)}`)
   process.exit(1)
 }
+T.mark('夹具（大目录+会话复制）+ DSH 就绪')
 
 const proxy = trackChild(spawn(
   process.execPath,
@@ -727,6 +874,7 @@ const proxy = trackChild(spawn(
   { stdio: 'ignore', detached: true },
 ))
 await sleep(2500)
+T.mark('代理就绪')
 
 const post = async (path, body) => {
   const response = await fetch(`http://127.0.0.1:${DSH_PORT}${path}`, {
@@ -840,6 +988,7 @@ try {
 } catch (error) {
   console.log('  · 造预览夹具失败，那一段会如实报失败：' + String(error && error.message ? error.message : error))
 }
+T.mark('预览夹具')
 
 const chromeDir = mkdtempSync(join(tmpdir(), 'mlc-'))
 /**
@@ -861,7 +1010,11 @@ for (let i = 0; i < 60 && target === undefined; i++) {
   }
 }
 const ws = new WebSocket(target.webSocketDebuggerUrl)
-await Promise.race([new Promise((r) => (ws.onopen = r)), sleep(5000)])
+// ★ 这里同样是**上限**（race 的输家不会被取消）✓：用裸 setTimeout ✗ 不用 `sleep` ✓ ——
+//   与下面 `evaluate` 那条同一个理由 ✓（否则这把从不被等的 5 秒会污染 `[timing]` 的 sleep 账 ✓）。
+//   机制一个字没改 ✓，仍然是"`onopen` 一到就走"✗（本来就是事件驱动，不是固定等待 ✓）。
+await Promise.race([new Promise((r) => (ws.onopen = r)), new Promise((r) => setTimeout(r, 5000))])
+T.mark('Chrome + CDP 就绪')
 let messageId = 0
 const pending = new Map()
 /**
@@ -887,12 +1040,18 @@ ws.onmessage = (event) => {
     pending.delete(message.id)
   }
 }
-const send = (method, params = {}) =>
-  new Promise((resolve) => {
+const send = (method, params = {}) => {
+  const line = callerLine()
+  const at = Date.now()
+  return new Promise((resolve) => {
     const id = ++messageId
     pending.set(id, resolve)
     ws.send(JSON.stringify({ id, method, params }))
+  }).then((value) => {
+    bump(T.send, line, Date.now() - at)
+    return value
   })
+}
 await send('Page.enable')
 await send('Runtime.enable')
 // ★ round 120：浏览器自己报的加载/导航失败也收一份 ✓（见上面 cdpLog 的说明 ✓）
@@ -924,16 +1083,30 @@ const evaluate = async (expression) => {
   // 少了它，异步 IIFE 返回的 Promise 会被 `returnByValue` 序列化成 `{}`，
   // 断言于是拿到 `undefined` 而报红 —— 看起来像"功能没生效"，其实是量法错了 ✗
   // （实测：转发打开宿主对话框那三条就是这么红的；`shoot-ui.mjs` 一直开着它，所以那边正常）
+  const line = callerLine()
+  const at = Date.now()
   const result = await Promise.race([
     send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }),
-    sleep(12_000).then(() => ({ timeout: true })),
+    // ★ 这里是**上限**（race 的输家不会被取消）：用裸 setTimeout 而不是 `sleep` ✓
+    //   —— `sleep` 现在带计时，把从不被 await 的 12s 计时也记进去会污染读数 ✗。
+    new Promise((r) => setTimeout(r, 12_000)).then(() => ({ timeout: true })),
   ])
+  bump(T.cdp, line, Date.now() - at)
   return result.timeout === true ? '(超时)' : result.result?.result?.value
 }
 
 try {
   const created = await post('/mobile/pair/code')
   await send('Page.navigate', { url: `https://${LAN_IP}:${TLS_PORT}/mobile` })
+  /**
+   * ★★ 实测回退（round 159 ✓，C 类教训 ✓）：这里**不能**用"等 `#link` 出现"✗ ——
+   *   配对页是**普通 HTML + 一段脚本**✓，`#link` 在 HTML 里**一开始就在** ✓，
+   *   而把事情办成的那段脚本**还没跑** ✗ ⇒ 轮询第一次就早退 ✓ ⇒
+   *   `do-pair` 被点在一个**还没接上处理函数**的按钮上 ✗ ⇒ 整轮配对没发生 ✓
+   *   （症状：侧栏会话行 0 条、页面停在配对页 ✓，与"改动没有生效"完全同形 ✗）。
+   *   `waitForExpr` 只在"**元素存在 ⇒ 它已经可用**"成立时才安全 ✓（React 渲染的控件 ✓）；
+   *   普通 HTML 页不满足这个前提 ✗ ⇒ **原样保留固定等待** ✓。
+   */
   await sleep(3000)
   await evaluate(`document.getElementById('link').value=${JSON.stringify(created.qrPayload)}`)
   await evaluate(`document.getElementById('do-pair').click()`)
@@ -941,7 +1114,13 @@ try {
   const pendingList = await (await fetch(`http://127.0.0.1:${DSH_PORT}/mobile/pair/pending`)).json()
   const device = (pendingList.pairings ?? []).find((x) => x.state === 'claimed')
   if (device !== undefined) await post('/mobile/pair/confirm', { code: device.code, deviceId: device.deviceId, approve: true })
-  await sleep(12_000)
+  // ★ 第二类（★ 判据就是**紧随其后那条断言自己的判据** ✓）：等**配对落地、中栏真的占满视口**
+  //   （上限仍是 12000ms ✓ —— 慢环境下最坏也等满 ✓；早退只发生在"中栏 ≥400px 已经成立"时 ✓）
+  await waitForExpr(`(function(){
+    var c=document.querySelector('[class*="centerCol"]')
+    if(c===null) return false
+    return Math.round(c.getBoundingClientRect().width) >= 400
+  })()`, 12_000)
   for (let i = 0; i < 3; i++) {
     const clicked = await evaluate(`(function(){var b=[...document.querySelectorAll('button')].find(function(x){return /稍后配置|继续/.test(x.innerText||'')});if(b){b.click();return true}return false})()`)
     if (clicked !== true) break
@@ -1437,8 +1616,9 @@ try {
         var row=rows[${i}]; if(!row) return null
         row.click(); return (row.innerText||'').replace(/\\s+/g,' ').slice(0,24) })()`)
       if (clicked === null || clicked === undefined) break
-      await sleep(5500)
-      const hasBar = await evaluate(`(function(){
+      // ★ 第一类：轮询到**紧随其后那个早退条件**（状态栏出现且这个会话没有"真入口"）成立就继续
+      //   （上限仍是 5500ms ✓ —— 判据与该循环 `if (hasBar === true) break` 逐字相同 ✓）
+      const hasBar = await settle(async () => await evaluate(`(function(){
         var r=document.querySelector('[data-composer-stats]')
         var ok=r!==null&&r!==undefined&&(r.textContent||'').length>0
         /**
@@ -1449,7 +1629,7 @@ try {
          */
         var h=document.querySelector('[data-dshm-topheader]')
         var hasLineage=h!==null&&h!==undefined&&h.querySelectorAll('button[aria-haspopup="tree"]').length>0
-        return ok&&!hasLineage })()`)
+        return ok&&!hasLineage })()`), async (hasBar) => hasBar === true, 5500)
       console.log(`    · 试第 ${i + 1} 个会话行「${String(clicked)}」→ 状态栏 ${hasBar === true ? '出现' : '没有'}`)
       if (hasBar === true) {
         openedSession = clicked
@@ -2078,10 +2258,10 @@ try {
       await sleep(60)
       await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
     }
-    await sleep(500)
-    const clickRead = asJson155(
+    // ★ sleep(500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 500ms ✓）
+    const clickRead = await settle(async () => (asJson155(
       await evaluate(`JSON.stringify({clicks:globalThis.__dshmLineageClicks||0})`),
-    )
+    )), async (clickRead) => (spyReady === true && clickRead.clicks >= 1), 500)
     check(
       spyReady === true && clickRead.clicks >= 1,
       '★ 157-A-⑧ 那枚入口**真点得到它自己** ✓（`elementFromPoint(它的中心)` 命中它 ✓ + 在同一个点上发**真触摸** ⇒ 它自己的 click 真的收到 ✓ —— 用户要求"改完样式必须仍然可点"✓）',
@@ -2225,8 +2405,8 @@ try {
           var row=rows[${i}]; if(!row) return null
           row.click(); return (row.innerText||'').replace(/\\s+/g,' ').slice(0,28) })()`)
         if (clicked === null || clicked === undefined) break
-        await sleep(3200)
-        const t = await realTriggerProbe()
+        // ★ sleep(3200) → settle：轮询到「紧随其后那个早退条件」成立就继续（上限仍是 3200ms ✓）
+        const t = await settle(async () => (await realTriggerProbe()), async (t) => (t.triggers >= 1), 3200)
         if (t.triggers >= 1) { realRow = clicked; break }
       }
       const drawerClosed = await closeDrawerNow()
@@ -2348,7 +2528,10 @@ try {
         `注入=${JSON.stringify(nested)}｜包装层（定下来之后）=${JSON.stringify(nestedSettled)}｜真入口=${JSON.stringify(tNested)}｜${geometryDetail(gNested)}`,
       )
       await evaluate(`(function(){var n=document.querySelector('[data-dshm-nested="lineage"]');if(n&&n.parentElement)n.parentElement.removeChild(n)})()`)
-      await sleep(700)
+      // ★ sleep(700) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 700ms ✓）
+      const srcLineage = await settle(async () => (readFileSync(join(repoRoot, 'packages', 'client', 'src', 'boot.js'), 'utf8')), async (srcLineage) => (srcLineage.indexOf('⇒ 就地显示') >= 0 &&
+          srcLineage.indexOf('入口摆不到位（') < 0 &&
+          srcLineage.split('lineageGeneratesBox').length - 1 >= 2), 700)
       /**
        * ⑥ **"藏起来"不许再当结论** ✗（源码级防呆 ✓）：`placeLineageEntry` 里那条
        *   "摆不到位 ⇒ 不显示"必须**真的没了** ✓，改成"**就地显示** + 留一行日志"✓。
@@ -2356,7 +2539,6 @@ try {
        *   而用户要的是"**摆不齐也不许不显示**"✓ —— 那是**代码路径**的性质 ✓，
        *   只有源码级这一条能一直盯着它 ✓（本项目已有同形先例 ✓：`if (DEBUG_BOX_ON) {` 那几处 ✓）。
        */
-      const srcLineage = readFileSync(join(repoRoot, 'packages', 'client', 'src', 'boot.js'), 'utf8')
       check(
         srcLineage.indexOf('⇒ 就地显示') >= 0 &&
           srcLineage.indexOf('入口摆不到位（') < 0 &&
@@ -3028,8 +3210,8 @@ try {
         if (btns.length > 0) btns[0].click()
         return true })()`)
       for (let i = 0; i < 12; i++) {
-        await sleep(400)
-        const rows = await evaluate(`document.querySelectorAll('.dshm-file').length`)
+        // ★ sleep(400) → settle：轮询到「紧随其后那个早退条件」成立就继续（上限仍是 400ms ✓）
+        const rows = await settle(async () => (await evaluate(`document.querySelectorAll('.dshm-file').length`)), async (rows) => (typeof rows === 'number' && rows > 0), 400)
         if (typeof rows === 'number' && rows > 0) break
       }
       console.log(
@@ -3052,8 +3234,8 @@ try {
   //   根本点不到探针 —— 第一版就是这么红的 ✗（"点了但没聚焦"其实是被挡住了）
   await evaluate(`(function(){
     var c=document.getElementById('dsh-mobile-sheet-close'); if(c) c.click() })()`)
-  await sleep(900)
-  const guardMark = await evaluate(`document.body.dataset.dshmKeyboardGuard||null`)
+  // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+  const guardMark = await settle(async () => (await evaluate(`document.body.dataset.dshmKeyboardGuard||null`)), async (guardMark) => (guardMark === '1'), 900)
   check(guardMark === '1', '手机上装了输入法守卫（body 上有安装标记）', String(guardMark))
   await evaluate(`(function(){
     var host=document.querySelector('[class*="centerCol"]')||document.body
@@ -3289,9 +3471,17 @@ try {
   const shellHref = String(await evaluate('location.href'))
   const shellBase = shellHref.split('?')[0]
   await send('Page.navigate', { url: shellBase + '?debug=1' })
-  await sleep(9000)
-  const pwaLog = String(
-    await evaluate("String((document.getElementById('dshm-upload-debug')||{}).textContent||'')"),
+  // ★ 第一类：等**下面那三条断言要的那几行 `[pwa]` 真的写进调试框**（上限仍是 9000ms ✓）。
+  //   判据取的是那三条判据的**合取** ✓（比单条更严 ✗ ⇒ 早退时三条都已经成立 ✓）。
+  const pwaLog = await settle(
+    async () => String(await evaluate("String((document.getElementById('dshm-upload-debug')||{}).textContent||'')")),
+    async (text) =>
+      text.includes('[pwa] 当前页面=/mobile/app') &&
+      text.includes('manifest=/mobile/manifest.webmanifest') &&
+      /\[pwa\] 打开方式=(独立窗口|浏览器标签)/.test(text) &&
+      text.includes('安全上下文=https:') &&
+      text.includes('[pwa] 可安装信号='),
+    9000,
   )
   const pwaLines = pwaLog
     .split('\n')
@@ -3488,8 +3678,9 @@ try {
   await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 300, y: 600, id: 1 }] })
   await sleep(40)
   await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 264, y: 600, id: 1 }] })
-  await sleep(40)
-  const openMid = await openDragProbe()
+  // ★ sleep(40) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 40ms ✓）
+  const openMid = await settle(async () => (await openDragProbe()), async (openMid) => (openMid.open === false && Number.isFinite(openMid.col) && Number.isFinite(openMid.top) &&
+      Math.abs(openMid.col - openMid.top) <= 6 && Math.abs(openMid.col + 66) <= 20 && openMid.panelVisible === true), 40)
   check(
     openMid.open === false && Number.isFinite(openMid.col) && Number.isFinite(openMid.top) &&
       Math.abs(openMid.col - openMid.top) <= 6 && Math.abs(openMid.col + 66) <= 20 && openMid.panelVisible === true,
@@ -3498,8 +3689,8 @@ try {
   )
   // 提前松手 → 回弹到**关闭**（不是打开 ✓）
   await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-  await sleep(900)
-  const openSnapBack = await openDragProbe()
+  // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+  const openSnapBack = await settle(async () => (await openDragProbe()), async (openSnapBack) => (openSnapBack.open === false && Math.abs(openSnapBack.col) <= 4 && Math.abs(openSnapBack.top) <= 4), 900)
   check(
     openSnapBack.open === false && Math.abs(openSnapBack.col) <= 4 && Math.abs(openSnapBack.top) <= 4,
     '打开手势没拉到位 → 回弹到关闭，内容与顶栏一起归零 ✓',
@@ -3512,8 +3703,8 @@ try {
     await sleep(30)
   }
   await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-  await sleep(1000)
-  const openCommitted = await openDragProbe()
+  // ★ sleep(1000) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1000ms ✓）
+  const openCommitted = await settle(async () => (await openDragProbe()), async (openCommitted) => (openCommitted.open === true && Math.abs(openCommitted.col + 264) <= 8 && Math.abs(openCommitted.top + 264) <= 8), 1000)
   check(
     openCommitted.open === true && Math.abs(openCommitted.col + 264) <= 8 && Math.abs(openCommitted.top + 264) <= 8,
     '打开手势拉到位 → 面板打开，内容与顶栏一起到位（都 = 整块让位 ✓）',
@@ -3793,8 +3984,8 @@ try {
   await evaluate(`(function(){
     if(document.body.dataset.dshMobileDrawer==='open'){var s=document.getElementById('dsh-mobile-scrim');if(s)s.click()}
   })()`)
-  await sleep(700)
-  const drawerClosedForNext = await evaluate(`document.body.dataset.dshMobileDrawer===undefined`)
+  // ★ sleep(700) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 700ms ✓）
+  const drawerClosedForNext = await settle(async () => (await evaluate(`document.body.dataset.dshMobileDrawer===undefined`)), async (drawerClosedForNext) => (drawerClosedForNext === true), 700)
   check(drawerClosedForNext === true, '（收尾）确定性复位到"两个抽屉都关着"，供后续用例使用', String(drawerClosedForNext))
   await sleep(400)
 
@@ -3854,8 +4045,8 @@ try {
   })()`)
   await sleep(900)
   await evaluate(`document.getElementById('dsh-mobile-files').click()`)
-  await sleep(110) // 过渡进行到一半附近 ✓
-  const animationProbe = JSON.parse(
+  // ★ sleep(110) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 110ms ✓）
+  const animationProbe = await settle(async () => (JSON.parse(
     String(
       await evaluate(`(function(){
         var top=document.getElementById('dsh-mobile-top');
@@ -3866,7 +4057,8 @@ try {
         });
       })()`),
     ),
-  )
+  )), async (animationProbe) => (Number.isFinite(animationProbe.top) && Number.isFinite(animationProbe.col) &&
+      Math.abs(animationProbe.top - animationProbe.col) <= 2), 110) // 过渡进行到一半附近 ✓
   check(
     Number.isFinite(animationProbe.top) && Number.isFinite(animationProbe.col) &&
       Math.abs(animationProbe.top - animationProbe.col) <= 2,
@@ -4046,10 +4238,10 @@ try {
     document.body.appendChild(wrap);
     return Math.round(wrap.scrollWidth)+'/'+Math.round(wrap.clientWidth);
   })()`)
-  await sleep(400)
-  const territory = JSON.parse(
+  // ★ sleep(400) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 400ms ✓）
+  const territory = await settle(async () => (JSON.parse(
     String(await evaluate(`JSON.stringify(window.__DSH_MOBILE_BOOT__.swipeTerritoryAt(120, 320))`)),
-  )
+  )), async (territory) => (territory.blocked === true && String(territory.reason).indexOf('可横向滚动') >= 0), 400)
   check(
     territory.blocked === true && String(territory.reason).indexOf('可横向滚动') >= 0,
     '宽表格被识别成"横向滚动区域"（诊断直接说出是哪一层、能滚多远 ✓）',
@@ -4065,11 +4257,11 @@ try {
     `表格上左滑 140px 后：两个抽屉都关着=${wideTableClean}`,
   )
   await evaluate(`(function(){var el=document.getElementById('dshm-wide-table-probe');if(el)el.remove()})()`)
-  await sleep(300)
-
-  const closedBeforeVertical = await evaluate(
+  // ★ sleep(300) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 300ms ✓）
+  const closedBeforeVertical = await settle(async () => (await evaluate(
     `document.body.dataset.dshmFiles===undefined && document.body.dataset.dshMobileDrawer===undefined`,
-  )
+  )), async (closedBeforeVertical) => (closedBeforeVertical === true), 300)
+
   check(closedBeforeVertical === true, '（前置）竖向滑动这一步开始时两个抽屉都是关着的', String(closedBeforeVertical))
   const beforeVertical = (await swipeState()).count
   await gesture(330, 700, 6, -160)
@@ -4750,8 +4942,8 @@ try {
     for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0){ rows[i].click(); return true } }
     return false;
   })()`)
-  await sleep(1600)
-  const fileListState = await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)
+  // ★ sleep(1600) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1600ms ✓）
+  const fileListState = await settle(async () => (await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)), async (fileListState) => (enteredWorkspace === true && typeof fileListState === 'number' && fileListState >= 5), 1600)
   check(
     enteredWorkspace === true && typeof fileListState === 'number' && fileListState >= 5,
     '能进入验收工作区根目录并看到夹具文件（前置）',
@@ -4776,8 +4968,8 @@ try {
       return true;
     })()`)
     await tapEntry(PREVIEW_FILES.text)
-    await sleep(2600)
-    const tapDefault = JSON.parse(
+    // ★ sleep(2600) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 2600ms ✓）
+    const tapDefault = await settle(async () => (JSON.parse(
       String(
         await evaluate(`(function(){
           return JSON.stringify({
@@ -4786,7 +4978,7 @@ try {
           });
         })()`),
       ),
-    )
+    )), async (tapDefault) => (tapDefault.calls.length === 1 && String(tapDefault.calls[0]).includes(PREVIEW_FILES.text)), 2600)
     check(
       tapDefault.calls.length === 1 && String(tapDefault.calls[0]).includes(PREVIEW_FILES.text),
       '★ **点文件默认走 DSH 预览**（用户："从现在起都用 dsh 预览" ✓ —— 而不是先给一个自家渲染的中间态 ✗）',
@@ -4831,8 +5023,8 @@ try {
 
   // ① 文本
   await clickEntry(PREVIEW_FILES.text)
-  await sleep(1400)
-  const pvText = await previewState()
+  // ★ sleep(1400) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1400ms ✓）
+  const pvText = await settle(async () => (await previewState()), async (pvText) => (pvText.title === PREVIEW_FILES.text && pvText.textLen !== null && String(pvText.textHead).includes('预览标记-9f3a')), 1400)
   check(
     pvText.title === PREVIEW_FILES.text && pvText.textLen !== null && String(pvText.textHead).includes('预览标记-9f3a'),
     '点文本文件 → 面板里直接预览（标题=文件名，正文含文件内容）',
@@ -4845,8 +5037,8 @@ try {
     for(var i=0;i<bs.length;i++){ if(/返回/.test(bs[i].textContent||'')){ bs[i].click(); return true } }
     return false;
   })()`)
-  await sleep(1500)
-  const backRows = await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)
+  // ★ sleep(1500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1500ms ✓）
+  const backRows = await settle(async () => (await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)), async (backRows) => (backOk === true && typeof backRows === 'number' && backRows >= 5), 1500)
   check(
     backOk === true && typeof backRows === 'number' && backRows >= 5,
     '预览页能返回文件列表（返回后目录内容还在）',
@@ -4855,8 +5047,8 @@ try {
 
   // ② 图片
   await clickEntry(PREVIEW_FILES.image)
-  await sleep(1600)
-  const pvImage = await previewState()
+  // ★ sleep(1600) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1600ms ✓）
+  const pvImage = await settle(async () => (await previewState()), async (pvImage) => (pvImage.imageW !== null && pvImage.imageW > 0 && pvImage.imageH > 0), 1600)
   check(
     pvImage.imageW !== null && pvImage.imageW > 0 && pvImage.imageH > 0,
     '点图片文件 → 真的解码并显示（naturalWidth > 0，不是"坏图"）',
@@ -4867,8 +5059,9 @@ try {
 
   // ③ 超大文本：必须**明说只显示前一段**，不能假装完整
   await clickEntry(PREVIEW_FILES.huge)
-  await sleep(1800)
-  const pvHuge = await previewState()
+  // ★ sleep(1800) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1800ms ✓）
+  const pvHuge = await settle(async () => (await previewState()), async (pvHuge) => (pvHuge.textLen !== null && pvHuge.textLen > 100 * 1024 && pvHuge.textLen <= 200 * 1024 + 1024 &&
+      typeof pvHuge.meta === 'string' && pvHuge.meta.includes('只显示前')), 1800)
   check(
     pvHuge.textLen !== null && pvHuge.textLen > 100 * 1024 && pvHuge.textLen <= 200 * 1024 + 1024 &&
       typeof pvHuge.meta === 'string' && pvHuge.meta.includes('只显示前'),
@@ -4880,8 +5073,8 @@ try {
 
   // ④ 二进制：不硬塞乱码，给一句人话 + 出路
   await clickEntry(PREVIEW_FILES.binary)
-  await sleep(1500)
-  const pvBinary = await previewState()
+  // ★ sleep(1500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1500ms ✓）
+  const pvBinary = await settle(async () => (await previewState()), async (pvBinary) => (pvBinary.textLen === null && typeof pvBinary.fallback === 'string' && pvBinary.fallback.includes('不预览')), 1500)
   check(
     pvBinary.textLen === null && typeof pvBinary.fallback === 'string' && pvBinary.fallback.includes('不预览'),
     '二进制文件不硬塞乱码：给出"不预览 + 可下载/在电脑上打开"的说明',
@@ -4915,11 +5108,13 @@ try {
       for(var i=0;i<bs.length;i++){ if(/返回/.test(bs[i].textContent||'')){ bs[i].click(); return true } }
       return false
     })()`)
-    await sleep(1500)
+    // ★ 第二类：等**DSH 预览标记真的落下去**（= "回到文件列表了"；上限仍是 1500ms ✓）
+    await waitForExpr(`String((document.body&&document.body.dataset.dshmDshPreview)||'') !== '1'`, 1500)
   }
   const openEntry = async (name) => {
     await clickEntry(name)
-    await sleep(1700)
+    // ★ 第二类：等**预览标记真的立起来**（= "预览开了"；上限仍是 1700ms ✓ —— 后面读的就是它 ✓）
+    await waitForExpr(`String((document.body&&document.body.dataset.dshmDshPreview)||'') === '1'`, 1700)
   }
 
   // 上一段结束时面板已关闭 → 这里重新打开并进入验收工作区根目录 ✓
@@ -4938,8 +5133,8 @@ try {
     for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0){ rows[i].click(); return true } }
     return false;
   })()`)
-  await sleep(1700)
-  const reopenRows = await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)
+  // ★ sleep(1700) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1700ms ✓）
+  const reopenRows = await settle(async () => (await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)), async (reopenRows) => (previewFixturesReady === true && typeof reopenRows === 'number' && reopenRows >= 6), 1700)
   check(
     previewFixturesReady === true && typeof reopenRows === 'number' && reopenRows >= 6,
     '（前置）预览夹具齐全，且这一段开始时确实站在工作区根目录',
@@ -5202,20 +5397,33 @@ try {
     const bRows = async () => Number(await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`))
     const bEnterWorkspace = async () => {
       await evaluate(`document.getElementById('dsh-mobile-files').click()`)
-      await sleep(1300)
+      // ★ 第二类：等**下一步要点的那个「工作区」按钮**出现（上限仍是 1300ms ✓）
+      await waitForExpr(`(function(){
+        var bar=document.querySelector('.dshm-files-toolbar');
+        if(bar===null) return false;
+        var bs=bar.querySelectorAll('button');
+        for(var i=0;i<bs.length;i++){ if(/工作区/.test(bs[i].textContent||'')) return true }
+        return false;
+      })()`, 1300)
       await evaluate(`(function(){
         var bar=document.querySelector('.dshm-files-toolbar');
         var bs=bar===null?[]:[].slice.call(bar.querySelectorAll('button'));
         for(var i=0;i<bs.length;i++){ if(/工作区/.test(bs[i].textContent||'')){bs[i].click();return true} }
         return false;
       })()`)
-      await sleep(1200)
+      // ★ 第二类：等**工作区列表里那一行**出现（上限仍是 1200ms ✓）
+      await waitForExpr(`(function(){
+        var rows=document.querySelectorAll('.dshm-ws');
+        for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0) return true }
+        return false;
+      })()`, 1200)
       await evaluate(`(function(){
         var rows=[].slice.call(document.querySelectorAll('.dshm-ws'));
         for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0){ rows[i].click(); return true } }
         return false;
       })()`)
-      await sleep(1700)
+      // ★ 第二类：等**文件列表真的有行**（上限仍是 1700ms ✓ —— 后面几条断言读的就是它 ✓）
+      await waitForExpr(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length > 0`, 1700)
     }
     const bClickRow = async (name) =>
       Boolean(
@@ -5241,7 +5449,8 @@ try {
           return '(没有探针)'
         })()`),
       )
-      await sleep(2800)
+      // ★ 第二类：等**预览标记真的落下去**（上限仍是 2800ms ✓ —— 它就是"预览关了没有"那句判据 ✓）
+      await waitForExpr(`String((document.body&&document.body.dataset.dshmDshPreview)||'') !== '1'`, 2800)
       return clicked
     }
     const countOf = (text, needle) => String(text).split(needle).length - 1
@@ -5507,11 +5716,16 @@ try {
       let allOpen = true
       for (let cycle = 1; cycle <= 3; cycle++) {
         await evaluate(`document.getElementById('dsh-mobile-files').click()`)
-        await sleep(1300)
+        // ★ 第二类：等**文件面板真的开出来**（上限仍是 1300ms ✓ —— 下一步就是在这个面板上操作 ✓）
+        await waitForExpr(`document.body.dataset.dshmFiles === 'open'`, 1300)
         await filesWatchStart()
         await bEnterWorkspace()
         const inSub = await bClickRow(RETURN_DEMO_DIR)
-        await sleep(1600)
+        // ★ 第二类：等**面包屑真的停到那个子目录**（上限仍是 1600ms ✓ —— 就是 `before` 要读的那件事 ✓）
+        await waitForExpr(`(function(){
+          var el=document.querySelector('.dshm-crumb-path')
+          return el!==null && String(el.getAttribute('title')||'').endsWith(${JSON.stringify(RETURN_DEMO_DIR)})
+        })()`, 1600)
         const before = await bCrumb()
         await bClickRow(RETURN_DEMO_FILE)
         await sleep(2500)
@@ -5849,8 +6063,8 @@ try {
     )
     const markerBefore = String(await evaluate(`(document.body&&document.body.dataset.dshmDshPreview)||''`))
     await gesture(360, 300, 240, 0)
-    await sleep(1400)
-    const markerAfter = String(await evaluate(`(document.body&&document.body.dataset.dshmDshPreview)||''`))
+    // ★ sleep(1400) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1400ms ✓）
+    const markerAfter = await settle(async () => (String(await evaluate(`(document.body&&document.body.dataset.dshmDshPreview)||''`))), async (markerAfter) => (markerBefore === '1' && markerAfter !== '1'), 1400)
     check(
       markerBefore === '1' && markerAfter !== '1',
       '**右滑能把 DSH 预览推回右边栏**（用户："不能右滑返回" ✗ —— 现在与自家预览是同一套操作逻辑 ✓）',
@@ -6018,8 +6232,8 @@ try {
       `(function(){try{return document.body.dataset.dshmFiles===undefined && document.body.dataset.dshMobileDrawer===undefined}catch(e){return false}})()`,
     )
     await gesture(330, 700, -150, 3)
-    await sleep(700)
-    const afterSwipe = asJson(
+    // ★ sleep(700) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 700ms ✓）
+    const afterSwipe = await settle(async () => (asJson(
       await evaluate(`(function(){
         try {
           return JSON.stringify({
@@ -6029,7 +6243,10 @@ try {
           });
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
-    )
+    )), async (afterSwipe) => (beforeSwipe === true &&
+        afterSwipe.error === undefined &&
+        afterSwipe.files !== 'open' &&
+        afterSwipe.drawer !== 'open'), 700)
     check(
       beforeSwipe === true &&
         afterSwipe.error === undefined &&
@@ -6118,15 +6335,8 @@ try {
     await evaluate(
       `(function(){try{var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click();return true}catch(e){return false}})()`,
     )
-    await sleep(1000)
-
-    /**
-     * ⑤ 调试框**不挡触摸** ✓ —— 内容区上方的点仍然落到内容上 ✓。
-     *    用户报的"聊天里的文件链接点不开" ✗，头号嫌疑就是我们自己的调试框 ✗：
-     *    `?debug=1` 会被 localStorage 记住 ✓，而它 `position: fixed` + 盖住上方约 40vh + z-index 300 ✓
-     *    ⇒ 它会**吃掉那片区域的所有触摸** ✗。这里直接对内容区上方做命中测试 ✓。
-     */
-    const topHit = asJson(
+    // ★ sleep(1000) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1000ms ✓）
+    const topHit = await settle(async () => (asJson(
       await evaluate(`(function(){
         try {
           var debugBox=document.getElementById('dshm-upload-debug');
@@ -6142,7 +6352,14 @@ try {
           });
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
-    )
+    )), async (topHit) => (topHit.error === undefined && topHit.blockedByDebug === false), 1000)
+
+    /**
+     * ⑤ 调试框**不挡触摸** ✓ —— 内容区上方的点仍然落到内容上 ✓。
+     *    用户报的"聊天里的文件链接点不开" ✗，头号嫌疑就是我们自己的调试框 ✗：
+     *    `?debug=1` 会被 localStorage 记住 ✓，而它 `position: fixed` + 盖住上方约 40vh + z-index 300 ✓
+     *    ⇒ 它会**吃掉那片区域的所有触摸** ✗。这里直接对内容区上方做命中测试 ✓。
+     */
     check(
       topHit.error === undefined && topHit.blockedByDebug === false,
       '调试框**不挡触摸**（内容区上方的点仍然落到内容上 ✓ —— 这就是"链接点不开"的头号嫌疑 ✓）',
@@ -6253,13 +6470,8 @@ try {
     await evaluate(
       `(function(){try{document.documentElement.style.setProperty('--dshm-safe-top','${SIM_SAFE_TOP}px');return true}catch(e){return false}})()`,
     )
-    await sleep(900)
-    /**
-     * ⑦ 预览层的**内容盒顶边**在安全区以下 ✓。
-     *    ★ 判据是"内容从哪一行开始画" ✓，不是"内边距是多少" ✗ —— 内边距只是手段之一 ✓
-     *      （工具行与预览层同流时，工具行先把层推下去 ✓，此时内边距是 0 也正确 ✓）。
-     */
-    const safeArea = asJson(
+    // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+    const safeArea = await settle(async () => (asJson(
       await evaluate(`(function(){
         try {
           var nodes=document.querySelectorAll('[class*="_preview"]');
@@ -6280,7 +6492,12 @@ try {
           });
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
-    )
+    )), async (safeArea) => (safeArea.error === undefined && safeArea.found === true && safeArea.contentTop >= SIM_SAFE_TOP), 900)
+    /**
+     * ⑦ 预览层的**内容盒顶边**在安全区以下 ✓。
+     *    ★ 判据是"内容从哪一行开始画" ✓，不是"内边距是多少" ✗ —— 内边距只是手段之一 ✓
+     *      （工具行与预览层同流时，工具行先把层推下去 ✓，此时内边距是 0 也正确 ✓）。
+     */
     check(
       safeArea.error === undefined && safeArea.found === true && safeArea.contentTop >= SIM_SAFE_TOP,
       `DSH 预览的**内容盒顶边**在安全区以下（安全区 ${SIM_SAFE_TOP}px 时 contentTop ≥ ${SIM_SAFE_TOP} ✓ —— 手段可以是内边距、也可以是把上面那条工具行推下去 ✓）`,
@@ -6487,8 +6704,8 @@ try {
      *    ★ 判据仍然是**内容顶边** ✓（内边距只是手段之一 ✗）——
      *      它同时证明"不是只在上一段那个值下有效" ✓。
      */
-    await sleep(900)
-    const previewAfterPull = asJson(
+    // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+    const previewAfterPull = await settle(async () => (asJson(
       await evaluate(`(function(){
         try {
           var nodes=document.querySelectorAll('[class*="_preview"]');
@@ -6502,7 +6719,7 @@ try {
           return JSON.stringify({contentTop:-1});
         } catch (e) { return JSON.stringify({contentTop:-1, error:String(e && e.message ? e.message : e)}) }
       })()`),
-    )
+    )), async (previewAfterPull) => (previewAfterPull.error === undefined && previewAfterPull.contentTop >= 33), 900)
     check(
       previewAfterPull.error === undefined && previewAfterPull.contentTop >= 33,
       '壳报 33px 之后，DSH 预览的**内容**跟着落到 33px 以下（不是只在上一段那个值下有效 ✓；判据是内容顶边 ✓，内边距只是手段之一 ✓）',
@@ -7993,15 +8210,15 @@ try {
     ),
   )
   if (hidden.hidden === true) {
-    await sleep(500)
-    const restored = JSON.parse(
+    // ★ sleep(500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 500ms ✓）
+    const restored = await settle(async () => (JSON.parse(
       String(
         await evaluate(`JSON.stringify({
           flag:document.body.dataset.dshmDshPreview||null,
           topVis:getComputedStyle(document.getElementById('dsh-mobile-top')).visibility,
         })`),
       ),
-    )
+    )), async (restored) => (restored.flag === null && restored.topVis === 'visible'), 500)
     check(
       restored.flag === null && restored.topVis === 'visible',
       'DSH 预览**被藏起来后 500ms 内**外壳恢复（标记清掉 ✓、顶栏回来 ✓ —— 不再"等一段时间"✗）',
@@ -8777,7 +8994,7 @@ try {
       }catch(e){return false}
     })()`)
     await sleep(300)
-    const chevronBefore = asJson(await chevronNow())
+    const chevronBefore = await asJson(await chevronNow())
     if (typeof chevronBefore.cx === 'number') await tapPoint(chevronBefore.cx, chevronBefore.cy)
     /**
      * ★★ 本轮 A2 的量测（**永久保留** ✓）：菜单里**每一项**的真实身份 ✓
@@ -8910,7 +9127,7 @@ try {
       }catch(e){return false}
     })()`)
     await sleep(400)
-    const chevronOff = asJson(await chevronNow())
+    const chevronOff = await asJson(await chevronNow())
     if (typeof chevronOff.cx === 'number') await tapPoint(chevronOff.cx, chevronOff.cy)
     const fallbackMenu = asJson(
       await evaluate(`(function(){
@@ -8957,9 +9174,9 @@ try {
       }catch(e){return false}
     })()`)
     await sleep(500)
+    const chevronAgain = await asJson(await chevronNow())
 
     // ③ 再打开一次菜单（真机口径 ✓），点「在文件面板中打开」⇒ 文件面板真的跳到那个目录 + 那一行滚到可见
-    const chevronAgain = asJson(await chevronNow())
     if (typeof chevronAgain.cx === 'number') await tapPoint(chevronAgain.cx, chevronAgain.cy)
     const itemsForReveal = asJson(await menuItemsNow())
     const revealItem = (itemsForReveal.items ?? []).find((b) => String(b.text) === '在文件面板中打开') ?? null
@@ -9076,8 +9293,8 @@ try {
       await evaluate(`(function(){
         var b=[].slice.call(document.querySelectorAll('.dshm-files-toolbar button')).filter(function(x){return String(x.textContent||'').trim()==='选择'})[0]
         if(b) b.click(); return true })()`)
-      await sleep(900)
-      const selRowNow = asJson2(
+      // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+      const selRowNow = await settle(async () => (asJson2(
         await evaluate(`(function(){
           var rows=[].slice.call(document.querySelectorAll('#dsh-mobile-sheet-select .dshm-select-row'))
           var row=rows.length>0?rows[rows.length-1]:null
@@ -9086,7 +9303,7 @@ try {
           var seen={}; for(var i=0;i<bs.length;i++) seen[Math.round(bs[i].getBoundingClientRect().top)]=true
           return JSON.stringify({found:true,count:bs.length,rows:Object.keys(seen).length,
             wrap:getComputedStyle(row).flexWrap,texts:bs.map(function(b){return String(b.textContent||'').trim()})}) })()`),
-      )
+      )), async (selRowNow) => (selRowNow.found === true && selRowNow.rows === 1 && selRowNow.wrap === 'nowrap' && selRowNow.count >= 3), 900)
       check(
         selRowNow.found === true && selRowNow.rows === 1 && selRowNow.wrap === 'nowrap' && selRowNow.count >= 3,
         '★ 第 146-② 条：**选择模式那一排**（全选 / 删除 / 移动 / 取消 ✓）也**一行** ✓（同一个量法 ✓ —— 用户点名要的那一排 ✓）',
@@ -9482,8 +9699,8 @@ try {
       for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0){ rows[i].click(); return true } }
       return false;
     })()`)
-    await sleep(1800)
-    const rowsNow = await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)
+    // ★ sleep(1800) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1800ms ✓）
+    const rowsNow = await settle(async () => (await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`)), async (rowsNow) => (entered === true && typeof rowsNow === 'number' && rowsNow > 0), 1800)
     check(
       entered === true && typeof rowsNow === 'number' && rowsNow > 0,
       '下载这一节的前置：文件面板停在工作区根目录（否则下面几条都是假绿 ✗）',
@@ -9531,8 +9748,8 @@ try {
         return true;
       }catch(e){return false}
     })()`)
-    await sleep(400)
-    const noteB = await noteNow()
+    // ★ sleep(400) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 400ms ✓）
+    const noteB = await settle(async () => (await noteNow()), async (noteB) => (noteB.indexOf('已保存到「下载」：') >= 0 && noteB.indexOf(PREVIEW_FILES.text) >= 0), 400)
     check(
       noteB.indexOf('已保存到「下载」：') >= 0 && noteB.indexOf(PREVIEW_FILES.text) >= 0,
       '壳写完之后的回调 ⇒ **如实说"已保存到「下载」：<文件名>"**（用户要的就是这一句 ✓ —— 存到哪了必须说清 ✓）',
@@ -9676,8 +9893,8 @@ try {
         }catch(e){return 'error:'+String(e&&e.message?e.message:e)}
       })()`),
     )
-    await sleep(2500)
-    const exportAfter = asJson(
+    // ★ sleep(2500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 2500ms ✓）
+    const exportAfter = await settle(async () => (asJson(
       await evaluate(`(function(){
         try{
           var n=document.getElementById('dsh-mobile-sheet-note');
@@ -9688,7 +9905,11 @@ try {
           });
         }catch(e){return JSON.stringify({error:String(e&&e.message?e.message:e)})}
       })()`),
-    )
+    )), async (exportAfter) => (exportAnchor === 'clicked' &&
+        exportAfter.error === undefined &&
+        Array.isArray(exportAfter.fetchCalls) &&
+        exportAfter.fetchCalls.some((c) => c.method === 'GET' && String(c.url).indexOf('/api/session.export') >= 0) &&
+        (String(exportAfter.note).indexOf('导出失败') >= 0 || String(exportAfter.note).indexOf('已交给手机保存') >= 0)), 2500)
     check(
       exportAnchor === 'clicked' &&
         exportAfter.error === undefined &&
@@ -9759,7 +9980,17 @@ try {
     await evaluate(`(function(){
       if(document.body.dataset.dshMobileDrawer!=='open'){var n=document.getElementById('dsh-mobile-nav');if(n)n.click()}
     })()`)
-    await sleep(900)
+    // ★ 第二类：等**下一步要点的「设置」按钮**出现（上限仍是 900ms ✓）
+    await waitForExpr(`(function(){
+      var col=document.querySelector('[class*=sidebarCol]');
+      if(col===null) return false;
+      var buttons=col.querySelectorAll('button');
+      for(var i=0;i<buttons.length;i++){
+        var text=String(buttons[i].textContent||'').trim();
+        if(text==='设置'||/^设置/.test(text)) return true;
+      }
+      return false;
+    })()`, 900)
     const opened = await evaluate(`(function(){
       var col=document.querySelector('[class*=sidebarCol]');
       if(col===null) return 'no-sidebar';
@@ -9770,7 +10001,8 @@ try {
       }
       return 'no-settings-button';
     })()`)
-    await sleep(1400)
+    // ★ 第二类：等**下一步要点的那格「连接与设备」**出现（上限仍是 1400ms ✓）
+    await waitForExpr(`document.querySelector('[data-dshm-conn-nav="1"]') !== null`, 1400)
     const clicked = await evaluate(`(function(){
       var cell=document.querySelector('[data-dshm-conn-nav="1"]');
       if(cell===null) return 'no-conn-nav(有壳吗？)';
@@ -10098,8 +10330,8 @@ try {
       }
       return false;
     })()`)
-    await sleep(1200)
-    const addressWithoutShell = readJson(
+    // ★ sleep(1200) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 1200ms ✓）
+    const addressWithoutShell = await settle(async () => (readJson(
       await evaluate(`(function(){
         try {
           var cell=document.querySelector('[data-dshm-conn-nav="1"]');
@@ -10113,7 +10345,7 @@ try {
           });
         } catch (e) { return JSON.stringify({found:true, error:String(e && e.message ? e.message : e)}) }
       })()`),
-    )
+    )), async (addressWithoutShell) => (addressWithoutShell.found === false && addressWithoutShell.rendered === true), 1200)
     check(
       addressWithoutShell.found === false && addressWithoutShell.rendered === true,
       '★ 没壳时 DSH 侧栏里**连「连接与设备」那一项都不存在**（整页依赖壳 ✓ —— 这一页是壳里才注入的 ✓；同一次里确认设置弹窗真的开着 ✓，不是"弹窗没开"的假绿 ✗）',
@@ -10751,8 +10983,11 @@ try {
       await sleep(600)
       const g400 = await navGeometry()
       await send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2, mobile: true })
-      await sleep(600)
-      const g412b = await navGeometry()
+      // ★ sleep(600) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 600ms ✓）
+      const g412b = await settle(async () => (await navGeometry()), async (g412b) => (g400.allVisible === true && g400.overflowX <= 1 &&
+          typeof g400.nav === 'number' && g400.nav <= 240 &&
+          typeof g400.content === 'number' && g400.content >= 340 &&
+          g412b.allVisible === true), 600)
       check(
         g400.allVisible === true && g400.overflowX <= 1 &&
           typeof g400.nav === 'number' && g400.nav <= 240 &&
@@ -10859,8 +11094,8 @@ try {
       await sleep(400)
       const beforeRight = await probeShellSettings()
       await gesture(120, 300, 240, 0) // 右滑（= 反方向 ✓）
-      await sleep(900)
-      const afterRight = await probeShellSettings()
+      // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+      const afterRight = await settle(async () => (await probeShellSettings()), async (afterRight) => (beforeRight.found === true && afterRight.found === true), 900)
       check(
         beforeRight.found === true && afterRight.found === true,
         '★ 右滑**不关**设置页（方向排他 ✓ —— 只有用户拍板的左滑才关 ✗；两边都能关是假绿 ✗）',
@@ -10958,8 +11193,9 @@ try {
       const capsBackReturned = await evaluate(
         `(function(){try{ return globalThis.__dshmBack?globalThis.__dshmBack():null }catch(e){ return 'err:'+String(e&&e.message?e.message:e) }})()`,
       )
-      await sleep(900)
-      const afterCapsBack = await capsView()
+      // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+      const afterCapsBack = await settle(async () => (await capsView()), async (afterCapsBack) => (capsBackReturned === true && afterCapsBack.title === '电脑文件目录' &&
+          afterCapsBack.rows === 0 && afterCapsBack.open === 'open' && afterCapsBack.drawer === ''), 900)
       check(
         capsBackReturned === true && afterCapsBack.title === '电脑文件目录' &&
           afterCapsBack.rows === 0 && afterCapsBack.open === 'open' && afterCapsBack.drawer === '',
@@ -10979,8 +11215,10 @@ try {
         })()`),
       )
       await gesture(capsPanelCenter.x, capsPanelCenter.y, 150, 3)
-      await sleep(900)
-      const afterCapsSwipe = await capsView()
+      // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
+      const afterCapsSwipe = await settle(async () => (await capsView()), async (afterCapsSwipe) => (beforeCapsSwipe.rows === 5 && afterCapsSwipe.rows === 0 &&
+          afterCapsSwipe.open === '' &&
+          String((await swipeState()).last) === 'close-files'), 900)
       check(
         beforeCapsSwipe.rows === 5 && afterCapsSwipe.rows === 0 &&
           afterCapsSwipe.open === '' &&
@@ -11010,8 +11248,9 @@ try {
       const closeDrawerBack = await evaluate(
         `(function(){try{ return globalThis.__dshmBack?globalThis.__dshmBack():null }catch(e){ return 'err:'+String(e&&e.message?e.message:e) }})()`,
       )
-      await sleep(800)
-      const afterDrawerBack = await capsView()
+      // ★ sleep(800) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 800ms ✓）
+      const afterDrawerBack = await settle(async () => (await capsView()), async (afterDrawerBack) => (closePanelBack === true && afterPanelBack.open === '' &&
+          drawerOpenedForLadder.drawer === 'open' && closeDrawerBack === true && afterDrawerBack.drawer === ''), 800)
       check(
         closePanelBack === true && afterPanelBack.open === '' &&
           drawerOpenedForLadder.drawer === 'open' && closeDrawerBack === true && afterDrawerBack.drawer === '',
@@ -11595,11 +11834,11 @@ try {
       var t = globalThis.__DSH_MOBILE_BOOT__.tunnel
       if (t.socket !== undefined) { try { t.socket.close() } catch (e) {} }
       return true })()`)
-    await sleep(3500)
-    const autoBack = asJson(await evaluate(`(function(){
+    // ★ sleep(3500) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 3500ms ✓）
+    const autoBack = await settle(async () => (asJson(await evaluate(`(function(){
       var t = globalThis.__DSH_MOBILE_BOOT__.tunnel
       return JSON.stringify({dials: globalThis.__dshmRcDials, live: t.hasLiveSocket(), paused: t.autoPaused === true})
-    })()`))
+    })()`))), async (autoBack) => (typeof autoBack.dials === 'number' && autoBack.dials > manualOk.after && autoBack.live === true), 3500)
     check(
       typeof autoBack.dials === 'number' && autoBack.dials > manualOk.after && autoBack.live === true,
       '★★ 第 152-⑭ 条：**自动行为恢复** —— 再断一次、**不做任何手动动作**：自动那一路自己又拨了一次并且**真的连上了** ✓（放弃状态没解除的话这里一次都不涨 ✓）',
@@ -11727,8 +11966,8 @@ try {
         return JSON.stringify({base: globalThis.__dshmRcPendBase, liveBefore: t.hasLiveSocket(), budget: t.autoReconnectBudgetMs()})
       }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
     })()`))
-    await sleep(2200)
-    const pendState = asJson(await evaluate(`(function(){
+    // ★ sleep(2200) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 2200ms ✓）
+    const pendState = await settle(async () => (asJson(await evaluate(`(function(){
       var t = globalThis.__DSH_MOBILE_BOOT__.tunnel
       var toast = document.getElementById('dshm-shell-toast')
       var box = document.getElementById('dshm-upload-debug')
@@ -11745,7 +11984,11 @@ try {
         notify: globalThis.__dshmRcNotify - globalThis.__dshmRcPendNotify,
         net: globalThis.__dshmRcNet.slice(globalThis.__dshmRcPendNet)
       })
-    })()`))
+    })()`))), async (pendState) => (pendArmed.error === undefined && pendState.error === undefined &&
+        typeof pendState.dials === 'number' && pendState.dials >= 6 &&
+        pendState.paused === false && pendState.failStreak === 0 &&
+        pendState.giveUpLines === 0 && pendState.notify === 0 && pendState.toastSame === true &&
+        Array.isArray(pendState.net) && pendState.net.filter((x) => x === 'offline').length === 0), 2200)
     check(
       pendArmed.error === undefined && pendState.error === undefined &&
         typeof pendState.dials === 'number' && pendState.dials >= 6 &&
@@ -12610,7 +12853,10 @@ try {
     await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
     await send('Emulation.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' })
     await send('Page.navigate', { url: tokenUrl })
-    await sleep(9000)
+    // ★ 第二类：等**桌面端 DSH 外壳真的渲染出来**（上限仍是 9000ms ✓）。
+    //   这一段断言的是"手机外壳的元素**一个都不在**"✗ —— 页面没加载完时它天然成立 ✗，
+    //   所以必须**先等到宿主自己渲染出来** ✓（`centerCol` 就是宿主的那一栏 ✓，只读 ✓）。
+    await waitForExpr(`document.querySelector('[class*="centerCol"]') !== null`, 9000)
     const desktop = await evaluate(`(function(){
       var ids=['dsh-mobile-top','dsh-mobile-nav','dsh-mobile-scrim','dsh-mobile-sheet','dshm-stats'];
       // 桌面端：**不该**有输入法守卫（installShell 只在手机表面跑 ✓）。
@@ -12773,7 +13019,12 @@ try {
 
     const added = await send('Page.addScriptToEvaluateOnNewDocument', { source: injectedSource })
     await send('Page.navigate', { url: APP_URL })
-    await sleep(4500)
+    // ★ 第二类：等**页面真的以"已配对"的姿态起完**（壳 api 在 ✓、config 口在 ✓、路径对 ✓；
+    //   上限仍是 4500ms ✓ —— 慢环境下最坏也等满 ✓）
+    await waitForExpr(`(function(){
+      var b=globalThis.__DSH_MOBILE_BOOT__
+      return !!(b && b.apk && typeof b.getConfig==='function' && location.pathname===${JSON.stringify(APP_PATH)})
+    })()`, 4500)
     const booted = asJson(
       await evaluate(`(function(){
         try {
@@ -12859,8 +13110,8 @@ try {
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: escapeTarget.x, y: escapeTarget.y, button: 'left', clickCount: 1 })
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: escapeTarget.x, y: escapeTarget.y, button: 'left', clickCount: 1 })
     }
-    await sleep(9000)
-    const escaped = asJson(
+    // ★ sleep(9000) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 9000ms ✓）
+    const escaped = await settle(async () => (asJson(
       await evaluate(`(function(){
         return JSON.stringify({
           flag:String(localStorage.getItem('dsh-mobile.debug')||''),
@@ -12870,7 +13121,8 @@ try {
           box:document.getElementById('dshm-upload-debug')!==null,
           actions:document.getElementById('dshm-debug-actions')!==null
         }) })()`),
-    )
+    )), async (escaped) => (escapeTarget.found === true && escaped.flag === '' && escaped.expanded === '' &&
+        escaped.url.indexOf('debug') < 0 && escaped.bar === false && escaped.box === false && escaped.actions === false), 9000)
     check(
       escapeTarget.found === true && escaped.flag === '' && escaped.expanded === '' &&
         escaped.url.indexOf('debug') < 0 && escaped.bar === false && escaped.box === false && escaped.actions === false,
@@ -12973,7 +13225,8 @@ try {
           var bs=col.querySelectorAll('button');
           for(var i=0;i<bs.length;i++){ if(/^设置/.test(String(bs[i].textContent||'').trim())){ bs[i].click(); return 'opened' } }
           return 'no-settings-button'; })()`)
-        await sleep(1600)
+        // ★ 第二类：等**下面要滚、要量的那颗开关出现**（上限仍是 1600ms ✓ —— 只读 ✓）
+        await waitForExpr(`document.querySelector('[data-dshm-action="toggle-debug"]') !== null`, 1600)
         /**
          * ★ round 151：**先把那行开关滚进视口** ✗ —— 第一次跑量到它的中心是 `(1014, 939)` ✓，
          *   而视口只有 `412×915` ✓ ⇒ 它在**折叠线以下** ✓（它在「端侧诊断」组的最后 ✓，
@@ -13013,7 +13266,12 @@ try {
       if (normalSwitch.found === true) {
         await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: normalSwitch.x, y: normalSwitch.y, button: 'left', clickCount: 1 })
         await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: normalSwitch.x, y: normalSwitch.y, button: 'left', clickCount: 1 })
-        await sleep(9000)
+        // ★ 第一类：等**下面那条断言自己的判据**成立（开关记住 + 地址带上 + 调试栏在；上限仍是 9000ms ✓）
+        await waitForExpr(`(function(){
+          var flag=String(localStorage.getItem('dsh-mobile.debug')||'')
+          var url=String(location.pathname+location.search)
+          return flag==='1' && url.indexOf('debug=1')>=0 && document.getElementById('dshm-kb-debug')!==null
+        })()`, 9000)
       }
       const afterOn = asJson6(await evaluate(`(function(){
         return JSON.stringify({
@@ -13054,7 +13312,12 @@ try {
       if (offBtn.found === true) {
         await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: offBtn.x, y: offBtn.y, button: 'left', clickCount: 1 })
         await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: offBtn.x, y: offBtn.y, button: 'left', clickCount: 1 })
-        await sleep(9000)
+        // ★ 第一类：等**下面那条断言自己的判据**成立（标志清掉 + 地址抹掉 + 调试栏消失；上限仍是 9000ms ✓）
+        await waitForExpr(`(function(){
+          var flag=String(localStorage.getItem('dsh-mobile.debug')||'')
+          var url=String(location.pathname+location.search)
+          return flag==='' && url.indexOf('debug')<0 && document.getElementById('dshm-kb-debug')===null
+        })()`, 9000)
       }
       const afterOff2 = asJson6(await evaluate(`(function(){
         return JSON.stringify({
@@ -13115,7 +13378,48 @@ try {
   sweepChromeClones(cloneSnapshot)
 }
 
+/**
+ * ── 临时分段计时报告（`ML_TIMING=1` 才打印 ✓，纯观测、不参与任何判据）──────────
+ * 打印顺序：总墙钟 → 各大类合计 → 阶段 mark → 最慢的若干调用点 → 相邻断言之间最长的等待。
+ * 行号是**本文件当前版本**的行号 ✓（每次改完脚本要重新对照 ✓）。
+ *
+ * ★★ 接手时修掉的两处（round 159 ✓）：
+ *   1. 这一段原来写在**两个 `process.exit(1)` 之后** ✗ ⇒ 只要有一条断言红 ✓，
+ *      报告**一次都打不出来** ✗ —— 而"有一条红"恰恰是最需要读数的时候 ✓
+ *      （第一次跑基线就撞上了 ✓：整轮跑完只有一句"未通过 1 项" ✗，没有任何分段读数 ✓）。
+ *      现在提成**函数** ✓、在两条退出路径与成功路径上都先打一遍 ✓。
+ *   2. `T.mark(...)` 四处**采了但从没打印** ✗ ⇒ 夹具 / 代理 / 预览夹具 / Chrome 四段
+ *      各占多少墙钟根本看不到 ✓。现在一并打印 ✓（`T.marks` 本来就在算 ✓）。
+ *   两处都只加**输出** ✓，不动任何判据、不动任何等待 ✓。
+ */
+function printTiming() {
+  if (process.env['ML_TIMING'] !== '1') return
+  const total = Date.now() - T.t0
+  const sum = (map) => [...map.values()].reduce((a, b) => a + b.ms, 0)
+  const top = (map, n) =>
+    [...map.entries()]
+      .sort((a, b) => b[1].ms - a[1].ms)
+      .slice(0, n)
+      .map(([line, v]) => `      L${line}  n=${v.n}  ${v.ms}ms`)
+      .join('\n')
+  console.log('\n[timing] ══════ 分段计时 ══════')
+  console.log(`[timing] 总计 ${total}ms（sleep 合计 ${sum(T.sleep)}ms ✓ / CDP evaluate 合计 ${sum(T.cdp)}ms ✓ / CDP send 合计 ${sum(T.send)}ms ✓）`)
+  console.log('[timing] —— 阶段 mark（各段墙钟）——')
+  let acc = 0
+  for (const m of T.marks) {
+    acc += m.ms
+    console.log(`      ${String(m.ms).padStart(7)}ms  累计 ${String(acc).padStart(7)}ms  ${m.name}`)
+  }
+  console.log(`[timing] —— 最慢 25 个 sleep 调用点 ——\n${top(T.sleep, 25)}`)
+  console.log(`[timing] —— 最慢 25 个 evaluate 调用点 ——\n${top(T.cdp, 25)}`)
+  console.log('[timing] —— 相邻断言之间最长 40 段等待 ——')
+  const gaps = [...T.gaps].sort((a, b) => b.ms - a.ms).slice(0, 40)
+  for (const g of gaps) console.log(`      L${g.line}  ${g.ms}ms  ← 上一条「${g.prev}」`)
+  console.log('[timing] ══════════════════════')
+}
+
 if (problems.length > 0) {
+  printTiming()
   clearTimeout(hardTimer)
   console.error(`\n[check-mobile-layout] 未通过 ${problems.length} 项：`)
   for (const p of problems) console.error(`  - ${p}`)
@@ -13129,8 +13433,11 @@ clearTimeout(hardTimer)
 if (checkCount < EXPECTED_MIN_CHECKS) {
   // ★ 必须**自己 exit(1)** ✓ —— 上面那个 `problems.length` 分支在这之前就判完了 ✗，
   //   只 push 不进 problems 的话，这一条会被静默吞掉 ✓（第一次加防呆时就踩了这个 ✗）。
+  printTiming()
   console.error(`\n[check-mobile-layout] 断言条数不足：${checkCount} < ${EXPECTED_MIN_CHECKS} ✗`)
   console.error('  - 有人删掉了断言？（见 EXPECTED_MIN_CHECKS 那段事故注释）')
   process.exit(1)
 }
+printTiming()
+
 console.log(`\n[check-mobile-layout] 通过：移动端布局与导航入口正常 ✓（${checkCount} 条 ✓ / 0 ✗，下限 ${EXPECTED_MIN_CHECKS}）`)
