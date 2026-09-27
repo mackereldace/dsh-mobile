@@ -795,7 +795,19 @@
        * 顺序反了的后果（正是用户 B2 的原话："**用返回键无法回到文件目录**"✓）：
        * 返回键会把**看不见的**面板关掉 ✓、预览却还盖在屏幕上 ✗ ⇒ 用户按一下返回"什么都没发生"✗✗。
        */
-      if (body.dataset.dshmDshPreview === '1') {
+      /**
+       * ★★ round 168：这一支**不能只看标记** ✗✗ —— 标记是"探测链"写上去的 ✓（200ms 轮询 + DOM 观察者 ✓），
+       *   而"预览层在不在"是 **DOM 事实** ✓。用户实拍：预览明明开着、标记却没写上 ✓
+       *   （真根见 `dshPreviewSurface()` 里 `visible()` 那条修正 ✓ —— 面板一开、列表盖住视口中心就漏判 ✓）
+       *   ⇒ 返回键于是**跳过**这一支 ✓、落到「关文件面板」那一支 ✗ ⇒ 面板被关掉 ✓、
+       *   再被"预览关闭后把面板还回去"的逻辑拉起来 ✓ = 用户原话"**一起把文件面板返回，然后再拉起**"✗。
+       * ⇒ 这里在**按下返回的那一下**直接问一次 DOM ✓（`dshPreviewSurface()` ✓，只在按键时调 ✓，不贵 ✓）
+       *   —— 标记与事实**取或** ✓，两条路都兜住 ✓。
+       */
+      if (
+        body.dataset.dshmDshPreview === '1' ||
+        (typeof dshPreviewSurface === 'function' && dshPreviewSurface() !== null)
+      ) {
         /**
          * ★ 点了「关闭 / 收起右侧边栏」之后**立刻**结束"预览开着"这个状态 ✓
          *   （`finishPreviewCloseNow` ✓）—— 与右滑返回同一个道理 ✓：
@@ -8057,9 +8069,26 @@
              *   视口中心命中的是面板 ✓ → 于是被判成"预览不在前台" ✗ →
              *   标记不写 ✓ → 顶栏不消失 ✓（"预览开着却叠了两条栏" ✗）。
              *   预览被我们自己的浮层遮住一点 ✗ 不代表它关了 ✓。
+             *
+             * ★★ round 168（**真机实拍的真根** ✓）：上面那条判据原来只看**命中元素自己**
+             *   有没有我们的 id ✗ —— 而面板里**列表行**（`button` ✓）是**没有 id** 的 ✓，
+             *   面板一开、列表正好盖住视口中心 ⇒ `hit` 是一颗无名按钮 ⇒ 判据不成立 ✗
+             *   ⇒ `visible()` 返回 false ✗ ⇒ **预览压根认不出来** ✗ ⇒ 标记不写 ✗。
+             *   用户实拍的两个症状都从这一条来 ✓：
+             *     · "文件目录居然在文件预览的上方" ✓（面板没被藏 ✓ —— 也是 round 167 之前那一态 ✓）；
+             *     · "返回键还是会一起把文件面板返回" ✗（标记没写 ⇒ 返回键落到"关文件面板"那一支 ✗）
+             *       + "文件预览一开始的顶栏又跑到手机状态栏一段时间" ✓（顶栏回来了 ✓，
+             *       而壳的 insets 还没到 ⇒ 它先挤进状态栏 ✓，过一会 insets 到了才复位 ✓）。
+             *   ⇒ 改成**沿祖先链找我们的层** ✓（`closest` 那种语义 ✓，但这里手写循环以免依赖
+             *     选择器字符串 ✓）：命中面板里的一颗按钮 ⇒ 它属于面板 ⇒ 仍算"预览被我们的层遮住" ✓。
              */
-            var hitId = String(hit.id || '')
-            if (hitId.indexOf('dsh-mobile') === 0 || hitId.indexOf('dshm-') === 0) return true
+            var cursor = hit
+            for (var depth = 0; depth < 12 && cursor !== null && cursor !== undefined; depth++) {
+              var hitId = String(cursor.id || '')
+              if (hitId.indexOf('dsh-mobile') === 0 || hitId.indexOf('dshm-') === 0) return true
+              if (cursor === document.body) break
+              cursor = cursor.parentElement
+            }
             return false
           } catch (error) {
             return true
