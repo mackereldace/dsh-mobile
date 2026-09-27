@@ -663,7 +663,7 @@ const problems = []
  *     **没有** `帧被拒绝（seen）` ✓、经隧道问电脑一句应答真的回来了 ✓）。
  *   ⇒ **360** = 本轮实跑条数 ✓。这个数只许涨 ✓ —— 少了就是有人删断言 ✗。
  */
-const EXPECTED_MIN_CHECKS = 375
+const EXPECTED_MIN_CHECKS = 378
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -4666,6 +4666,199 @@ try {
       await sleep(1600)
     }
     await cCloseAll()
+
+    /**
+     * ── round 182：返回键的**两级内容层**（欠了很久的两条断言 ✓）────────────────────
+     *
+     * 用户原话：① "同理给**轨迹那一页**也做一个无侧滑返回" ✓
+     *           ② "进入子代理聊天以后**退不出来**" ✓
+     *
+     * ★ 为什么放在**这一节**、而不是套件末尾 ✗：这两条都要求"屏幕上真的有会话标签行" ✓，
+     *   而套件末尾那一段跑在"调试模式刷新之后" ✓，那时标签行是**空的** ✗
+     *   （round 166 我把它写在末尾 ⇒ 前提造不出来 ⇒ 只能撤掉 ✓ 见 §4.1r D ✓）。
+     *   这里刚量完真「轨迹」视图、且视图刚被切回「对话」✓ ⇒ 前提天然成立 ✓。
+     *
+     * ★ 判据全部读**用户能看见的事实** ✓（DSH 那颗 tab 的 `aria-selected` ✓、被点按钮的计数 ✓），
+     *   不读"我们调了哪个函数" ✗。
+     */
+    /**
+     * ★★ round 182 修正（第一版把后面 5 条断言带红了 ✗）：装假壳会**顺手改掉页面状态** ——
+     *   `installBackHook()` 里会调 `markShellRoot()` ✓ ⇒ `html[data-dshm-shell="android"]` 被写上 ✗
+     *   ⇒ 所有"**只在壳里生效**"的 CSS 从此打开 ✓ ⇒ 后面那几条"**无壳时应当原样可见/应当渲染**"
+     *   的断言全被带红 ✓（实测 5 条：DSH 内容头/关闭键、md 排版 4 条、158-B-④、键盘第④条、
+     *   第 145-① 竖滚动条 ✓）。假壳的 `insets()` 还会把 `--dshm-safe-*` 改成 24 ✗（套件用的是自己的
+     *   `SIM_SAFE_TOP` ✓）⇒ 也一并存下来还回去 ✓。
+     *   ⇒ 所以：**装之前先存** ✓、**拆之后原样还原** ✓（这两句一个字都不能省 ✗）。
+     */
+    const shellEnvBefore182 = JSON.parse(
+      String(
+        await evaluate(`(function(){
+          try {
+            var root=document.documentElement;
+            var cs=getComputedStyle(root);
+            return JSON.stringify({
+              marker: String(root.getAttribute('data-dshm-shell')||''),
+              safeTop: String(cs.getPropertyValue('--dshm-safe-top')||'').trim(),
+              safeBottom: String(cs.getPropertyValue('--dshm-safe-bottom')||'').trim(),
+              keyboard: String(cs.getPropertyValue('--dshm-keyboard')||'').trim(),
+              keyboardPad: String(cs.getPropertyValue('--dshm-keyboard-pad')||'').trim(),
+            });
+          } catch (e) { return JSON.stringify({ marker:'', safeTop:'', safeBottom:'', keyboard:'', keyboardPad:'' }) }
+        })()`),
+      ),
+    )
+    // ① 装一个最小假壳（只为拿到 window.__dshmBack ✓ —— 与 back-hook 那一节同一套写法 ✓）
+    await evaluate(`(function(){
+      try {
+        globalThis.__dshmBackPushes=[];
+        globalThis.DshmShell = {
+          version: function(){ return '0.1.0+BUILD-VERIFY' },
+          insets: function(){ return JSON.stringify({seen:true,top:24,bottom:0,ime:0,density:3,edgeToEdge:true}) },
+          setBackAvailable: function(v){ globalThis.__dshmBackPushes.push(v===true) },
+          notify: function(){ return 'ok' },
+          changeAddress: function(){},
+          endpoints: function(){ return JSON.stringify({ slots:[], timeoutMs:2000, pinned:null }) },
+          log: function(){},
+        };
+        var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
+        return api ? api.installBackHook() === true : false
+      } catch (e) { return false }
+    })()`)
+    await sleep(300)
+
+    /** 读"当前选中的是哪颗 tab"（用户看得见的那件事 ✓）。 */
+    const readActiveTab182 = async () =>
+      String(
+        await evaluate(`(function(){
+          try {
+            var tabs=document.querySelectorAll('[data-dshm-topheader] [role="tab"]');
+            for (var i=0;i<tabs.length;i++){ if (tabs[i].getAttribute('aria-selected')==='true') return String(tabs[i].textContent||'').trim() }
+            return '(无标签行)'
+          } catch (e) { return '(err)' }
+        })()`),
+      )
+    /** 点某颗 tab（找不到就返回 0 ✓）。 */
+    const clickTab182 = async (label) =>
+      Number(
+        await evaluate(`(function(){
+          try {
+            var tabs=document.querySelectorAll('[data-dshm-topheader] [role="tab"]');
+            for (var i=0;i<tabs.length;i++){ if (String(tabs[i].textContent||'').trim()===${JSON.stringify(label)}){ tabs[i].click(); return 1 } }
+            return 0
+          } catch (e) { return 0 }
+        })()`),
+      )
+    /** 按一次返回（网页那半的入口 ✓）。 */
+    const callBack182 = async () =>
+      JSON.parse(
+        String(
+          await evaluate(`(function(){
+            try { return JSON.stringify({ ret: globalThis.__dshmBack ? globalThis.__dshmBack() : null }) }
+            catch (e) { return JSON.stringify({ ret:'err', error:String(e && e.message ? e.message : e) }) }
+          })()`),
+        ),
+      )
+
+    // ① 「轨迹」页按返回 ⇒ 回「对话」
+    const tabAtStart = await readActiveTab182()
+    const toTrajectory182 = await clickTab182('轨迹')
+    if (toTrajectory182 === 1) {
+      await waitForExpr(`(function(){
+        var tabs=document.querySelectorAll('[data-dshm-topheader] [role="tab"]');
+        for (var i=0;i<tabs.length;i++){ if (tabs[i].getAttribute('aria-selected')==='true') return String(tabs[i].textContent||'').trim()==='轨迹' }
+        return false
+      })()`, 2000)
+    }
+    const tabBeforeBack = await readActiveTab182()
+    const backOnTrajectory = await callBack182()
+    await waitForExpr(`(function(){
+      var tabs=document.querySelectorAll('[data-dshm-topheader] [role="tab"]');
+      for (var i=0;i<tabs.length;i++){ if (tabs[i].getAttribute('aria-selected')==='true') return String(tabs[i].textContent||'').trim()==='对话' }
+      return false
+    })()`, 2000)
+    const tabAfterBack = await readActiveTab182()
+    check(
+      tabBeforeBack === '轨迹' && backOnTrajectory.ret === true && tabAfterBack === '对话',
+      '★★ 第 163-① 条（round 182 补）：「**轨迹」页按返回 ⇒ 回到「对话」** ✓（用户："同理给轨迹那一页也做一个无侧滑返回"✓）—— 判据是**真的切回去了** ✓（读的是 DSH 那颗 tab 的 aria-selected ✓），不是"我们调了哪个函数" ✗',
+      `起始=${JSON.stringify(tabAtStart)}｜切到轨迹后=${JSON.stringify(tabBeforeBack)}｜__dshmBack() 返回=${JSON.stringify(backOnTrajectory.ret)}（应为 true ✓）｜返回后=${JSON.stringify(tabAfterBack)}`,
+    )
+
+    // ② 有"上一级"的会话里按返回 ⇒ 点的是**倒数第二格**那颗面包屑
+    const crumbSetup182 = JSON.parse(
+      String(
+        await evaluate(`(function(){
+          try {
+            var header=document.querySelector('[data-dshm-topheader]');
+            if (header===null) return JSON.stringify({ found:false, reason:'没有顶栏标记' });
+            var nav=header.querySelector('nav');
+            if (nav===null) return JSON.stringify({ found:false, reason:'顶栏里没有 nav.crumbs' });
+            var old=document.getElementById('probe-182-crumb'); if (old) old.remove();
+            globalThis.__dshm182ParentClicks=0;
+            var seg=document.createElement('span');
+            // ★ id 刻意**不以 dshm- 开头** ✗（那种 id 会被我们自己的 ours() 判成"我们的元素"，
+            //   round 165 就踩过这个坑 ✓）
+            seg.id='probe-182-crumb';
+            // ★ 类名必须以 _crumbSeg **结尾** ✓（线上判据是 classHasSuffix ✓，不是子串 ✗）
+            seg.className='probe182_crumbSeg';
+            var btn=document.createElement('button');
+            btn.type='button'; btn.textContent='（round 182 的假上一级）';
+            btn.addEventListener('click', function(){ globalThis.__dshm182ParentClicks += 1 });
+            seg.appendChild(btn);
+            nav.insertBefore(seg, nav.firstChild);
+            var segs=0, all=header.querySelectorAll('[class*="crumbSeg"]');
+            for (var i=0;i<all.length;i++){
+              var cls=String(all[i].className||'').split(/\\s+/);
+              for (var k=0;k<cls.length;k++){ if (cls[k].length>=9 && cls[k].slice(-9)==='_crumbSeg'){ segs++; break } }
+            }
+            return JSON.stringify({ found:true, segs:segs });
+          } catch (e) { return JSON.stringify({ found:false, error:String(e && e.message ? e.message : e) }) }
+        })()`),
+      ),
+    )
+    const backOnCrumb = await callBack182()
+    await sleep(400)
+    const crumbClicks182 = Number(
+      await evaluate(`(function(){ return Number(globalThis.__dshm182ParentClicks||0) })()`),
+    )
+    await evaluate(`(function(){ var n=document.getElementById('probe-182-crumb'); if(n) n.remove(); return true })()`)
+    check(
+      crumbSetup182.found === true && crumbSetup182.segs >= 2 && backOnCrumb.ret === true && crumbClicks182 === 1,
+      '★★ 第 163-② 条（round 182 补）：**在"有上一级"的会话里按返回 ⇒ 点的是倒数第二格那颗面包屑** ✓（用户："进入子代理聊天以后退不出来"✗）—— 面包屑格数 ≥2 就是线上那条判据 ✓（deriveAncestry() 只在当前会话是子代理时给 ≥2 格 ✓）；夹具只验"我们**点对了那颗按钮**" ✓（真导航是 DSH 自己的 onClick ✓，夹具给不了 ✓）',
+      `假面包屑=${JSON.stringify(crumbSetup182)}｜__dshmBack() 返回=${JSON.stringify(backOnCrumb.ret)}｜被点次数=${JSON.stringify(crumbClicks182)}（应为 1 ✓）`,
+    )
+
+    /**
+     * 拆假壳 ✓，并**把页面状态原样还原** ✓（见上面那段：第一版就是漏了这一步，把后面 5 条带红 ✗）：
+     *   · `data-dshm-shell` —— 不还原 ⇒ 所有"只在壳里生效"的 CSS 一直开着 ✗；
+     *   · `--dshm-safe-*` / `--dshm-keyboard*` —— 假壳报的是 24 ✓，套件自己用的是 `SIM_SAFE_TOP` ✓。
+     */
+    const shellEnvAfter182 = JSON.parse(
+      String(
+        await evaluate(`(function(){
+          try { delete globalThis.DshmShell; delete globalThis.__dshmBack; delete globalThis.__dshmBackPushes } catch (e) {}
+          try {
+            var root=document.documentElement;
+            var before=${JSON.stringify(shellEnvBefore182)};
+            if (before.marker === '') root.removeAttribute('data-dshm-shell');
+            else root.setAttribute('data-dshm-shell', before.marker);
+            var put=function(name,value){
+              if (value === '') root.style.removeProperty(name);
+              else root.style.setProperty(name, value);
+            };
+            put('--dshm-safe-top', before.safeTop);
+            put('--dshm-safe-bottom', before.safeBottom);
+            put('--dshm-keyboard', before.keyboard);
+            put('--dshm-keyboard-pad', before.keyboardPad);
+            return JSON.stringify({ restored:true, marker:String(root.getAttribute('data-dshm-shell')||'') });
+          } catch (e) { return JSON.stringify({ restored:false, error:String(e && e.message ? e.message : e) }) }
+        })()`),
+      ),
+    )
+    check(
+      shellEnvAfter182.restored === true && shellEnvAfter182.marker === shellEnvBefore182.marker,
+      '★ 第 163-③ 条（round 182 补，**给上面两条兜底** ✓）：那段假壳用完**把页面状态原样还回去了** ✓（`data-dshm-shell` 与 `--dshm-safe-*` / `--dshm-keyboard*` 全部按装之前的值还原 ✓）—— 第一版漏了这一步 ⇒ 后面 5 条"无壳时应当原样可见/应当渲染"的断言被带红 ✗（实测 ✓）；这条就是防止以后再有人装完假壳忘了还原 ✓',
+      `装之前=${JSON.stringify(shellEnvBefore182)}｜还原后=${JSON.stringify(shellEnvAfter182)}`,
+    )
   }
 
   // ── 设置界面的"两处之分"（round 83，用户第 5 点）────────────────────
