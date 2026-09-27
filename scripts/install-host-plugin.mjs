@@ -529,6 +529,37 @@ function updatePatch() {
     const lost = reusedTrustedHosts ? preserved.trustedHosts.filter((host) => !written.includes(host)) : []
     if (lost.length > 0) fail(`配置自检失败：沿用路径下丢失受信 authority ${lost.join('、')}`)
   }
+  /**
+   * ★★ C1 写完立刻自检：**`listener` 块的"往返"必须与本次意图一致** ✓。
+   *
+   * 为什么必须有（这条是本轮补的 ✓）：`--listener` 是"**把手机入口从第三进程搬到插件内**"那一步的**唯一开关** ✓。
+   * 而它**要等 DSH 重启才生效** ✗ ⇒ 万一 `patchBlock` 因为任何原因没把它写进去，
+   * **本脚本会报成功** ✓、**重启后也一切正常** ✓、只是手机入口**静默地还留在原来的第三进程上** ✗ ——
+   * 那正是本项目最怕的一类失败：**看起来做完了，实际没做** ✓。
+   *
+   * 判据刻意用**同一个** `readPreservedListener` 解析回来 ✓（不是再写一条正则 ✗）：
+   * 这样它同时验了"写得进去"**和**"读得回来"✓ —— 也就是"保留式合并"那条路自己也走了一遍 ✓。
+   *
+   * 方向**两边都判** ✓：
+   *   · 本次意图是**开**（命令行 `--listener` ✓ 或沿用现有配置里的 true ✓）⇒ 解析回来必须 `enabled === true` ✗；
+   *   · 本次意图是**关** ⇒ 解析回来**不许**是 true ✗（否则用户以为关了、重启后它却起来了 ✓）。
+   */
+  {
+    // ★ 与 `patchBlock` 里**同一个**优先级表达式（命令行 > 现有配置 > 默认 false）——
+    //   两边必须一字不差地一致，否则这条自检会在正确的路径上误报 ✗。
+    const wanted = (args.listener ?? preserved.listenerEnabled ?? false) === true
+    const written = readPreservedListener(readFileSync(patchFile, 'utf8'))
+    if (wanted && written.enabled !== true) {
+      fail(
+        '配置自检失败：本次要求**打开**插件内监听（--listener 或沿用配置），但写出的配置里读不回 `listener.enabled: true`。\n' +
+          '        重启后手机入口**不会**搬到插件内，而且**不会有任何报错** ⇒ 必须先修这个再重启。',
+      )
+    }
+    if (!wanted && written.enabled === true) {
+      fail('配置自检失败：本次意图是**关闭**插件内监听，但写出的配置里 `listener.enabled` 仍是 true（会被误解为"已关"）。')
+    }
+    if (wanted) log('配置自检通过：listener 块可往返（重启后手机入口由 DSH 插件进程提供）')
+  }
   log(`已更新 ${patchFile}`)
 }
 
