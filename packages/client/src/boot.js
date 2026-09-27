@@ -8451,19 +8451,36 @@
               void error
             }
           }
+          /**
+           * ★★ round 177（用户实拍 + 我加的升沿诊断，两条读数合起来才看明白 ✓）：
+           *   `[preview] 升沿：pad=10px｜safeTop=48｜layerTop=38｜层内 fixed/sticky=无` ✓
+           *   ⇒ **预览层本身在升沿那一刻是对的** ✓（38 + 10 = 48 = 安全区下沿 ✓）、
+           *     而且**层内当时没有任何 `fixed/sticky`** ✓。
+           *   ⇒ 会跑到状态栏里的那一条，是**稍后才出现**的 ✗（PDF 渲染完才插入的工具行 / 预览层之外的标签条 ✓）——
+           *     它出现时**没人推它** ✓，只能等下一个 200ms 心跳 ✗ = 用户说的"打开瞬间才到标准位置" ✓✓。
+           * ⇒ 固定几发（rAF/80/250 ✓）抓不到"晚到的那一件" ✗ ⇒ 改成**短轮询**：
+           *   升沿后头 **2.5 秒**里每 **60ms** 跑一次 ✓（`tuneBurst` 幂等 ✓、只按当下量到的 rect 写 ✓，
+           *   成本是几次命中测试 ✓，与 DOM 大小无关 ✓ —— 这正是 `tuneDshTopChrome` 当初特意改用命中测试的理由 ✓）。
+           *   2.5 秒之后交还给原有的 200ms 心跳 ✓（不在稳态里增加任何负担 ✓）。
+           */
+          var tuneBurst = function () {
+            try {
+              if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+            } catch (error) {
+              void error
+            }
+          }
           tuneBurst()
           try {
-            if (typeof globalThis.requestAnimationFrame === 'function') {
-              globalThis.requestAnimationFrame(function () {
-                tuneBurst()
-              })
-            }
-          } catch (error) {
-            void error
-          }
-          try {
-            globalThis.setTimeout(tuneBurst, 80)
-            globalThis.setTimeout(tuneBurst, 250)
+            var burstUntil = Date.now() + 2500
+            var burstTimer = globalThis.setInterval(function () {
+              // 预览已经关了 / 窗口过了 ⇒ 收工 ✓（绝不留一个永久的 interval ✗）
+              if (Date.now() > burstUntil || document.body.dataset.dshmDshPreview !== '1') {
+                globalThis.clearInterval(burstTimer)
+                return
+              }
+              tuneBurst()
+            }, 60)
           } catch (error) {
             void error
           }
