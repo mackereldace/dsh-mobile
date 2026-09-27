@@ -13575,7 +13575,7 @@ try {
      *   （用户实拍："预览返回……主界面仍然是从右往左到目标位置"✗ 的根就是这里 ✗：
      *    之前我们把让位量强制清零 ✓，预览一关它弹回"面板开着"的 -264px ⇒ 主页面滑一下 ✓）。
      */
-    const pushBeforePreview = asJson(
+    const pushBeforePreview = asJson166(
       await evaluate(`JSON.stringify({ push: getComputedStyle(document.documentElement).getPropertyValue('--dshm-push').trim() })`),
     )
     // ── ③ 165：预览开着时，子框架那一整套"让开"都得生效（含子代理入口 ✓）──────
