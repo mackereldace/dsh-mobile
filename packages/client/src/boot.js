@@ -4533,60 +4533,21 @@
       }
     }
     /**
-     * ★★ round 176（用户实拍：**PDF 预览**开着 ✓，而 `[layout]` 那行写着"还没有预览层"✗）：
-     *   `dshPreviewSurface()` 靠**类名**（`_preview` / `_document` ✓）认层 ✗ —— 而 PDF 那一层
-     *   显然不含这些类名 ✓ ⇒ 它返回 null ✓ ⇒ 上面那条"按 layer 的几何兜底"**根本没机会跑** ✗
-     *   ⇒ `previewOpen` 恒为 false ⇒ 本函数**什么都不做**（还会去 `restoreTopChrome()` ✗）
-     *   ⇒ 预览那条 `fixed/sticky` 顶栏没人推 ✓ ⇒ 它只能等 **DSH 自己**把位置摆好 = "过一会儿复位" ✓、
-     *   而那个时机不由我们控制 = 用户说的"**偶发**" ✓✓。
-     * ⇒ 这里补一条**完全不看类名**的判据 ✓（用的还是本函数既有的那套手法：**命中测试** ✓）：
-     *   "视口中心命中的那一层里，有没有一个盖住 ≥95%×95% 视口、且**不是我们的**元素" ✓。
-     *   · 为什么门槛取 95% 而不是 90% ✗：聊天界面的中栏 `centerCol` 也"几乎盖满"
-     *     （实测 ≈85% 高 ✓）—— 90% 有把它误判成预览的风险 ✗；预览那一层实测是 `412×877 / 412×915`
-     *     （≈100%×96% ✓）⇒ 95% 刚好把它留下、把中栏挡在外面 ✓。
-     *   · 为什么沿祖先链走 ✗：命中的可能是预览层**里面**的元素（PDF 的 canvas / iframe ✓）。
-     */
-    if (!previewOpen) {
-      try {
-        /**
-         * ★ round 178：这里原来用 `elementFromPoint`（**只拿最上面那一个** ✗）——
-         *   而"点了文件、预览还在加载"那段里，最上面那个往往是**我们自己的文件面板** ✗
-         *   （面板 256px 宽、正好盖住视口中心 ✓）⇒ 从它往上走只能走到我们自己的层和 body ✗
-         *   ⇒ 永远判不出"预览开着" ✗。改成 `elementsFromPoint`（**那一点上的所有层** ✓）：
-         *   预览层就算被我们的面板压着 ✓，也会出现在这个栈里 ✓ ⇒ 照样能认出来 ✓。
-         */
-        var stack = []
-        try {
-          stack = document.elementsFromPoint(
-            Math.round(window.innerWidth / 2),
-            Math.round(window.innerHeight / 2),
-          ) || []
-        } catch (error) {
-          stack = []
-        }
-        for (var si = 0; si < stack.length && !previewOpen; si++) {
-          var walk = stack[si]
-          for (var walkDepth = 0; walkDepth < 8 && walk !== null && walk !== undefined; walkDepth++) {
-            var wr = walk.getBoundingClientRect()
-            var walkId = String(walk.id || '')
-            var isOurs = walkId.indexOf('dsh-mobile') === 0 || walkId.indexOf('dshm-') === 0
-            if (!isOurs && wr.width >= window.innerWidth * 0.95 && wr.height >= window.innerHeight * 0.95) {
-              previewOpen = true
-              break
-            }
-            if (walk === document.body) break
-            walk = walk.parentElement
-          }
-        }
-      } catch (error) {
-        void error
-      }
-    }
-    /**
-     * ★ 预览**关掉**时，必须把之前推下去的还原 ✓。
-     *   否则聊天界面会永久多出一段 48px 的空白 ✗（`margin-top` 是**写死在元素上**的 ✓，
-     *   它不会因为预览关了而自己消失 ✓）—— 这是一类"修了 A 坏了 B"的典型 ✗，
-     *   所以这里把**改动前**的行内值原样记下来 ✓，还原时按原样写回 ✓。
+     * ★★ round 181（**用户实拍："对话/轨迹/子代理那一栏会在 app 刚打开的时候往下沉，
+     *   打开一个文件预览再返回才正常"** ✗）：这里 round 176 曾补过一条"**不看类名**"的结构判据
+     *   （"视口中心命中的那一层里，有没有一个盖住 ≥95%×95%、且不是我们的元素"✓），**撤回** ✓✗。
+     *
+     * 为什么它必须撤 ✗：**首屏/普通聊天上它会误判** ✓ —— 那时视口中心命中的是 DSH 自己的
+     * 大容器（宽高都接近满屏、不是我们的 ✓）⇒ `previewOpen` 变成 true ✗
+     * ⇒ 下面那段就**去推聊天自己的那一行** ✓，而它不是 `fixed/sticky` ✓ ⇒ 走
+     * `bar.style.marginTop = safeTop + 'px'` ✓ = **整行往下沉 48px** ✓✓（用户看到的"下沉"✓）。
+     * 而唯一会把它还原的是 `restoreTopChrome()` ✓ —— 那个只在**预览关闭**时跑 ✓
+     * ⇒ "**打开一个文件预览、再返回才正常**" ✓✓ 逐字对上 ✓。
+     *
+     * ★ 那"PDF 预览认不出"怎么办 ✗：由 round 178 的 `data-dshm-preview-pending` 兜住 ✓ ——
+     *   它精确得多 ✓（只在"我们真的请求了预览、它还没被认出来"这段里成立 ✓），
+     *   而且**我们自己开预览**这条主路一定经过它 ✓。**判据宁可窄、不可宽** ✗：
+     *   宽了就会像这次一样，去动不该动的东西 ✓。
      */
     if (!previewOpen) {
       restoreTopChrome()
