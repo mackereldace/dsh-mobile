@@ -483,8 +483,34 @@ try {
 
     // boot.js 应在同一页面里装上传输层并读到配置
     const installed = await phone.evaluate(`!!(globalThis.__DSH_TRANSPORT__ && globalThis.__DSH_TRANSPORT__.ownsHost)`)
+    /**
+     * ★★ P1a（多宿主）：身份键已按宿主指纹命名空间化（`dsh-mobile.host:<指纹>` ✓），
+     * 所以**不能**再直接 `getItem('dsh-mobile.host')` ✗ —— 那样会拿到空串 ✓，
+     * 这条断言就会以"指纹读不到"的形式失败 ✗（**不是产品坏** ✓ —— 是测试还在读旧键名 ✓）。
+     *
+     * 这里按**前缀扫描**取键 ✓，且**带指纹的优先** ✓（与产品的读取顺序一致 ✓：
+     * 产品是"带指纹优先 → 旧键带归属校验回退" ✓）。
+     * ★ 为什么用扫描而不是写死某个指纹 ✗：指纹是**票据给的**、每次测试都可能不同 ✓，
+     * 写死就又把测试绑在了一个会变的值上 ✓（本项目为此栽过"写死旧 IP"那个坑 ✓）。
+     */
     const storedFp = await phone.evaluate(
-      `(function () { try { return JSON.parse(localStorage.getItem('dsh-mobile.host') || '{}').pinnedHostFingerprint || '' } catch (e) { return '' } })()`,
+      `(function () {
+        try {
+          var pickHostKey = function () {
+            var base = 'dsh-mobile.host';
+            var prefixed = null;
+            for (var i = 0; i < localStorage.length; i++) {
+              var k = localStorage.key(i);
+              if (k !== null && k.indexOf(base + ':') === 0 && k.length > base.length + 1) { prefixed = k; break; }
+            }
+            if (prefixed !== null) return prefixed;
+            return localStorage.getItem(base) !== null ? base : null;
+          };
+          var key = pickHostKey();
+          if (key === null) return '';
+          return JSON.parse(localStorage.getItem(key) || '{}').pinnedHostFingerprint || '';
+        } catch (e) { return '' }
+      })()`,
     )
     // boot.js 读完即擦：地址栏里不应再残留票据（安全预期，不是缺陷）
     const scrubbed = await phone.evaluate(`location.search.indexOf('pair=') < 0`)

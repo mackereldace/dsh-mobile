@@ -159,6 +159,48 @@
     'dsh-mobile.lastGoodEndpoint',
   ]
 
+  /**
+   * ★★ P1a：四条身份键**按宿主指纹命名空间化** ✓（§3.2 ✓）。
+   *
+   *   `dsh-mobile.device-key` ⇒ `dsh-mobile.device-key:<宿主公钥指纹>` ✓
+   *
+   * ## 为什么（一句话）
+   * 一台手机要管多台电脑 ✓ ⇒ 每台电脑必须**各有一份**身份 ✗ ——
+   * 否则第二台配对时会**覆盖**掉第一台的私钥 ✗（"隧道能建立、对面不认这台设备"✓）。
+   * 主键是**指纹**（不是 IP、不是名称 ✓ —— IP 会变、名称会撞 ✓）。
+   *
+   * ## 壳侧一行都不用改 ✓（推导 ✓，真机未验 ✗）
+   * 壳的 vault 是**哑存储** ✓（`MainActivity` 的 `vaultGet`/`vaultSet` 不解释键名 ✓、
+   * 按"整库 JSON 对象"合并写 ✓）⇒ 名字里多一段 `:<指纹>` 它一点也不关心 ✓。
+   *
+   * ## ★ 读取侧的三条硬规矩（本段代码的全部要点）
+   *   1. **先定"当前源对应的宿主指纹"** ✓（`currentHostFingerprint()` ✓），**再**取身份 ✗ ——
+   *      ★ 绝不许写成"vault 里有就恢复"✗✗：那样在 B 宿主的源上会把 **A 宿主的私钥**
+   *      恢复进来 ✓，症状是"隧道能建立、但对面不认这台设备"✗（比"连不上"难查得多 ✓）；
+   *   2. 取某一台的身份：**先查带指纹的键** ✓；没有 ⇒ **旧键回退** ✓，
+   *      但旧键**必须归属可证** ✓（旧 `dsh-mobile.host` 的 `pinnedHostFingerprint`
+   *      == 要取的那个指纹 ✓）—— 对不上就**当它不存在** ✗（这就是上面那条闸 ✓）；
+   *   3. 用了旧键就**顺手迁移** ✓（写新键 + 删旧键 ✓，幂等 ✓；旧真机不迁移会**丢配对** ✗）。
+   *
+   * ## 两个新键（宿主目录 ✓，跨源 ✓ —— §3.1）
+   *   · `dsh-mobile.hosts`        —— 宿主记录数组（JSON ✓，主键 = 指纹 ✓）
+   *   · `dsh-mobile.hosts.active` —— 当前这台宿主的指纹 ✓
+   * 它们也必须进白名单 ✓（否则写不进壳 ✓），且**写**永远只写带指纹的形态 ✗。
+   */
+  var HOSTS_KEY = 'dsh-mobile.hosts'
+  var HOSTS_ACTIVE_KEY = 'dsh-mobile.hosts.active'
+  /**
+   * 本页 URL 票据里带的宿主指纹 ✓（配对当次才有 ✓）。
+   * ★ 它必须在 `readStoredHost()` **之前**固化 ✓：配对那一页的 config 是全新的，
+   *   而"当前源属于谁"不能靠旧目录猜 ✗（见 `currentHostFingerprint` ✓）。
+   */
+  var pageTicketFingerprint
+
+  /** 指纹（或键名后缀）长这样：十六进制 / 分组短横 / 测试用的注入串 ✓。 */
+  function validHostFingerprint(value) {
+    return typeof value === 'string' && /^[A-Za-z0-9_.-]{8,}$/.test(value)
+  }
+
   /** 读整个键值库 ✓（没有壳 / 桥抛错 ⇒ `null` ✓ —— 一切相关逻辑都先问这一句 ✓）。 */
   function vaultRead() {
     return shellJson('vaultGet')
@@ -182,9 +224,40 @@
     }
   }
 
-  /** 这个键归不归"必须跨源存活"管 ✓。 */
+  /** 这个键归不归"必须跨源存活"管 ✓ —— 旧名 ✓、`<旧名>:<指纹>` ✓、以及宿主目录那两个键 ✓。 */
   function isIdentityKeyAllowed(key) {
+    if (typeof key !== 'string' || key.length === 0) return false
+    if (key === HOSTS_KEY || key === HOSTS_ACTIVE_KEY) return true
+    if (IDENTITY_VAULT_KEYS.indexOf(key) >= 0) return true
+    var colon = key.indexOf(':')
+    if (colon <= 0) return false
+    var base = key.slice(0, colon)
+    var suffix = key.slice(colon + 1)
+    return IDENTITY_VAULT_KEYS.indexOf(base) >= 0 && suffix.indexOf(':') < 0 && validHostFingerprint(suffix)
+  }
+
+  /** 这个键是不是那四条**基名**之一（不带指纹 ✓）。 */
+  function isBaseIdentityKey(key) {
     return IDENTITY_VAULT_KEYS.indexOf(key) >= 0
+  }
+
+  /** localStorage 里的值 ✓（空串 / 取不到 ⇒ `null` ✓；localStorage 抛错 ⇒ `null` ✓）。 */
+  function localValue(key) {
+    try {
+      var value = localStorage.getItem(key)
+      return typeof value === 'string' && value.length > 0 ? value : null
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
+  /** 壳的身份库里的值 ✓（没有壳 / 缺键 ⇒ `null` ✓）。 */
+  function vaultValue(key) {
+    var vault = vaultRead()
+    if (vault === null) return null
+    var value = vault[key]
+    return typeof value === 'string' && value.length > 0 ? value : null
   }
 
   /**
@@ -193,27 +266,496 @@
    * `value === null` ⇒ 两边都**删除** ✓ —— 注意必须往补丁里写**显式的 `null`** ✗：
    * `JSON.stringify({a: undefined})` 会得到 `{}` ✗，那样壳里的旧值**原封不动**，
    * 于是"本机已解除配对、壳里还留着私钥"✗（这个坑正是本函数存在的理由之一 ✓）。
+   *
+   * ## ★ 第三个参数 `fingerprint`（P1a 新增 ✓）
+   *   · **省略** ⇒ 按**当前源对应的宿主指纹**命名空间化 ✓（`currentHostFingerprint()` ✓）；
+   *   · **字符串** ⇒ 用这个指纹 ✓（配对当次用 config 自己带的那个 ✓ —— 最可信 ✓）；
+   *   · **`null`** ⇒ ★ **不命名空间化**：直接写/删**旧键**本身 ✓
+   *     （迁移时"删掉旧键"专用 ✗ —— 省略参数会把它映射到新键、旧键永远删不掉 ✗）。
+   *
+   * ★ 传入的键**已经带指纹**时原样使用 ✓（例如"按指纹恢复"那条路会显式点名一个键 ✓）。
+   * ★ 签名不可得（既没有指纹、也没显式给）时**退回旧键** ✓ —— 那是纯旧模式（单宿主 ✓）；
+   *   硬要写 `undefined:...` 反而会把配对当场弄丢 ✗（见交付说明里这一条偏差 ✓）。
    */
-  function writeIdentityKey(key, value) {
-    if (!isIdentityKeyAllowed(key)) {
-      console.warn('[dsh-mobile] 拒绝写白名单之外的身份键：' + key)
+  function writeIdentityKey(key, value, fingerprint) {
+    var target = isBaseIdentityKey(key) ? identityKeyFor(key, fingerprint) : key
+    if (!isIdentityKeyAllowed(target)) {
+      console.warn('[dsh-mobile] 拒绝写白名单之外的身份键：' + target)
       return false
     }
     try {
-      if (value === null || value === undefined) localStorage.removeItem(key)
-      else localStorage.setItem(key, String(value))
+      if (value === null || value === undefined) localStorage.removeItem(target)
+      else localStorage.setItem(target, String(value))
     } catch (error) {
-      console.warn('[dsh-mobile] 写 localStorage 失败：' + key, error)
+      console.warn('[dsh-mobile] 写 localStorage 失败：' + target, error)
     }
     var patch = {}
-    patch[key] = value === undefined ? null : value
+    patch[target] = value === undefined ? null : value
     vaultMerge(patch)
     return true
   }
 
-  /** 删一个身份键 ✓（= 写 `null` ✓ —— 两边一起删 ✓）。 */
+  /** 删一个身份键 ✓（= 写 `null` ✓ —— 两边一起删 ✓；按当前指纹命名空间化 ✓）。 */
   function removeIdentityKey(key) {
     return writeIdentityKey(key, null)
+  }
+
+  /**
+   * 基名 + 指纹 ⇒ 真正的键名 ✓。
+   *   · `fingerprint === null` ⇒ 旧键本身（迁移删旧键专用 ✓）；
+   *   · 省略 ⇒ 当前源对应的指纹 ✓；
+   *   · 指纹不可得 ⇒ 旧键本身 ✓（纯旧模式 ✓ —— 那时没有第二个宿主可混 ✗）。
+   */
+  function identityKeyFor(base, fingerprint) {
+    if (!isBaseIdentityKey(base)) return base
+    if (fingerprint === null) return base
+    var resolved = fingerprint === undefined ? currentHostFingerprint() : fingerprint
+    if (!validHostFingerprint(resolved)) return base
+    return base + ':' + resolved
+  }
+
+  /** 从"配对配置"对象里取宿主指纹 ✓（`pinnedHostFingerprint` ✓）；取不到 ⇒ `undefined` ✓。 */
+  function fingerprintFromConfig(config) {
+    if (config === null || config === undefined || typeof config !== 'object') return undefined
+    var value = config.pinnedHostFingerprint
+    return validHostFingerprint(value) ? value : undefined
+  }
+
+  /** 从一段 JSON 文本里取宿主指纹 ✓（坏 JSON ⇒ `undefined` ✓，绝不抛 ✗）。 */
+  function fingerprintFromJson(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    try {
+      return fingerprintFromConfig(JSON.parse(raw))
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * 旧键的**归属** ✓ —— 旧 `dsh-mobile.host`（不带指纹的那条 ✓）里的 `pinnedHostFingerprint`。
+   *
+   * 先看本机 ✓，本机没有再看壳的库 ✓（"换源后从壳恢复"那条老路 ✓ —— 那时壳里有旧键、
+   * 本机是空的 ✓）。两边都取不到 ⇒ `undefined` ✓（**归属不可证** ✓）。
+   */
+  function legacyIdentityOwnerFingerprint() {
+    var local = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (local !== undefined) return local
+    return fingerprintFromJson(vaultValue(STORAGE_KEY))
+  }
+
+  /**
+   * ★★ **先定"当前源对应的宿主指纹"** ✓ —— 这一步必须在取身份**之前** ✓。
+   *
+   * 顺序（与派单里定死的一致 ✓）：
+   *   a) **本页票据**里的指纹 ✓（配对当次 ✓ —— 它定义的就是"这一页在配的那台" ✓）；
+   *   b) **宿主目录** `dsh-mobile.hosts`：哪条记录的 `slots[]` 里有地址的 **host**
+   *      等于 `location.host` ⇒ 取那条记录的指纹 ✓（这正是目录的用途 ✓）；
+   *   c) **旧键自己就是归属的定义** ✓（老用户 / 目录还没建 ✓）：
+   *      · 本机旧 `dsh-mobile.host` 的 `pinnedHostFingerprint` ✓；
+   *      · ★ 只有"整台手机**一个宿主目录都没有**"时，才允许再看**壳里**那份旧键 ✓ ——
+   *        否则会在 B 源上把 A 的旧身份当成本源身份 ✗（那正是要防的串台 ✓）。
+   *   d) 都得不出 ⇒ `undefined` ✓ = "这个源没有身份可取" ✓（走老路 ✓，绝不猜 ✗）。
+   *
+   * ★ `dsh-mobile.hosts.active` **不参与**这个解析 ✗：它是"面板标出当前"与切换用的
+   *   **标记** ✓，拿它当解析来源会在"另一台电脑的新源"上借到 active 那台的私钥 ✗。
+   */
+  function currentHostFingerprint() {
+    if (validHostFingerprint(pageTicketFingerprint)) return pageTicketFingerprint
+    var records = hostsRead()
+    var matched = hostFingerprintMatchingOrigin(records, location.host)
+    if (matched !== undefined) return matched
+    var fromLocalLegacy = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (fromLocalLegacy !== undefined) return fromLocalLegacy
+    if (records.length === 0) {
+      var fromVaultLegacy = fingerprintFromJson(vaultValue(STORAGE_KEY))
+      if (fromVaultLegacy !== undefined) return fromVaultLegacy
+    }
+    return undefined
+  }
+
+  /** 目录里"哪条记录的某个槽的 host == 当前源" ⇒ 那个指纹 ✓（找不到 ⇒ `undefined` ✓）。 */
+  function hostFingerprintMatchingOrigin(records, host) {
+    if (typeof host !== 'string' || host.length === 0) return undefined
+    for (var i = 0; i < records.length; i++) {
+      var slots = Array.isArray(records[i].slots) ? records[i].slots : []
+      for (var j = 0; j < slots.length; j++) {
+        var url = slots[j] !== null && typeof slots[j] === 'object' ? slots[j].url : slots[j]
+        if (typeof url !== 'string' || url.length === 0) continue
+        var slotHost = ''
+        try {
+          slotHost = new URL(url, location.href).host
+        } catch (error) {
+          void error
+        }
+        if (slotHost === host) return records[i].fingerprint
+      }
+    }
+    return undefined
+  }
+
+  // ─────────────────── 宿主目录 `dsh-mobile.hosts`（§3.1 ✓）───────────────────
+
+  /** 一段 JSON 文本 ⇒ 宿主记录数组 ✓（坏数据 / 非数组 ⇒ `null` ✓）。 */
+  function parseHostRecords(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return null
+    try {
+      var parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return null
+      var out = []
+      for (var i = 0; i < parsed.length; i++) {
+        var record = parsed[i]
+        if (record === null || typeof record !== 'object') continue
+        if (!validHostFingerprint(record.fingerprint)) continue
+        out.push(record)
+      }
+      return out
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
+  /**
+   * 读宿主目录 ✓ —— **本机与壳的库合并** ✓（按指纹取并 ✓，同一条以 `updatedAt` 较新者为准 ✓）。
+   *
+   * 为什么要合并 ✗：目录是**跨源**的 ✓ —— 另一台宿主的页面可能刚往里加过一条 ✓，
+   * 而本机的 localStorage 还是旧的 ✓；只看本机会漏掉刚加的那台 ✓。
+   */
+  function hostsRead() {
+    var fromVault = parseHostRecords(vaultValue(HOSTS_KEY))
+    var fromLocal = parseHostRecords(localValue(HOSTS_KEY))
+    if (fromVault === null && fromLocal === null) return []
+    if (fromVault === null) return fromLocal === null ? [] : fromLocal
+    if (fromLocal === null) return fromVault
+    var order = []
+    var byFingerprint = {}
+    var add = function (record) {
+      var fingerprint = record.fingerprint
+      if (byFingerprint[fingerprint] === undefined) {
+        order.push(fingerprint)
+        byFingerprint[fingerprint] = record
+        return
+      }
+      var previous = byFingerprint[fingerprint]
+      if (Number(record.updatedAt) > Number(previous.updatedAt)) byFingerprint[fingerprint] = record
+    }
+    for (var i = 0; i < fromVault.length; i++) add(fromVault[i])
+    for (var j = 0; j < fromLocal.length; j++) add(fromLocal[j])
+    var out = []
+    for (var k = 0; k < order.length; k++) out.push(byFingerprint[order[k]])
+    return out
+  }
+
+  /** 写宿主目录 ✓（走唯一写入口 ✓ ⇒ localStorage + 壳两边一起 ✓）。 */
+  function hostsWrite(records) {
+    return writeIdentityKey(HOSTS_KEY, JSON.stringify(records))
+  }
+
+  /** 当前宿主的**标记** ✓（`dsh-mobile.hosts.active` ✓）。 */
+  function setActiveHost(fingerprint) {
+    if (!validHostFingerprint(fingerprint)) return false
+    return writeIdentityKey(HOSTS_ACTIVE_KEY, fingerprint)
+  }
+
+  /** 当前宿主的标记值 ✓（没写过 ⇒ `undefined` ✓）。 */
+  function activeHostFingerprint() {
+    var value = localValue(HOSTS_ACTIVE_KEY)
+    if (value === null) value = vaultValue(HOSTS_ACTIVE_KEY)
+    return validHostFingerprint(value) ? value : undefined
+  }
+
+  /** 目录里那条记录的主显示名 ✓（人工填的 > 槽自己带的标签 > 当前地址 ✓）。 */
+  function hostRecordLabel(record) {
+    if (record !== null && typeof record.label === 'string' && record.label.length > 0) return record.label
+    var slots = record !== null && Array.isArray(record.slots) ? record.slots : []
+    for (var i = 0; i < slots.length; i++) {
+      var label = slots[i] !== null && typeof slots[i] === 'object' ? slots[i].label : undefined
+      if (typeof label === 'string' && label.length > 0) return label
+    }
+    return '（未命名）'
+  }
+
+  /**
+   * 把一条宿主记录**合并**进目录 ✓（主键 = 指纹 ✓ —— 有的字段不覆盖 ✓）。
+   *
+   * 语义：只更新**这次真的知道**的字段 ✗（`undefined` 的字段保持原值 ✓）——
+   * 于是"连接成功上报时间"不会把人工起的名字冲掉 ✓。
+   */
+  function hostRecordUpsert(record) {
+    if (record === null || typeof record !== 'object') return false
+    if (!validHostFingerprint(record.fingerprint)) return false
+    var fingerprint = record.fingerprint
+    var records = hostsRead()
+    var index = -1
+    for (var i = 0; i < records.length; i++) {
+      if (records[i].fingerprint === fingerprint) index = i
+    }
+    var previous = index >= 0 ? records[index] : {}
+    var next = {
+      fingerprint: fingerprint,
+      label: typeof record.label === 'string' && record.label.length > 0 ? record.label : previous.label,
+      slots: Array.isArray(record.slots) && record.slots.length > 0 ? record.slots : previous.slots,
+      lastState: record.lastState !== undefined ? record.lastState : previous.lastState,
+      lastSeenAt: record.lastSeenAt !== undefined ? record.lastSeenAt : previous.lastSeenAt,
+      updatedAt: Date.now(),
+    }
+    if (next.slots === undefined) next.slots = []
+    if (index >= 0) records[index] = next
+    else records.push(next)
+    return hostsWrite(records)
+  }
+
+  /**
+   * 一台宿主有哪些槽 ✓（`{label,url}` 数组 ✓）—— 来源与优先级：
+   *   ① 壳里那两组默认链接 ✓（同一台电脑的其它槽 ✓ —— 换源后仍要能认出"这是我" ✓）；
+   *   ② 票据 / 配置里的 `endpoints`、`baseUrl`、`tunnelUrls` ✓；③ 当前页面源 ✓。
+   * ★ 存的是**地址**不是隧道端点 ✓：匹配只比 `host` ✓（http/ws 与 https/wss 同机同槽 ✓）。
+   * ★ 槽集里**不**放配对票据 / baseUrl 之外的配置字段 ✗（宿主记录是**目录**，不是配对配置 ✓）。
+   */
+  function hostSlotsForConfig(config) {
+    var slots = []
+    var seen = {}
+    var add = function (url, label) {
+      if (typeof url !== 'string' || url.length === 0) return
+      var host = ''
+      try {
+        host = new URL(url, location.href).host
+      } catch (error) {
+        void error
+      }
+      if (host === '' || seen[host] === true) return
+      seen[host] = true
+      slots.push({ label: typeof label === 'string' ? label : '', url: url })
+    }
+    var links = readDefaultLinks()
+    for (var i = 0; i < links.length; i++) add(links[i].url, links[i].label)
+    if (config !== null && config !== undefined && typeof config === 'object') {
+      var endpoints = Array.isArray(config.endpoints) ? config.endpoints : []
+      for (var j = 0; j < endpoints.length; j++) add(endpoints[j])
+      add(config.baseUrl)
+      var tunnelUrls = Array.isArray(config.tunnelUrls) ? config.tunnelUrls : []
+      for (var k = 0; k < tunnelUrls.length; k++) add(tunnelUrls[k])
+    }
+    add(location.origin)
+    return slots
+  }
+
+  /**
+   * 连接成功 ⇒ 把"这台宿主"记进目录并标成当前 ✓（`lastState` / `lastSeenAt` ✓）。
+   * 只是**追加信息** ✓：任何异常都不许影响连接 ✗（调用处另有 try/catch ✓）。
+   */
+  function noteHostConnected(config) {
+    var fingerprint = fingerprintFromConfig(config)
+    if (fingerprint === undefined) fingerprint = currentHostFingerprint()
+    if (fingerprint === undefined) return false
+    hostRecordUpsert({
+      fingerprint: fingerprint,
+      slots: hostSlotsForConfig(config),
+      lastState: 'connected',
+      lastSeenAt: Date.now(),
+    })
+    setActiveHost(fingerprint)
+    return true
+  }
+
+  // ─────────────── 设置页「连接与设备」里的**宿主列表**（P1a 第 ③ 条 ✓）───────────────
+
+  /** 目录里那条记录的主地址 ✓（第一条槽 ✓；没有 ⇒ 一句人话 ✓，绝不显示 `undefined` ✗）。 */
+  function hostPrimaryAddress(record) {
+    var slots = record !== null && Array.isArray(record.slots) ? record.slots : []
+    for (var i = 0; i < slots.length; i++) {
+      var url = slots[i] !== null && typeof slots[i] === 'object' ? slots[i].url : slots[i]
+      if (typeof url === 'string' && url.length > 0) return url
+    }
+    return '（没有记录地址）'
+  }
+
+  /**
+   * 宿主列表的**行模型** ✓（纯数据 ✓ —— 渲染与验收共用同一份 ✓，不另算一遍 ✗）。
+   *
+   * 一行 = 一台电脑 ✓：显示名 ✓ + 主地址（槽 ✓）+ **指纹短串** ✓ + 是不是当前那台 ✓。
+   * "当前"的判据：解析出来的当前指纹 ✓（拿不到时退回 `hosts.active` 那个标记 ✓ ——
+   * 那只是**显示**用 ✓，绝不参与身份解析 ✗）。
+   */
+  function hostsPanelRows() {
+    var records = hostsRead()
+    var current = currentHostFingerprint()
+    if (current === undefined) current = activeHostFingerprint()
+    var rows = []
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i]
+      var active = current !== undefined && record.fingerprint === current
+      rows.push({
+        fingerprint: record.fingerprint,
+        label: hostRecordLabel(record),
+        address: hostPrimaryAddress(record),
+        fingerprintShort: formatFingerprint(record.fingerprint).slice(0, 9) + '…',
+        active: active,
+        state: typeof record.lastState === 'string' && record.lastState.length > 0 ? record.lastState : '（未知）',
+      })
+    }
+    return rows
+  }
+
+  /**
+   * ★★ P1a 第 ③ 条：「连接与设备」里**列出所有电脑**并**标出当前那台** ✓。
+   *
+   * ## 规矩（用户明确要求，违反即是 bug ✗）
+   *   · **当前那台**：显示名 + 地址 + 指纹短串 ✓，并明写「当前」✓；
+   *   · **其它那几台**：★ **不画"切换"按钮** ✗ —— P1b 才有那条桥 ✓
+   *     （`MainActivity.changeAddress()` 不接受参数 ✗，真要在壳内换源必须加新桥 + 重装 APK ✗）。
+   *     改成一句**可操作的提示** ✓："切过去：用「改地址」填这个地址"✓ ——
+   *     用户照着做**今天就能办成** ✓，而不是点了没反应 ✗（本项目对"画一颗死按钮"零容忍 ✓）。
+   *   · 一条都没登记 ⇒ 一句人话 ✓（不画空表格 ✗）。
+   *
+   * ★ 渲染只读**行模型** ✓（`hostsPanelRows()` ✓）—— 面板与验收不会各算一份 ✓。
+   */
+  function buildHostsGroup() {
+    var group = settingsGroup('电脑')
+    var rows = hostsPanelRows()
+    if (rows.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'dshm-set-hint'
+      empty.textContent = '还没有登记过电脑 —— 完成一次配对之后，这里会列出所有电脑，并标出当前这台。'
+      group.appendChild(empty)
+      return group
+    }
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      group.appendChild(
+        settingsRow(
+          row.label,
+          (row.active ? '当前 · ' : '') + row.address + ' · ' + row.fingerprintShort + (row.active ? '' : ' · ' + row.state),
+          row.active ? 'ok' : undefined,
+        ),
+      )
+      if (!row.active) {
+        var hint = document.createElement('div')
+        hint.className = 'dshm-set-hint'
+        hint.dataset.dshmHostHint = row.fingerprint
+        hint.textContent = '切过去：用「改地址」填上面这个地址（P1b 才会有"点一下直接切"）。'
+        group.appendChild(hint)
+      }
+    }
+    return group
+  }
+
+  // ─────────────────── 旧键：归属校验回退 + 一次性迁移 ✗ ───────────────────
+
+  /**
+   * 旧键（不带指纹）**归属可证吗** ✓ → 这是"B 宿主绝不能拿到 A 的身份"那道闸 ✓。
+   *
+   *   · 旧 `dsh-mobile.host` 的 `pinnedHostFingerprint` **== 要取的指纹** ⇒ 认 ✓；
+   *   · 本机**没有**旧 host 键、但本机已经有一份**带指纹**的 `dsh-mobile.host:<指纹>`
+   *     ⇒ 也认 ✓（同一个源上的旧兄弟键 ✓ —— 例如验收脚本直接往本机种一个旧
+   *     `lastGoodEndpoint` ✓；★ 这条**只对 localStorage** 成立 ✗，
+   *     壳里那份是**跨源**的 ✗ ⇒ 那边一律只认"旧 host 的指纹过"✓）；
+   *   · 其余一律 **不认** ✗（当它不存在 ✓ —— 绝不猜 ✗）。
+   */
+  function legacyKeyBelongsToLocal(base, fingerprint) {
+    if (!validHostFingerprint(fingerprint)) return false
+    var owner = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (owner !== undefined) return owner === fingerprint
+    var scopedHost = localValue(identityKeyFor(STORAGE_KEY, fingerprint))
+    return scopedHost !== null && fingerprintFromJson(scopedHost) === fingerprint
+  }
+
+  /** 壳里那份旧键的归属 ✓（**只**认"旧 host 的指纹 == 要取的指纹"✓ —— 见上面那条 ✗）。 */
+  function legacyValueFromVault(base, fingerprint, vault) {
+    if (!validHostFingerprint(fingerprint)) return null
+    var owner = fingerprintFromConfig(parseJsonOrUndefined(vault[STORAGE_KEY]))
+    if (owner === undefined || owner !== fingerprint) return null
+    var value = vault[base]
+    return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  function parseJsonOrUndefined(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    try {
+      return JSON.parse(raw)
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * ★ 一条身份键的**读取** ✓（P1a：读也要命名空间化 ✓，但旧键仍要能用 ✓）。
+   *
+   * 顺序：**带指纹的键**（本机 → 壳 ✓）⇒ 没有再看**旧键**（本机 → 壳 ✓，**归属必须可证** ✓）。
+   * 用了旧键 ⇒ **顺手迁移** ✓（写新键 + 删旧键 ✓；幂等 ✓）。
+   */
+  function readIdentityKeyValue(base, fingerprint) {
+    var resolved = fingerprint === undefined ? currentHostFingerprint() : fingerprint
+    var scopedKey = identityKeyFor(base, resolved)
+    if (scopedKey !== base) {
+      var scoped = localValue(scopedKey)
+      if (scoped !== null) return scoped
+      var scopedFromVault = vaultValue(scopedKey)
+      if (scopedFromVault !== null) return scopedFromVault
+    }
+    var legacy = localValue(base)
+    if (legacy !== null) {
+      if (!legacyKeyBelongsToLocal(base, resolved)) return null
+      migrateLegacyIdentityKeys()
+      var migrated = scopedKey === base ? null : localValue(scopedKey)
+      return migrated !== null ? migrated : legacy
+    }
+    var vaultLegacy = legacyValueFromVault(base, resolved, vaultRead() || {})
+    if (vaultLegacy === null) return null
+    // 壳里那份旧键归属已证 ✓ ⇒ 迁到带指纹的键（不动壳里那份旧值 ✗ —— 见 backfillIdentityVault ✓）
+    if (scopedKey !== base && localValue(scopedKey) === null) {
+      try {
+        localStorage.setItem(scopedKey, vaultLegacy)
+      } catch (error) {
+        void error
+      }
+    }
+    return vaultLegacy
+  }
+
+  /**
+   * ★★ 旧键**一次性迁移** ✓ —— 严格按"旧 `dsh-mobile.host` 自带归属指纹"来判 ✓（不猜 ✗）。
+   *
+   * 语义：
+   *   1. 旧 `dsh-mobile.host` 在本机不存在 ⇒ **什么都不做** ✓（第二次跑就是这一条 ⇒ 幂等 ✓）；
+   *   2. 它存在但 `pinnedHostFingerprint` 取不到 ⇒ **什么都不做** ✓
+   *      （★ 绝不把 `device-key` 单独挂到某个猜出来的指纹上 ✗ —— 那正是
+   *       "隧道能建立、对面不认这台设备"那条坑 ✓）；
+   *   3. 指纹可得 ⇒ 四条旧键**逐条改名**到 `<名字>:<指纹>` ✓（值已在新键里 / 新键更权威 ⇒
+   *      只删旧键 ✓），并把这台宿主记进目录、标成当前 ✓。
+   *
+   * 返回迁移到的指纹 ✓（没做事 ⇒ `null` ✓ —— 验收要能看见"到底动没动" ✓）。
+   */
+  function migrateLegacyIdentityKeys() {
+    var raw = localValue(STORAGE_KEY)
+    if (raw === null) return null
+    var fingerprint = fingerprintFromJson(raw)
+    if (fingerprint === undefined) return null
+    var moved = 0
+    for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+      var base = IDENTITY_VAULT_KEYS[i]
+      var value = localValue(base)
+      if (value === null) continue
+      var target = base + ':' + fingerprint
+      if (localValue(target) === null) writeIdentityKey(base, value, fingerprint)
+      // ★ 旧键**必须**删（显式 `null` 作用在旧键本身 ✓ —— 传 `null` 才不命名空间化 ✓）
+      writeIdentityKey(base, null, null)
+      moved++
+    }
+    if (moved === 0) return null
+    var config = parseJsonOrUndefined(raw)
+    hostRecordUpsert({
+      fingerprint: fingerprint,
+      label: undefined,
+      slots: hostSlotsForConfig(config),
+      lastState: 'paired',
+      lastSeenAt: Date.now(),
+    })
+    setActiveHost(fingerprint)
+    console.info('[dsh-mobile] 已把 ' + moved + ' 个旧身份键迁移到宿主命名空间：' + fingerprint)
+    return fingerprint
   }
 
   // ─────────────── "宿主**明确拒绝**这台设备"（本轮修的那条路）───────────────
@@ -280,8 +822,22 @@
     var cleared = []
     for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
       try {
-        removeIdentityKey(IDENTITY_VAULT_KEYS[i])
-        cleared.push(IDENTITY_VAULT_KEYS[i])
+        /**
+         * ★★ P1a：**只清当前这台宿主**的四条 ✓。
+         *
+         * 为什么非这样不可 ✗：拒绝我们的是**某一台**宿主 ✓ —— 若把四条全清（或者写成
+         * "前缀匹配 `dsh-mobile.host:*` 全删" ✗），用户在 A 上被撤销会**连带清掉 B 的身份** ✗
+         * ⇒ 第二台电脑也得重新配对 ✓（多宿主下这是最容易被写错的一处 ✓）。
+         * `identityKeyFor` 在指纹不可得时返回**旧键本身** ✓ ⇒ 纯旧模式的行为与改动前一致 ✓。
+         */
+        var key = identityKeyFor(IDENTITY_VAULT_KEYS[i])
+        removeIdentityKey(key)
+        cleared.push(key)
+        // 旧键确实属于当前宿主时才连旧键一起清 ✓（归属对不上 ⇒ 一个字都不动 ✗）
+        if (key !== IDENTITY_VAULT_KEYS[i] && legacyKeyBelongsToLocal(IDENTITY_VAULT_KEYS[i], currentHostFingerprint())) {
+          writeIdentityKey(IDENTITY_VAULT_KEYS[i], null, null)
+          cleared.push(IDENTITY_VAULT_KEYS[i])
+        }
       } catch (error) {
         void error
       }
@@ -320,14 +876,28 @@
    *
    * ⚠️ "vault 里**缺**这个键" 与 "这个键的值是 `null`" **都不恢复** ✓ ——
    * 后者是壳明确的**删除**语义（换槽时删 `lastGoodEndpoint` 就走这条路 ✓）。
+   *
+   * ## ★★ P1a：**只恢复"当前源对应的那个指纹"那四条** ✗✗（§3.2 点名的坑 ✓）
+   * 旧语义是"本机缺 + 库里有 ⇒ 恢复" ✓ —— 命名空间化之后**不能**再这么写 ✗：
+   * 那样在 B 宿主的源上会把 **A 宿主的私钥**恢复进来 ✓，症状是"隧道能建立、
+   * 但对面不认这台设备"✗（比"连不上"难查得多 ✓）。
+   * 指纹定不下来（`undefined`）⇒ **一个都不恢复** ✓（宁可让老路继续可用 ✓，绝不猜 ✗）。
+   * 旧键形态的库（老用户的壳 ✓）走 `legacyValueFromVault` ✓ —— 那里**必须**归属可证 ✓。
    */
   function restoreIdentityFromVault() {
     var vault = vaultRead()
     if (vault === null) return 0
+    var fingerprint = currentHostFingerprint()
+    if (!validHostFingerprint(fingerprint)) return 0
     var restored = 0
     for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
-      var key = IDENTITY_VAULT_KEYS[i]
+      var base = IDENTITY_VAULT_KEYS[i]
+      var key = identityKeyFor(base, fingerprint)
       var value = vault[key]
+      if (typeof value !== 'string' || value.length === 0) {
+        // 壳里那份**旧键**（老用户的身份库 ✓）：归属必须可证，否则当它不存在 ✗
+        value = legacyValueFromVault(base, fingerprint, vault)
+      }
       // 缺键 / null / 非字符串（理论上到不了 ✓）⇒ 都没有可恢复的值 ✓
       if (typeof value !== 'string' || value.length === 0) continue
       try {
@@ -339,7 +909,7 @@
       }
     }
     if (restored > 0) {
-      console.info('[dsh-mobile] 已从壳的身份库恢复 ' + restored + ' 个跨源身份键（换地址后不用重新配对）')
+      console.info('[dsh-mobile] 已按宿主指纹 ' + String(fingerprint).slice(0, 8) + '… 从壳的身份库恢复 ' + restored + ' 个跨源身份键（换地址后不用重新配对）')
     }
     return restored
   }
@@ -367,23 +937,33 @@
    * 极端情形（另一个源里还留着早已解除配对的旧身份 ✓）万一被补回去也不要紧 ✗✗：
    * 那台设备在电脑端**已经撤销** ✓ ⇒ 一握手就被明确拒绝 ✓ ⇒ 上面那条
    * `handleDeviceRejection` 立刻把两边一起清干净 ✓（自愈 ✓，不是死循环 ✓）。
+   *
+   * ## ★★ P1a：只用**当前指纹**的键名 ✓（外加宿主目录那两个跨源键 ✓）
+   * 指纹不可得 ⇒ 四条身份键**一条都不补** ✓（补旧键形态进库，等于给别的源埋一颗雷 ✗）；
+   * 宿主目录仍然照补 ✓（它本身就是跨源的 ✓ —— 与"哪台宿主"无关 ✓）。
    */
   function backfillIdentityVault() {
     var vault = vaultRead()
     if (vault === null) return 0
     var patch = {}
     var count = 0
-    for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
-      var key = IDENTITY_VAULT_KEYS[i]
-      if (vault[key] !== undefined) continue
-      var local = null
-      try {
-        local = localStorage.getItem(key)
-      } catch (error) {
-        void error
+    var fingerprint = currentHostFingerprint()
+    if (validHostFingerprint(fingerprint)) {
+      for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+        var key = identityKeyFor(IDENTITY_VAULT_KEYS[i], fingerprint)
+        if (vault[key] !== undefined) continue
+        var local = localValue(key)
+        if (local === null) continue
+        patch[key] = local
+        count++
       }
-      if (typeof local !== 'string' || local.length === 0) continue
-      patch[key] = local
+    }
+    var crossSourceKeys = [HOSTS_KEY, HOSTS_ACTIVE_KEY]
+    for (var j = 0; j < crossSourceKeys.length; j++) {
+      if (vault[crossSourceKeys[j]] !== undefined) continue
+      var value = localValue(crossSourceKeys[j])
+      if (value === null) continue
+      patch[crossSourceKeys[j]] = value
       count++
     }
     if (count === 0) return 0
@@ -2129,7 +2709,13 @@
 
   /** 载入或生成设备签名密钥（P-256，raw 公钥 65 字节）。 */
   async function loadOrCreateDeviceKey() {
-    var stored = localStorage.getItem(DEVICE_KEY)
+    /**
+     * ★ P1a：读**当前源对应指纹**那一份 ✓（旧键在此仅作"归属可证"的回退 ✓ ——
+     *   见 `readIdentityKeyValue` ✓）。指纹不可得 ⇒ 生成新密钥并写旧键形态 ✓
+     *   （纯旧模式 ✓ —— 行为与改动前一致 ✓）。
+     */
+    var fingerprint = currentHostFingerprint()
+    var stored = readIdentityKeyValue(DEVICE_KEY, fingerprint)
     if (stored !== null) {
       try {
         var parsed = JSON.parse(stored)
@@ -2152,7 +2738,8 @@
     var jwk = await subtle().exportKey('jwk', pair.privateKey)
     var deviceId = 'web-' + b64u(crypto.getRandomValues(new Uint8Array(9)))
     // ★ 走身份写入口 ✓：这台设备的私钥必须**跨源存活** ✗（换地址后新源里没有它就等于没配对 ✓）
-    writeIdentityKey(DEVICE_KEY, JSON.stringify({ deviceId: deviceId, publicKey: b64u(raw), privateKeyJwk: jwk }))
+    // ★ P1a：写**带指纹**的键 ✓（指纹不可得时才退回旧键形态 ✓ —— 见 writeIdentityKey ✓）
+    writeIdentityKey(DEVICE_KEY, JSON.stringify({ deviceId: deviceId, publicKey: b64u(raw), privateKeyJwk: jwk }), fingerprint)
     return { deviceId: deviceId, privateKey: pair.privateKey, publicRaw: raw }
   }
 
@@ -2275,6 +2862,38 @@
 
   /** 上次成功的端点存这里：手机换网后优先试它，通常一次就中。 */
   var LAST_ENDPOINT_KEY = 'dsh-mobile.lastGoodEndpoint'
+
+  /**
+   * ★★ P1a：读"上次成功的端点" ✓ —— **只认与当前源同一个 host 的那条** ✓。
+   *
+   * ## 为什么必须有这道源校验（点位 B ✓）
+   * 壳在**换槽**那一刻会删掉 vault 里的 `dsh-mobile.lastGoodEndpoint` ✓
+   * （`MainActivity.forgetLastGoodEndpoint()` —— 硬编码旧名字 ✗），
+   * 目的是"换源之后别把上一个源那条端点当首选、白等 8 秒" ✗。
+   * 命名空间化之后网页写的是 `dsh-mobile.lastGoodEndpoint:<指纹>` ✓ ⇒
+   * **壳删不到它了** ✗（本轮**不改 Java** ✗）⇒ 这条保护会**静默失效** ✓。
+   *
+   * ⇒ 网页侧接管同一语义 ✓，而且比壳那条更准 ✓（壳是"换槽就删"，
+   *   我们按"**这条端点的 host 还是不是当前源**"判 ✓）：
+   *   · host 一致 ⇒ 当首选 ✓；
+   *   · host 不一致（= 换过槽 / 换过电脑 ✓）⇒ **忽略 + 顺手删掉** ✓（走唯一写入口 ✓）。
+   * ★ 隧道端点记的是 `wss://host:3443/mobile/ws` ✓，页面源是 `https://host:3443` ✓
+   *   ⇒ 比的是 **host** ✗（比 origin 会把 wss 与 https 判成两个源 ✗）。
+   */
+  function readLastGoodEndpointForCurrentSource() {
+    var value = readIdentityKeyValue(LAST_ENDPOINT_KEY)
+    if (value === null) return null
+    var host = ''
+    try {
+      host = new URL(value, location.href).host
+    } catch (error) {
+      void error
+    }
+    if (host !== '' && host === location.host) return value
+    console.info('[dsh-mobile] 忽略并清除"属于别的源"的上次端点：' + value + '（当前源 ' + location.host + ' ✓）')
+    removeIdentityKey(LAST_ENDPOINT_KEY)
+    return null
+  }
   /** 单个端点的尝试上限。多候选时必须收紧：否则 3 个候选最坏要等 45 秒才轮到可用的那个。 */
   var ENDPOINT_TIMEOUT_MS = 8000
 
@@ -3466,8 +4085,10 @@
   async function submitPairingClaim(config, device) {
     var ticket = config.pairingTicket
     if (ticket === undefined) return
+    // P1a：票据记录也要按宿主命名空间化 ✓（换源/换电脑后不会把同一张票据的公钥再提交一遍 ✓）
+    var fingerprint = currentHostFingerprint()
     // 已经成功连过就不再提交，避免每次重连都打一次请求
-    if (localStorage.getItem(CLAIMED_KEY) === ticket) return
+    if (readIdentityKeyValue(CLAIMED_KEY, fingerprint) === ticket) return
     try {
       var response = await fetch('/mobile/pair/claim', {
         method: 'POST',
@@ -3483,7 +4104,7 @@
       })
       if (response.ok) {
         // ★ 身份写入口 ✓（换源之后不该把同一张票据的公钥再提交一遍 ✓）
-        writeIdentityKey(CLAIMED_KEY, ticket)
+        writeIdentityKey(CLAIMED_KEY, ticket, fingerprint)
         console.info('[dsh-mobile] 已提交配对请求，请在电脑上核对指纹并点「允许此设备」')
       }
     } catch (error) {
@@ -3543,7 +4164,8 @@
       }
     }
     try {
-      fromBase(localStorage.getItem(LAST_ENDPOINT_KEY))
+      // P1a：上次成功的端点也按宿主命名空间化 ✓（多宿主下不会拿别台电脑的端点先白等 ✓）
+      fromBase(readLastGoodEndpointForCurrentSource())
     } catch (error) {
       void error
     }
@@ -3796,7 +4418,17 @@
 
   function readStoredHost() {
     try {
-      var raw = localStorage.getItem(STORAGE_KEY)
+      /**
+       * ★★ P1a：配置也按**当前源对应的指纹**取 ✓（旧键回退见 `readIdentityKeyValue` ✓）。
+       *
+       * `rootedByFingerprint` = "这份配置是从**带指纹**的键里取到的" ✓ ——
+       * 它决定下面那条**按源校验**怎么用（这一处是单宿主时代留下的判据 ✓，
+       * 命名空间化之后它的语义必须重想 ✓，见下面那段长注释 ✓）。
+       */
+      var fingerprint = currentHostFingerprint()
+      var scopedKey = identityKeyFor(STORAGE_KEY, fingerprint)
+      var rootedByFingerprint = scopedKey !== STORAGE_KEY && localValue(scopedKey) !== null
+      var raw = readIdentityKeyValue(STORAGE_KEY, fingerprint)
       if (raw === null) return undefined
       var parsed = JSON.parse(raw)
       if (parsed === null || typeof parsed !== 'object') return undefined
@@ -3807,7 +4439,7 @@
         storedOrigin = new URL(parsed.baseUrl)
       } catch (error) {
         void error
-        return dropStaleHost('baseUrl 无法解析')
+        return dropStaleHost('baseUrl 无法解析', scopedKey)
       }
       if (storedOrigin.protocol !== location.protocol || storedOrigin.host !== location.host) {
         /**
@@ -3822,20 +4454,38 @@
          * 持有的槽 ✓，由网页自己上报 ✓）里出现过的 authority 才放行 ✓。
          * ⚠️ **没有壳时 `shellEndpointHosts()` 返回空** ⇒ 这一整段与今天**一字不差** ✓
          * （多个验收脚本跑在无壳的无头 Chrome 里 ✓，那里的行为必须原样保留 ✗）。
+         *
+         * ★★ P1a 补的那一半（**必须点名的一处** ✓）：如果这份配置是从
+         * `<名字>:<指纹>` 里取到的 ✓，那"来源不同"**本来就是预期的** ✗ ——
+         * 指纹才是身份锚 ✓（同一台电脑的学校槽 / Tailscale 槽是两个源 ✓），
+         * 而"当前源 → 指纹"这一步已经由 `currentHostFingerprint()` 用**目录里的槽**
+         * 证过了 ✓ ⇒ 这里再拿 baseUrl 比一次源，就是把**刚按指纹取回来的正确配置**
+         * 当场删掉 ✗（旧判据在单宿主时代用来防"拿着旧配置换了源"✓；
+         * 现在这件事由"指纹 + 目录槽"回答 ✓，比 origin 更准 ✓）。
+         * ★ 旧键形态取到的配置 **不**享受这条豁免 ✗（归属已证 ≠ 来源已证 ✓）：走原判据 ✓。
+         * ★ 跨源的旧 `tunnelUrl` **照样丢** ✗（下面那一段一个字没动 ✓）。
          */
-        var slotHosts = shellEndpointHosts()
-        if (slotHosts.indexOf(storedOrigin.host) < 0) {
-          return dropStaleHost('配置来源 ' + storedOrigin.protocol + '//' + storedOrigin.host + ' 与当前页面 ' + location.protocol + '//' + location.host + ' 不一致')
-        }
-        console.info(
-          '[dsh-mobile] 接受了跨源但属于候选槽的来源：' +
-            storedOrigin.protocol + '//' + storedOrigin.host +
+        if (rootedByFingerprint) {
+          console.info(
+            '[dsh-mobile] 按宿主指纹取回配置：baseUrl ' +
+              storedOrigin.protocol + '//' + storedOrigin.host +
+              ' 属于同一台电脑的另一个槽（当前源 ' + location.protocol + '//' + location.host + ' ✓）⇒ 接受 ✓',
+          )
+        } else {
+          var slotHosts = shellEndpointHosts()
+          if (slotHosts.indexOf(storedOrigin.host) < 0) {
+            return dropStaleHost('配置来源 ' + storedOrigin.protocol + '//' + storedOrigin.host + ' 与当前页面 ' + location.protocol + '//' + location.host + ' 不一致', scopedKey)
+          }
+          console.info(
+            '[dsh-mobile] 接受了跨源但属于候选槽的来源：' +
+              storedOrigin.protocol + '//' + storedOrigin.host +
             '（当前页面 ' + location.protocol + '//' + location.host +
             '；壳的候选槽 ' + (slotHosts.length === 0 ? '（无）' : slotHosts.join('、')) + '）',
-        )
+          )
+        }
       }
       if (location.protocol === 'https:' && typeof parsed.tunnelUrl === 'string' && parsed.tunnelUrl.indexOf('wss:') !== 0) {
-        return dropStaleHost('HTTPS 页面不能用 ws:// 隧道（混合内容会被拦截）')
+        return dropStaleHost('HTTPS 页面不能用 ws:// 隧道（混合内容会被拦截）', scopedKey)
       }
       /**
        * ★ 跨源恢复时**丢掉过期的 `tunnelUrl`** ✓（round 131 ✓）。
@@ -3878,9 +4528,12 @@
   }
 
   /** 丢弃与当前页面不兼容的本地配置，并留下可诊断的日志。 */
-  function dropStaleHost(reason) {
+  function dropStaleHost(reason, key) {
     try {
-      localStorage.removeItem(STORAGE_KEY)
+      // P1a：删的是**这次真正读到的那把键** ✓（带指纹的 / 旧键 ✓）——
+      // 只 removeItem(STORAGE_KEY) 的话，"从带指纹键读到、却删不掉" ⇒ 下次又读回来 ✗。
+      if (typeof key === 'string' && key.length > 0 && isIdentityKeyAllowed(key)) writeIdentityKey(key, null)
+      else localStorage.removeItem(STORAGE_KEY)
     } catch (error) {
       void error
     }
@@ -3889,8 +4542,28 @@
   }
 
   function storeHost(config) {
+    /**
+     * ★ P1a：**配置自己带的指纹优先** ✓（配对当次最可信 ✓）——
+     * 绝不拿 `hosts.active` 去猜 ✗（在别的电脑的新源上会把配置写进错的名字空间 ✗）。
+     * 完全没有指纹时才退回旧键形态 ✓（否则配对会当场丢失 ✗ —— 见交付说明里的偏差 ✓）。
+     */
+    var fingerprint = fingerprintFromConfig(config)
+    if (fingerprint === undefined) fingerprint = currentHostFingerprint()
     // ★ 身份写入口 ✓（配对配置必须跨源存活 ✗ —— 否则壳一换地址，新源就是"没配对" ✗）
-    writeIdentityKey(STORAGE_KEY, JSON.stringify(config))
+    writeIdentityKey(STORAGE_KEY, JSON.stringify(config), fingerprint)
+    if (fingerprint === undefined) return
+    // P1a：把这台宿主记进目录并标成当前 ✓（面板要列的就是它 ✓；失败绝不影响配对 ✗）
+    try {
+      hostRecordUpsert({
+        fingerprint: fingerprint,
+        slots: hostSlotsForConfig(config),
+        lastState: config !== null && config !== undefined && config.pairingTicket !== undefined ? 'pairing' : undefined,
+        lastSeenAt: Date.now(),
+      })
+      setActiveHost(fingerprint)
+    } catch (error) {
+      void error
+    }
   }
 
   /** 从 URL 查询串读取配对参数（扫码跳转或手输 6 位码）。 */
@@ -12043,7 +12716,8 @@
     if (DEBUG_BOX_ON) {
       var lastEndpoint = null
       try {
-        lastEndpoint = localStorage.getItem(LAST_ENDPOINT_KEY)
+        // P1a：这条读数也按宿主命名空间化 ✓（否则多宿主下会显示别台电脑的端点 ✓）
+        lastEndpoint = readIdentityKeyValue(LAST_ENDPOINT_KEY)
       } catch (error) {
         void error
       }
@@ -12063,6 +12737,14 @@
     body.appendChild(connection)
 
     /**
+     * ★★ P1a 第 ③ 条：**列出所有电脑**并标出当前那台 ✓（`buildHostsGroup` ✓）。
+     * 放在「连接」之后、「默认链接」之前 ✓ —— 它回答的是"我这台手机管着哪几台电脑"✓，
+     * 属于连接这一类 ✓。判据里**不看有没有壳** ✗：宿主目录在本机 localStorage 里也有一份 ✓
+     * （纯浏览器配对过的那台也该列出来 ✓）。
+     */
+    body.appendChild(buildHostsGroup())
+
+    /**
      * ★ round 132：「默认链接」小节 ✓ —— 把壳里那两个默认链接（学校 / Tailscale ✓）
      *   与切换阈值**显示出来** ✓（此前它们只活在壳的 `SharedPreferences` 里 ✗，
      *   设置界面上一片空白 ✗，用户看不到到底记下了什么 ✗）。
@@ -12079,9 +12761,10 @@
     var deviceId = ''
     var pinned = ''
     try {
-      var storedDevice = JSON.parse(localStorage.getItem('dsh-mobile.device-key') || 'null')
+      // P1a：这两行读数也按**当前源对应的指纹**取 ✓（设置页要显示的是"这台设备 / 这台电脑" ✓）
+      var storedDevice = JSON.parse(readIdentityKeyValue(DEVICE_KEY) || 'null')
       if (storedDevice !== null && typeof storedDevice === 'object') deviceId = String(storedDevice.deviceId || '')
-      var storedHost = JSON.parse(localStorage.getItem('dsh-mobile.host') || 'null')
+      var storedHost = JSON.parse(readIdentityKeyValue(STORAGE_KEY) || 'null')
       if (storedHost !== null && typeof storedHost === 'object') {
         pinned = String(storedHost.pinnedHostFingerprint || '')
       }
@@ -12143,9 +12826,12 @@
       try {
         // ★ 必须走身份写入口（= 两边一起删 ✗）：只删 localStorage 的话，下一次启动会
         //   从壳的库里把刚解除的身份**恢复回来** ✗ —— "解除配对"当场失效 ✓。
+        // ★ P1a：**只清当前这台宿主**那几条 ✓（`identityKeyFor` 按指纹命名空间化 ✓；
+        //   连字面量也换成常量 ✓ —— 否则多宿主下会清错/清漏 ✓）。
         removeIdentityKey(STORAGE_KEY)
         removeIdentityKey(DEVICE_KEY)
-        removeIdentityKey('dsh-mobile.lastGoodEndpoint')
+        removeIdentityKey(CLAIMED_KEY)
+        removeIdentityKey(LAST_ENDPOINT_KEY)
       } catch (error) {
         void error
       }
@@ -16125,8 +16811,16 @@
 
   async function boot() {
     var native = globalThis.__DSH_MOBILE__
-    var stored = readStoredHost()
+    /**
+     * ★ P1a：**票据里的指纹必须先固化** ✓ —— `readStoredHost()` 要按"当前源对应的指纹"
+     * 取配置 ✓，而配对当次那个指纹只有票据里有 ✓（目录里可能还没有这台 ✓）。
+     * 顺序调换是安全的 ✓：两个都是纯读 ✓（原来的顺序只是巧合 ✓）。
+     */
     var fromUrl = readUrlConfig()
+    if (fromUrl !== undefined && validHostFingerprint(fromUrl.pinnedHostFingerprint)) {
+      pageTicketFingerprint = fromUrl.pinnedHostFingerprint
+    }
+    var stored = readStoredHost()
     var config = fromUrl !== undefined ? Object.assign({}, stored, fromUrl) : stored
 
     // 注入诊断与配对界面所需的接口
@@ -16301,6 +16995,50 @@
         },
         identityWrite: function (key, value) {
           return writeIdentityKey(key, value)
+        },
+        /**
+         * ★★ P1a 多宿主这条线的**验收入口** ✓ —— 全部直通生产函数 ✓（同一个概念不许两套实现 ✓）：
+         *   · `identityRead(base)`   —— 按当前源对应指纹读一条身份键 ✓（旧键回退也在里面 ✓）；
+         *   · `currentFingerprint()` —— "当前源对应哪个指纹" ✓（`null` = 定不下来 ✓）；
+         *   · `migrateLegacy()`      —— 显式跑一次旧键迁移 ✓（返回迁移到的指纹 / `null` ✓ —— 幂等读数靠它 ✓）；
+         *   · `hosts()` / `hostsActive()` —— 宿主目录与"当前"标记 ✓；
+         *   · `hostRecord(record)`   —— 走唯一写入口记一条宿主 ✓（面板那几条断言要用 ✓）。
+         */
+        identityRead: function (base) {
+          return readIdentityKeyValue(base)
+        },
+        currentFingerprint: function () {
+          var fingerprint = currentHostFingerprint()
+          return fingerprint === undefined ? null : fingerprint
+        },
+        migrateLegacy: function () {
+          return migrateLegacyIdentityKeys()
+        },
+        /**
+         * 显式跑一次"宿主明确拒绝这台设备"那条路 ✓（验收用 ✓ —— 与 `restoreIdentity` 同一个口径 ✓）。
+         * 它调的是**生产函数本身** ✓：真机上这条路随后会 `location.replace` 回配对页 ✓
+         * （验收里那个替换是 no-op ✓）。要钉的是"**只清当前宿主**"✓ —— 别把另一台也清了 ✗。
+         */
+        deviceRejection: function (code, detail) {
+          return handleDeviceRejection(undefined, code, detail)
+        },
+        hosts: function () {
+          return hostsRead()
+        },
+        hostsActive: function () {
+          var active = activeHostFingerprint()
+          return active === undefined ? null : active
+        },
+        hostRecord: function (record) {
+          return hostRecordUpsert(record)
+        },
+        /**
+         * 「连接与设备」那一屏里"电脑"那一组的**行模型 + 真实渲染产物** ✓（验收用 ✓）。
+         * `rows` 是纯数据 ✓，`group` 是**生产渲染函数**（`buildHostsGroup` ✓）造出来的元素 ✓
+         * —— 断言因此能打在"面板真的画了什么"上 ✓，而不是打在"某个字符串存在"上 ✓。
+         */
+        hostsPanel: function () {
+          return { rows: hostsPanelRows(), group: buildHostsGroup() }
         },
       },
       /** 最近一笔滑动导航的判定（验收脚本读它，避免"只看结果猜原因" ✓）。 */
@@ -16481,6 +17219,18 @@
        *   只有"启动那一次 fetch 失败过"这种少见情形才会在这里多等一次 fetch ✓（几毫秒 ✓）。
        */
       if (state === 'connected') void prepareEndpointSlots(config)
+
+      /**
+       * ★ P1a：连上了 ⇒ 把这台宿主记进目录、标成当前 ✓（`lastState` / `lastSeenAt` ✓）。
+       * 纯追加信息 ✓：异常绝不许影响连接 ✗（这里显式吞掉 ✓ —— 与"布局失败不影响连接"同一条纪律 ✓）。
+       */
+      if (state === 'connected') {
+        try {
+          noteHostConnected(config)
+        } catch (error) {
+          void error
+        }
+      }
 
       // ── 首次配对成功后的**一次性重载** ─────────────────────────────
       //
@@ -17773,6 +18523,18 @@
   //   于是占位传输层根本不装 ✓，等 `boot()` 再恢复过来已经晚了一整段启动流程 ✗。
   //   它自己包了 try/catch ✓，没有壳时就是纯粹的 no-op ✓。
   try {
+    /**
+     * ★★ P1a：**旧键一次性迁移必须在恢复之前** ✗ —— 恢复要按"当前源对应的指纹"取 ✓，
+     * 而老用户手机上那个指纹只写在**旧键** `dsh-mobile.host` 里 ✓ ⇒ 先迁移（改名 ✓、
+     * 顺手建目录 + 标当前 ✓）再恢复 ✓，否则老用户会"刷新一下就掉配对"✗。
+     * 它自己保证幂等 ✓（旧键已不在 ⇒ 一次也不动 ✓）。
+     * 另外把本页票据里的指纹也固化下来 ✓（配对那一页没有目录、只有票据 ✓）。
+     */
+    var earlyUrlConfig = readUrlConfig()
+    if (earlyUrlConfig !== undefined && validHostFingerprint(earlyUrlConfig.pinnedHostFingerprint)) {
+      pageTicketFingerprint = earlyUrlConfig.pinnedHostFingerprint
+    }
+    migrateLegacyIdentityKeys()
     restoreIdentityFromVault()
     // ★ 反向也要补齐 ✓：本机有、壳的库没有的身份键（升级前配的对就是这一种 ✗）⇒ 补进去 ✓
     backfillIdentityVault()

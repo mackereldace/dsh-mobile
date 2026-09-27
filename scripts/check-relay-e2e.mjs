@@ -186,7 +186,27 @@ markChromeLaunch()
 
   // ⑤ 关键一步：把候选端点换成中继，重载 —— 整条 GUI 是否还能用？
   const relayUrl=`ws://127.0.0.1:${RELAY}/connect?room=${room}`
-  await ev(`localStorage.setItem('dsh-mobile.lastGoodEndpoint',${JSON.stringify(relayUrl)});localStorage.setItem('dsh-mobile.tunnelLog','[]');location.reload()`)
+  /**
+   * ★★ P1a（多宿主）：这个种子**必须种在"当前宿主那把键"上** ✗，不能再种基名 ✗。
+   *
+   * 为什么：身份键已按宿主指纹命名空间化 ✓，而读取顺序是"**带指纹优先** → 旧键带归属校验回退" ✓。
+   * 本用例在此之前**已经配过对并连上局域网** ✓ ⇒ 本机已有 `lastGoodEndpoint:<指纹>` ✓ ——
+   * 种基名的话会被那份**盖住** ✗ ⇒ 实际端点是局域网、不是中继 ⇒ 下面"实际端点就是中继"当场报红 ✓
+   * （**是测试写错了，不是产品坏** ✓，但红得毫无信息量 ✓）。
+   *
+   * ⇒ 走产品自己的写入口 `__DSH_MOBILE_BOOT__.apk.identityWrite(base,value)` ✓ ——
+   * 它内部按**当前指纹**解析键名 ✓（与产品同一条路 ✓，不是测试自己拼键名 ✗）。
+   * ★ 顺带把可能已存在的那把也覆盖掉 ✓（写入口就是覆盖 ✓），所以不会出现"两份并存、谁优先"的问题 ✓。
+   * 旧 APK / 没有这个入口时退回基名 ✓（保持这条用例对老产物也能跑 ✓）。
+   */
+  await ev(`(function(){try{
+    var api=globalThis.__DSH_MOBILE_BOOT__&&globalThis.__DSH_MOBILE_BOOT__.apk;
+    var url=${JSON.stringify(relayUrl)};
+    if(api&&typeof api.identityWrite==='function'){api.identityWrite('dsh-mobile.lastGoodEndpoint',url)}
+    else{localStorage.setItem('dsh-mobile.lastGoodEndpoint',url)}
+    localStorage.setItem('dsh-mobile.tunnelLog','[]');
+    location.reload();
+  }catch(e){location.reload()}})()`)
   let state='?'
   for(let i=0;i<25;i++){await sleep(2000);state=String(await ev("__DSH_MOBILE_BOOT__ && __DSH_MOBILE_BOOT__.state ? __DSH_MOBILE_BOOT__.state() : '?'"));if(state==='connected')break}
   console.log('\n【隧道改走中继】')
