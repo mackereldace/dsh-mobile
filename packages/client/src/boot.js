@@ -6915,6 +6915,26 @@
       'body[data-dshm-dsh-preview="1"] #dsh-mobile-top { visibility: hidden; }',
       'body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }',
       /**
+       * ★★ round 165（用户 B ✓）：**DSH 预览开着时，子代理入口也必须让开** ✗✗ ——
+       *   用户原话："打开文件预览以后，文件目录居然在文件预览的上方，而且**我们新加的那个
+       *   子代理也在文件预览的上方**"✓。
+       *
+       * 为什么它会跑到预览上面 ✗：它是我们挂在 `body` 下的 `position: fixed` 元素 ✓，
+       * `z-index: 60` ✓ —— 而 DSH 预览那一层所在的那一列**只有 `z-index: 25`** ✓
+       * （round 158 实测：面板 85 能盖住预览 25 ✓，同一个道理 ✓）⇒ 谁都没挡住它 ✗。
+       * ★ round 159 把它做成自绘控件时，**只写了"怎么摆"和"长什么样"，没写"预览开着时让开"** ✗
+       *   —— 顶栏（70）与文件面板（85）各有各的让开规则 ✓，它漏了 ✓。
+       *
+       * 用 `opacity: 0` 而**不是** `display: none` ✗：`placeLineageEntry` 的闭环要**量它的 rect** ✓
+       * （`display:none` 会量到 0×0 ⇒ 走"量不到尺寸"那一支 ⇒ 打上 `blocked` ✓ ——
+       * 虽然预览关掉后能自己恢复 ✓，但那一轮会白记一行日志、也白白绕一圈 ✓）；
+       * `opacity: 0` 保留盒子 ⇒ 几何一帧都不动 ✓、预览一关立刻回来 ✓。
+       * `pointer-events: none` 保证它**不吃触摸** ✓（透明但仍然能点的坑不能留 ✓）。
+       */
+      'body[data-dshm-dsh-preview="1"] [data-dshm-lineage-host] {',
+      '  opacity: 0 !important; pointer-events: none !important;',
+      '}',
+      /**
        * ★★ round 158（B1 ✓）：DSH 预览开着时，**我们的文件面板一个像素都不画** ✗，
        *   但**状态照旧是 `open`** ✓（`data-dshm-files` 不动 ✓）。
        *
