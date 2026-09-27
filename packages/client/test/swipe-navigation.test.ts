@@ -168,6 +168,11 @@ function buildHarness(overrides: { getComputedStyle?: (node: unknown) => { overf
     grabVar('dshPreviewSurface'),
     grabVar('syncDshPreviewState'),
     grabFunction('describeNode'),
+    /**
+     * ★ round 160：`applyFrame` 收尾时改调 `flipDrawerMotion`（抽屉走 FLIP ✓）——
+     *   它是**模块级**函数 ✓，不切进来就是 `ReferenceError` ✗（同上面那条教训 ✓）。
+     */
+    grabFunction('flipDrawerMotion'),
     grabFunction('installSwipeNavigation'),
   ].join('\n')
 

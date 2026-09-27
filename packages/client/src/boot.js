@@ -5111,6 +5111,64 @@
    * @param sheet - 文件面板的 api（开关都走它，别自己改 dataset ✗）。
    * @param setDrawer - 左抽屉的开关（与汉堡/遮罩共用同一份实现 ✓）。
    */
+  /**
+   * ★★ round 160（A ✓）：左抽屉的**滑行**用 FLIP 交给合成层 —— 与「电脑文件目录」
+   *   面板同一套观感 ✓（用户："照这个改法再改一下左侧聊天面板和主页面的动画"✓）。
+   *
+   * ## 为什么不能直接把 CSS 的 `left` 换成 `transform` ✗
+   * `[class*="sidebarCol"]` **不能长期带 transform** ✗✗：DSH 的设置弹窗是渲染在
+   * 侧栏列内部的 `position: fixed` 浮层 ✓ —— 这一列一旦有 transform（或
+   * `will-change: transform` ✓），就成了那些 fixed 后代的**包含块** ✓，
+   * 实测把设置面板压成 263px（= 抽屉宽度）、设置界面完全不可用 ✗
+   * （见 `tagSettingsOverlay` 的注释 ✓）。这条已经踩过一次，不许再踩 ✗。
+   *
+   * ## 所以反过来做：位置照旧，只把"那一段路"补出来（标准 FLIP ✓）
+   *   ① **量**：改状态**之前**先量出"视觉上还在哪" ✓（`getBoundingClientRect` 会把
+   *      正在跑的过渡、跟手拖动中的内联位移都算进去 ✓ —— 这正是我们要的"当前在哪"✓）；
+   *   ② **改**：同步执行 `mutate`（改 `left` / 改 body 标记 ✓）⇒ 位置**一步到位** ✓；
+   *   ③ **补**：把差量写成内联 `transform` ✓ ⇒ 屏幕上看不出跳变 ✓；
+   *   ④ **放**：`transition: none` 下强制一次布局 ✓（让浏览器把这个 transform 记成
+   *      **起点** ✗ —— 不刷的话两次写入会被合并进同一次样式重算 ⇒ 看不到起点 ⇒ 没有过渡 ✗），
+   *      然后清掉内联 `transition`/`transform` ✓ ⇒ CSS 里那条
+   *      `transition: transform var(--dshm-slide)` 接手，**合成层**用 240ms 滑回 0 ✓。
+   *
+   * 结果：静止态**没有** transform（fixed 后代安全 ✓），运动态**不重排**
+   *（一次布局、一次绘制 ✓，不再每帧重排会话列表 + 重画 36px 阴影 ✗）。
+   *
+   * ★ 与主页面（`--dshm-push` 那条 transform 过渡 ✓）在**同一次任务**里起步 ✓、
+   *   共用同一条 `--dshm-slide` ✓ ⇒ 抽屉与主页面锁死同步 ✓。
+   *
+   * @param mutate - 真正改状态的那一下 ✓（必须**同步**完成 ✓）。
+   */
+  function flipDrawerMotion(mutate) {
+    var node = document.querySelector('[class*="sidebarCol"]')
+    if (node === null || node === undefined || node.style === undefined || node.getBoundingClientRect === undefined) {
+      mutate()
+      return
+    }
+    var before = node.getBoundingClientRect()
+    mutate()
+    var after = node.getBoundingClientRect()
+    var dx = before.left - after.left
+    /**
+     * 没有位移 ⇒ 什么都不补 ✓（测试桩、或者状态本来就对 ✓）。
+     * ★ 两端都**整块在屏幕外**时也不补 ✓：收尾那次 `removeProperty('left')` 会把
+     *   内联的"推出去 24px"换成状态值（差 16px ✓）—— 两次都在屏外 ✓，
+     *   补一段谁也看不见的 240ms 只是白占一个合成层 ✗。
+     */
+    var offscreen = function (rect) {
+      return rect.left + rect.width <= 0 || rect.left >= window.innerWidth
+    }
+    if (!(Math.abs(dx) > 0.5)) return
+    if (offscreen(before) && offscreen(after)) return
+    node.style.transition = 'none'
+    node.style.transform = 'translateX(' + String(Math.round(dx * 100) / 100) + 'px)'
+    // ★ 强制一次布局（见上）：不刷就没有"起点"，过渡不会发生 ✗
+    void node.offsetWidth
+    node.style.transition = ''
+    node.style.transform = ''
+  }
+
   function installSwipeNavigation(sheet, setDrawer, openFiles, syncPush) {
     /** 打开（内容区）：横滑到这个距离就开 ✓（打开是"往前拉"，不存在误触问题 ✓）。 */
     var MIN_DX = 56
@@ -5441,10 +5499,21 @@
         style.transform = offset === 0 ? '' : 'translateX(' + String(offset) + 'px)'
       } else if (surface.kind === 'files') {
         style.transform = offset === 0 ? '' : 'translateX(' + String(offset) + 'px)'
-      } else if (offset === 0) {
-        style.removeProperty('left')
       } else {
-        style.setProperty('left', String(-offset) + 'px', 'important')
+        /**
+         * ★★ round 160（A ✓）：抽屉这一支走 **FLIP** ✓（见 `flipDrawerMotion` 的长注释 ✓）——
+         *   `left` 只是**状态**（一步到位 ✓）、`transform` 才是**那 240ms 的动画** ✓。
+         *   三个收尾分支都从这里过，一个都不能漏 ✗：
+         *     · 打开提交 → `run()` 切状态后走到 `offset === 0` ⇒ 清内联 ⇒ 归 0 ✓；
+         *     · 关闭提交 → `offset = 宽度+24` ⇒ 写内联 ⇒ 推到屏外 ✓；
+         *     · 回弹 → `offset === 0` ⇒ 清内联 ⇒ 弹回原位 ✓。
+         *   （拖动中 `live === true` 不走这里 ✓ —— 那时写的是内联 `left`，
+         *     跟手必须逐像素、不能带任何补间 ✓。）
+         */
+        flipDrawerMotion(function () {
+          if (offset === 0) style.removeProperty('left')
+          else style.setProperty('left', String(-offset) + 'px', 'important')
+        })
       }
       /**
        * 所有跟随者（内容列 + 我们的顶栏 + 以后任何带标记的元素 ✓）：
@@ -6192,6 +6261,28 @@
        */
       ':root { --dshm-top-h: ' + TOPBAR_HEIGHT + 'px; --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: var(--dshm-drawer-w); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }',
 
+      /* ── 点按反馈里两样"外来物"一起去掉（round 160，用户 B ✓）──────────────
+         用户原文："点击的时候会出现蓝色框框住字（我注意到点击对话，轨迹也会有），
+         把这个东西去掉"✓。他特意点明「对话/轨迹也有」✓ ⇒ 不是我们那颗控件的问题 ✓，
+         是**全页**都有的两样默认反馈 ✓：
+
+         ① `-webkit-tap-highlight-color`：Android / WebView 给可点元素糊的那层高亮 ✓。
+            它是**可继承**属性 ⇒ 在根上关掉就全页生效 ✓（本项目此前只在自己那两颗按钮上
+            单独关过 ✓，所以 DSH 那一大片一直是默认值 ✓）。
+         ② `outline`：DSH 的 `[role="tab"]` 是**裸 `<button>`** ✓，作者样式里
+            **查不到任何 focus 规则**（通篇只有 `._switch_*` / `._copyable_*` /
+            `._tableScroll_*` 那几条 ✓）⇒ 点按后画的是**浏览器默认焦点环** ✓
+            （Chrome 的 `-webkit-focus-ring-color` 在深色下就是浅蓝 ✓ = 用户说的"蓝色框"✓）。
+            这条同时治好我们自己的按钮 ✓（round 159 只写了 `:focus-visible{background:none}` ✗，
+            漏掉了 `outline` ✓）。
+
+         两条都**只在手机表面注入** ✓（这段样式只在 `isMobileSurface()` 时装 ✓）
+         ⇒ 电脑端的 DSH 一个像素都不动 ✓，也没碰 DSH 源码 ✓。
+         ⚠️ 刻意**不碰 `box-shadow`** ✗ —— tab 的下划线、浮层阴影都用它 ✓，
+           一起关掉会误伤 ✓（真需要时按元素单独处理 ✓）。 */
+      '  html, html body * { -webkit-tap-highlight-color: transparent; }',
+      '  html body *:focus { outline: none !important; }',
+
       /* ── 自建顶栏：三区 flex，纵向天然对齐 ───────────────────────── */
       '#dsh-mobile-top {',
       '  position: fixed; top: 0; left: 0; right: 0; z-index: 70;',
@@ -6646,7 +6737,37 @@
           如果和预览层在同一个流里，它已经把预览层推下去了，再补内边距就是空档 ✗）。
          没写这个变量时（JS 还没跑到 / 出错），`var()` 的兜底值仍然是完整的 max(...) ✓ ——
          即"先按 48px 顶上，JS 跑完再精确修正"✓，任何一帧都不会让它压在状态栏里 ✓。 */
-      '[class*="_preview"] { padding-top: var(--dshm-preview-pad, max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      'div[class*="_preview"]:not([data-queue-dock] *) { padding-top: var(--dshm-preview-pad, max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      /**
+       * ★★ round 162（B ✓）：上面那条**选择器又写宽了一次** ✗✗ —— 用户真机截图：
+       *   "我在你工作的时候发送消息，dsh 会给我安排一个排队消息，目前我们的排队消息
+       *    会有概率往下错一行，像截图这样"✓。
+       *
+       * 真因：它原来写的是 `[class*="_preview"]` ✓ —— 而 DSH 排队消息那一行的预览文本
+       *   正是 `<span class="_7yHdaG_preview">` ✓（`QueueDock.module.css` ✓），
+       *   **类名后缀就带 `_preview`** ✓ ⇒ 那颗 span 也被塞进一个"安全区那么大"的
+       *   上内边距 ✗。
+       *   偏移量与"内边距 ÷ 2"**完全吻合** ✓：那一行是 `display:flex; align-items:center`
+       *   的 36px 行 ✓ ⇒ 内边距把 span 撑高、居中之后**整体下沉一半** ✓。
+       *   截图实测（1200×2608，dpr 3）：文字中心比该行中心低 **9.3 CSS px**
+       *   ⇒ 实际内边距 ≈ **18–19px** ✓（= `max(env(safe-area-inset-top), var(--dshm-safe-top))`
+       *   在这台机器上的真实值 ✓）。
+       *   "有概率"也解释得通 ✓：DSH 预览开过之后 JS 会把 `--dshm-preview-pad` 写成 0px ✓，
+       *   没开过预览（本页会话里）走的就是上面那个 `var()` 兜底 ✓ ——
+       *   两种状态随使用过程交替 ⇒ 看起来就是"有时错一行、有时正常"✓。
+       *
+       * ⇒ 两条**互相独立**的收口（少一条都不够 ✗）：
+       *   · `div[...]`：真预览层全是 div ✓，而那条排队消息是一颗 **span** ✓；
+       *   · `:not([data-queue-dock] *)`：DSH 给队列面板留了**稳定的** `data-queue-dock` ✓
+       *     （不是哈希类名 ✓）⇒ 以后它就算把 span 换成 div 也不会再中 ✗。
+       *
+       * ★ 这是本项目**第四次**栽在"选择器写太宽"上 ✓（前三次：`[class*="collapsed"]`
+       *   把 frame 宽度改坏 ✓、`[class*="header"]` 把面板顶下去 52px ✓、
+       *   `[class*="_root"]` 误命中 ✓）。真预览层**应该**像 `tagTopHeader` 那样由 JS
+       *   打标记再选 ✓ —— 但那要动 `dshPreviewSurface` 整条链路（哈希、多候选、兜底 ✓），
+       *   本轮风险大于收益 ✗ ⇒ 先收口 ✓，并在 `check-mobile-layout` 里补一条断言盯着 ✓
+       *   （排队行不得被加内边距 ✓ / 真预览层仍必须有 ✓）。
+       */
       /* DSH 自带预览盖住整屏时：我们的顶栏让开 ✓（免得两条栏叠在一起 ✗），让位量归零 ✓ */
       /**
        * ★ 预览打开时把**我们自己的顶栏**让开 ✓（免得两条栏叠在一起 ✗）。
@@ -6987,7 +7108,25 @@
          半径与文件面板的左缘共用同一个值（验收里有等式断言盯着，改一处必须改两处 ✓）。
          `overflow: hidden` 本来就在，所以圆角能真的裁掉子元素 ✓。 */
       '    border-radius: 0 18px 18px 0;',
-      '    transition: left var(--dshm-slide);',
+      /**
+       * ★★ round 160（A ✓）：**过渡属性从 `left` 改成 `transform`** ——
+       *   用户原文："你之前好像改动过文件面板和主页面的滑动动画，
+       *   照这个改法再改一下左侧聊天面板和主页面的动画"✓。
+       *
+       * 面板那套（`#dsh-mobile-sheet-panel` ✓）用的是
+       * `transform: translateX(102%) → none` + `transition: transform var(--dshm-slide)` ✓
+       * —— 合成层移动，每帧**不重排** ✓。抽屉原来走的是 `left` ✓：
+       * 每帧重排整棵会话列表 + 重画那条 36px 阴影 ⇒ 手机上就是"卡顿" ✗。
+       *
+       * ⚠️ **但不能把这列长期挂上 transform** ✗✗：DSH 的设置弹窗是渲染在**侧栏列内部**的
+       *   `position: fixed` 浮层 ✓ —— 一旦这一列有 transform（或 `will-change: transform` ✓），
+       *   它就成了那些 fixed 后代的**包含块** ✓，实测把设置面板压成 263px（= 抽屉宽度）、
+       *   设置界面完全不可用 ✗（见 `tagSettingsOverlay` 的注释 ✓）。
+       *   ⇒ 所以走 **FLIP**：位置照旧由 `left` 一步到位 ✓（静止态**没有** transform ✓ ⇒
+       *     对任何 fixed 后代都没有影响 ✓），屏幕上那 240ms 由**内联 transform**补间 ✓
+       *     （见 `flipDrawerMotion` ✓）。过渡声明挂在这里，是因为"补间那一下"要的就是它 ✓。
+       */
+      '    transition: transform var(--dshm-slide);',
       '  }',
       '  body[data-dsh-mobile-drawer="open"] [class*="sidebarCol"] {',
       '    left: 0 !important;',
@@ -7047,26 +7186,93 @@
          它们虽然隐身，**盒子还在**，而下面那条把 `overflow` 放开了（必须放开，否则入口被裁 ✗）
          ⇒ 不收干净就会把内容撑出可视区 ✗（"页面能左右拖"那类问题 ✓）。 */
       '  [data-dshm-topheader] [class*="titleRow"] > *:not([data-dshm-lineage-chain]) { display: none !important; }',
-      '  [data-dshm-lineage-chain] > *:not([data-dshm-lineage-chain]):not([data-dshm-lineage]) { display: none !important; }',
+      '  [data-dshm-lineage-chain] > *:not([data-dshm-lineage-chain]):not([data-dshm-lineage-dsh]) { display: none !important; }',
       /* ★ 裁剪必须放开：入口的**包含块在 `.crumbs` 之外** ✓（`offsetParent` ✓），
          而 `.crumbs{overflow:hidden}` 正好夹在两者中间 ⇒ 不放开就会被裁得一点不剩 ✗
          （绝对定位后代**越不过**夹在它与包含块之间的 `overflow:hidden` ✓）。 */
       '  [data-dshm-lineage-chain] { overflow: visible !important; }',
-      /* ★ 定位：三个变量由 `tagLineageEntry` **按当下的 rect 现算** ✓（没有写死的像素 ✓）——
-         `top` 对齐「对话 | 轨迹」那条带子 ✓、`right` 贴齐标签行右缘 ✓、
-         `max-width` = 从最右那个 tab 到标签行右缘的那块空地 ✓
-         ⇒ 切换器形态再长也**挤不到**「对话/轨迹」✓，只会自己截断 ✓。 */
-      '  [data-dshm-lineage] {',
-      '    visibility: visible !important;',
-      '    position: absolute !important; z-index: 3 !important;',
+      /**
+       * ★★ round 159（A ✓）：**DSH 那颗触发键整颗隐身，但盒子必须留在原地** ✓✗
+       *   （用户拍板："能不能自己写一个控件"✓ —— 外观不再由它承担 ✓）。
+       *
+       * ## 为什么"留盒子"不是顺手，而是**必须** ✗
+       * 它弹出的那棵树**不长在它旁边** ✓，而是 `createPortal(…, document.body)` 的另一棵子树 ✓，
+       * 坐标由 DSH 自己算（`@deepseek-ai/dsh-client-ui-subagent/lib/client.js` ✓）：
+       *     `catalogMenuPosition(trigger) = { top: trigger.rect.bottom + 5, left: clamp(trigger.rect.left, 16, …) }`
+       * ⇒ 用 `display:none` 会把 `rect` 变成 `0×0` ⇒ 菜单弹到屏幕**左上角** ✗✗；
+       *    `visibility:hidden` **保留盒子** ⇒ 菜单仍弹在 round 158 那个位置（= 我们控件正下方 ✓）。
+       *
+       * ## 拿掉的两件事
+       *   · **绘制** ✗ —— `/` 分隔符、状态点、`∨` 箭头都在这棵子树里 ✓，一起不再出现 ✓；
+       *   · **命中测试** ✗ —— `visibility:hidden` 与 `pointer-events:none` 都拿掉它 ✓
+       *     ⇒ 它不会与**我们自己的控件**抢点击 ✓（我们控件就在它正上方 ✓）。
+       *
+       * 定位沿用**同一套变量**（与我们控件 ✓，见 `placeLineageEntry`）——
+       * 所以它在哪，菜单就弹在哪个正下方 ✓，与"我们控件在哪"自动一致 ✓。
+       */
+      '  [data-dshm-lineage-dsh] {',
+      '    visibility: hidden !important; pointer-events: none !important;',
+      '    position: fixed !important;',
       '    right: var(--dshm-lineage-right, 0px) !important;',
       '    top: var(--dshm-lineage-top, 0px) !important;',
       '    max-width: var(--dshm-lineage-max, 240px) !important;',
       '  }',
-      /* ★ 入口**自己那棵子树**要一起显回来 ✓ —— 上面那条"整棵子树隐身"是按
-         `[class*="titleRow"] *` 命中的 ✓，连胶囊里的状态点/计数一起算 ✓；
-         这里是同特异度、写在后头 ⇒ 后来者胜 ✓（`:not()` 里塞后代选择器在旧 WebView 上不保险 ✗）。 */
-      '  [data-dshm-lineage] * { visibility: visible !important; }',
+      '  [data-dshm-lineage-dsh] * { visibility: hidden !important; pointer-events: none !important; }',
+      /**
+       * ★★ round 159（A ✓）：**我们自己的控件** ✓。
+       *
+       * ## 为什么不再覆盖 DSH 那颗 ✗
+       * 它的外观是它自己的 JSX 拼的 ✓：前导 `/` 是**触发键的兄弟** `span.separator` ✓、
+       * "有子代理在跑"时文字前的状态点是 `span.activitySlot > StateDot` ✓、
+       * 尾部 `∨` 是 `IconChevronDownOutline14` ✓ —— 三件都在它那一层里 ✓，
+       * 盖掉一件还会长出下一件 ✗。自己写 ⇒ 这三件**天然不存在** ✓（不需要任何隐藏规则 ✓）。
+       *
+       * ## 挂在哪
+       * 宿主挂在 `document.body` 下 ✓ —— **绝不进 DSH 的 React 树** ✓
+       * （本项目铁律：DSH 渲染的节点一个字节都不碰 ✓）。
+       * `position: fixed` ⇒ "不被祖先裁剪"是**结构性成立**的 ✓
+       * （round 157/158 那一串"把祖先 `overflow` 逐一放开"的补丁因此不再需要 ✓）。
+       */
+      '  [data-dshm-lineage-host] {',
+      '    position: fixed !important; left: 0 !important; top: 0 !important;',
+      '    width: 0 !important; height: 0 !important; overflow: visible !important;',
+      '    z-index: 60 !important;',
+      '  }',
+      /* ★ 三个变量由 `placeLineageEntry` 按**当下量到的 rect** 现算 ✓，
+         写在 `document.documentElement` 上 ✓ —— 我们控件与那颗隐形锚点读的是**同一套** ✓。 */
+      '  [data-dshm-lineage] {',
+      '    position: fixed !important; z-index: 60 !important;',
+      '    right: var(--dshm-lineage-right, 0px) !important;',
+      '    top: var(--dshm-lineage-top, 0px) !important;',
+      /**
+       * ★★ round 160（A ✓）：**跟着让位量一起动** —— 用户原文：
+       *   "目前切页面这行字没法和对话轨迹他们一起动，会有很明显的卡顿"✓。
+       *
+       * 根因是**结构**的、不是算法 ✗：我们挂在 `document.body` 下、而且是 `position:fixed`
+       * ⇒ 抽屉/文件面板推挤时动的是 `[class*="centerCol"]`（`transform: translateX(--dshm-push)` ✓），
+       * 我们**不在那一列里** ⇒ 整段动画里「对话/轨迹」在滑、这行字**钉在原地** ✓，
+       * 动画结束、下一个 120ms 去抖 / 1s 对账才"啪"地归位 ⇒ 用户看到的"很明显的卡顿"✓✓。
+       * ⇒ 用**同一个变量、同一条时长**让它跟着滑 ✓：与 centerCol 同帧、同速、零 JS 成本 ✓
+       * （GPU 合成，不逐帧布局 ✓ —— 这正是当年把 `left` 换成 `transform` 的同一条理由 ✓）。
+       *
+       * ⚠️ **不许加 `!important`** ✗：拖动跟手那一路要给跟随者写**内联** transform
+       *   （见 `pushFollowers` ✓），而带 `!important` 的样式表规则**盖得过内联** ✗
+       *   ⇒ 跟手拖动时会脱节 ✓（`[class*="centerCol"]` 与 `#dsh-mobile-top` 那两条
+       *   同样都没写 `!important` ✓）。
+       */
+      '    transform: translateX(var(--dshm-push, 0px));',
+      '    transition: transform var(--dshm-slide);',
+      '    max-width: var(--dshm-lineage-max, 240px) !important;',
+      /* ★ 必须是 `flex`（不是 `block` ✗）：`block` 里那颗 `inline-flex` 按钮会落在**行盒**里 ✓
+         ⇒ 容器比按钮高 2px（行高留白 ✓），而闭环对齐的是**容器**中心 ⇒ 文字**低 1px** ✗
+         （探针实测：容器 27px / 按钮 25px ✓）。改成 `flex` ⇒ 容器高 = 按钮高 ✓，文字与 tab 齐平 ✓。 */
+      '    display: flex !important;',
+      /* 摆好之前**不画** ✓（`visibility` 连命中测试一起拿掉 ✓ ⇒ 半卡的控件也抢不走点击 ✓）。
+         `tagLineageEntry` 先打 `blocked` ✓、同一帧里 `reflowLineageEntry()` 摆好再摘掉 ✓
+         ⇒ 浏览器没有机会画中间那一帧 ✓。 */
+      '    visibility: hidden !important;',
+      '  }',
+      '  [data-dshm-lineage]:not([data-dshm-lineage-blocked="1"]) { visibility: visible !important; }',
       /**
        * ★★ round 157（A ✓）：**摆不好就不许露出来** ✗✗（用户 A1 的硬要求：
        *   "宁可看不见，也不许压住 tab 或半卡"✓）。
@@ -7080,21 +7286,21 @@
       '  [data-dshm-lineage][data-dshm-lineage-blocked="1"],',
       '  [data-dshm-lineage][data-dshm-lineage-blocked="1"] * { visibility: hidden !important; }',
       /**
-       * ★★ round 157（A ✓）：**做成与「对话 | 轨迹」同款** ✓ ——
-       *   用户原话："**风格和对话、轨迹两个不一样**" ✗（round 155 给它套了个小胶囊：
-       *   底色 + 999px 圆角 + 3px/10px 内边距 + caption 一档的字色 ✗）。
+       * ★★ round 159（A ✓）：我们那颗按钮的**兜底样式** ✓ —— 与「对话 | 轨迹」里
+       * **未选中那一颗 tab** 同档 ✓（`font-size:13px / font-weight:500 / line-height:16px /
+       * color: label-tertiary / padding: 0 0 9px` ✓；`padding-bottom:9px` 正是 tab 给
+       * 下划线留的那条带子 ✓ —— 让**文字**与 tab 文字落在同一条基线上 ✓）。
        *
-       * 取值**逐条对齐 DSH 自己那两个 tab** ✓（实测 conversation 的 `*_tab`：
-       *   `font-size:13px; font-weight:500; line-height:16px;
-       *    color:var(--dsw-alias-label-tertiary); background:0 0; border:none` ✓）：
-       *   · 字：13px / 500 / 16px ✓；· 色：**未选中 tab 那一档**（tertiary ✓）；
-       *   · **胶囊底 / 边框 / 圆角全部去掉** ✗✗（"不一样"就是它们）；
-       *   · **不要下划线** ✗ —— tab 的 `padding:0 0 9px` 是给下划线留的位置 ✓，
-       *     而入口是个**控件**、不是选中态 tab ✓ ⇒ 内边距归零 ✓、`text-decoration:none` ✓。
-       * ★ 只改**我们自己那一层**（`> button` ✓），DSH 点开后的那个树菜单（fixed / 336px ✓）
-       *   一个字节不碰 ✓ —— 它不在 `[data-dshm-lineage] > button` 这条选择器里 ✓。
+       * ★ 真正的值**不靠这里** ✗：`applyLineageTabStyle` 每轮把**真 tab 的计算样式**
+       *   逐项抄过来（内联 ✓）⇒ "一致"是**构造出来的** ✓，不是手调的 ✓ ——
+       *   DSH 以后改字号/配色，我们自动跟着走 ✓。这一组只在"抄不到"时兜底 ✓。
+       * ★ 只作用于**我们自己那一层**（`[data-dshm-lineage]` ✓，挂在 body 下 ✓）；
+       *   DSH 点开后的那棵树（portal 到 body / `role="tree"` ✓）一个字节不碰 ✓
+       *   —— 它既不在这个选择器里、也不在这棵子树里 ✓。
        */
       '  [data-dshm-lineage] > button {',
+      '    display: inline-flex !important; align-items: center !important; gap: 4px !important;',
+      '    font-family: inherit !important;',
       '    font-size: 13px !important;',
       '    font-weight: 500 !important;',
       '    line-height: 16px !important;',
@@ -7102,27 +7308,60 @@
       '    background: none !important;',
       '    border: 0 !important;',
       '    border-radius: 0 !important;',
-      '    padding: 0 !important;',
+      '    padding: 0 0 9px !important;',
       '    min-height: 0 !important;',
       '    box-shadow: none !important;',
       '    text-decoration: none !important;',
+      '    cursor: pointer !important;',
+      '    max-width: 100% !important;',
+      /* `min-width: 0`：让它在 flex 容器里**真的能被压窄** ✓（否则 `min-width:auto` 顶着内容宽 ⇒
+         切换器那种长名字会把容器顶出 `--dshm-lineage-max` ✗）。 */
+      '    min-width: 0 !important;',
       '  }',
       /* 悬停/键盘聚焦也别长出胶囊底来 ✓（DSH 自己那两个 tab 也没有 ✓）。 */
       '  [data-dshm-lineage] > button:hover,',
       '  [data-dshm-lineage] > button:focus-visible { background: none !important; }',
-      /**
-       * ★ 状态点（"有子代理在跑"时文字前那个小点 ✓）：**≤10px** ✓（这里 8px ✓）。
-       * 选择器只认**按钮里空的第一个孩子** ✓ —— 那个位置在两种形态里都只可能是状态点 ✓
-       * （计数是带文字的 span ✓、切换器名字也是带文字的 span ✓，空元素不可能是文字 ✓）
-       * ⇒ 既不误伤文字排版 ✓，也不用去猜 DSH 的哈希类名 ✗。
-       */
-      '  [data-dshm-lineage] > button > *:first-child:empty {',
-      '    width: 8px !important; height: 8px !important;',
-      '    border-radius: 50% !important; flex: none !important;',
+      /* 文字：切换器形态显示的是**当前子代理的名字**（可能很长 ✓）⇒ 截断 ✓；
+         计数形态本来就短 ✓，不受影响 ✓。宽度上限由 `--dshm-lineage-max` 兜着 ✓。 */
+      '  [data-dshm-lineage] [data-dshm-lineage-label] {',
+      '    display: block !important; overflow: hidden !important; min-width: 0 !important;',
+      '    text-overflow: ellipsis !important; white-space: nowrap !important;',
       '  }',
-      /* 切换器形态：显示的是**当前子代理的名字** ✓ ⇒ 给足最大宽度 + 截断 ✓
-         （宽度上限由上面那个 `--dshm-lineage-max` 兜着 ✓，412px 屏上不会把 tab 挤走 ✓）。 */
-      '  [data-dshm-lineage="switcher"] > button { max-width: 100% !important; }',
+      /**
+       * ★★ round 159（A ✓）：状态点 —— **我们自己的**一个 8px 小圆点 ✓，
+       * 颜色取 `currentColor`（= 与文字同色系 ✓）、`opacity: 0.7`（比文字更淡 ✓），
+       * **只在"有子代理在跑"时**才由 JS 挂进来 ✓。
+       *
+       * ★ 判断依据（用户问"它到底是不是有信息"✓，答案：**是** ✓）：
+       *   DSH 的源码里它就是 `descendants.runningCount > 0 && <span class="activitySlot">
+       *   <StateDot state="ongoing"/></span>` ✓ —— **条件渲染** ✓，实测同一个真会话
+       *   （31 个子代理、当时**没有**在跑的）里它**根本不存在** ✓
+       *   （探针读数：`<button><span>31 个子代理</span><svg …/></button>` ✓）。
+       *   ⇒ 它承载"有活在跑"这条信息 ✓ ⇒ **保留，但自己做小做淡** ✓；
+       *   而 `/` 分隔符与 `∨` 箭头是**常驻的纯装饰** ✗ ⇒ 一个都不留 ✓。
+       */
+      '  [data-dshm-lineage] [data-dshm-lineage-dot] {',
+      '    flex: none !important; width: 8px !important; height: 8px !important;',
+      '    border-radius: 50% !important; background: currentColor !important; opacity: 0.7 !important;',
+      '  }',
+      /**
+       * ★★ round 160（A ✓）：状态点**分成两态上色** —— 用户原文：
+       *   "目前有一个子代理在跑，但左边的那个标是灰色的，我认为这样设计比较好，
+       *    在跑的时候蓝色，跑完了绿色"✓。
+       *
+       * 所以点**常驻**（只要入口在就画 ✓，见 `tagLineageEntry` ✓），颜色由状态决定 ✓：
+       *   · `running` = DSH 那颗按钮里多了"空的非 svg 孩子" ✓（= 有活在跑 ✓）⇒ 蓝 ✓；
+       *   · `idle`    = 其余（已经有子代理、但都跑完了 ✓）⇒ 绿 ✓。
+       * 两色都优先用 DSH 自己的语义色 ✓（跟着主题走 ✓），拿不到才用深色主题的兜底值 ✓。
+       * ⚠️ 刻意不写死 `opacity` ✗：基础态那 0.7 是"与文字同色系、比文字淡"用的 ✓，
+       *   而蓝/绿两态要**一眼可辨** ⇒ 这里给回 1 ✓。
+       */
+      '  [data-dshm-lineage][data-dshm-lineage-state="running"] [data-dshm-lineage-dot] {',
+      '    background: var(--dsw-alias-state-business-primary, #4d9cff) !important; opacity: 1 !important;',
+      '  }',
+      '  [data-dshm-lineage][data-dshm-lineage-state="idle"] [data-dshm-lineage-dot] {',
+      '    background: var(--dsw-alias-state-success-primary, #3ecf8e) !important; opacity: 1 !important;',
+      '  }',
       /* ★ 只认我们打好的标记（见 tagTopHeader）：**绝不能**写成 `[class*="header"]` ——
          那会把面板里的 `…_header`（例如上下文面板的 JObwrW_header）一起推下去 52px，
          表现为"点开面板顶上多一块空白" ✗（用户实测报上来的就是这个）。 */
@@ -8381,6 +8620,187 @@
      * ⇒ 只做一件事：把上一轮打的标记**收干净** ✓ —— 标签行右端不留空白、
      *   高度与布局一个像素都不变 ✓（这一条验收里有断言盯着 ✓）。
      */
+    /**
+     * ★★ round 159（A ✓）：**状态的唯一来源** = DSH 那颗触发键（`trigger` ✓）——
+     * 它虽然不画了 ✗，但仍然是**真值来源**（文本/计数/在跑与否/展开与否 ✓）
+     * 与**行为代理的目标**（点击/悬停转发过去 ✓）。每一轮由 `tagLineageEntry` 刷新 ✓。
+     */
+    var lineageTriggerNode = null
+
+    /**
+     * ★★ round 159（A ✓）：造**我们自己的**入口控件 ✓（只造一次 ✓，之后每轮只改内容 ✓）。
+     *
+     * 结构：`<div data-dshm-lineage="count|switcher"><button data-dshm-lineage-btn="1">
+     *        [<span data-dshm-lineage-dot="1">]<span data-dshm-lineage-label="1">文案</span>
+     *        </button></div>`
+     *
+     * ★ 里面**没有** `svg` ✓（那根 `∨` 不存在 ✓）、**没有**前导 `/` ✓、
+     *   **没有** DSH 的 `StateDot` ✓ —— 用户说的那三件外来物从此**根本不存在** ✓
+     *   （不需要任何"隐藏它们"的规则 ✓）。
+     */
+    function lineageBuildWidget(host) {
+      if (host === null || host === undefined) return null
+      var widget = document.createElement('div')
+      widget.setAttribute('data-dshm-lineage', 'count')
+      /**
+       * ★★ round 160（A ✓）：进"跟着让位量走"的名单 ✓（见 `pushFollowers` ✓）——
+       *   拖抽屉/文件面板**跟手**那一路是给名单里的元素写**内联** transform ✓，
+       *   名单外的元素在拖的那 200ms 里就是**钉住的** ✗（用户："很明显的卡顿"✓）。
+       *   状态机那一路不靠它 ✓（靠 `[data-dshm-lineage]` 那条 CSS 规则里的
+       *   `translateX(var(--dshm-push))` ✓），两条合起来才覆盖"跟手 + 收尾"全流程 ✓。
+       */
+      widget.setAttribute('data-dshm-push-follower', '1')
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('data-dshm-lineage-btn', '1')
+      button.setAttribute('aria-expanded', 'false')
+      /**
+       * ★ 代理：真机上"点一下"实际发生两件事 ✓ ——
+       *   ① `pointerdown` 时浏览器会合成 `mouseover`/`mouseenter` ⇒ DSH 的树**靠这条打开** ✓；
+       *   ② `click` 那一下（切换器形态靠它导航 ✓）。
+       *   ⇒ 两条都照原样转给 DSH 那颗按钮 ✓（见 `lineageForwardPointer` / `lineageForwardClick` ✓）。
+       */
+      button.addEventListener('pointerdown', function () { lineageForwardPointer() })
+      button.addEventListener('click', function () { lineageForwardClick() })
+      var label = document.createElement('span')
+      label.setAttribute('data-dshm-lineage-label', '1')
+      button.appendChild(label)
+      widget.appendChild(button)
+      host.appendChild(widget)
+      return widget
+    }
+
+    /** ★★ round 159（A ✓）：我们自己的控件挂在这个宿主下 ✓（`document.body` 直挂 ✓，不进 DSH 的 React 树 ✓）。 */
+    function lineageHost() {
+      var host = document.querySelector('[data-dshm-lineage-host]')
+      if (host !== null && host !== undefined) return host
+      if (document.body === null || document.body === undefined) return null
+      host = document.createElement('div')
+      host.setAttribute('data-dshm-lineage-host', '1')
+      document.body.appendChild(host)
+      return host
+    }
+
+    /**
+     * ★★ round 159（A ✓）：**没在跑就不画点** —— 判据直接照着 DSH 的源码来 ✓。
+     *
+     * DSH 那边是条件渲染 ✓：`descendants.runningCount > 0 && <span class="activitySlot">
+     * <StateDot state="ongoing"/></span>` ⇒ "跑着"这件事只表现为触发键里**多了一个
+     * 空的、非 `svg` 的孩子** ✓（计数/名字那两颗都带文字 ✓、`∨` 那颗是 `svg` ✓）。
+     * ⇒ 认它靠**结构 + 有没有文字** ✓，不碰哈希类名 ✗。
+     */
+    function lineageTriggerRunning(trigger) {
+      var kids = trigger.children
+      for (var i = 0; i < kids.length; i++) {
+        if (String(kids[i].tagName || '').toLowerCase() === 'svg') continue
+        if (String(kids[i].textContent || '').trim() !== '') continue
+        return true
+      }
+      return false
+    }
+
+    /** 抄过来的那几项 ✓（正是用户点名要"逐项相等"的那一组 ✓）。 */
+    var LINEAGE_STYLE_KEYS = [
+      'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'color', 'letterSpacing',
+      'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'height', 'boxSizing', 'textTransform',
+    ]
+
+    /**
+     * ★★ round 159（A ✓）：把**真 tab**（「对话 | 轨迹」里**未选中**那一颗 ✓）的计算样式
+     * **逐项抄到我们自己的按钮上** ✓（内联 ✓ ⇒ 优先级最高、也最好被断言量到 ✓）。
+     *
+     * ## 为什么抄、而不是写死 ✗
+     * 用户要的是"**风格和那两个保持一致**"✓ —— 写死一份数值只是"今天像"✗；
+     * 抄真 tab 是让一致**由构造保证** ✓：DSH 换主题/改字号，我们下一轮就跟着变 ✓。
+     *
+     * ## 为什么取**未选中**那一颗 ✓
+     * 选中的那颗字色是 `label-primary`（更亮 ✓）—— 拿它当基准会把**正确**的实现判红 ✗
+     * （round 157 差点自己踩 ✓）。
+     *
+     * ## 抄了 `padding-bottom` 与 `height` 会不会"看着偏低" ✗
+     * 不会 ✓：tab 的 `padding: 0 0 9px` 正是给它自己那条下划线留的带子 ✓
+     * ⇒ 把**同一个盒模型**搬过来，**文字**就落在与 tab 文字**同一条基线**上 ✓
+     * （`placeLineageEntry` 对齐的是整条带子的中心 ✓，两边盒高相同 ⇒ 文字自然齐平 ✓）。
+     *
+     * @returns true = 抄到了 ✓；false = 量不到 tab（这一轮用 CSS 里的兜底值 ✓）。
+     */
+    function applyLineageTabStyle(header, button) {
+      if (button === null || button === undefined) return false
+      var row = lineageTabRow(header)
+      if (row === null) return false
+      var tab = null
+      for (var i = 0; i < row.buttons.length; i++) {
+        if (row.buttons[i].getAttribute('aria-selected') !== 'true') { tab = row.buttons[i]; break }
+      }
+      if (tab === null && row.buttons.length > 0) tab = row.buttons[row.buttons.length - 1]
+      if (tab === null) return false
+      var computed
+      try {
+        computed = getComputedStyle(tab)
+      } catch (error) {
+        noteLineageOnce('读不到 tab 的计算样式（这一轮用兜底样式 ✓）：' + String(error && error.message ? error.message : error))
+        return false
+      }
+      for (var k = 0; k < LINEAGE_STYLE_KEYS.length; k++) {
+        var key = LINEAGE_STYLE_KEYS[k]
+        var value = computed[key]
+        if (value === undefined || value === null || value === '') continue
+        // `paddingTop` → `padding-top` ✓（内联样式只能用带横杠的属性名 ✓）
+        var prop = key.replace(/[A-Z]/g, function (letter) { return '-' + letter.toLowerCase() })
+        if (button.style.getPropertyValue(prop) !== String(value)) button.style.setProperty(prop, String(value))
+      }
+      return true
+    }
+
+    /**
+     * ★★ round 159（A ✓）：**点击代理** —— 把点击原样交给 DSH 那颗按钮 ✓。
+     *
+     * ★ 实测（探针，真 DSH ✓）：**计数形态下 `click()` 打不开那棵树** ✗ ——
+     *   DSH 的 `onClick` 只在 `openTitle !== undefined` 时才挂 ✓
+     *   （`onClick: openTitle === void 0 ? void 0 : () => {...}` ✓），而计数形态没传 ✓
+     *   ⇒ 真机上一次"点"打开树，靠的是浏览器顺手合成的 **`mouseover`/`mouseenter`**
+     *   （根节点上挂着 `onMouseEnter: scheduleHoverOpen` ✓，150ms 后 `changeOpen(true)` ✓）。
+     *   所以**两条都要转** ✓ —— 这正是"真点一下"在真机上发生的全部事情 ✓。
+     */
+    function lineageForwardPointer() {
+      var trigger = lineageTriggerNode
+      if (trigger === null || trigger === undefined) return
+      // 树已经开着 ⇒ **不转**这一步 ✓：让 DSH 自己的 `closeOutside` 把它关掉 ✓
+      // （"再点一下收起"就成立了 ✓；照旧转发会把它 150ms 后又打开 ✗）。
+      if (String(trigger.getAttribute('aria-expanded')) === 'true') return
+      var root = trigger.parentElement
+      if (root === null || root === undefined) return
+      try {
+        root.dispatchEvent(
+          new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window, relatedTarget: null }),
+        )
+      } catch (error) {
+        noteLineageOnce('代理悬停失败：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    /** ★★ round 159（A ✓）：点击那一下照样转给 DSH 那颗按钮 ✓（切换器形态靠它导航 ✓）。 */
+    function lineageForwardClick() {
+      var trigger = lineageTriggerNode
+      if (trigger === null || trigger === undefined) return
+      try {
+        trigger.click()
+      } catch (error) {
+        noteLineageOnce('代理点击失败：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    /**
+     * ★★ round 159（A ✓）：三个定位变量写在**文档根**上 ✓ ——
+     * 我们控件（`[data-dshm-lineage]` ✓）与 DSH 那颗**隐形锚点**（`[data-dshm-lineage-dsh]` ✓）
+     * 读的是同一套 ✓ ⇒ "控件在哪，树菜单就弹在它正下方" ✓（见那条 CSS 的说明 ✓）。
+     */
+    function setLineageVars(name, value) {
+      var root = document.documentElement
+      if (root === null || root === undefined || root.style === undefined) return
+      if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value)
+    }
+
     function tagLineageEntry() {
       if (document.body === null || document.body === undefined) return
       var header = document.querySelector('[data-dshm-topheader]')
@@ -8445,29 +8865,93 @@
       for (var i = 0; i < staleChain.length; i++) {
         if (chain.indexOf(staleChain[i]) < 0 && staleChain[i].dataset !== undefined) delete staleChain[i].dataset.dshmLineageChain
       }
-      var staleEntry = document.querySelectorAll('[data-dshm-lineage]')
+      var staleEntry = document.querySelectorAll('[data-dshm-lineage-dsh]')
       for (var j = 0; j < staleEntry.length; j++) {
-        if (staleEntry[j] !== entry && staleEntry[j].dataset !== undefined) delete staleEntry[j].dataset.dshmLineage
+        if (staleEntry[j] !== entry && staleEntry[j].dataset !== undefined) delete staleEntry[j].dataset.dshmLineageDsh
       }
-      if (entry === null || entry === undefined) return
+      /**
+       * ★★ round 159（A ✓）：**我们自己的控件**（一个 ✓，多出来的当场摘掉 ✓）。
+       * 它挂在**我们自己的宿主**下 ✓ ⇒ DSH 重渲染**不会**把它换掉 ✓
+       * （round 155/157 那套"每轮重新认一遍入口节点"的清理因此只剩幂等作用 ✓）。
+       */
+      var host = lineageHost()
+      var widgets = host === null ? [] : host.querySelectorAll('[data-dshm-lineage]')
+      var widget = widgets.length > 0 ? widgets[0] : null
+      for (var d = 1; d < widgets.length; d++) {
+        if (widgets[d].parentElement !== null) widgets[d].parentElement.removeChild(widgets[d])
+      }
+      /**
+       * ★★ round 159（A ✓）：**没有子代理 ⇒ 右端一个像素都不多** ✓ ——
+       *   把控件**整个摘掉** ✓（不是"藏起来" ✗：藏起来的盒子仍在布局里 ✓，
+       *   而且"没有入口"与"入口被藏了"就再也分不开了 ✗）。
+       *   触发键与锚点都认不到时（DSH 那个槽什么都不渲染 ✓）走到这里 ✓。
+       */
+      if (entry === null || entry === undefined || trigger === null || trigger === undefined) {
+        lineageTriggerNode = null
+        if (widget !== null && widget.parentElement !== null) widget.parentElement.removeChild(widget)
+        return
+      }
 
       for (var k = 0; k < chain.length; k++) {
         if (chain[k].dataset !== undefined && chain[k].dataset.dshmLineageChain !== '1') chain[k].dataset.dshmLineageChain = '1'
       }
+      /** ★ 锚点 = DSH 那颗触发键的根 ✓（**不画、不可点** ✓，只负责"树菜单弹在哪儿"✓）。 */
+      if (entry.dataset !== undefined && entry.dataset.dshmLineageDsh !== '1') entry.dataset.dshmLineageDsh = '1'
+      lineageTriggerNode = trigger
+      if (widget === null || widget === undefined) widget = lineageBuildWidget(host)
+      if (widget === null || widget === undefined) return
       /**
        * 形态：**切换器**（当前就在子代理会话里 ✓）还是**计数胶囊** ✓。
        * 判据用触发键/根的类名后缀里的 `switcher` ✓ —— DSH 那边叫
        * `*_switcherTrigger` / `*_switcherRoot` ✓（哈希前缀会变，这半截不会 ✓）。
        */
       var variant = /switcher/i.test(String(entry.className) + ' ' + String(trigger.className)) ? 'switcher' : 'count'
-      if (entry.dataset.dshmLineage !== variant) entry.dataset.dshmLineage = variant
+      if (widget.dataset !== undefined && widget.dataset.dshmLineage !== variant) widget.dataset.dshmLineage = variant
+      var button = widget.querySelector('[data-dshm-lineage-btn]')
+      var labelNode = widget.querySelector('[data-dshm-lineage-label]')
+      if (button === null || button === undefined || labelNode === null || labelNode === undefined) return
+      /**
+       * ★ 文案**镜像** DSH 那颗按钮的**可见文本** ✓（普通形态 =「N 个子代理」✓、
+       *   子代理会话里 = 当前子代理的名字 ✓）—— **一个字都不自己编** ✓
+       *   （用户明确说过：文字内容不用改 ✓）。兜底用它自己的 `aria-label` ✓。
+       */
+      var mirrored = String(trigger.textContent || '').replace(/\s+/g, ' ').trim()
+      if (mirrored === '') mirrored = String(trigger.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()
+      if (labelNode.textContent !== mirrored) labelNode.textContent = mirrored
+      if (button.getAttribute('aria-label') !== mirrored) button.setAttribute('aria-label', mirrored)
+      var expandedNow = String(trigger.getAttribute('aria-expanded')) === 'true'
+      if (button.getAttribute('aria-expanded') !== String(expandedNow)) button.setAttribute('aria-expanded', String(expandedNow))
+      /**
+       * ★ 状态点：**常驻** ✓，颜色分两态（round 160，用户 B ✓）——
+       *   原文："目前有一个子代理在跑，但左边的那个标是灰色的，我认为这样设计比较好，
+       *         在跑的时候蓝色，跑完了绿色"✓。
+       *   round 159 的写法是"只在跑的时候才画" ✗ ⇒ 用户看到的那颗一直是灰的 ✓
+       *   （`currentColor` + 0.7 ⇒ 与文字同色的灰 ✓），"跑完了"反而**没有点** ✗。
+       *   判据仍是 `lineageTriggerRunning` ✓（= DSH 那颗按钮里多了"空的非 svg 孩子"✓）。
+       *   （整颗入口在没有子代理时仍然**整个摘掉** ✓ ⇒ "没有子代理 ⇒ 右端一个像素都不多"不变 ✓。）
+       */
+      var running = lineageTriggerRunning(trigger)
+      var stateName = running === true ? 'running' : 'idle'
+      if (widget.dataset !== undefined && widget.dataset.dshmLineageState !== stateName) {
+        widget.dataset.dshmLineageState = stateName
+      }
+      var dotNode = widget.querySelector('[data-dshm-lineage-dot]')
+      if (dotNode === null || dotNode === undefined) {
+        dotNode = document.createElement('span')
+        dotNode.setAttribute('data-dshm-lineage-dot', '1')
+        // 纯装饰 ✓：信息已经在按钮的 `aria-label`（= DSH 那串文字 ✓）里了 ✓
+        dotNode.setAttribute('aria-hidden', 'true')
+        button.insertBefore(dotNode, labelNode)
+      }
+      /** ★ 外观：**每轮从真 tab 现抄** ✓（DSH 换主题/换字号就自动跟着走 ✓）。 */
+      applyLineageTabStyle(header, button)
       /**
        * ★★ round 157（A ✓）：**先按"不许露出来"待命** ✓ —— 紧接着的 `reflowLineageEntry()`
        * 会在**同一帧里**量好、摆好、再把标记摘掉 ✓ ⇒ 浏览器根本没有机会画出"半卡"的那一帧 ✓
        * （同一帧内先加属性再删属性，不会产生中间绘制 ✓）。
        * 摆不好就一直留着这个标记 ✓（用户看到的是"没有入口"✓，而不是"压在轨迹上"✗✗）。
        */
-      if (entry.dataset.dshmLineageBlocked !== '1') entry.dataset.dshmLineageBlocked = '1'
+      if (widget.dataset.dshmLineageBlocked !== '1') widget.dataset.dshmLineageBlocked = '1'
       if (reflowLineageEntry() !== true) {
         /**
          * ★ 怀疑①的正面修法 ✓：**入口一出现就算一次** ✓ —— 上面那一次同步算可能太早
@@ -8535,7 +9019,7 @@
         noteLineageOnce('标签行右端没有放得下入口的空地（' + maxWidth + 'px）⇒ 不显示')
         return false
       }
-      entry.style.setProperty('--dshm-lineage-max', maxWidth + 'px')
+      setLineageVars('--dshm-lineage-max', maxWidth + 'px')
       /**
        * 纵向的目标是「对话 | 轨迹」**那两个字标签**的中心 ✓（不是整行盒子的中心 ✗ ——
        * tab 自带 9px 下内边距是给下划线留的 ✓，按盒子对齐会看着偏低 ✓）。
@@ -8543,8 +9027,11 @@
       var targetCenterY = (row.tabTop + row.tabBottom) / 2
       /**
        * 初值：老办法（`offsetParent` 的 padding box ✓）—— **只当起点** ✓。
-       * 它即便整个错掉也没关系 ✓：下面那 3 轮闭环会把它拉回来 ✓
-       * （本轮③④两条怀疑就是这么被"绕过"的 ✓，不需要先证明它是哪一条 ✓）。
+       * ★★ round 159（A ✓）：控件现在是 `position: fixed` ✓ ⇒ `offsetParent` 恒为 `null` ✓、
+       *   于是初值退化成"右缘 = 视口右缘 ✓、上边 = 标签行中心 − 半个盒高 ✓"。
+       *   这**不影响正确性** ✗：下面那 3 轮闭环按**屏幕上量到的偏差**修正 ✓，
+       *   与包含块是谁完全无关 ✓（对 `fixed` 元素，`right` 变大 = 往左移 ✓、符号照样对 ✓）。
+       *   而且"不被祖先裁剪"从此是**结构性成立**的 ✓（`fixed` 的包含块就是视口 ✓）。
        */
       var anchor = entry.offsetParent
       var cbTop = 0
@@ -8559,8 +9046,8 @@
       var top = targetCenterY - box0.height / 2 - cbTop
       var latest = box0
       for (var attempt = 0; attempt < 3; attempt++) {
-        entry.style.setProperty('--dshm-lineage-right', Math.round(right) + 'px')
-        entry.style.setProperty('--dshm-lineage-top', Math.round(top) + 'px')
+        setLineageVars('--dshm-lineage-right', Math.round(right) + 'px')
+        setLineageVars('--dshm-lineage-top', Math.round(top) + 'px')
         // 读 rect = 强制布局 ✓ ⇒ 拿到的是**刚写下**的结果 ✓（所以不需要等帧 ✓）
         latest = entry.getBoundingClientRect()
         if (!(latest.width > 0) || !(latest.height > 0)) {
@@ -8617,7 +9104,7 @@
         if (freshRow !== null) {
           var freshMax = Math.round(freshRow.rect.right - freshRow.rightMost - 10)
           if (freshMax > 24) {
-            entry.style.setProperty('--dshm-lineage-max', freshMax + 'px')
+            setLineageVars('--dshm-lineage-max', freshMax + 'px')
             latest = entry.getBoundingClientRect()
             overlap = lineageTabOverlap(latest, freshRow)
           }
@@ -8765,7 +9252,11 @@
     function reflowLineageEntry() {
       var entry = document.querySelector('[data-dshm-lineage]')
       if (entry === null || entry === undefined) return false
-      var header = entry.closest('[data-dshm-topheader]')
+      /**
+       * ★★ round 159（A ✓）：控件挂在 `document.body` 下 ✓ ⇒ 不能再靠 `closest` 往上找 ✗ ——
+       * 顶栏标记（`tagTopHeader` 打的）**全页唯一** ✓，直接查它 ✓。
+       */
+      var header = document.querySelector('[data-dshm-topheader]')
       if (header === null || header === undefined) return false
       var placed = false
       try {
@@ -8981,8 +9472,17 @@
         reportBackAvailable()
         return
       }
-      if (open) document.body.dataset.dshMobileDrawer = 'open'
-      else delete document.body.dataset.dshMobileDrawer
+      /**
+       * ★★ round 160（A ✓）：状态那一下**包在 FLIP 里** ✓（见 `flipDrawerMotion` ✓）——
+       *   汉堡键 / 蒙层 / 点会话行自动收起 / 返回键**全走这里** ✓ ⇒ 抽屉自己那段滑行
+       *   不再走 `left` 过渡（每帧重排整棵会话列表 + 重画阴影 ✗），改成合成层移动 ✓。
+       *   紧跟着的 `syncDrawer()` → `applyPush()` 在**同一次任务**里改 `--dshm-push` ✓
+       *   ⇒ 抽屉与主页面同帧起步、共用同一条 `--dshm-slide` ✓（用户要的"一起动"✓）。
+       */
+      flipDrawerMotion(function () {
+        if (open) document.body.dataset.dshMobileDrawer = 'open'
+        else delete document.body.dataset.dshMobileDrawer
+      })
       syncDrawer()
       /**
        * ★ 左抽屉也是"一层页面" ✓ —— 开/关都要上报 ✓（round 121，见 dshmBack ✓）。
