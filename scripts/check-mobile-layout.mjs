@@ -13570,6 +13570,14 @@ try {
       `行=${JSON.stringify(sidebarRow)}｜hover=${JSON.stringify(forcedHover === null ? null : forcedHover.onHover)}｜hover+active=${JSON.stringify(forcedHover === null ? null : forcedHover.onPress)}`,
     )
 
+    /**
+     * ★ round 172：先记下**注入假预览层之前**的让位量 ✓ —— round 170 起"预览开着时让位量**不许变**" ✓
+     *   （用户实拍："预览返回……主界面仍然是从右往左到目标位置"✗ 的根就是这里 ✗：
+     *    之前我们把让位量强制清零 ✓，预览一关它弹回"面板开着"的 -264px ⇒ 主页面滑一下 ✓）。
+     */
+    const pushBeforePreview = asJson(
+      await evaluate(`JSON.stringify({ push: getComputedStyle(document.documentElement).getPropertyValue('--dshm-push').trim() })`),
+    )
     // ── ③ 165：预览开着时，子框架那一整套"让开"都得生效（含子代理入口 ✓）──────
     await evaluate(`(function(){
       try {
@@ -13608,9 +13616,8 @@ try {
         previewChrome.lineageHost !== null &&
         previewChrome.lineageHost.opacity === '0' &&
         previewChrome.lineageHost.pointerEvents === 'none' &&
-        previewChrome.topVisibility === 'hidden' &&
-        previewChrome.push === '0px',
-      '★★ 第 165 条（round 166 补，round 169 修订 ✓）：**预览开着时，我们的浮动件让开** ✓ —— 子代理入口 `opacity:0` + `pointer-events:none` ✓（用户报的"子代理在文件预览上方"就是它 ✗）、顶栏 `visibility:hidden` ✓、让位量归零 ✓（探针是一个**盖住视口的同形层** ✓，走的是线上那条 200ms 探测链 ✓，不是直接冒充标记 ✗）。★ 面板那一条**不在本断言里** ✓：round 169 起面板**不再被藏**（改成被预览压在底下 ✓），层序由 158-B-① 用命中测试证明 ✓',
+        previewChrome.push === pushBeforePreview.push,
+      '★★ 第 165 条（round 166 补，round 169/172 修订 ✓）：**预览开着时，子代理入口让开、而且让位量一个像素都不动** ✓ —— 入口 `opacity:0` + `pointer-events:none` ✓（用户报的"子代理在文件预览上方"就是它 ✗）；让位量必须与**注入之前逐字相同** ✓（`--dshm-push` 不许被清零 ✗，否则预览一关主页面会滑一下 ✓ —— 用户实拍过这条 ✗）。探针是一个**盖住视口的同形层** ✓，走线上那条 200ms 探测链 ✓。★ 面板与顶栏的**层序**（谁压在谁上面）不在本断言里 ✓：顶栏那条 round 172 已按用户要求撤回（预览那一列抬到 190 ⇒ 本来就盖住它 ✓），由 158-B-① 用命中测试证明 ✓',
       `假预览层立起后：${JSON.stringify(previewChrome)}`,
     )
     // 收尾：撤掉假预览层 ✓，并等标记自己落回去 ✓（别把"预览开着"留给后面的断言 ✗）
