@@ -18,6 +18,7 @@
     "check:relay-isolation": "node scripts/check-relay-isolation.mjs",
     "check:relay-backhaul": "node scripts/check-relay-backhaul.mjs",
     "check:ipv6": "node scripts/check-ipv6-path.mjs",
+    "check:lan-listener": "node scripts/check-lan-listener.mjs",
     "check:device": "node scripts/check-device-channel.mjs",
     "check:relay": "node scripts/check-relay.mjs"
   },
