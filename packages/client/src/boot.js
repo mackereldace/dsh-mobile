@@ -6890,7 +6890,18 @@
           如果和预览层在同一个流里，它已经把预览层推下去了，再补内边距就是空档 ✗）。
          没写这个变量时（JS 还没跑到 / 出错），`var()` 的兜底值仍然是完整的 max(...) ✓ ——
          即"先按 48px 顶上，JS 跑完再精确修正"✓，任何一帧都不会让它压在状态栏里 ✓。 */
-      'div[class*="_preview"]:not([data-queue-dock] *) { padding-top: var(--dshm-preview-pad, max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      /**
+       * ★★ round 175（用户："我们之前是怎么处理这个部分的"✓ —— 查 §4.2 后**照当年那条对齐** ✓）：
+       *   当年（round 115/116 ✓、**2026-09-21 真机确认"顶栏没问题了"** ✓）这条写的是
+       *   `[class*="_preview"] { padding-top: var(--dshm-safe-top) }` ✓。
+       *   round 162 为了"别误伤排队消息那一行"把它收窄成 `div[...]` ✗ —— **`div` 这个限制是多余的** ✗：
+       *   真正需要的那半已经由 `:not([data-queue-dock] *)` 单独承担了 ✓
+       *   （排队行那颗是 `span._7yHdaG_preview` 且在 `[data-queue-dock]` 里 ✓）。
+       *   ⇒ **恢复成当年的宽度** ✓、只保留"排除队列面板"这一条 ✓ ——
+       *   万一真预览层不是 `div`（我们只在一个文件的预览上量过 ✓），收窄就会让它**完全没有内边距** ✗，
+       *   而症状恰好就是"预览顶栏钻到状态栏里" ✓。
+       */
+      '[class*="_preview"]:not([data-queue-dock] *) { padding-top: var(--dshm-preview-pad, max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
       /**
        * ★★ round 162（B ✓）：上面那条**选择器又写宽了一次** ✗✗ —— 用户真机截图：
        *   "我在你工作的时候发送消息，dsh 会给我安排一个排队消息，目前我们的排队消息
