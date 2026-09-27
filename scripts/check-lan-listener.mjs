@@ -47,6 +47,7 @@
  * 退出码：0 全绿；1 有 ✗；2 环境性问题（探测不到局域网 IP / 测试端口已被占）
  */
 import { spawn, execFileSync } from 'node:child_process'
+import { createHash, X509Certificate } from 'node:crypto'
 import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { Agent, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -295,6 +296,35 @@ function getViaTls(path) {
   })
 }
 
+/**
+ * 从**局域网 IP** 打 TLS 监听 —— 这就是手机的走法 ✓（`https://${LAN}:${TLS_PORT}/…`）。
+ * 自签证书 ⇒ `rejectUnauthorized: false` ✓（与手机 TOFU 那条"不验证证书的连接"同义 ✓）。
+ * 返回里带上 `headers` ✓：D4 要断言 `content-type` ✓。
+ */
+function getViaTlsFromLan(path) {
+  return new Promise((resolve) => {
+    const request = httpsRequest(
+      { host: LAN, port: TLS_PORT, path, rejectUnauthorized: false },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () =>
+          resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: response.headers }),
+        )
+      },
+    )
+    request.on('error', (error) => resolve({ status: 0, body: String(error.message), headers: {} }))
+    request.end()
+  })
+}
+
+/** 自检 `tls` 段里那个指纹（= **进配对票据的那一个** ✓，见 `index.ts` 的 selfcheck/manifest ✓）。 */
+function selfcheckTlsFingerprint(selfcheck) {
+  if (selfcheck === null || typeof selfcheck !== 'object') return undefined
+  const tls = selfcheck.tls
+  return tls !== null && typeof tls === 'object' ? tls.caFingerprint : undefined
+}
+
 /** 轮询自检，直到 `predicate(listener)` 成立或超时。返回最后一次读到的 listener 段。 */
 async function waitForListener(predicate, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs
@@ -454,6 +484,61 @@ try {
     )
     const viaIpv6 = await getViaIpv6('/mobile')
     ok(viaIpv6.status === 200, `D2 从 [::1]:${PLAIN_PORT} GET /mobile ⇒ 200`, `HTTP ${viaIpv6.status}`)
+
+    /**
+     * ── D2. ★★ TOFU 的**第一步**：手机在**还不信任**这台电脑时，必须能取到那张 CA ─────
+     *
+     * 为什么这一组非有不可 ✗：C2 把"首次连接"的判据改成 TOFU ✓ ——
+     * 而 TOFU 的**前提**是手机能先 `GET <源>/mobile/trust.crt` 把那台电脑的 CA 取回来 ✓
+     * （见 `MainActivity.tofuTrustOnce` ✓：它跑的是一条**不验证证书**的连接 ✓）。
+     * 这条路由在宿主里只受**第一道栅栏**管（Host 必须是回环或受信 ✓，见 `index.ts:2493` ✓）——
+     * 而"本机局域网 IP 自动受信"是 B1 那条**自推导**给的 ✓（`lan-trust.ts` ✓）。
+     *
+     * ⇒ 一旦自推导坏了 / 这条路由被挪进 `/mobile/admin/*`（那还有第二道 `isAdminSourceTrusted` ✗），
+     *   症状是**手机永远连不上任何一台电脑**✗，而电脑上一切正常 ✓ ——
+     *   与 `e2e-pairing` 那次的"看起来像功能坏了"是同一类陷阱 ✓。
+     *
+     * ★ D6 是**手机那一侧比对的可执行等价物** ✓：宿主广告的指纹（自检 `tls.caFingerprint` ✓，
+     *   = 进票据的那一个 ✓）经**壳的归一化规则**（去非 hex + 大写 ✓）之后，
+     *   必须 == 对**真正发出去的那份 CA** 求 SHA-256 的结果 ✓。
+     *
+     * ★ 编号接着 D 走（D3–D6）而不是另起一节 ✓：它跑在**同一个临时实例**上 ✓
+     *   （就在 `killSpawned()` 之前 ✓），所以打印顺序是 D→D2→E ✓，不会出现"F 在 E 前面"那种像 bug 的读数 ✓。
+     */
+    console.log(`\n【D2. ★★ TOFU 第一步：局域网 ${LAN}:${TLS_PORT} 取 CA（手机在受信之前就得能取到）】`)
+    const trust = await getViaTlsFromLan('/mobile/trust.crt')
+    ok(
+      trust.status === 200,
+      `D3 从局域网 https://${LAN}:${TLS_PORT}/mobile/trust.crt ⇒ 200（TOFU 的前提：**还没被信任时**就取得到 CA）`,
+      `HTTP ${trust.status}${trust.status === 403 ? ' ← 被栅栏挡了：手机会永远连不上任何电脑' : ''}`,
+    )
+    const trustType = String(trust.headers?.['content-type'] ?? '')
+    ok(
+      trustType.includes('application/x-x509-ca-cert'),
+      'D4 content-type 是 application/x-x509-ca-cert（安卓见到这个类型才会引导安装 ✓）',
+      trustType || '(无 content-type)',
+    )
+    const caOnDisk = readFileSync(join(home, 'storages', 'dsh-mobile', 'tls', 'lan-ca.pem'), 'utf8')
+    ok(
+      trust.body === caOnDisk,
+      'D5 取回来的字节 == 这台实例磁盘上那张 lan-ca.pem（逐字节）',
+      trust.body === caOnDisk ? `一致（${trust.body.length} 字符）` : `不一致（取回 ${trust.body.length} / 磁盘 ${caOnDisk.length}）`,
+    )
+    {
+      const advertised = String(selfcheckTlsFingerprint(await readSelfcheck()) ?? '')
+      const shellStyle = advertised.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() // 壳的归一化规则
+      let served = ''
+      try {
+        served = createHash('sha256').update(new X509Certificate(trust.body).raw).digest('hex').toUpperCase()
+      } catch {
+        served = '(发回来的不是一张证书)'
+      }
+      ok(
+        shellStyle.length === 64 && shellStyle === served,
+        '★★ D6 TOFU 比对能成立：宿主广告的指纹经壳的归一化规则后 == 对**真正发出去的**那份 CA 求 SHA-256（D3–D5 都绿而这条红 ⇒ 手机一定会判"指纹不一致"并拒绝连接 ✗）',
+        `广告 ${advertised.length} 字符 ⇒ 归一化后 ${shellStyle.length}；与发出的 CA 的 SHA-256 ${shellStyle === served ? '一致 ✓' : '**不一致** ✗'}`,
+      )
+    }
   }
   killSpawned()
   await sleep(500)
