@@ -50,6 +50,7 @@ import {
   type NetworkInterfacesReader,
 } from './lan-trust.ts'
 import { probeDshFrontend, type DshFrontendProbe } from './dsh-probe.ts'
+import { unavailableLanListenerStatus, type LanListenerStatus } from './lan-listener.ts'
 import type { TlsManager, TlsStatus } from './tls-cert.ts'
 import { PAIRING_PAGE_HTML } from './pairing-page.ts'
 import { TunnelSession } from './tunnel.ts'
@@ -91,6 +92,13 @@ const HOST_FEATURES = [
   'tls.selfSign', // 首启缺证书就自签（10 年 CA；叶子按需重签）
   'admin.devicesRemove', // 正式删除设备记录（内存表 + devices.json 同时更新，不用重启）
   'admin.selfcheck', // 一条请求自检：证书 / 端口 / 信任推导 / 设备数 / DSH 前端探针
+  /**
+   * ★ C1（把 TLS/明文监听搬进插件，2026-09-27）：插件自己起局域网监听，
+   * 不再依赖外置第三进程 `scripts/lan-proxy.mjs`。**默认关闭**（`listener.enabled`），
+   * 现状见自检的 `listener` 段。`scripts/check-production.mjs` 的 `EXPECTED_FEATURES`
+   * **必须同步**（两处一起改是这条约定的全部意义）。
+   */
+  'listener.plugin',
 ] as const
 
 /** 插件配置。 */
@@ -261,6 +269,16 @@ export interface MobileSelfcheck {
   }
   readonly devices: { readonly count: number; readonly connected: number; readonly revoked: number }
   readonly dshFrontend: DshFrontendProbe
+  /**
+   * 局域网监听现状（C1）。
+   *
+   * 为什么值得单独一段：手机打不开时，问题可能落在**三层**里的任何一层——
+   * 插件没起监听（`available:false` / `enabled:false`）、起了但端口被占
+   * （`bindings[].code === 'EADDRINUSE'`，还带"可能上次的 lan-proxy 还活着"的提示）、
+   * 或者监听正常但 `x-forwarded-for` 注入没生效（⇒ 手机被当成"人在电脑前"，
+   * 这是**权限提升**且毫无症状，所以把它作为一项显式报出来）。
+   */
+  readonly listener: LanListenerStatus
   /** 人话版的"缺什么"（自检输出直接可读；空数组 = 没发现问题）。 */
   readonly warnings: readonly string[]
 }
@@ -453,6 +471,13 @@ export function createMobileHost(options: {
    * 退回"读不到就说清楚"的 404——**绝不让缺证书变成一句静默**。
    */
   readonly tls?: TlsManager
+  /**
+   * 局域网监听器（由 `cordis.ts` 按 `listener.enabled` 建好注入；C1）。
+   *
+   * 省略时自检的 `listener` 段是"本部署未注入"（`available:false`），
+   * 且**不算失败**——老部署的手机入口由外置 `lan-proxy.mjs` 提供，那是最常见形态。
+   */
+  readonly listener?: { status(): LanListenerStatus }
 }): MobileHost {
   const config: MobileHostConfig = { ...DEFAULT_CONFIG, ...options.config }
   const store = options.store
@@ -1321,6 +1346,21 @@ export function createMobileHost(options: {
       const code = String(randomInt(100000, 1_000_000))
       const ticketKey = randomTicket()
       const expiresAt = new Date(Date.now() + config.pairingTtlMs).toISOString()
+      /**
+       * ★ C2：票据顺带带上宿主 TLS 证书（本机 CA）的指纹 —— **可选字段**
+       * （`PairingTicket.caFingerprint?`，理由与"为什么必须可选"写在 `wire.ts` 那一段）。
+       *
+       * 它只服务一件事：原生外壳**第一次**连这台电脑时要做 **TOFU** ——
+       * 二维码/配对链接是**带外**通道（用户在电脑屏幕上看到、手机扫到），
+       * 所以壳可以拿"从这台电脑取回的 CA 指纹"与"票据里这个值"比对，
+       * 一致才落盘并放行，**不需要人眼读十六进制**。
+       *
+       * ⚠️ 拿不到就**不写这个键**（而不是写 `undefined`）：没注入证书管理器
+       * （`options.tls === undefined`）或证书坏了时，票据形状与加字段**之前逐字段相同**
+       * ⇒ 旧手机 / 旧宿主那条路一个字都不变。壳那边拿不到它也**不会**"盲信第一次"，
+       * 而是退回"把指纹显示给用户、要用户明确确认"（见 `16` §4.2 第 3 条）。
+       */
+      const caFingerprint = options.tls?.status().caFingerprint
       const ticket: PairingTicket = {
         v: 1,
         hostId: options.identity.hostId,
@@ -1330,6 +1370,7 @@ export function createMobileHost(options: {
         endpoints: [...options.endpoints()],
         protocolVersion: PROTOCOL_VERSION,
         expiresAt,
+        ...(caFingerprint === undefined ? {} : { caFingerprint }),
       }
       const entry: PendingPairing = { ticket, state: 'open' }
       pendingByCode.set(code, entry)
@@ -1512,6 +1553,7 @@ export function createMobileHost(options: {
       const devices = store.list()
       const probe = probeDshFrontend(options.distIndex?.())
       const relay = relayAuthorities()
+      const listener = options.listener?.status() ?? unavailableLanListenerStatus()
       const warnings: string[] = []
 
       if (tlsStatus === undefined) {
@@ -1535,9 +1577,29 @@ export function createMobileHost(options: {
         warnings.push('DSH 前端无法探测（拿不到产物）⇒ 兼容性**未知**')
       }
 
+      /**
+       * ── 局域网监听（C1）────────────────────────────────────────────────
+       * 三种形态要分得开：**没启用**（默认，老部署）／**启用且就绪**／**启用但没起来**。
+       * 后者的原因（端口被占、证书缺失）由 `listener.warnings` 原样带出来，
+       * 自检里直接就有人话结论，不必再去翻终端日志。
+       */
+      for (const warning of listener.warnings) warnings.push(`局域网监听：${warning}`)
+      if (listener.available && listener.enabled && !listener.ok) {
+        warnings.push('局域网监听**未就绪**：手机入口不可用（DSH 本身不受影响；原因见上面那条）')
+      }
+      if (!listener.forwardedForInjection) {
+        /**
+         * ★ 这条几乎不可能出现（注入恒为开启），写在这里是为了"被关掉"时**必然**报警：
+         * 关掉注入 ⇒ 局域网手机被判成"人在电脑前" ⇒ 配对码生成/配对确认/设备管理/端侧控制
+         * （`LOCAL_ONLY` 全家）在局域网可达，而且**没有任何症状**。
+         */
+        warnings.push('★ x-forwarded-for 注入被关闭：局域网手机将被判成"人在电脑前"（LOCAL_ONLY 端点会被提权可达）')
+      }
+
       return {
-        // 总判据：证书可用，且前端探针没有"全不命中"（unknown 不算失败——不编，也不误报）
-        ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing',
+        // 总判据：证书可用、前端探针没有"全不命中"、且已启用的局域网监听确实在听
+        // （unknown 不算失败——不编，也不误报；监听未启用更不算失败，那是老部署的常态）
+        ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing' && listener.ok,
         checkedAt: new Date().toISOString(),
         host: {
           hostId: options.identity.hostId,
@@ -1583,6 +1645,7 @@ export function createMobileHost(options: {
           revoked: devices.filter((device) => device.authorization === 'revoked').length,
         },
         dshFrontend: probe,
+        listener,
         warnings,
       }
     },

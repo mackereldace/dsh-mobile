@@ -28,6 +28,7 @@ import { generateP256KeyPair } from '@dsh-mobile/protocol'
 import { DeviceStore } from './devices.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
+import { createLanListener, type LanListener } from './lan-listener.ts'
 import { createTlsManager } from './tls-cert.ts'
 import {
   createMobileHost,
@@ -91,6 +92,21 @@ export interface Config extends Partial<MobileHostConfig> {
    * 配对与隧道都无法工作。安装脚本会用 `--phone-base-url` 写入。
    */
   phoneBaseUrl?: string
+  /**
+   * 插件自带的局域网监听（C1：把 `scripts/lan-proxy.mjs` 搬进插件）。
+   *
+   * ★ **默认关闭**（`enabled` 缺省 = false）⇒ 老部署行为**一字不变**：手机入口仍由
+   * 外置的 `scripts/lan-proxy.mjs` 提供。只有显式写 `enabled: true` 才会在插件进程里
+   * 起明文（默认 `0.0.0.0:3081`）与 TLS（默认 `0.0.0.0:3443`）监听。
+   *
+   * 监听失败**只警告不抛错**（手机入口不可用 ≠ DSH 挂掉），现状见
+   * `/mobile/admin/selfcheck` 的 `listener` 段（含端口冲突原因与 `x-forwarded-for` 注入状态）。
+   */
+  listener?: {
+    enabled?: boolean
+    plain?: string
+    tls?: string
+  }
 }
 
 /** 解析 DSH home。 */
@@ -230,6 +246,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   const dataDirectory = join(dshHome, 'storages', 'dsh-mobile')
 
   /**
+   * 局域网监听器（C1）：**默认关闭**，只有 `config.listener.enabled === true` 才起监听。
+   *
+   * 用 `let` 而不是 `const`：证书管理器的 `onResult` 回调需要引用它，而回调是在
+   * `tls.ensure()` 里同步触发的——那时监听器还没建（首次 ensure 也**不需要**热更新，
+   * 因为 `start()` 会直接读盘上的最新文件）。之后任何一次 `ensure()` 重签了叶子，
+   * 回调就会通过 `refreshTls()` 按 mtime 变化把新证书推进已建立的 TLS 监听。
+   */
+  let listener: LanListener | undefined
+
+  /**
    * ── 自签证书：**首启缺就生成、有就复用**（B1）───────────────────────────
    *
    * 为什么放在加载期（而不是等第一次 HTTPS 请求）：证书"有没有、对不对"是
@@ -262,6 +288,16 @@ export function apply(ctx: Context, config: Config = {}): void {
             `${status.error ?? '未知原因'}（目录：${status.directory}）`,
         )
       }
+      /**
+       * ★ 证书热更新（C1-6）：重签叶子后**不必重启 DSH**。
+       *
+       * 只在文件 mtime/size 真的变了时 `setSecureContext(...)`（详见 `lan-listener.ts`）；
+       * 失败只记一行警告——证书热更新失败不该把插件加载带下去。
+       */
+      const reload = listener?.refreshTls()
+      if (reload?.error !== undefined) {
+        console.warn(`[dsh-mobile] TLS 证书热更新失败（监听仍用旧证书）：${reload.error}`)
+      }
     },
   })
   tls.ensure()
@@ -285,6 +321,24 @@ export function apply(ctx: Context, config: Config = {}): void {
   )
 
   const gateway = ctx.typertGateway as unknown as RemoteGateway
+
+  /**
+   * ── 局域网监听（C1）：按配置起明文 / TLS 监听 ──────────────────────────
+   *
+   * ★ **默认关闭**：`config.listener?.enabled !== true` 时一行都不做 ⇒ 老部署行为不变。
+   * ★ 转发目标是 DSH **自己的 loopback 端口**（`127.0.0.1:${port}`）：这是"面向全量管线"
+   *   的关键——`/assets/*`、`/plugins/*`、`/api/*` 全都靠它透传给 DSH（见 lan-listener.ts 头注释）。
+   * ★ 监听失败只警告不抛错：手机入口不可用 ≠ DSH 挂掉。
+   */
+  listener = createLanListener({
+    enabled: config.listener?.enabled === true,
+    ...(config.listener?.plain === undefined ? {} : { plain: config.listener.plain }),
+    ...(config.listener?.tls === undefined ? {} : { tls: config.listener.tls }),
+    target: { host: '127.0.0.1', port },
+    tlsPaths: tls.paths,
+    logger: { info: (message) => console.log(message), warn: (message) => console.warn(message) },
+  })
+  listener.start()
 
   // 复用 DSH 自己的 trustedHosts 配置：插件无法读取 Connection 的私有配置，
   // 因此让部署方在插件配置里显式声明（install 脚本会打印出该加什么）。
@@ -323,6 +377,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     renderIndex: (html) => ctx.webServer.renderIndex(html),
     // 自签证书管理器：manifest / 自检 / `/mobile/trust.crt` 都从它取（见上面的长注释）
     tls,
+    // 局域网监听器（C1）：自检的 `listener` 段读它（默认关闭时是"未启用"，不是故障）
+    listener,
     ...(config.capabilityCeiling === undefined
       ? {}
       : {
@@ -635,6 +691,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     disposeUpgrade()
     disposeInject?.()
     disposeShell()
+    /**
+     * ★ 监听器与插件同生命周期（C1-2 的落点）：DSH 停 ⇒ 手机入口停，
+     * 不会再像外置 `lan-proxy.mjs` 那样留下占着端口的孤儿进程。
+     * 挂进的是**现有那个** `ctx.effect`（不是新加一个）——多一个 effect 就多一处漏清理。
+     */
+    listener?.dispose()
   })
 
   ctx.logger?.info?.(

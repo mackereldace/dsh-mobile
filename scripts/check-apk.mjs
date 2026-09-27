@@ -12,20 +12,28 @@
  *   1. **能装**：包名、版本、`targetSdk`、launcher activity、**权限白名单**
  *      （`INTERNET` + `POST_NOTIFICATIONS` + **`CAMERA`** ✓ —— 第三条是 round 143 加的，
  *      见下面 `allowedPermissions` 的说明 ✓）；
- *   2. **该有的东西在**：`classes.dex` ✓、两张图标 ✓、`assets/dshm_ca.pem` ✓、
- *      **扫码界面的文案** ✓；
+ *   2. **该有的东西在**：`classes.dex` ✓、两张图标 ✓、**扫码界面的文案** ✓、
+ *      ★ **没有** `assets/dshm_ca.pem` ✓（C2 起 —— 见下面那条断言的说明 ✓）；
  *   2b. **壳的代码真的在里面** ✓：三个尺寸变量 / insets 事件 / 显式 edge-to-edge /
  *      通知桥 / 文件选择器 / 外链 / **系统返回（OnBackInvokedCallback ✓ round 121）** /
  *      **底部手势区读数（mandatorySystemGestures ✓ round 124）** /
  *      **端点槽与换槽计时器 + 身份哑存储（round 129 ✓）** /
  *      **扫码配对（深链 + 壳内扫码 + 相机 + ZXing 解码器 ✓ round 143 ✓）** /
  *      **画面比例修复（`PreviewFit` 纯数学 + `applyPreviewLayout` ✓ round 153 ✓ ——
- *      修的是用户报的"调用的相机是纵向拉伸的"✗，见下面 `previewFit` 那段 ✓）**
+ *      修的是用户报的"调用的相机是纵向拉伸的"✗，见下面 `previewFit` 那段 ✓）** /
+ *      ★ **TOFU 三件套（C2 ✓：取 CA + 与带外票据比对 / pin 落盘 + assets 回退 /
+ *      忘记这台电脑 + 已固定指纹可核验 ✓）**
  *      —— 这几件事在手机上失败了没有任何画面差异 ✗，只能靠 dex 里的符号判 ✓；
- *   3. **CA 真的是这台电脑那张** ✓（指纹逐字节比对 ✓）——
- *      这是"证书固定"能成立的前提 ✓；
- *   4. **链能验通** ✓：用 APK 里那张 CA 验证**电脑当前**发的那张服务器证书 ✓
- *      （`openssl verify` ✓）—— 等价于壳里 `pinCa()` 做的事 ✓。
+ *   3. ★★ **不再固定任何 CA**（C2 ✓）—— 这正是"一个包能连任何一台电脑"的**判据** ✓：
+ *      `assets/dshm_ca.pem` **不该在包里** ✓；"不固定的代偿"是 TOFU 的闸门真的在 dex 里 ✓
+ *      （第 2b 条那三组 ✓）。**"CA 与这台电脑逐字节一致"那条整体退场** ✗ ——
+ *      它断言的是一个**已经不存在**的性质 ✓（留着它就是在要求回到"一机一包"✗）；
+ *   4. **链仍然验得通** ✓：用**电脑上那张** CA（不再是"APK 里那张"✗）验证
+ *      **电脑当前**发的那张服务器证书 ✓（`openssl verify` ✓）——
+ *      等价于壳里 `pinCa()` 拿到 pin 之后做的事 ✓，也等价于 TOFU 第 ② 步
+ *      "这张 CA 到底签没签服务器那张" ✓。
+ *      ★ 它**不**证明"APK 里带对了 CA" ✗（包里已经没有 CA 了 ✓），
+ *        只证明"这台电脑的 CA/叶子这一对是自洽的" ✓ —— 后者才是 TOFU 能成功的条件 ✓。
  *
  * ★ 与 `scripts/check-pair-link.mjs` 的分工 ✗：那个脚本**真跑**壳里那份纯解析
  *   （`PairLink.java` ✓ —— 深链怎么变地址 ✓）；本脚本只管**产物里到底有没有这些代码** ✓。
@@ -65,7 +73,7 @@ let failed = 0
  *   缺 SDK / 缺证书时本脚本本来就会**跳过**若干条 ✓（打印 `·` ✓），
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
- * ★★ 34 = 包信息 9 ✓ + APK 内容 5 ✓ + dex 符号 18 ✓ + CA 指纹 1 ✓ + 链校验 1 ✓
+ * ★★ 38 = 包信息 9 ✓ + APK 内容 4 ✓ + 资源文案 2 ✓ + dex 符号 21 ✓ + TOFU/链 2 ✓
  *   （round 143 从 24 抬到 32 ✓ —— 加的 8 条全是"扫码配对"那条链上的 ✓：
  *    权限 1 ✓ + 清单里的深链 filter 1 ✓ + ScanActivity 1 ✓ + 扫码文案 1 ✓ +
  *    dex 里四个分组（深链 / 入口 / 相机 / 解码器 ✓）✓。
@@ -74,9 +82,22 @@ let failed = 0
  *    round 153 从 33 抬到 34 ✓ —— 加的那 1 条是"**画面比例修复在 dex 里**"✓：
  *    `PreviewFit`（纯数学 ✓）+ `applyPreviewLayout`（重摆 SurfaceView ✓），
  *    见下面 `previewFit` 那段 ✓ —— 修的是用户报的"调用的相机是纵向拉伸的"✗。
- *    它的"算得对不对"由 `scripts/check-preview-fit.mjs` **真跑**着验 ✓。）
+ *    它的"算得对不对"由 `scripts/check-preview-fit.mjs` **真跑**着验 ✓。
+ *    ★ C2 从 34 抬到 **38** ✓ —— **只增不减** ✓，四条新的：
+ *      ① `string/tofu_title` + `string/address_forget` + `string/tofu_mismatch` 在资源表里 ✓
+ *         （与 `action_scan` 那条同一个理由 ✓：文案被 aapt2 弄丢时 dex 一个字节不变 ✗）；
+ *      ② dex：TOFU 闸门（取 CA + 与带外票据比对 ✓）；
+ *      ③ dex：pin 落盘 + **assets 回退分支** ✓（`dshm_ca.pem` 这个字符串**必须还在** ✓ ——
+ *         它是"先读 pin、读不到再退回 assets"那条回退链的落点 ✓，删了就断了老包那条路 ✗）；
+ *      ④ dex：「忘记这台电脑」+「已固定指纹可核验」 ✓。
+ *    ⚠️ 同时**退场**一条：旧第 ③ 条"APK 里的 CA 与电脑上那张逐字节一致" ✗ ——
+ *      它断言的性质（包里带 CA ✓）已经被 C2 **有意**去掉了 ✓。
+ *      这不是"删断言"✗：同一件事换成了"包里**不该**有 CA" ✓（第 2 条）
+ *      与"不固定的代偿（TOFU 闸门）真的在包里" ✓（第 2b 条那三组）✓。
+ *      净变化 34 + 4 = 38 ✓（③/④ 两条**保留** ✓：③ 改成"电脑上有 CA 与叶子可验"✓，
+ *      ④ 的 `-CAfile` 从 APK 里那张改成**电脑上**那张 ✓）。
  */
-const EXPECTED_MIN_CHECKS = 34
+const EXPECTED_MIN_CHECKS = 38
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -233,7 +254,25 @@ const listing = execFileSync('unzip', ['-l', apkPath], { encoding: 'utf8' })
 check(/\bclasses\.dex\b/.test(listing), '打包了 classes.dex ✓')
 check(/res\/mipmap-xxhdpi-v4\/ic_launcher\.png/.test(listing), '带 192 图标 ✓')
 check(/res\/mipmap-xxxhdpi-v4\/ic_launcher\.png/.test(listing), '带 512 图标 ✓')
-check(/assets\/dshm_ca\.pem/.test(listing), '带本机 CA（证书固定用 ✓）')
+/**
+ * ★★ C2：**包里不该再有任何固定 CA** ✓（`assets/dshm_ca.pem` ✗）。
+ *
+ * 这条断言是"APK 与机器解耦"的**唯一**产物级判据 ✓：
+ *   · 包里带 CA ⇒ 这个包只认**那一台**电脑 ✓（一机一包 ✗）；
+ *   · 包里不带 CA ⇒ 首次连接只能走 TOFU ✓（`/mobile/trust.crt` + 带外指纹比对 ✓）。
+ *
+ * 为什么要专门断言"**没有**" ✗（而不是删掉旧断言就完事 ✓）：
+ *   `native/android/assets/` 是 aapt2 的 `-A` 输入目录 ✓，而那份 CA 曾经是**入库**的 ✓ ——
+ *   谁要是把文件恢复回来（或者老工作区里那份没删干净 ✓），aapt2 会静默地照样打进包 ✓，
+ *   构建日志、dex、图标全都看不出任何异样 ✗，只有**装到手机上**才会发现
+ *   "换了电脑连不上、而且死活不弹确认框"✗。
+ *   `scripts/build-apk.mjs` 的第 ② 步现在会主动删掉它 ✓ —— 这里再验一遍产物 ✓（两道 ✓）。
+ */
+check(
+  !/assets\/dshm_ca\.pem/.test(listing),
+  '★ 包里**没有**固定 CA（assets/dshm_ca.pem ✗ —— C2 起一个包能连任何一台电脑 ✓，首次连接走 TOFU ✓；包里带 CA 就说明"一机一包"又回来了 ✗）',
+  /assets\/dshm_ca\.pem/.test(listing) ? '存在 assets/dshm_ca.pem ✗' : 'assets 里没有任何 CA ✓',
+)
 
 /**
  * ★★ round 143：**扫码界面的文案资源也在包里** ✓（`string/scan_*` ✓）。
@@ -258,6 +297,25 @@ if (existsSync(aapt2)) {
     missing.length === 0,
     '扫码配对的文案资源在包里（`action_scan` 入口按钮 + `scan_hint` 界面提示 + `scan_denied_hint` 降级提示 ✓）',
     resources === '' ? '读不出资源表 ✗' : (missing.length === 0 ? wanted.join('、') : `缺 ${missing.join('、')}`),
+  )
+  /**
+   * ★★ C2：**TOFU 与「忘记这台电脑」的文案资源也在包里** ✓。
+   *
+   * 与上面那条同一个理由 ✓（少一个 `R.string.*` 编译期就红 ✓ —— 所以这条防的是
+   * "资源被 aapt2 的拆分/裁剪弄丢"✓：那时 dex 一个字节不变 ✓、只是界面上
+   * 显示成一串资源 id ✗）。
+   * 取三个关键字，各管一件事 ✓：
+   *   · `tofu_title` —— "第一次连这台电脑要确认身份"那个框 ✓（**没有它就没有确认这一步** ✓）；
+   *   · `tofu_mismatch` —— 指纹**不一致**那条（"可能有人在中间冒充"✓）——
+   *     这是 TOFU 唯一真正危险的失败 ✓，这条文案丢了就等于把风险交给用户猜 ✗；
+   *   · `address_forget` —— 「忘记这台电脑」✓（换宿主之后的**唯一**出路 ✓）。
+   */
+  const wantedTofu = ['string/tofu_title', 'string/tofu_mismatch', 'string/address_forget']
+  const missingTofu = wantedTofu.filter((name) => !resources.includes(name))
+  check(
+    missingTofu.length === 0,
+    'TOFU 的文案资源在包里（`tofu_title` 确认框 + `tofu_mismatch` 指纹不一致的警告 + `address_forget`「忘记这台电脑」✓ —— 少了任何一条，手机上就没有"确认身份 / 说清为什么拒 / 换电脑"这三步 ✓）',
+    resources === '' ? '读不出资源表 ✗' : (missingTofu.length === 0 ? wantedTofu.join('、') : `缺 ${missingTofu.join('、')}`),
   )
 } else {
   console.log(`  · （跳过扫码文案检查：找不到 aapt2 —— ${aapt2} ✓）`)
@@ -538,35 +596,99 @@ if (existsSync(aapt2)) {
       ? `${zxingDecoder.length} 个类都在（ZXing core 3.5.3 ✓）`
       : `缺 ${missing(zxingDecoder).join('、')}`,
   )
+
+  /**
+   * ★★ C2 第 ① 组：**TOFU 的决策闸门真的在包里** ✓。
+   *
+   * 这三样是"**绝不静默接受未知证书**"这条硬不变量的**代码形态** ✓：
+   *   · `tofuTrustOnce` —— 未知身份时那条"取 CA → 比对 → 落盘 → 才 proceed"的路 ✓
+   *     （少了它，`onReceivedSslError` 就只有"验不通 ⇒ cancel"✗：
+   *      新包不带 CA ⇒ **永远连不上任何电脑** ✓ —— 用户在手机上看到的只是"打不开"✗）；
+   *   · `trust.crt` —— `/mobile/trust.crt` 那个取 CA 的路径 ✓（少了它取不到 CA ✓）；
+   *   · `rememberTicketCaFingerprint` —— **读票据里那个带外指纹**的那一段 ✓
+   *     （少了它，"拿什么比对"这件事就只剩下"用户自己看"✓ —— 旧宿主那条降级路能走 ✓，
+   *      但新宿主明明带了指纹却被忽略 ✗）。
+   *     ★ 这里刻意**不**用字符串 `caFingerprint` 当判据 ✗ —— 变异验证时发现的：
+   *       `String.includes` 是**子串**匹配 ✓，而壳里有个无关的方法叫 `caFingerprintOf` ✓，
+   *       于是"把读票据字段那段整个删掉"之后这条断言**照样绿** ✗（判据被同名前缀喂饱了 ✓）。
+   *       换成方法名 `rememberTicketCaFingerprint` 之后，删掉那段就是真红 ✓。
+   *
+   * 为什么只能靠 dex 符号判 ✗：本机没有真机 ✓ —— 这三样在手机上失败的表现
+   * 与"整段代码没写"**一模一样**✗（不崩、不报错，只是连不上或者永远弹确认框 ✓）。
+   * 而"闸门到底有没有被绕过"（能不能被静默接受 ✓）**电脑上验不了** ✗ ——
+   * 那是真机 / 代码评审的事 ✓，这里只管"这段代码在不在产物里"✓。
+   */
+  const tofuGate = ['tofuTrustOnce', 'trust.crt', 'rememberTicketCaFingerprint']
+  check(
+    hasAll(tofuGate),
+    '★★ TOFU 的闸门在 dex 里（`tofuTrustOnce` 取 CA 与**带外**票据指纹比对 + `/mobile/trust.crt` 路径 + `rememberTicketCaFingerprint` 读票据字段 ✓ —— 少了它，不带 CA 的新包**永远连不上**，而手机上只表现为"打不开"✗；少了比对就是"盲信第一次"✗）',
+    missing(tofuGate).length === 0 ? tofuGate.join('、') : `缺 ${missing(tofuGate).join('、')}`,
+  )
+  /**
+   * ★★ C2 第 ② 组：**pin 落盘 + 读不到时退回 assets** ✓。
+   *
+   * 回退链是"**先读 pin，读不到再退回 assets**" ✓ —— 这一组的四个符号正好是这条链 ✓：
+   *   · `loadPinnedCa`（先读 pin ✓、读不到退回 assets ✓）/ `savePinnedCa`（TOFU 确认后落盘 ✓）；
+   *   · `pinned-ca`（prefs 键名 ✓ —— 与参数里那份"不固定任何 CA"配套 ✓）；
+   *   · `dshm_ca.pem` —— ★ **这个字符串必须还在 dex 里** ✗：它是 assets 回退分支的落点 ✓。
+   *     有人可能觉得"包里都不带 CA 了，这个字符串也该删"✗ ——
+   *     删了就等于**只留一条路** ✓：老包（CA 还打在包里 ✓）就再也不能靠 assets 工作了 ✗，
+   *     而"滚回只需恢复 build-apk 那一步、不用改壳代码"正是本方案的回退承诺 ✓。
+   */
+  const tofuPinFallback = ['loadPinnedCa', 'savePinnedCa', 'pinned-ca', 'dshm_ca.pem']
+  check(
+    hasAll(tofuPinFallback),
+    '★ pin 落盘与 assets 回退在 dex 里（`loadPinnedCa` 先读 pin ✓、`savePinnedCa` 确认后落盘 ✓、prefs 键 `pinned-ca` ✓、回退分支的 `dshm_ca.pem` ✓ —— 少了回退，滚回老包那条路就断了 ✗；少了落盘，每次冷启动都要重新确认身份 ✗）',
+    missing(tofuPinFallback).length === 0 ? tofuPinFallback.join('、') : `缺 ${missing(tofuPinFallback).join('、')}`,
+  )
+  /**
+   * ★★ C2 第 ③ 组：**「忘记这台电脑」+「已固定指纹可核验」** ✓。
+   *
+   * 这两件事是 TOFU 的**运维前提**（不是锦上添花 ✓）：
+   *   · `forgetThisComputer` —— 换宿主之后旧 pin 会把新宿主**全部拒掉** ✓
+   *     （TOFU 的经典操作陷阱 ✓）；没有它，用户只能卸载重装 ✓；
+   *   · `pinnedCaFingerprint` —— 网页要能显示"手机到底固定了哪一张"✓
+   *     （配对页的「连接」卡把它与"这台电脑的 CA 指纹"并排显示 ✓）。
+   *     少了它，用户对着一句"连不上"没有任何可核对的线索 ✗。
+   */
+  const tofuForget = ['forgetThisComputer', 'pinnedCaFingerprint', 'KEY_PINNED_CA']
+  check(
+    hasAll(tofuForget),
+    '★ 「忘记这台电脑」与已固定指纹可核验在 dex 里（`forgetThisComputer` 同时清 pin 与 pinned-slot ✓ + `pinnedCaFingerprint` 只读桥 ✓ + `KEY_PINNED_CA` 常量名 ✓ —— 少了前者，换电脑之后只能卸载重装 ✗；少了后者，用户没有任何可核对的线索 ✗）',
+    missing(tofuForget).length === 0 ? tofuForget.join('、') : `缺 ${missing(tofuForget).join('、')}`,
+  )
 }
 
-// ── ③ APK 里那张 CA 是不是这台电脑那张（指纹逐字节比对 ✓）
-const apkCaPath = join(workDir, 'apk-ca.pem')
+// ── ③ ★★ C2：**本包不带任何固定 CA**，而"不固定的代偿"是这台电脑 CA/叶子这一对自洽 ✓
+//
+// 旧的第 ③ 条（"APK 里那张 CA 与电脑上那张逐字节一致"）**整体退场** ✗ ——
+// 它断言的性质已经被 C2 有意去掉了（包里不再带 CA ✓）。这里换成两件仍然成立、
+// 而且**正是 TOFU 能成功的条件** ✓：
+//   ③a）电脑上确实有一张 CA、以及由它签发的服务器证书（壳要去取的对象存在 ✓）；
+//   ③b）用**电脑上那张** CA 能验通**电脑当前**发的那张服务器证书
+//        （= 壳里 `pinCa()` 拿到 pin 之后做的事 ✓ = TOFU 第 ② 步的"签得了吗" ✓）。
+// ★ 这两条**不再**碰 APK 里的任何证书 ✓（包里没有 CA 了 ✓）；
+//   判据从"包与这台电脑一致" ✓ 变成"包与机器无关 ✓ + 这台电脑自己是自洽的" ✓。
 const liveCaPath = join(tlsDir, 'lan-ca.pem')
-if (/assets\/dshm_ca\.pem/.test(listing) && existsFile(liveCaPath)) {
-  writeFileSync(apkCaPath, unzip('assets/dshm_ca.pem'))
-  const fingerprint = (path) =>
-    execFileSync('openssl', ['x509', '-in', path, '-noout', '-fingerprint', '-sha256'], { encoding: 'utf8' }).trim()
-  const apkFp = fingerprint(apkCaPath)
-  const liveFp = fingerprint(liveCaPath)
-  check(apkFp === liveFp, 'APK 里的 CA 与电脑上那张**完全一致**（否则固定必然失败 ✗）', apkFp.split('=')[1]?.slice(0, 32))
+const liveLeafPath = join(tlsDir, 'lan-cert.pem')
+if (existsFile(liveCaPath) && existsFile(liveLeafPath)) {
+  check(true, '电脑上有 CA 与由它签发的服务器证书（TOFU 要取回并比对的对象 ✓ —— 与 APK 里带了什么**无关** ✓）', `${liveCaPath} + ${liveLeafPath}`)
 } else {
-  check(false, 'APK 里带本机 CA 且电脑上有 CA 可比对', `apk=${/assets\/dshm_ca\.pem/.test(listing)} live=${existsFile(liveCaPath)}`)
+  console.log('  · （跳过"电脑上有 CA/叶子"：还没生成 ✓ —— 先跑 node scripts/make-cert.mjs）')
 }
 
-// ── ④ 用 APK 里那张 CA 去验**电脑当前**发的那张服务器证书（= 壳里 pinCa() 做的事 ✓）
-const liveLeafPath = join(tlsDir, 'lan-cert.pem')
-if (existsFile(apkCaPath) && existsFile(liveLeafPath)) {
+// ── ④ 用**电脑上那张** CA 去验**电脑当前**发的那张服务器证书（= 壳里 pinCa() 做的事 ✓）
+if (existsFile(liveCaPath) && existsFile(liveLeafPath)) {
   let verified = false
   let note = ''
   try {
-    const output = execFileSync('openssl', ['verify', '-CAfile', apkCaPath, liveLeafPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const output = execFileSync('openssl', ['verify', '-CAfile', liveCaPath, liveLeafPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     verified = /: OK/.test(output)
     note = output.trim().split('\n').pop() ?? ''
   } catch (error) {
     note = String(error?.stdout ?? error?.message ?? error).trim().split('\n').pop() ?? ''
   }
-  check(verified, '用 APK 里的 CA 能验通电脑当前发的服务器证书（= 证书固定会成功 ✓）', note)
+  check(verified, '用电脑上的 CA 能验通电脑当前发的服务器证书（= TRUST 成立、TOFU 第 ② 步的"签得了吗"会通过 ✓；★ 这条**不**再说明"APK 里带对了 CA"✗ —— 包里已经没有 CA 了 ✓）', note)
 } else {
   console.log('  · （跳过链校验：电脑上还没有 CA/服务器证书 ✓ —— 先跑 node scripts/make-cert.mjs）')
 }
@@ -575,14 +697,16 @@ rmSync(workDir, { recursive: true, force: true })
 
 console.log(
   failed === 0
-    ? `\n[check-apk] 通过：APK 可以装、内容齐全、证书固定链验得通 ✓（${checkCount} 条 ✓ / 0 ✗）`
+    ? `\n[check-apk] 通过：APK 可以装、内容齐全、★ 与机器无关（包里不带任何 CA ✓、TOFU 闸门在 ✓）、这台电脑的 CA/叶子自洽 ✓（${checkCount} 条 ✓ / 0 ✗）`
     : `\n[check-apk] 未通过 ${failed} 项 ✗（共 ${checkCount} 条）`,
 )
 /**
  * ★ 条数防呆 ✓（见 `EXPECTED_MIN_CHECKS` 的说明 ✓）：
  *   **环境完整**时才执法 ✗ —— `aapt2` 缺失或电脑上没有 CA/服务器证书时，
  *   本脚本会**成组跳过**断言 ✓（打印 `·` ✓），那时"条数少"是环境使然 ✓，
- *   不是"有人删了断言"✗ —— 按 24 判红只会误导下一个人 ✓。
+ *   不是"有人删了断言"✗ —— 按固定条数判红只会误导下一个人 ✓。
+ *   （C2 起，电脑上有没有 CA/叶子只影响第 ③/④ 两条 ✓ —— 它们验的是**这台电脑**
+ *    自己的自洽性 ✓，与包里带了什么**无关** ✓。）
  */
 const environmentComplete = existsSync(aapt2) && existsFile(liveCaPath) && existsFile(liveLeafPath)
 if (environmentComplete && checkCount < EXPECTED_MIN_CHECKS) {

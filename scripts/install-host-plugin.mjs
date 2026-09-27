@@ -396,18 +396,29 @@ function installPackages() {
   /**
    * 原生外壳 APK ✓：`dist/dsh-mobile.apk` → 插件目录（宿主路由 `/mobile/app.apk` 读它 ✓）。
    * 没构建就跳过 ✓（只提示一句 ✓，不让安装失败 ✗ —— 外壳是可选增强 ✓）。
+   *
+   * ★★ C2：这个包**不再与某台电脑绑定** ✓ —— `build-apk.mjs` 不再把本机 CA 打进 assets ✓，
+   *   首次连接由壳与宿主**当场 TOFU**（取回 CA → 与带外票据里的 `caFingerprint` 比对 ✓）。
+   *   于是：
+   *     · `dist/dsh-mobile.apk` **可以随仓库 / 发布走** ✓（预置、缓存、复用都行 ✓）；
+   *     · profile 里那份**旧的** APK 也不需要因为"换了电脑"而重装 ✓
+   *       （旧包只是"带了一张老家 CA"✓ —— 首次连新宿主时会走 TOFU 覆盖 pin ✓）；
+   *     · `check-apk.mjs` 里"APK 里的 CA 与电脑上那张逐字节一致"那条已经**整体退场** ✓
+   *       （它要求的是"一机一包"✓，与本改动相反 ✓）。
+   *   代价（运维上要知道 ✓）：**换宿主后必须点一次「忘记这台电脑」** ✓
+   *   （壳的「电脑地址」框里那个勾 ✓），否则旧 pin 会把新宿主全拒掉 ✓。
    */
   const apkSource = join(repoRoot, 'dist', 'dsh-mobile.apk')
   const apkTarget = join(profileModules, '@dsh-mobile', 'host', 'lib', 'dsh-mobile.apk')
   let apkNote = '未构建（跑 node scripts/build-apk.mjs 后重装即可）'
   if (existsSync(apkSource)) {
     cpSync(apkSource, apkTarget)
-    apkNote = `已安装（${Math.round(readFileSync(apkSource).length / 1024)} KB ✓）`
+    apkNote = `已安装（${Math.round(readFileSync(apkSource).length / 1024)} KB ✓，与机器无关 ✓）`
   }
 
   const hasTemml = bootCode.includes('TEMML_INLINE_GZIP_BASE64 = "')
   log(`已安装 boot.js → ${bootDestination}（戳 ${installStamp}，${hasTemml ? '含公式渲染器 ✓' : '⚠ 不含公式渲染器（公式将按原样显示）'}）`)
-  log(`原生外壳 APK：${apkNote}（手机可直接下 /mobile/app.apk ✓）`)
+  log(`原生外壳 APK：${apkNote}（手机可直接下 /mobile/app.apk ✓ —— C2 起这个包不固定任何 CA ✓）`)
 }
 
 /** 更新 cordis.patch.yml（幂等：先删旧块再追加）。 */

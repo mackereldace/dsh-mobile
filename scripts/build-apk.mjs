@@ -21,13 +21,28 @@
  *
  * 好处很实在 ✓：**没有版本地狱** ✓、构建只用一条命令 ✓、产物可复现 ✓。
  *
- * ## 两个"从电脑上取"的东西
+ * ## 唯一一个"从电脑上取"的东西：图标
  *
  * 1. **图标** ✓：直接复用插件里那份生成逻辑（`packages/host/lib/app-icons.js` ✓），
- *    不重新画、也不会两边不一致 ✗；
- * 2. **本机 CA** ✓：从 `~/.dsh/storages/dsh-mobile/tls/lan-ca.pem` 打进 assets ✓ ——
- *    壳用它做**证书固定** ✓（于是用户不用把 CA 装进系统信任库 ✓，
- *    也就没有"网络可能受到监控"那条常驻提示 ✓）。
+ *    不重新画、也不会两边不一致 ✗。
+ *
+ * ## ★★ 本包**不固定任何 CA**（C2 起 ✓ —— 一个包能连任何一台电脑 ✓）
+ *
+ * 以前这里还有第 2 件：把 `~/.dsh/storages/dsh-mobile/tls/lan-ca.pem` 打进
+ * `assets/dshm_ca.pem` ✓（壳拿它做证书固定 ✓）。代价是**一机一包** ✗：
+ * 换一台电脑就得重新构建、重新分发 ✗，而"哪个包配哪台机"没人记得住 ✓。
+ *
+ * 现在改成 **TOFU**（首次连接时确认宿主的 CA ✓，见
+ * `native/android/java/dev/dshm/shell/MainActivity.java` 的 `tofuTrustOnce` ✓）：
+ *   · 壳第一次连某台电脑时，去 `/mobile/trust.crt` 取回它的 CA ✓；
+ *   · 与**带外**配对票据里的 `caFingerprint` 比对（二维码是扫的，中间人改不了 ✓）；
+ *   · 票据里没有（旧宿主 ✓）⇒ **把指纹显示给用户、要用户明确确认** ✓ ——
+ *     这一步**不能省** ✗：省掉就把"编译期固定"换成"盲信第一次" ✓（安全倒退 ✓）；
+ *   · 确认后落盘到 `SharedPreferences`（键 `pinned-ca` ✓），以后先用它、读不到再退回 assets ✓。
+ *
+ * ⇒ `dist/dsh-mobile.apk` 从此**可以随仓库/发布走** ✓（不再与某台电脑绑定 ✓），
+ *   而 `assets/dshm_ca.pem` 这个文件**不该再存在** ✓（下面第 ② 步专门把它清掉 ✓ ——
+ *   老工作区里那份残留会被 aapt2 原样打进包 ✓，那就白改了 ✓）。
  *
  * ## 第三方 jar（round 143 起**有一个** ✗ —— 扫码解码用的 ZXing ✓）
  *
@@ -159,14 +174,22 @@ mkdirSync(dirname(outPath), { recursive: true })
   log(`图标已生成（192 / 512 ✓）`)
 }
 
-// ── ② CA：从电脑上取本机 CA 打进 assets ✓（证书固定用 ✓）
+// ── ② ★★ C2：**不再**把本机 CA 打进 assets ✓ —— 本包不固定任何 CA（配对时 TOFU ✓）
 {
-  const caPath = join(homedir(), '.dsh', 'storages', 'dsh-mobile', 'tls', 'lan-ca.pem')
-  if (!existsSync(caPath)) {
-    fail(`找不到本机 CA：${caPath}\n        先生成：node scripts/make-cert.mjs --ip <局域网IP>`)
+  /**
+   * ⚠️ 这一步**不是**"顺手删个文件"，而是本次改动的一部分 ✗：
+   *   aapt2 的 `-A assets` 会把 `native/android/assets/` **整目录**打进包 ✓ ——
+   *   老工作区里那份 `dshm_ca.pem`（C2 之前由本脚本写进去的 ✓，而且它是**入库**的 ✓）
+   *   如果留着，新包照样"一机一包" ✓，而**日志上完全看不出来** ✗
+   *   （`check-apk.mjs` 里那条"assets 里不该有 CA"的断言就是防这个 ✓）。
+   *   所以：先删 ✓，再明说"本包不固定任何 CA" ✓。
+   */
+  const caAssetPath = join(androidDir, 'assets', 'dshm_ca.pem')
+  if (existsSync(caAssetPath)) {
+    rmSync(caAssetPath, { force: true })
+    log('已删除老的 assets/dshm_ca.pem（包子里的那份固定 CA ✗ —— 它正是"一机一包"的来源 ✓）')
   }
-  writeFileSync(join(androidDir, 'assets', 'dshm_ca.pem'), readFileSync(caPath))
-  log(`已打入本机 CA（证书固定 ✓）`)
+  log('本包**不**固定任何 CA（配对时 TOFU）✓ —— 一个包能连任何一台电脑 ✓')
 }
 
 // ── ③ 资源与清单 → base.apk（同时产出 R.java ✓）

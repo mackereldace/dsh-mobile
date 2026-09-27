@@ -39,4 +39,29 @@
     <string name="slot_last_good">上次成功的地址</string>
     <string name="slot_configured">已有候选</string>
     <string name="slot_default">默认地址</string>
+
+    <!-- ── ★★ C2：TOFU（第一次连某台电脑时确认它的 CA）与「忘记这台电脑」──────────
+         因果：APK 不再把某台电脑的 CA 打进包里（那等于"一机一包"）⇒
+         第一次连一台没见过的电脑时证书必然验不过，必须**确认**之后才放行。
+         文案口径（**都不是随手写的**）：
+           ① 确认框里只显示**前 16 位**（= 前 4 组，每 4 位一组）——
+              与电脑配对页上那一串**同一种分组**，人才可能逐段核对；
+           ② 每一条失败文案都**说清发生了什么**（不一致 / 取不到 / 没确认）——
+              绝不只说"失败了"，也绝不"先连上再说"；
+           ③ 不一致那条要点明"可能有人在中间冒充"并给出下一步（重新生成配对码）——
+              这是 TOFU 唯一真正危险的失败，含糊过去就等于把风险留给用户猜。
+    -->
+    <string name="tofu_checking">第一次连这台电脑，正在核对它的证书…</string>
+    <string name="tofu_title">确认这台电脑的身份</string>
+    <string name="tofu_message">这是第一次连这台电脑，手机还不能验证它的证书。\n\n手机从这台电脑取回的 CA 指纹（前 16 位）：\n%1$s\n\n请与电脑配对页上显示的「本机 CA 指纹」逐段核对，一致才点「信任」。\n（配对链接里带了指纹的话，这一步会自动完成、不会问你。）</string>
+    <string name="tofu_trust">信任这台电脑</string>
+    <string name="tofu_reject">不信任</string>
+    <string name="tofu_rejected">没有确认这台电脑的证书，已拒绝连接（安全考虑）。</string>
+    <string name="tofu_mismatch">这台电脑给的证书与配对票据里的指纹不一致，已拒绝连接——可能有人在中间冒充这台电脑。请在电脑上重新生成配对码，再扫一次。</string>
+    <string name="tofu_unavailable">取不到这台电脑的证书（超时或打不开），已拒绝连接。请确认手机与电脑在同一网络，或重新扫一次配对码。</string>
+    <string name="tofu_forgotten">已忘记这台电脑：下次连接会重新核对它的证书指纹。</string>
+    <string name="tofu_nothing_pinned">本来就没有固定任何电脑的证书（不用清）。</string>
+    <string name="address_forget">忘记这台电脑（换电脑后必须勾：会同时清掉已固定的证书与钉死的地址）</string>
+    <string name="address_pinned">手机已固定这台电脑的证书，指纹前 16 位：%1$s</string>
+    <string name="address_no_pin">手机还没有固定任何电脑的证书：连上时会先让你核对一次指纹。</string>
 </resources>

@@ -2,14 +2,14 @@
  * 配对页 HTML —— **由 scripts/gen-pairing-page.mjs 自动生成，请勿手工编辑**。
  * 源文件：packages/host/src/pairing-page.html
  *
- * 生成时间：2026-09-26T11:26:46.397Z
- * 大小：105806 字节
+ * 生成时间：2026-09-27T16:04:43.189Z
+ * 大小：113243 字节
  *
  * ★ 下面两个 sha256 是给校验脚本用的"同步戳" ✓（scripts/check-pairing-page.mjs ✓）：
  *   源 HTML 改过、或 vendored 编码器换过之后**忘了重新跑本脚本** ✗ 时，
  *   构建产物里的 HTML 还是旧的 ✓ ⇒ 那两个戳对不上 ⇒ 校验当场报红 ✗。
  *   为什么不用"比对正文"的办法 ✗：那要把模板字面量转义规则再抄一份 ✓（迟早走偏 ✗）。
- * 源 HTML sha256：1c32f3e011478721a6c1175b69d6d5873d01eb721014590510f4cad2265d8db1
+ * 源 HTML sha256：f1ca3e138d2ff7bb8e033c5de24f43f5c8b01aceb193e53f0b5cd68784145c88
  * 内联编码器 sha256：b80a0cc76c03d7e441d874df570f8fc93d956c1976d476e1525838d1b5cd71b8
  */
 export const PAIRING_PAGE_HTML = `<!doctype html>
@@ -219,6 +219,12 @@ export const PAIRING_PAGE_HTML = `<!doctype html>
             <button class="primary" id="open-gui">打开 DSH 界面</button>
           </div>
           <p class="note" id="conn-detail"></p>
+          <!--
+            ★ C2：手机侧也要能看见"证书"这件事（由 renderCaTrust 填）——
+            "这台电脑的 CA 指纹"与"手机壳记住了哪一台电脑"摆在一起，
+            不一致时给出可操作的那一步（壳的「电脑地址」→「忘记这台电脑」）。
+          -->
+          <p class="note" id="conn-ca"></p>
         </div>
         <div class="card">
           <h2 style="margin-top:0">已配对的电脑</h2>
@@ -267,6 +273,26 @@ export const PAIRING_PAGE_HTML = `<!doctype html>
               </p>
             </div>
           </div>
+          <!--
+            ★ C2：本机 CA 指纹（由 showCaFingerprint 填）。
+
+            为什么非显示不可：APK 不再把 CA 打进包里之后，"首次连接该信任哪张 CA"
+            这件事要靠**带外**确认——手机壳从这台电脑取回 CA、算出指纹，
+            再拿二维码票据里的指纹比对。两串一致才放行。
+            电脑屏幕上这一串是**人眼兜底**：票据里没带指纹（旧宿主）时，
+            手机壳会把同一串显示出来、要求用户明确点「信任」。
+            分四段显示与手机壳里的分组方式**一致**（壳那边见 MainActivity 的
+            formatFingerprintGroups）——分组不一样就没法逐段核对了。
+
+            ★ 放在 #pairing **外面**是刻意的：它不是"这一次配对码"的属性，
+              而是**这台电脑**的属性。用户"自己填地址、没扫码"那条路上，
+              手机壳会弹确认框要他核对——那时他需要能在电脑上**不生成配对码**
+              就看到这一串（放里面的话，得先点一次「生成配对码」才看得见）。
+          -->
+          <p class="muted" style="margin-top:14px">本机 CA 指纹（首次连接时手机壳会显示同一串，逐段核对）：</p>
+          <div class="fp mono" id="ca-fingerprint">（正在读证书…）</div>
+          <p class="note" id="ca-fingerprint-note"></p>
+        </div>
         </div>
 
         <div class="card">
@@ -2608,7 +2634,7 @@ var qrcode = function() {
       var API = ''
       // phoneBaseUrl：手机应访问的基地址（来自 manifest，见 generatePairing 的说明）
       // expiresAt：当前配对码的到期毫秒数（用来把过期的二维码从屏幕上撤掉，见 checkPairingExpiry）
-      var state = { profile: null, tunnel: null, code: null, timer: null, phoneBaseUrl: null, expiresAt: null }
+      var state = { profile: null, tunnel: null, code: null, timer: null, phoneBaseUrl: null, expiresAt: null, caFingerprint: null }
 
       /**
        * 官方可选的 UTF-8 覆盖 ✓（上游 dist/qrcode_UTF8.js 的**全部内容**就是这一行 ✓）。
@@ -2627,6 +2653,84 @@ var qrcode = function() {
       function formatFingerprint(hex) {
         if (!hex) return ''
         return (hex.match(/.{1,4}/g) || []).join('-').toUpperCase()
+      }
+
+      /**
+       * ★ C2：CA 指纹的分段显示（每 4 个十六进制字符一组）。
+       *
+       * 为什么不直接复用上面那个 formatFingerprint：
+       *   那个函数的输入是**纯十六进制**（主机/设备指纹），它按"每 4 个字符"切；
+       *   而宿主的 tls.caFingerprint 是 Node 的 X509Certificate.fingerprint256 写法
+       *   —— **冒号分隔**（AB:CD:EF:…）。直接喂给 formatFingerprint，
+       *   切出来的段会**错位**（AB:C-D:EF-…）⇒ 与手机壳上那一串对不上，
+       *   而"对不上"在下一次连接时表现为"指纹不一致、拒绝连接"——
+       *   人会以为是中间人，其实是显示格式不一致。
+       *   所以这里先**清掉所有非十六进制字符**再分组。
+       *
+       * shortOnly = 只取前 16 个十六进制字符（= 前 4 组）。
+       * 壳那边显示的也是这 4 组（见 MainActivity.pinnedCaFingerprint / formatFingerprintGroups），
+       * 两边**必须同一种分组方式**，否则人眼比对没有意义。
+       * （★ 本文件**一个反引号都不能有** ✗ —— scripts/gen-pairing-page.mjs 会直接拒绝 ✓，
+       *   因为它要把整页嵌进模板字面量 ✓ ⇒ 注释里也别用反引号 ✓。）
+       */
+      function caFingerprintGroups(value, shortOnly) {
+        var hexValue = String(value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+        if (hexValue.length < 8) return ''
+        if (shortOnly) hexValue = hexValue.slice(0, 16)
+        return (hexValue.match(/.{1,4}/g) || []).join('-')
+      }
+
+      /** 电脑侧：把本机 CA 指纹摆出来（人眼比对的参照物）。 */
+      function showCaFingerprint() {
+        var raw = state.caFingerprint
+        if (!raw) {
+          text('ca-fingerprint', '（读不到本机 CA 指纹）')
+          text('ca-fingerprint-note', '宿主没有提供 tls.caFingerprint（未注入证书管理器，或证书坏了）——手机首次连接时会退回"显示指纹、要你点「信任」"这条路，仍然不会盲信。')
+          return
+        }
+        text('ca-fingerprint', caFingerprintGroups(raw, false))
+        text('ca-fingerprint-note', '前 16 位：' + caFingerprintGroups(raw, true) + '（手机壳上显示的也是前 16 位）')
+      }
+
+      /**
+       * ★ C2：手机侧把"这台电脑的 CA 指纹"与"手机壳记住了哪一台"摆在一起。
+       *
+       * 为什么两边都要显示：
+       *   · 只显示电脑侧那一串 ⇒ 用户看不出手机壳当时确认的到底是哪一串；
+       *   · 只显示手机侧那一串 ⇒ 换了电脑之后，用户不知道"手机还在信任上一台"。
+       * 两串摆在一起，不一致时直接给出**可操作的那一步**（壳→「电脑地址」→
+       * 勾「忘记这台电脑」→ 重新配对），而不是让用户对着"连不上"猜。
+       *
+       * 桥的返回值见 MainActivity.ShellBridge.pinnedCaFingerprint：
+       * {"short":"AB12-CD34-EF56-7890","source":"pinned"} / {"short":"","source":"none"}。
+       * 旧 APK 没有这条桥 ⇒ typeof !== 'function' ⇒ 只显示电脑侧那一串（不报错）✓。
+       */
+      function renderCaTrust() {
+        var hostSide = state.caFingerprint ? caFingerprintGroups(state.caFingerprint, true) : ''
+        var parts = []
+        parts.push(hostSide ? '这台电脑的 CA 指纹：' + hostSide : '这台电脑没给出 CA 指纹（宿主未注入证书管理器）')
+        var bridge = typeof window === 'undefined' ? undefined : window.DshmShell
+        if (bridge === undefined || bridge === null || typeof bridge.pinnedCaFingerprint !== 'function') {
+          parts.push('（这个页面不在壳里，或者壳的版本还没有"已固定指纹"这条桥——无法显示手机记住了哪一台。）')
+          text('conn-ca', parts.join(' '))
+          return
+        }
+        var pinned = null
+        try {
+          pinned = JSON.parse(bridge.pinnedCaFingerprint())
+        } catch (error) {
+          pinned = null
+        }
+        if (pinned === null || typeof pinned.short !== 'string') {
+          parts.push('（壳没有回答"记住了哪一台电脑"，无法核对。）')
+        } else if (!pinned.short) {
+          parts.push('手机还没有记住任何电脑的证书：第一次连接会先让你核对指纹再放行。')
+        } else if (hostSide && pinned.short === hostSide) {
+          parts.push('手机记住的证书：' + pinned.short + '（与这台电脑一致）')
+        } else {
+          parts.push('手机记住的是「另一台」电脑的证书：' + pinned.short + '。要连这台电脑，请在壳的「电脑地址」框里勾上「忘记这台电脑」再重新配对。')
+        }
+        text('conn-ca', parts.join(' '))
       }
 
       async function api(path, options) {
@@ -3292,8 +3396,15 @@ var qrcode = function() {
         try {
           var manifestForPhoneUrl = await api('/mobile/manifest')
           state.phoneBaseUrl = manifestForPhoneUrl.phoneBaseUrl || null
+          // ★ C2：本机 CA 指纹（manifest.tls.caFingerprint ✓ —— 由宿主 tls.status() 给出 ✓）。
+          //   它与配对票据里那个 caFingerprint 是**同一个值**（见 createPairing ✓），
+          //   所以电脑屏幕上这一串正好可以当"手机票据里那一串"的参照物 ✓。
+          state.caFingerprint = manifestForPhoneUrl.tls && manifestForPhoneUrl.tls.caFingerprint
+            ? manifestForPhoneUrl.tls.caFingerprint
+            : null
         } catch (error) {
           state.phoneBaseUrl = null
+          state.caFingerprint = null
         }
 
         // 判定自己是电脑还是手机：能访问 loopback 管理端点的是电脑。
@@ -3314,6 +3425,7 @@ var qrcode = function() {
             refreshConsole()
           }
           $('copy').onclick = copyPayload
+          showCaFingerprint()
           refreshConsole()
         } else {
           text('subtitle', '在这台手机上接入电脑上的 DeepSeek Harness')
@@ -3336,6 +3448,8 @@ var qrcode = function() {
             text('conn-state', '已配对')
             text('conn-detail', '主机指纹 ' + formatFingerprint(stored.pinnedHostFingerprint))
           }
+          // ★ C2：把"这台电脑的 CA"与"壳记住了哪一台"摆在一起（见 renderCaTrust ✓）
+          renderCaTrust()
         }
       }
 

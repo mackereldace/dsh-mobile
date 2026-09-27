@@ -61,6 +61,8 @@ const EXPECTED_FEATURES = [
   'tls.selfSign',
   'admin.devicesRemove',
   'admin.selfcheck',
+  // ★ C1（2026-09-27）把 TLS/明文监听搬进插件 —— 与 HOST_FEATURES 同步
+  'listener.plugin',
 ]
 
 const problems = []
