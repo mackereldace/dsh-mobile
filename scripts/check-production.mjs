@@ -25,6 +25,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { createHash, X509Certificate } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -115,6 +116,49 @@ try {
   loopJson = undefined
 }
 row(loop.status === 200 && loopJson !== undefined, '回环 manifest 可达', `HTTP ${loop.status}`)
+
+/**
+ * ── ②b ★★ C2 的**宿主侧**在不在（= 手机首次连接要比对的那一个指纹）────────────
+ *
+ * 为什么放在"电脑视角"这一组 ✓：manifest 是**公开**信息 ✓（手机与诊断都读它 ✓），
+ * 而 `tls.caFingerprint` 就是**进配对票据的那一个值** ✓（四条一致性由
+ * `packages/host/test/pairing-ticket-ca.test.ts` 守着 ✓）。
+ *
+ * ★ 它不在时的症状（这才是它值得一条断言的原因 ✓）：手机侧 TOFU 拿不到"带外指纹"✗
+ *   ⇒ 退化成"弹框让用户自己确认"✓ —— 不崩、不报错，只是**每一次**首次连接都少一道自动比对 ✗
+ *   （用户看到的是"这新包怎么老问我"✓，而电脑上完全看不出来 ✗）。
+ *
+ * ★★ 第二条是**对着磁盘上那张 CA 现算**的 ✓：光"有个指纹字段"不够 ✗ ——
+ *   必须是**这回真正要发出去的那张 CA** 的指纹 ✓，否则手机把 CA 取回来自己一算就对不上 ✗
+ *   （那一步在手机上的表现是"指纹不一致 ⇒ 拒绝连接"✗，人会以为是中间人 ✓）。
+ *   归一化规则与壳一致（去非 hex + 大写 ✓，见 `MainActivity.normalizeFingerprint` ✓）。
+ */
+console.log('\n【C2：宿主广告的 CA 指纹（手机 TOFU 要比对的那一个）】')
+{
+  const advertised = loopJson?.tls?.caFingerprint
+  row(
+    typeof advertised === 'string' && advertised.length > 0,
+    'manifest.tls.caFingerprint 存在（C2 宿主侧已上线）',
+    typeof advertised === 'string' ? `${advertised.length} 字符` : '缺失（旧进程 / 证书不可用）',
+  )
+  const caPath = join(DSH_HOME, 'storages', 'dsh-mobile', 'tls', 'lan-ca.pem')
+  if (!existsSync(caPath)) {
+    row(undefined, '广告的指纹与磁盘 CA 一致', `读不到 ${caPath}（先跑 node scripts/make-cert.mjs）`)
+  } else {
+    let expected = ''
+    try {
+      expected = createHash('sha256').update(new X509Certificate(readFileSync(caPath, 'utf8')).raw).digest('hex').toUpperCase()
+    } catch (error) {
+      expected = `(CA 读不出来：${String(error?.message ?? error).slice(0, 40)})`
+    }
+    const normalized = String(advertised ?? '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase()
+    row(
+      normalized.length === 64 && normalized === expected,
+      '广告的指纹 == 磁盘上那张 CA 的 SHA-256（手机取回 CA 后自己算得出来）',
+      normalized === expected ? '一致' : `广告归一化后 ${normalized.length} 字符 / 期望 64`,
+    )
+  }
+}
 
 // ── ③ 手机身份（关键：必须**非回环**来源才会走手机的判定分支）
 console.log('\n【服务（手机身份，模拟 x-forwarded-for）】')
