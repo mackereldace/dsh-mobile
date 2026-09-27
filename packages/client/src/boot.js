@@ -8290,6 +8290,36 @@
       if (open) {
         dshPreviewAbsentSince = 0
         document.body.dataset.dshmDshPreview = '1'
+        /**
+         * ★★ round 171（用户实拍："**（文件预览的顶栏）依旧一开始往状态栏跑**"✗）：
+         *   `--dshm-preview-pad` 是**给 JS 留的通道** ✓（`tuneDshPreviewSafeArea` 量完写进去 ✓）——
+         *   而它是**上一次预览**留下的值 ✗，常常正是 `0px` ✓（那一次预览量出来"不需要补"✓）。
+         *   ⇒ 新预览的**第一帧**就按 0 上内边距画 ✓ ⇒ **预览自己的那条顶栏**钻进状态栏 ✓，
+         *   等下一次测量（最多 200ms 之后 ✓）才复位 ✓ = 用户看到的"一开始往状态栏跑、过一会复位" ✗。
+         * ★ 为什么以前没暴露 ✗：本页会话里**第一次**开预览时这个变量是**空的** ✓
+         *   ⇒ 走 CSS 那条兜底 `max(env(), --dshm-safe-top)` ✓（= 完整的 48px ✓，安全 ✓）；
+         *   只有**开过至少一次之后**才会拿到那个过期的 0 ✓ —— 正是用户连着试几次才报上来的形状 ✓。
+         * ⇒ 升沿这一下：**先把变量写成安全区**（宁可先多留一点 ✗，也绝不先压在状态栏里 ✓），
+         *   紧接着**在同一个 tick 里当场重算一次** ✓（`tuneDshPreviewSafeArea()` 会按实测收窄 ✓）
+         *   ⇒ 浏览器只会画"收窄之后"的那一帧 ✓，中间那一步不会上屏 ✓。
+         */
+        if (!was) {
+          try {
+            var safeTopNow = safeTopPx()
+            document.documentElement.style.setProperty(
+              '--dshm-preview-pad',
+              'max(env(safe-area-inset-top, 0px), ' + String(safeTopNow) + 'px)',
+            )
+          } catch (error) {
+            void error
+          }
+          // ★ 同一 tick 里按实测收窄（缓存会因为"换了层"而失效 ⇒ 它一定真的重算 ✓）
+          try {
+            if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+          } catch (error) {
+            void error
+          }
+        }
         // ★ round 170：真的认出来了 ⇒ pending 这一笔可以收了 ✓（见 openFileInDshPreview ✓）
         try {
           if (document.body.dataset.dshmPreviewPending !== undefined) delete document.body.dataset.dshmPreviewPending
