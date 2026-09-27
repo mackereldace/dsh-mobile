@@ -4951,52 +4951,6 @@
   /** ★ round 176：认不出预览层时的诊断节流（签名 + 上次记录时刻 ✓，见 `dshPreviewSurface` ✓）。 */
   var dshmPreviewMissSig = ''
   var dshmPreviewMissAt = 0
-  /**
-   * ★★ round 180：预览期间的**"上屏前修正"观察者** ✓ —— 这条才是"首帧即正确"的唯一可能 ✓。
-   *
-   * ## 为什么必须用它（用户一句话点破的 ✗）
-   * 用户原话："**他只在刚打开出现**，我给你升沿又有什么用呢？"✓ —— 完全正确 ✓：
-   * 那条工具行是 DSH **渲染出来**的 ✓，而我们所有修正（200ms 心跳 ✓、我加的 60ms 短轮询 ✓、
-   * 升沿诊断 ✓）都跑在"它已经在屏幕上"之后 ✗ ⇒ **再快也是"先闪一下再修"** ✗。
-   * ⇒ 唯一能根治的位置是**它进 DOM 的那一刻、在它被绘制之前** ✓。
-   *
-   * ## 为什么观察者能做到 ✓
-   * `MutationObserver` 的回调是**微任务** ✓ —— 浏览器在**下一次绘制之前**清空微任务队列 ✓
-   * ⇒ 在回调里写 `top` / 内边距 = 那一层**从来没有以错误的位置上过屏** ✓✓（不是"先闪后修"✓）。
-   * 这也是 §4.2 当年给"壳 insets"写下的同一条道理（"脚本比布局早 ⇒ 首帧即正确"✓）——
-   * 只不过**预览自己那套 chrome 当年没有这条保证** ✗（只有 200ms 心跳 ✓），缺口一直在这儿 ✓。
-   *
-   * ## 成本与边界 ✓
-   * · **只在预览开着时挂** ✓（开：`syncDshPreviewState` 的 open 支 ✓；关：close 支 disconnect ✓）
-   *   ⇒ 聊天/稳态里一个观察者都不多 ✗；
-   * · 回调里只调一次 `tuneDshPreviewSafeArea()` ✓（命中测试 ✓，与 DOM 大小无关 ✓）；
-   * · DSH 一次重渲染会是**一个批次** ⇒ 只跑一次 ✓（不会每插一个节点跑一遍 ✓）。
-   */
-  var dshmPreviewChromeObserver = null
-  function ensurePreviewChromeObserver(on) {
-    try {
-      if (on === true) {
-        if (dshmPreviewChromeObserver !== null) return
-        if (typeof MutationObserver !== 'function') return
-        if (document.body === null || document.body === undefined) return
-        dshmPreviewChromeObserver = new MutationObserver(function () {
-          try {
-            if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
-          } catch (error) {
-            void error
-          }
-        })
-        dshmPreviewChromeObserver.observe(document.body, { childList: true, subtree: true })
-        return
-      }
-      if (dshmPreviewChromeObserver !== null) {
-        dshmPreviewChromeObserver.disconnect()
-        dshmPreviewChromeObserver = null
-      }
-    } catch (error) {
-      void error
-    }
-  }
 
   /**
    * ★★ round 157（B ✓）：**"为看 DSH 预览而收起的文件面板"要还回去** 的那笔记忆 ✓。
@@ -8495,8 +8449,6 @@
          *   ⇒ 浏览器只会画"收窄之后"的那一帧 ✓，中间那一步不会上屏 ✓。
          */
         if (!was) {
-          // ★ round 180：挂上"上屏前修正"观察者 ✓（见它的长注释 ✓）
-          ensurePreviewChromeObserver(true)
           try {
             var safeTopNow = safeTopPx()
             document.documentElement.style.setProperty(
@@ -8609,15 +8561,8 @@
               } catch (error) {
                 void error
               }
-              /**
-               * ★★ round 179：**先把"手机跑的是哪一版"写进这一行** ✗ ——
-               *   我连着改了七轮、用户每次都说"没变化/还不行" ✓，而之前每一张截图里
-               *   **都看不出 boot.js 的版本** ✗（`[外壳]` 那行是 **APK** 的戳 ✓，不是我们的 ✓）
-               *   ⇒ 必须先排除"手机上还是旧版 boot.js"这个可能 ✓（它一次就能解释掉"没变化"✓）。
-               */
               debugBoxLine(
-                '[preview] 升沿：boot=' + String(typeof BOOT_STAMP === 'string' ? BOOT_STAMP : '(未知)') +
-                  '｜pad=' + (diagPad === '' ? '(空)' : diagPad) +
+                '[preview] 升沿：pad=' + (diagPad === '' ? '(空)' : diagPad) +
                   '｜safeTop=' + String(safeTopPx()) + '｜layerTop=' + String(diagTop) +
                   '｜层内 fixed/sticky=' + (diagKids.length === 0 ? '无' : diagKids.join('、')) +
                   '｜状态栏那条带子里=' + (diagBand.length === 0 ? '空' : diagBand.join(' / ')),
@@ -8703,8 +8648,6 @@
         //   —— 宽限只是为了防止重渲染造成的单帧抖动 ✓，180ms（≈ 两次轮询）足够 ✓。
         if (now - dshPreviewAbsentSince < 180) return true
         delete document.body.dataset.dshmDshPreview
-        // ★ round 180：预览关了 ⇒ 观察者摘掉 ✓（稳态里不留任何额外观察者 ✓）
-        ensurePreviewChromeObserver(false)
         dshPreviewAbsentSince = 0
         // ★ 预览关掉了 ⇒ 可返回的东西少了一层 ✓（这条与 finishPreviewCloseNow 是同一个事实 ✓）
         reportBackAvailable()
