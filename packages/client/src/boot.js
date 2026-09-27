@@ -613,8 +613,116 @@
       settingsOverlayOpen() ||
       body.dataset.dshmFiles === 'open' ||
       body.dataset.dshMobileDrawer === 'open' ||
-      body.dataset.dshmDshPreview === '1'
+      body.dataset.dshmDshPreview === '1' ||
+      /**
+       * ★★ round 163（C ✓）：两级**内容层**的返回（「轨迹」⇒「对话」✓、
+       *   子代理会话 ⇒ 上一级 ✓ —— 见 `backOutOfTrajectoryView` /
+       *   `backOutOfSubagentSession` 的长注释 ✓）。
+       *
+       * ★ 这两条**必须在这里也回答"有"** ✗✗ —— 顺序是"壳**先问** `backAvailable` ✓，
+       *   为真才把这一下交给网页"（见 `MainActivity.handleBackPressed` ✓）⇒
+       *   这里漏了 ⇒ 返回键**根本到不了** `dshmBack()` ✓ ⇒ `goBack()`（DSH 从不写历史 ✗）
+       *   ⇒ `finish()` = **退出 App** ✗。用户报的"退不出来"正是这个形状 ✓。
+       */
+      backOutOfTrajectoryView(false) ||
+      backOutOfSubagentSession(false)
     )
+  }
+
+  /**
+   * ★★ round 163（C ✓）：**「轨迹」页退回「对话」** —— 用户原话（2026-09-27）：
+   *   "只做 C，但不做侧滑了，只做返回，同理给**轨迹那一页**也做一个无侧滑返回"✓。
+   *
+   * ## 为什么这件事得我们做 ✗
+   * 「对话 | 轨迹」是 DSH 自己的 view 状态 ✓ —— 它**不写 URL**（整份客户端里
+   * 一处 `pushState` 都没有 ✓）、也不进任何"层级" ✓ ⇒ 站在「轨迹」页按返回，
+   * 壳那边只能 `goBack()`（无历史）→ `finish()` = **退出 App** ✗。
+   *
+   * ## 判据与动作都用 DSH 自己那颗 tab ✓（语义属性，不是哈希类名 ✓）
+   *   · **读**：`button[role="tab"]` 里当前 `aria-selected="true"` 的那颗**不是「对话」** ⇒ 可以退 ✓；
+   *   · **动**：点「对话」那颗 ⇒ 走 DSH 自己的 `onClick: () => selectView(id)` ✓
+   *     （我们不碰它的状态 ✗）。
+   * ★ 认"哪颗是对话"**不靠顺序** ✗：先按可见文案找（`对话` / `Conversation` ✓），
+   *   找不到才退回**第一颗** ✓ ⇒ 以后 DSH 多一个 view、或语言变了，也不会退错层 ✓。
+   *
+   * @param act - `true` = 真的点下去 ✓；`false`（或缺省）= 只回答"能不能退" ✓。
+   */
+  function backOutOfTrajectoryView(act) {
+    try {
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return false
+      var row = header.querySelector('[role="tablist"]')
+      if (row === null || row === undefined) return false
+      var tabs = row.querySelectorAll('[role="tab"]')
+      if (tabs.length < 2) return false
+      var active = null
+      var conversation = null
+      for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i].getAttribute('aria-selected') === 'true') active = tabs[i]
+        if (conversation !== null) continue
+        var label = String(tabs[i].textContent || '').replace(/\s+/g, '')
+        if (label === '对话' || /^conversation$/i.test(label)) conversation = tabs[i]
+      }
+      if (conversation === null) conversation = tabs[0]
+      if (active === null || active === conversation) return false
+      if (act !== true) return true
+      conversation.click()
+      return true
+    } catch (error) {
+      debugBoxLine('[back] 退回「对话」失败：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  /**
+   * ★★ round 163（C ✓）：**子代理会话退回上一级** —— 用户原话：
+   *   "目前进入子代理聊天以后退不出来，只能走左侧聊天页面回到主对话兜底"✓。
+   *
+   * ## 真根（读 DSH 装在本机的那份源码得到，不是猜 ✓）
+   * DSH **自己就有一个**"上一级"的入口 ✓ —— 会话头渲染的面包屑
+   * `nav.crumbs > span.crumbSeg > button.crumb` ✓，`onClick: () => open(summary.id)` ✓
+   * （父会话本身也是子代理时，那一格走 lineage 槽、带 `openTitle = () => open(parentId)` ✓，
+   * `onClick` 同样是导航 ✓）。
+   * **但它被我们藏掉了** ✗ —— round 155/158 为了让入口出现在「轨迹」右边，把标题行里
+   * "不在入口祖先链上"的节点全 `display:none` 了 ✓，而祖先面包屑正好是入口的**兄弟**
+   * （`tagLineageEntry` 只把 `entry.parentElement` 往上一路标成 chain ✓）⇒
+   * 手机上它**一个像素都不显示** ✓✓。
+   * ★ 于是这里**不新造控件**（用户选的是"只做 C"✓）：把那颗**已经存在**的按钮点一下 ✓ ——
+   *   `display:none` 不影响合成 click ✓（React 的 `onClick` 挂在根容器上 ✓，命中测试用不上 ✓）。
+   *
+   * ## 判据为什么用面包屑的**格数** ✓
+   * `deriveAncestry()` 只在"当前会话是子代理"时才会给出 ≥2 格 ✓
+   * （从当前会话一路向上 `unshift`、遇到非子代理就停 ✓）⇒
+   * "**≥2 格**" = "此刻在子代理会话里" ✓ —— 与我们那颗控件认不认得出入口**无关** ✓
+   * （控件坏了这条路照样能用 ✓）。
+   *
+   * ★ 顺带记下 DSH 侧的事实（省得下次再查 ✓）：它的"子代理切换器"菜单里**只有兄弟/下级** ✗
+   *   （`CatalogDropdown` 只列 `kind === "child"` 的条目 ✓；`parentAvailable` 只用于
+   *   "父会话不在线 ⇒ 变只读" ✓）⇒ 菜单里**没有向上的口子** ✓，"走左抽屉"是唯一兜底 ✓。
+   *
+   * @param act - `true` = 真的点下去 ✓；`false`（或缺省）= 只回答"能不能退" ✓。
+   */
+  function backOutOfSubagentSession(act) {
+    try {
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return false
+      var candidates = header.querySelectorAll('[class*="crumbSeg"]')
+      var segs = []
+      for (var i = 0; i < candidates.length; i++) {
+        // ★ 子串先筛、再用 `classHasSuffix` 确认 ✓（"选择器写太宽"这个项目已经栽过四次 ✗）
+        if (classHasSuffix(candidates[i], '_crumbSeg')) segs.push(candidates[i])
+      }
+      if (segs.length < 2) return false
+      // 紧邻的上一级 = **倒数第二格** ✓（最后一格是"当前会话"✓，它那颗按钮是 `disabled` 且没有 onClick ✗）
+      var target = segs[segs.length - 2].querySelector('button')
+      if (target === null || target === undefined) return false
+      if (act !== true) return true
+      target.click()
+      return true
+    } catch (error) {
+      debugBoxLine('[back] 退回上一级失败：' + String(error && error.message ? error.message : error))
+      return false
+    }
   }
 
   /**
@@ -644,6 +752,8 @@
    *
    * 按**最上层优先**依次尝试关掉 ✓：
    *   ① DSH 原生设置弹窗 ✓ ② DSH 预览 ✓ ③ 文件面板 ✓ ④ 左抽屉 ✓
+   *   ★★ round 163（C ✓）再加**两级内容层**：⑤「轨迹」页 ⇒「对话」✓
+   *   ⑥ 子代理会话 ⇒ 上一级 ✓（见 `backOutOfTrajectoryView` / `backOutOfSubagentSession` ✓）。
    *   （★ round 158 把"DSH 预览"从第 ④ 提到第 ② ✓ —— 理由见下面那一大段 ✓）
    * 关掉任意一个就返回 `true` = "这一下被我吃掉了" ✓；
    * 一个都没开返回 `false` ✓ = 交给壳（网页历史回退 ✓ / 都没有就退出 ✓）。
@@ -719,6 +829,25 @@
       }
       if (body.dataset.dshMobileDrawer === 'open') {
         runtime.closeDrawer()
+        reportBackAvailable()
+        return true
+      }
+      /**
+       * ★★ round 163（C ✓）：**两级"内容层"返回** —— 覆盖层（①②③④ ✓）全在上面，
+       *   这两级是**页面自己**的层级 ✓（用户原话："只做 C，但不做侧滑了，只做返回，
+       *   同理给轨迹那一页也做一个无侧滑返回"✓）：
+       *     ⑤ 「轨迹」页 ⇒ 退回「对话」✓
+       *     ⑥ 子代理会话 ⇒ 退回**上一级**（父会话）✓
+       * ★ 顺序"由内到外" ✓：先离开当前 view ✓、再离开当前会话 ✓ ——
+       *   站在子代理会话的轨迹页上连按两次返回 = 对话 → 主对话 ✓。
+       * ★ 用户明确要求**不做侧滑** ✗ ⇒ 这两级**只接返回键** ✓：
+       *   `installSwipeNavigation` 一个字都没动 ✓（侧滑那一套仍然只管抽屉/面板/预览 ✓）。
+       */
+      if (backOutOfTrajectoryView(true) === true) {
+        reportBackAvailable()
+        return true
+      }
+      if (backOutOfSubagentSession(true) === true) {
         reportBackAvailable()
         return true
       }
@@ -9600,6 +9729,37 @@
       setDrawer(false)
       openFilesSheet(sheet, getTunnel)
     })
+
+    /**
+     * ★★ round 163（C ✓）：**内容层那两级返回的"可返回状态"要跟得上 DSH 的 DOM 变化** ✓。
+     *
+     * 为什么要单独补这一条 ✗：主观察者的 `attributeFilter` **只盯 `class`** ✓，
+     * 而"切 view"改的是 `aria-selected` ✓、"进/出子代理会话"改的是会话头子树 ✓ ——
+     * 前者可能**一整帧都不上报** ✗ ⇒ 刚点完「轨迹」立刻按返回时，壳那边还以为
+     * `backAvailable=false` ⇒ 直接 `finish()` = **退出 App** ✗✗（最难受的一种失败）。
+     * 这条**捕获阶段**的 click 监听专门覆盖那一瞬间 ✓：点在 tab 或子代理入口上就稍后重报一次 ✓
+     * （60ms：够 DSH 把状态与 DOM 落定 ✓）。
+     * ★ 判据全用**语义属性** ✓（`role="tab"` ✓ / `aria-haspopup="tree"` ✓ —— 子代理入口就是它 ✓），
+     *   不碰哈希类名 ✗、不用 `[class*=…]` 子串 ✗（本项目在这上面栽过四次 ✓）。
+     */
+    try {
+      document.addEventListener(
+        'click',
+        function (event) {
+          try {
+            var node = event === null || event === undefined ? null : event.target
+            if (node === null || node === undefined || node.closest === undefined) return
+            if (node.closest('[role="tab"], [aria-haspopup="tree"]') === null) return
+            globalThis.setTimeout(reportBackAvailable, 60)
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+    } catch (error) {
+      void error
+    }
 
     /**
      * ★★ round 142（本轮第 1 条）：文件面板底部那行「端侧能力」⇒ 进**只含端侧能力**的视图 ✓
