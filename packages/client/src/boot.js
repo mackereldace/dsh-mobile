@@ -6926,20 +6926,35 @@
        */
       'body[data-dshm-dsh-preview="1"] #dsh-mobile-top { visibility: hidden; }',
       /**
-       * ★★ round 169（用户实拍："预览只是让顶栏在状态栏的时间更短暂了些，**表现为闪烁**"✗）：
-       *   上面那条靠**标记**（JS 探测写的 ✓ —— 200ms 轮询 + 观察者 ✓，实测最多慢半拍 ✓）
-       *   ⇒ 预览刚出现的那一两百毫秒里顶栏还画着 ✓（而壳的 insets 还没上报 ⇒ 它先挤进状态栏 ✓）
-       *   = 用户看到的**闪烁** ✗。
-       * ⇒ 补一条**纯 CSS 的结构判据** ✓（`body:has(预览层)` ✓，与 round 167 抬 z-index 用的是同一条 ✓）：
-       *   DOM 里一出现预览层，**同一帧**就藏 ✓，不等任何 JS ✓。两条并存 ✓（哪条先成立都行 ✓）。
+       * ★★ round 170：这里 round 169 曾用 `body:has(预览层)` 来**即时**藏顶栏 ✗ ——
+       *   **撤回** ✓，因为 `:has()` 是**粘的** ✗：DSH 的预览层"被隐藏/最小化"时**仍然留在 DOM 里** ✓
+       *   （round 157 实测 ✓）⇒ `:has()` 恒真 ⇒ **顶栏永远藏着** ✓ ⇒ 我们的 ☰ 按钮
+       *   `visibility:hidden` 之后**点不到** ✓ ⇒ 验收里"抽屉已滑入"当场变红 ✓（本轮实测 ✓）。
+       * ⇒ 顶栏的即时隐藏改由**我们请求预览那一瞬间**的 `pending` 标记负责 ✓（下面那条 ✓）——
+       *   它精确 ✓（只在"我们点了文件、预览还没出现"这段窗口里成立 ✓）、且一定会被清掉 ✓。
+      /**
+       * ★★ round 170（用户实拍："**顶栏依旧闪**"✗）：上面两条（标记版 + `:has()` 版）都只能
+       *   **事后**成立 ✗ —— DSH 预览那一层是**点完文件之后**才渲染的 ✓，而我们的顶栏在点击那一刻
+       *   就还在画着 ✓ ⇒ 中间那一段它必然露一次脸 ✗；露脸时壳的 insets 若还没上报 ✓
+       *   （`--dshm-safe-top` 还是 0 ✓）它就正好**压在状态栏上** ✓ = 用户说的"闪/跑到状态栏" ✓。
+       * ⇒ 唯一能根治的位置是**我们请求预览的那一瞬间** ✓：`openFileInDshPreview()` 里在调
+       *   `bridge.open` **之前**打上 `body[data-dshm-preview-pending="1"]` ✓，这里据此**立刻**藏 ✓
+       *   —— 从"点了文件"到"预览层出现"之间**一帧都不露** ✓。
+       *   清掉的时机（三处都在代码里 ✓）：真的出现了（标记/`:has()` 接手 ✓）、打不开（失败分支 ✓）、
+       *   迟迟不出现（兜底超时 ✓）。
        */
-      'body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) #dsh-mobile-top {',
-      '  visibility: hidden !important;',
+      'body[data-dshm-preview-pending="1"] #dsh-mobile-top,',
+      'body[data-dshm-preview-pending="1"] [data-dshm-lineage-host] {',
+      '  visibility: hidden !important; opacity: 0 !important; pointer-events: none !important;',
       '}',
-      'body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) [data-dshm-lineage-host] {',
-      '  opacity: 0 !important; pointer-events: none !important;',
-      '}',
-      'body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }',
+      /**
+       * ★★ round 170：这里原来有一条 `body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }` ✗ ——
+       *   用户实拍："预览返回……**主界面仍然是从右往左到目标位置**"✗：预览开着时让位量被清零 ✓，
+       *   预览一关这条规则失效 ⇒ 让位量**弹回**"面板开着"的 `-264px` ✓ ⇒ 主页面又滑了一下 ✗。
+       *   ★ 而 round 169 起，预览期间**面板状态一个字都没变** ✓（它只是被压在底下 ✓）⇒
+       *   让位量本来就**不该变** ✗：预览是**整屏**的 ✓，它底下主页面在哪儿**根本看不见** ✓
+       *   ⇒ 保持原值 ⇒ 预览一关**零位移** ✓（用户要的"平滑" ✓）。
+       */
       /**
        * ★★ round 165（用户 B ✓）：**DSH 预览开着时，子代理入口也必须让开** ✗✗ ——
        *   用户原话："打开文件预览以后，文件目录居然在文件预览的上方，而且**我们新加的那个
@@ -7415,7 +7430,14 @@
        *     （round 158 ✓）⇒ 按返回**先关预览** ✓、面板状态原封不动 ✓ ⇒ 预览一关、面板**立刻就在**
        *     （同一个目录、同一份滚动位置 ✓）= 用户要的"平滑回到打开前" ✓✓。
        */
-      '  body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) [class*="rightbarCol"] {',
+      /**
+       * ★★ round 170：这条原来也是 `body:has(预览层)` ✗ —— 同一个粘性问题 ✓（预览层被隐藏后仍在 DOM 里 ✓
+       *   ⇒ 右栏永远抬在 190 ⇒ 我们面板永远被它压着 ✗）。改成**两个精确信号取或** ✓：
+       *   · `data-dshm-preview-pending`（我们请求预览的那一瞬间 ✓，见 `openFileInDshPreview` ✓）；
+       *   · `data-dshm-dsh-preview`（探测链认出来的"真的开着" ✓，它会在关闭/最小化时被清掉 ✓）。
+       */
+      '  body[data-dshm-preview-pending="1"] [class*="rightbarCol"],',
+      '  body[data-dshm-dsh-preview="1"] [class*="rightbarCol"] {',
       '    z-index: 190 !important;',
       '  }',
       '  [class*="handle"] { display: none !important; }',
@@ -8268,6 +8290,12 @@
       if (open) {
         dshPreviewAbsentSince = 0
         document.body.dataset.dshmDshPreview = '1'
+        // ★ round 170：真的认出来了 ⇒ pending 这一笔可以收了 ✓（见 openFileInDshPreview ✓）
+        try {
+          if (document.body.dataset.dshmPreviewPending !== undefined) delete document.body.dataset.dshmPreviewPending
+        } catch (error) {
+          void error
+        }
         // ★ "DSH 预览开着"也算一层 ✓ —— 上报给壳，系统返回先关它 ✓（见 dshmBack ✓）
         reportBackAvailable()
         /**
@@ -13422,22 +13450,67 @@
    */
   function openFileInDshPreview(sheet, entry, filesState) {
     var bridge = dshPreview()
+    /**
+     * ★★ round 170（用户实拍："**顶栏依旧闪**"✗）：在**请求预览之前**就把我们的顶栏/入口藏起来 ✓。
+     *   为什么必须提前到这一行 ✗：DSH 那一层是**点完文件之后**才渲染的 ✓ ——
+     *   靠标记（JS 探测 ✓）或 `:has()`（要等那一层进 DOM ✓）都只能**事后**知道 ✓
+     *   ⇒ 从"点文件"到"预览出现"这段里顶栏必然露一次脸 ✓；露脸时壳的 insets 若还没上报 ✓
+     *   （`--dshm-safe-top` 仍是 0 ✓）它就正好**压在状态栏上** ✓ = 用户说的"闪/跑到状态栏" ✓。
+     * 清掉的三条路 ✓：真的出现了（标记接管 ✓，见 `syncDshPreviewState` ✓）、打不开（下面每个失败分支 ✓）、
+     *   迟迟不出现（兜底超时 ✓）——**每一条都清 ✓**，绝不留下"顶栏永久隐藏"✗。
+     */
+    var markPending = function (on) {
+      try {
+        if (document.body === null || document.body === undefined || document.body.dataset === undefined) return
+        if (on) document.body.dataset.dshmPreviewPending = '1'
+        else delete document.body.dataset.dshmPreviewPending
+      } catch (error) {
+        void error
+      }
+    }
     if (bridge === undefined) {
       setNote('这个 DSH 版本还没有预览桥（重启 DSH 后可用 ✓）——先用手机自带的预览 ✓')
       return false
+    }
+    // ★ 请求之前就打上（见上面那段说明 ✓）
+    markPending(true)
+    // ★ 兜底：万一预览迟迟不出现（桥静默失败 ✓），**必须**把顶栏还回来 ✗（绝不留"永久隐藏"✗）
+    try {
+      globalThis.setTimeout(function () {
+        markPending(false)
+      }, 12000)
+    } catch (error) {
+      void error
     }
     var result
     try {
       result = bridge.open({ path: entry.path })
     } catch (error) {
+      markPending(false)
       setNote(
         'DSH 预览打不开：' + String(error && error.message ? error.message : error) + ' —— 先用手机自带的预览 ✓',
       )
       return false
     }
     if (result === undefined || result === null || result.ok !== true) {
+      markPending(false)
       setNote('DSH 预览打不开：' + String((result && result.reason) || '未知原因') + ' —— 先用手机自带的预览 ✓')
       return false
+    }
+    /**
+     * ★ round 170：**预览真的出现了 ⇒ pending 交棒给标记** ✓（标记那条在 `syncDshPreviewState`
+     *   的开支里清 pending ✓ —— 两条规则同时成立也无所谓 ✓，但早清掉更干净 ✓）。
+     */
+    if (typeof syncDshPreviewState === 'function') {
+      try {
+        globalThis.setTimeout(function () {
+          if (document.body !== null && document.body !== undefined && document.body.dataset !== undefined) {
+            if (document.body.dataset.dshmDshPreview === '1') markPending(false)
+          }
+        }, 400)
+      } catch (error) {
+        void error
+      }
     }
     // 立刻同步一次"预览开着"✓（观察器要等下一帧 ✓，而这一步可能已经推开了布局 ✓）
     if (typeof syncDshPreviewState === 'function') setTimeout(syncDshPreviewState, 0)
