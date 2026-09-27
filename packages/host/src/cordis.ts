@@ -27,7 +27,8 @@ import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from './devices.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
-import { detectLanIp, isAddressPresent } from './lan.ts'
+import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
+import { createTlsManager } from './tls-cert.ts'
 import {
   createMobileHost,
   DEFAULT_CONFIG,
@@ -227,6 +228,44 @@ function resolveDistIndex(): string | undefined {
 export function apply(ctx: Context, config: Config = {}): void {
   const dshHome = resolveDshHome(config.dshHome)
   const dataDirectory = join(dshHome, 'storages', 'dsh-mobile')
+
+  /**
+   * ── 自签证书：**首启缺就生成、有就复用**（B1）───────────────────────────
+   *
+   * 为什么放在加载期（而不是等第一次 HTTPS 请求）：证书"有没有、对不对"是
+   * 一整条链路（手机装 CA、浏览器不报证书错、`/mobile/trust.crt` 能下载）的前提，
+   * 让它**在启动那一刻就有结论**，比等到用户手机上打不开再回头查便宜得多。
+   *
+   * ★ 失败**只警告、不抛错**：插件加载失败会把整个 DSH 带下去，而"没有证书"
+   *   只是一条明确可恢复的降级。失败原因会同时出现在：
+   *   `/mobile/manifest` 的 `tls.error` 与 `/mobile/admin/selfcheck` 的 `tls.error`
+   *   ——**绝不静默**（这是本条的验收要求之一）。
+   *
+   * ★ 生成位置与 DSH_HOME 绑定：不再写死 `~/.dsh`（`/mobile/trust.crt` 原先写死过，
+   *   临时 DSH_HOME / 多 profile 都读不到自己的证书）。
+   */
+  const tls = createTlsManager({
+    directory: join(dataDirectory, 'tls'),
+    // 每次 ensure 按**当时**网卡现算 ⇒ 换网后重签叶子时 SAN 才是新的
+    addresses: () => listLanCandidates().map((candidate) => candidate.address),
+    onResult: (status) => {
+      if (status.ok) {
+        console.log(
+          `[dsh-mobile] 自签 TLS 就绪：CA=${status.caFingerprint ?? '?'}` +
+            `${status.createdCa ? '（**新建**，手机需重装一次根证书）' : '（复用）'}` +
+            `${status.resignedServer ? '；服务器证书已按当前地址重签（手机信任不受影响）' : ''}` +
+            ` 目录=${status.directory}`,
+        )
+      } else {
+        console.warn(
+          `[dsh-mobile] 自签 TLS **不可用**（其余功能不受影响，但手机端 HTTPS 会失败）：` +
+            `${status.error ?? '未知原因'}（目录：${status.directory}）`,
+        )
+      }
+    },
+  })
+  tls.ensure()
+
   const store = new DeviceStore({
     directory: dataDirectory,
     ...(config.auditLimit === undefined ? {} : { auditLimit: config.auditLimit }),
@@ -282,6 +321,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       : { phoneBaseUrl: config.phoneBaseUrl }),
     distIndex: resolveDistIndex,
     renderIndex: (html) => ctx.webServer.renderIndex(html),
+    // 自签证书管理器：manifest / 自检 / `/mobile/trust.crt` 都从它取（见上面的长注释）
+    tls,
     ...(config.capabilityCeiling === undefined
       ? {}
       : {

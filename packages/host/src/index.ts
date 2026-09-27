@@ -19,7 +19,6 @@ import type { KeyObject } from 'node:crypto'
 import { randomBytes, randomInt } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
@@ -43,6 +42,15 @@ import {
 
 import { DeviceStore, type AuditEntry } from './devices.ts'
 import { DeviceCallQueue, DEVICE_CAPABILITIES, type DeviceCapability } from './device-calls.ts'
+import {
+  deriveLanTrust,
+  isIpLiteralHostname,
+  matchesDerivedTrust,
+  type LanTrustSnapshot,
+  type NetworkInterfacesReader,
+} from './lan-trust.ts'
+import { probeDshFrontend, type DshFrontendProbe } from './dsh-probe.ts'
+import type { TlsManager, TlsStatus } from './tls-cert.ts'
 import { PAIRING_PAGE_HTML } from './pairing-page.ts'
 import { TunnelSession } from './tunnel.ts'
 import { listOpenInAppTargets, openInApp } from './open-in-app.ts'
@@ -74,6 +82,15 @@ const HOST_FEATURES = [
   'relay.dialer', // 中继外拨（电脑主动拨出，不需要入站端口）
   'relay.backhaul', // 中继页面回源
   'pairing.ticketFallback', // 票据失效时回退到已配对设备
+  /**
+   * ★ 插件封装第一阶段（2026-09-27，见 `16-插件封装-第一阶段.md`）：下面四条是**本轮新加**的
+   * 宿主能力。`scripts/check-production.mjs` 的 `EXPECTED_FEATURES` **必须同步** ✓ ——
+   * 只改一处会让 `check:prod` 变红 ✗，或让新能力没人盯着 ✗（两处一起改是这条约定的全部意义 ✓）。
+   */
+  'trust.autoDerive', // 信任判据按**当时网卡**现算（不再要求手传 IP）
+  'tls.selfSign', // 首启缺证书就自签（10 年 CA；叶子按需重签）
+  'admin.devicesRemove', // 正式删除设备记录（内存表 + devices.json 同时更新，不用重启）
+  'admin.selfcheck', // 一条请求自检：证书 / 端口 / 信任推导 / 设备数 / DSH 前端探针
 ] as const
 
 /** 插件配置。 */
@@ -105,6 +122,14 @@ export interface MobileHostConfig {
   relayPoolSize?: number
   /** 回源通道地址；省略时由 `relayUrl` 把 `/attach` 换成 `/attach-http` 推导。 */
   relayHttpUrl?: string
+  /**
+   * 信任推导里**本机 hostname** 那半边是否放行（默认 true）。
+   *
+   * 只有 IP 字面量那半边是"不可能被 rebinding 借用"的（见 `lan-trust.ts` 的长注释）；
+   * hostname 那半边是**精确匹配**本机名，够安全但不是零风险，因此留一个收紧的开关：
+   * 关掉之后只剩回环 ∪ 静态列表 ∪ 本机 IP 字面量，代价是用机器名访问会 403。
+   */
+  trustLocalNames: boolean
 }
 
 export const DEFAULT_CONFIG: MobileHostConfig = {
@@ -115,6 +140,7 @@ export const DEFAULT_CONFIG: MobileHostConfig = {
   maxMessageBytes: DEFAULT_MAX_MESSAGE_BYTES,
   idleTimeoutMs: 300_000,
   allowPersistentAuthorization: true,
+  trustLocalNames: true,
 }
 
 /**
@@ -182,6 +208,63 @@ export interface DeviceUpdate {
   expiresAt?: string | null
 }
 
+/**
+ * 自检报告（`GET /mobile/admin/selfcheck`）。
+ *
+ * ## 为什么要有它
+ *
+ * 现在的"现在到底好不好、缺什么"要靠 `scripts/check-production.mjs` 在电脑上跑一整套脚本，
+ * 而症状常常出现在**手机那一侧**（打不开、连不上），人在电脑前根本不知道该看哪一项。
+ * 这条路由把关键判据收成**一次请求**：证书在不在（指纹）、监听端口、信任判据的**当前**推导结果、
+ * `devices.json` 条数、以及 DSH 前端关键锚点的命中率。
+ *
+ * ★ 纪律：**拿不到就写"未知"，不许编**。所以 `dshFrontend.status` 允许是 `'unknown'`，
+ *   而 `tls.available === false` 表示本部署根本没注入证书管理器（不是"证书坏了"）。
+ */
+export interface MobileSelfcheck {
+  /** 总判据：证书可用 且 DSH 前端探针没有"全不命中"。`unknown` 不算失败（不编也不误报）。 */
+  readonly ok: boolean
+  readonly checkedAt: string
+  readonly host: { readonly hostId: string; readonly hostName: string; readonly hostFingerprint: string }
+  readonly tls: {
+    /** 本部署有没有注入证书管理器（`cordis.ts` 注入；纯协议测试里没有）。 */
+    readonly available: boolean
+    readonly ok: boolean
+    readonly directory: string
+    readonly createdCa: boolean
+    readonly createdServer: boolean
+    readonly resignedServer: boolean
+    readonly caFingerprint?: string
+    readonly serverFingerprint?: string
+    readonly serverSubjectAltName?: string
+    readonly caNotAfter?: string
+    readonly serverNotAfter?: string
+    /** 证书生成/读取失败的原因（**必须被说出来**，不许静默）。 */
+    readonly error?: string
+  }
+  readonly listen: {
+    /** 本机 DSH 的监听端口（回源通道用它做环回请求）。 */
+    readonly dshPort: number | null
+    readonly phoneBaseUrl: string | null
+    readonly endpoints: readonly string[]
+  }
+  readonly trust: {
+    /** 网卡是否真的取到了；false ⇒ 只剩静态列表可用。 */
+    readonly derived: boolean
+    readonly localAddresses: readonly string[]
+    readonly hostnames: readonly string[]
+    /** 本机 hostname 那半边是否放行（`MobileHostConfig.trustLocalNames`）。 */
+    readonly localNamesEnabled: boolean
+    readonly staticHosts: readonly string[]
+    /** 中继 authority（写进信任集合的那两条）。 */
+    readonly relay: readonly string[]
+  }
+  readonly devices: { readonly count: number; readonly connected: number; readonly revoked: number }
+  readonly dshFrontend: DshFrontendProbe
+  /** 人话版的"缺什么"（自检输出直接可读；空数组 = 没发现问题）。 */
+  readonly warnings: readonly string[]
+}
+
 /** 插件对外暴露的服务面。 */
 export interface MobileHostService {
   /**
@@ -242,10 +325,26 @@ export interface MobileHostService {
   listDevices(): DeviceRecord[]
   updateDevice(deviceId: string, update: DeviceUpdate): DeviceRecord | undefined
   revokeDevice(deviceId: string): boolean
+  /**
+   * **彻底删除**一条设备记录（不是撤销）。
+   *
+   * 与 `revokeDevice` 分开：撤销保留记录（审计可追溯、界面能显示"已撤销"），
+   * 删除是把条目从 `devices.json` 里抹掉 —— 这正是过去只能"改文件 + 立刻重启"才能做到的事
+   * （`DeviceStore` 只在构造时 `load()`、之后整表覆盖写回，手改文件会被下一次 `touch()` 写回）。
+   * 删除同样**立刻断开**该设备的在线隧道，否则"删了还能用"直到它自己断线。
+   */
+  removeDevice(deviceId: string): boolean
+  /** 批量删除所有**已撤销**的记录；返回删除条数。 */
+  removeRevokedDevices(): number
   listAudit(options?: { deviceId?: string; since?: string; limit?: number }): AuditEntry[]
   connectedCount(): number
   manifest(): MobileManifest
   connectedSession(deviceId: string): TunnelSession | undefined
+  /**
+   * 自检（`GET /mobile/admin/selfcheck`）的**纯数据**部分。
+   * 与 HTTP 路由分开，是为了让"现在到底好不好"这件事可以被单测直接断言。
+   */
+  selfcheck(): MobileSelfcheck
 }
 
 /** 完整宿主对象（服务面 + HTTP/upgrade 处理）。 */
@@ -338,6 +437,22 @@ export function createMobileHost(options: {
   readonly renderIndex?: (html: string) => string
   readonly clientBundleVersion?: string
   readonly dshVersion?: string
+  /**
+   * 网卡取值函数（默认 `os.networkInterfaces`）。
+   *
+   * 只为**可测**而存在：信任判据必须"每次请求按当时网卡现算"，而这件事只有在
+   * 能把网卡换掉的前提下才验得了（单测里塞一个可变函数，先后两次调用得到不同结论）。
+   */
+  readonly networkInterfaces?: NetworkInterfacesReader
+  /** 本机 hostname 取值函数（默认 `os.hostname`）；同样只为可测。 */
+  readonly hostname?: () => string
+  /**
+   * 自签证书管理器（由 `cordis.ts` 建好注入）。
+   *
+   * 省略时：manifest 里的 `tls` 标成不可用、自检标成 `available: false`、`/mobile/trust.crt`
+   * 退回"读不到就说清楚"的 404——**绝不让缺证书变成一句静默**。
+   */
+  readonly tls?: TlsManager
 }): MobileHost {
   const config: MobileHostConfig = { ...DEFAULT_CONFIG, ...options.config }
   const store = options.store
@@ -347,6 +462,83 @@ export function createMobileHost(options: {
   const sessions = new Map<string, TunnelSession>()
   /** 端侧请求队列（电脑 → 手机；见 device-calls.ts 的四条不变量）。 */
   const deviceCalls = new DeviceCallQueue()
+
+  /**
+   * ── 信任判据（本插件那道闸）─────────────────────────────────────────────
+   *
+   * 判据 = 回环（调用方单独判）∪ 静态列表 ∪ **自推导的本机地址/主机名**。
+   * 静态列表由调用方给（含 `phoneBaseUrl` 与中继 authority —— 它们本就是
+   * "部署方声明过的 authority"，与 `trustedHosts` 同类）。
+   *
+   * ★ 为什么是**函数**而不是启动时算好的常量：换 Wi-Fi / 插网线 / VPN 起来 /
+   *   Tailscale 掉线都会改变本机地址，启动时算一次就等于"换网必须重启 DSH"。
+   *   这里每次 `handleHttp` / `handleUpgrade` 重新推一遍（见 `lan-trust.ts` 的长注释：
+   *   判据的宽严与"为什么只有 IP 字面量才比本机 IP"都写在那里）。
+   *
+   * ★ 推导失败（拿不到网卡）时 `deriveLanTrust` 返回空地址 + `derived: false`
+   *   ⇒ 实际效果是**退回静态列表**，即比平常更严。方向刻意选这一侧。
+   */
+  function trustSnapshot(): LanTrustSnapshot {
+    return deriveLanTrust({
+      ...(options.networkInterfaces === undefined ? {} : { networkInterfaces: options.networkInterfaces }),
+      ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
+    })
+  }
+
+  /** 一个 authority 是否落在"静态 ∪ 自推导"里（回环由调用方先判）。 */
+  function isTrustedAuthority(
+    authority: ParsedAuthority,
+    staticHosts: readonly string[],
+    snapshot: LanTrustSnapshot,
+  ): boolean {
+    if (matchesTrusted(authority, staticHosts)) return true
+    // 收紧开关：关掉本机 hostname 那半边之后，只剩 IP 字面量能靠推导进来
+    if (config.trustLocalNames === false && !isIpLiteralHostname(authority.hostname)) return false
+    return matchesDerivedTrust(authority, snapshot)
+  }
+
+  /** 中继的两条 authority（写进信任集合用的那一份，与 upgrade 路径保持一致）。 */
+  function relayAuthorities(): string[] {
+    const out: string[] = []
+    for (const relayEndpoint of [config.relayUrl, config.relayHttpUrl]) {
+      if (typeof relayEndpoint === 'string' && relayEndpoint.length > 0) out.push(relayEndpoint)
+    }
+    return out
+  }
+
+  /**
+   * `/mobile/admin/*` 的来源判据。
+   *
+   * ★ 与栅栏的区别必须说清：栅栏放行**回环 hostname**（`localhost` / `127.0.0.1`）时
+   *   **不看 socket 来源**——它是防 rebinding / 防跨站的判据，不是身份。局域网客户端
+   *   完全可以发 `Host: localhost` 过栅栏。所以这里第一件事是判 `isLoopbackRequest(req)`
+   *   （socket 是否为回环；只有 socket 确实回环才采信 `x-forwarded-for`），
+   *   而**不能**用 `isLoopbackHostname(authority.hostname)` 顶替。
+   */
+  function isAdminSourceTrusted(req: IncomingMessage, authority: ParsedAuthority, snapshot: LanTrustSnapshot): boolean {
+    /**
+     * ★★ 2026-09-27 **用户拍板：这两条管理路由只允许本机（loopback）** ✓。
+     *
+     * 原先这里是"loopback ∪ 受信 authority（复用 A 的自推导判据）"，代价写在下面的历史注释里：
+     * 局域网里任何人拿**本机真实 IP** 就能 `POST /mobile/admin/devices/remove` 清空设备表
+     * （DoS：把所有人踢回重新配对；不是提权 —— 删记录不新增设备、不授予能力位，
+     * 重新配对仍要电脑端生成配对码并人工确认指纹）。
+     *
+     * 用户明确选择**收紧**：设备清理只在电脑本机上做（手机不再提供"一键清设备"）。
+     * ⇒ 判据只剩 `isLoopbackRequest(req)`（看 socket 与 `x-forwarded-for`，**不看 Host 长什么样**）
+     * —— 与文件里其它 `LOCAL_ONLY` 的判据同一把尺子 ✓。
+     *
+     * ★ 为什么不干脆复用外面那道栅栏：栅栏放行**回环 hostname**（`localhost` / `127.0.0.1`）时
+     *   并不看 socket 来源（那是为了兼容反代与 DNS rebinding 的判据）⇒ 一个局域网客户端
+     *   完全可以发 `Host: localhost` 过栅栏 ✗。所以这里必须另判 socket 来源 ✓。
+     *
+     * `authority` / `snapshot` 保留在签名里是为了让调用点与审计仍能拿到完整上下文 ✓
+     * （将来若要做"只允许某台已配对设备"的隧道内端点，判据也挂在这一层旁边 ✓）。
+     */
+    void authority
+    void snapshot
+    return isLoopbackRequest(req)
+  }
 
   /** 清理过期配对。 */
   function purgeExpired(now = Date.now()): void {
@@ -1073,6 +1265,45 @@ export function createMobileHost(options: {
     return true
   }
 
+  /**
+   * **彻底删除**一条设备记录（`/mobile/admin/devices/remove` 的唯一实现）。
+   *
+   * ## 为什么必须有这条正式路由
+   *
+   * `DeviceStore` 只在构造时 `load()` 一次，之后每次写都是**整张内存表覆盖文件**
+   * （`persist()` 写 `[...this.devices.values()]`）。于是"改 `devices.json` 再重启"
+   * 是过去唯一的清设备办法——手改文件会被下一次 `touch()` 原样写回，
+   * 这是项目文档里反复警告、也反复被踩的一条纪律。走 `store.remove()` 就绕开了它：
+   * 内存表与被删的文件**同时**更新，不需要重启。
+   *
+   * ## 为什么删除要连隧道一起断
+   *
+   * 与撤销同理：记录没了但**已建立的加密会话还在**，等于"删了还能用，直到它自己断线"。
+   * 撤销路径早就这么做（`revokeDevice`），删除没有理由更松。
+   */
+  function removeDevice(deviceId: string): boolean {
+    const existed = store.remove(deviceId)
+    if (!existed) return false
+    const session = sessions.get(deviceId)
+    if (session !== undefined) {
+      sessions.delete(deviceId)
+      session.close('device removed by the host')
+    }
+    store.record({ deviceId, kind: 'remove', detail: '设备记录已删除，隧道已断开', ok: true })
+    return true
+  }
+
+  /** 批量删除所有已撤销记录（`?revoked=1`）。返回删除条数。 */
+  function removeRevokedDevices(): number {
+    let removed = 0
+    // 先取快照再删：`list()` 返回深拷贝，删除过程中不会边遍历边改
+    for (const device of store.list()) {
+      if (device.authorization !== 'revoked') continue
+      if (removeDevice(device.deviceId)) removed += 1
+    }
+    return removed
+  }
+
   const service: MobileHostService = {
     store,
 
@@ -1196,6 +1427,8 @@ export function createMobileHost(options: {
       agentTool = status
     },
     revokeDevice,
+    removeDevice,
+    removeRevokedDevices,
     listAudit: (auditOptions) => store.listAudit(auditOptions),
     /**
      * 按 **6 位配对码**取出"给手机用的配对载荷"（base64url(UTF-8 JSON)）。
@@ -1220,7 +1453,26 @@ export function createMobileHost(options: {
 
     manifest(): MobileManifest {
       // 说明：manifest 是手机/诊断读取的公开信息，手机基地址本就不算机密（它就在二维码里）
-      return {
+      /**
+       * ★ 这里多出两个 `MobileManifest` 里没有的字段（`tls` / `dshFrontend`）。
+       *
+       * 为什么可以有：本阶段**不许改 `packages/protocol`**（交接纪律），而
+       * "证书生成失败必须明说"（B1）与"DSH 前端漂移要在 manifest 里提示不兼容"（doc 15 §4.2）
+       * 都要求 manifest 带上这两条状态。做法是返回一个**结构上兼容** MobileManifest 的更大对象
+       * —— TS 允许，JSON 多两个键，手机端旧代码读到多余字段直接忽略。
+       * 字段名刻意加前缀式命名（`tls` / `dshFrontend`），避免将来与 DSH 官方加的字段撞名。
+       */
+      const tls = options.tls?.status()
+      const probe = probeDshFrontend(options.distIndex?.())
+      const manifest: MobileManifest & {
+        tls?: {
+          ok: boolean
+          directory: string
+          caFingerprint?: string
+          error?: string
+        }
+        dshFrontend?: { status: DshFrontendProbe['status']; hits: number; total: number }
+      } = {
         protocolVersion: PROTOCOL_VERSION,
         hostId: options.identity.hostId,
         hostFingerprint: fingerprint(options.identity.signingKey.publicKey),
@@ -1233,6 +1485,105 @@ export function createMobileHost(options: {
           ? {}
           : { phoneBaseUrl: options.phoneBaseUrl }),
         features: { pairing: config.enabled, ephemeralKey: true, internet: false, phoneControl: false },
+        tls:
+          tls === undefined
+            ? // 没注入证书管理器：明确说"没有"，而不是省掉这个键（省掉会被读成"没问题"）
+              { ok: false, directory: '(未注入)', error: '本部署未注入证书管理器（cordis.ts 未启用）' }
+            : {
+                ok: tls.ok,
+                directory: tls.directory,
+                ...(tls.caFingerprint === undefined ? {} : { caFingerprint: tls.caFingerprint }),
+                ...(tls.error === undefined ? {} : { error: tls.error }),
+              },
+        dshFrontend: { status: probe.status, hits: probe.hits, total: probe.total },
+      }
+      return manifest
+    },
+
+    /**
+     * 自检的纯数据部分（HTTP 路由见 `handleAdminHttp`）。
+     *
+     * 刻意**不做**任何"可能失败但不影响判定"的事：全部用已有函数取现成值，
+     * 拿不到就留 `undefined`/`unknown`。这里出的数字必须是真的。
+     */
+    selfcheck(): MobileSelfcheck {
+      const tlsStatus = options.tls?.status()
+      const snapshot = trustSnapshot()
+      const devices = store.list()
+      const probe = probeDshFrontend(options.distIndex?.())
+      const relay = relayAuthorities()
+      const warnings: string[] = []
+
+      if (tlsStatus === undefined) {
+        warnings.push('未注入证书管理器：本部署无法自签证书（manifest.tls.ok=false）')
+      } else if (!tlsStatus.ok) {
+        warnings.push(`自签证书不可用：${tlsStatus.error ?? '未知原因'}（手机端将无法建立 HTTPS 信任）`)
+      } else if (tlsStatus.createdCa) {
+        warnings.push('本次**新建**了 CA：手机需要重新安装一次根证书，旧信任已作废')
+      }
+      if (!snapshot.derived) {
+        warnings.push(`网卡推导失败（${snapshot.error ?? '未知原因'}）⇒ 信任集合已退回静态列表（比平常更严）`)
+      } else if (snapshot.addresses.length === 0) {
+        warnings.push('本机没有非内部 IPv4：局域网手机只能靠静态 trustedHosts 或 hostname 进入')
+      }
+      if (probe.status === 'missing') {
+        warnings.push(`DSH 前端关键锚点 0/${probe.total} 命中：这一版 DSH 可能不兼容（手机端会半坏）`)
+      } else if (probe.status === 'partial') {
+        const missed = probe.items.filter((item) => !item.found).map((item) => item.name)
+        warnings.push(`DSH 前端锚点命中 ${probe.hits}/${probe.total}：缺 ${missed.join('、')}`)
+      } else if (probe.status === 'unknown') {
+        warnings.push('DSH 前端无法探测（拿不到产物）⇒ 兼容性**未知**')
+      }
+
+      return {
+        // 总判据：证书可用，且前端探针没有"全不命中"（unknown 不算失败——不编，也不误报）
+        ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing',
+        checkedAt: new Date().toISOString(),
+        host: {
+          hostId: options.identity.hostId,
+          hostName: options.identity.hostName,
+          hostFingerprint: fingerprint(options.identity.signingKey.publicKey),
+        },
+        tls:
+          tlsStatus === undefined
+            ? { available: false, ok: false, directory: '(未注入)', createdCa: false, createdServer: false, resignedServer: false }
+            : {
+                available: true,
+                ok: tlsStatus.ok,
+                directory: tlsStatus.directory,
+                createdCa: tlsStatus.createdCa,
+                createdServer: tlsStatus.createdServer,
+                resignedServer: tlsStatus.resignedServer,
+                // exactOptionalPropertyTypes：可选字段不能显式写 undefined，只能条件展开
+                ...(tlsStatus.caFingerprint === undefined ? {} : { caFingerprint: tlsStatus.caFingerprint }),
+                ...(tlsStatus.serverFingerprint === undefined ? {} : { serverFingerprint: tlsStatus.serverFingerprint }),
+                ...(tlsStatus.serverSubjectAltName === undefined
+                  ? {}
+                  : { serverSubjectAltName: tlsStatus.serverSubjectAltName }),
+                ...(tlsStatus.caNotAfter === undefined ? {} : { caNotAfter: tlsStatus.caNotAfter }),
+                ...(tlsStatus.serverNotAfter === undefined ? {} : { serverNotAfter: tlsStatus.serverNotAfter }),
+                ...(tlsStatus.error === undefined ? {} : { error: tlsStatus.error }),
+              },
+        listen: {
+          dshPort: options.selfPort ?? null,
+          phoneBaseUrl: options.phoneBaseUrl && options.phoneBaseUrl.length > 0 ? options.phoneBaseUrl : null,
+          endpoints: options.endpoints(),
+        },
+        trust: {
+          derived: snapshot.derived,
+          localAddresses: snapshot.addresses,
+          hostnames: snapshot.hostnames,
+          localNamesEnabled: config.trustLocalNames !== false,
+          staticHosts: [...(options.trustedHosts ?? [])],
+          relay,
+        },
+        devices: {
+          count: devices.length,
+          connected: sessions.size,
+          revoked: devices.filter((device) => device.authorization === 'revoked').length,
+        },
+        dshFrontend: probe,
+        warnings,
       }
     },
   }
@@ -1389,6 +1740,66 @@ export function createMobileHost(options: {
     }
 
     respondJson(res, 404, wireError(ErrorCode.Internal, `unknown mobile endpoint ${url.pathname}`))
+  }
+
+  /**
+   * 管理员端点的 HTTP 处理（`/mobile/admin/*`）。
+   *
+   * 授权**不在这里**判——它在 `handleHttp` 的栅栏之后、分发之前用
+   * `isAdminSourceTrusted` 判完了（那里才有 `req` 与 authority 的完整上下文）。
+   * 这里只做"参数怎么解释、返回什么"。
+   */
+  async function handleAdminHttp(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    /**
+     * 自检：一条请求回答"现在到底好不好、缺什么"。
+     *
+     * 只读：不写文件、不改内存状态（`probeDshFrontend` 只读产物文本且有 60 秒缓存）。
+     * 数字全部来自现算；拿不到的写 `unknown`/`available:false`，**不编**。
+     */
+    if (req.method === 'GET' && url.pathname === '/mobile/admin/selfcheck') {
+      respondJson(res, 200, service.selfcheck())
+      return
+    }
+
+    /**
+     * 清设备：`POST /mobile/admin/devices/remove`
+     *   · `{"deviceId":"..."}` —— 删一台；
+     *   · `?revoked=1`         —— 批量删所有已撤销的记录。
+     *
+     * 走 `DeviceStore.remove()`（内存表 + 文件同时更新）⇒ **不需要重启 DSH**，
+     * 这正是从前"改文件 + 立刻重启"那条纪律要防的坑。
+     */
+    if (req.method === 'POST' && url.pathname === '/mobile/admin/devices/remove') {
+      if (url.searchParams.get('revoked') === '1') {
+        const removed = service.removeRevokedDevices()
+        store.record({
+          deviceId: '(host)',
+          kind: 'remove',
+          target: url.pathname,
+          detail: `批量清理已撤销设备：删除 ${removed} 条`,
+          ok: true,
+        })
+        respondJson(res, 200, { removed })
+        return
+      }
+      const body = await readJsonBody<{ deviceId?: string }>(req)
+      const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : ''
+      if (deviceId === '') {
+        // 参数错与"没权限"分开报：前者是调用方写错了（400），后者是 403（权限），
+        // 混成一个码会让"到底该修哪儿"变成猜。
+        respondJson(res, 400, wireError(ErrorCode.HandshakeMalformed, 'deviceId is required, or use ?revoked=1 to purge revoked devices'))
+        return
+      }
+      const removed = service.removeDevice(deviceId)
+      if (!removed) {
+        // 审计要能回答"他试过删谁、删掉了没有"——删不到也记一条（ok:false）。
+        store.record({ deviceId, kind: 'remove', target: url.pathname, detail: '设备不存在，未删除', ok: false })
+      }
+      respondJson(res, removed ? 200 : 404, { removed, deviceId })
+      return
+    }
+
+    respondJson(res, 404, wireError(ErrorCode.Internal, `unknown mobile admin endpoint ${url.pathname}`))
   }
 
   /**
@@ -1841,22 +2252,45 @@ export function createMobileHost(options: {
         if (options.phoneBaseUrl !== undefined && options.phoneBaseUrl.length > 0) {
           trustedUpgradeHosts.push(options.phoneBaseUrl)
         }
-        for (const relayEndpoint of [config.relayUrl, config.relayHttpUrl]) {
-          if (typeof relayEndpoint === 'string' && relayEndpoint.length > 0) trustedUpgradeHosts.push(relayEndpoint)
-        }
+        trustedUpgradeHosts.push(...relayAuthorities())
 
         const authority = parseAuthority(req.headers.host)
         if (authority === undefined) {
           refuse('Host 头缺失或无法解析')
           return
         }
-        if (!isLoopbackHostname(authority.hostname) && !matchesTrusted(authority, trustedUpgradeHosts)) {
+        /**
+         * ★ 信任判据含**自推导**（本机非内部 IPv4 / 本机 hostname）——与 `handleHttp`
+         *   用同一个 `isTrustedAuthority`，两条准入路径的宽严从此不会走偏。
+         *   为什么升级路径更需要它：手机壳连的是 `wss://<局域网IP>:<代理端口>/mobile/ws`，
+         *   而那个 IP 正是"本机网卡上的地址"，不推导就得靠人手把它写进 `trustedHosts`。
+         */
+        const upgradeTrust = trustSnapshot()
+        if (!isLoopbackHostname(authority.hostname) && !isTrustedAuthority(authority, trustedUpgradeHosts, upgradeTrust)) {
           refuse(`Host ${req.headers.host} 不在回环或受信集合内`)
           return
         }
         const originUrl = parseAuthority(originHeader)
         const sameAsHost =
           originUrl !== undefined && originUrl.hostname === authority.hostname && originUrl.port === authority.port
+        /**
+         * ★ Origin 这条腿**刻意不用自推导**，只认"部署方声明过的 authority"
+         *   （`trustedHosts` ∪ `phoneBaseUrl` ∪ 中继）——两条理由：
+         *
+         *   ① **端口是 Origin 判据的一部分**。自推导给的是"本机地址"、不含端口；
+         *      而"同一个主机名、不同端口"就是**跨源**（`packages/host/test/pairing-security.test.ts`
+         *      的 T6 ⑤ 明确钉着这条：`Origin: https://<本机IP>:9999` 必须拒绝）。
+         *      本机 IP 上任何别的服务（又一个本地 web 应用）都能凭它拿到的名字去开我们的隧道，
+         *      那就把"同源"这件事让掉了。
+         *   ② **真机并不需要它**：手机页面与隧道端点通常**同源**
+         *      （`https://<ip>:3443/mobile/app` → `wss://<ip>:3443/mobile/ws`，
+         *      或明文代理 3081 那条同理），`sameAsHost` 就已经放行；
+         *      真正"Origin 与 Host 不同源"的场景是**反代/中继**，那里的 Origin 是
+         *      **部署方声明过的** authority，本来就在静态集合里。
+         *
+         *   所以这里保留原来的 `matchesTrusted`：Host 腿放宽（干掉手传 IP），
+         *   Origin 腿不跟着放宽（安全不倒退）。
+         */
         if (!sameAsHost && !(originUrl !== undefined && matchesTrusted(originUrl, trustedUpgradeHosts))) {
           refuse(`Origin ${originHeader} 与 Host 不同源、也不在受信集合内`)
           return
@@ -1978,23 +2412,29 @@ export function createMobileHost(options: {
       // 因此极易误判为"栅栏没问题"。现在的顺序是先栅栏、后分发。
       //
       // 规则与 DSH 的栅栏保持一致：
-      //  - Host 必须能解析，且是 loopback 或匹配某个 trustedHosts 条目
+      //  - Host 必须能解析，且是 loopback 或落在受信集合里
       //    （带端口精确匹配，不带端口匹配任意端口）；
       //  - 若附带 Origin，必须与该 Host **同 hostname 且同端口**；
       //  - `sec-fetch-site: cross-site` 一律拒绝。
       // 这些检查防御 DNS rebinding 与跨站请求，**不建立身份**——身份由设备密钥负责。
+      //
+      // ★ 受信集合 = 静态 `trustedHosts` ∪ **自推导的本机地址/主机名**（见 `isTrustedAuthority`）。
+      //   推导是**每次请求现算**的（`trustSnapshot()` 就在下面这一行里），
+      //   这样换 Wi-Fi / 插网线 / VPN 起来都不用重启 DSH —— 这正是"手传 IP 不再必要"的落点。
       const authority = parseAuthority(req.headers.host)
       if (authority === undefined) {
         respondJson(res, 403, wireError(ErrorCode.CapabilityDenied, 'missing or malformed Host header'))
         return true
       }
-      if (!isLoopbackHostname(authority.hostname) && !matchesTrusted(authority, options.trustedHosts ?? [])) {
+      const httpTrust = trustSnapshot()
+      if (!isLoopbackHostname(authority.hostname) && !isTrustedAuthority(authority, options.trustedHosts ?? [], httpTrust)) {
         respondJson(
           res,
           403,
           wireError(
             ErrorCode.CapabilityDenied,
-            `Host ${req.headers.host} is not allowed; start DSH with --trusted-host ${req.headers.host} to allow it`,
+            // 提示语更新：现在只有"名字/外部地址"才需要人工声明；本机 IP 与主机名已自动生效
+            `Host ${req.headers.host} is not allowed; it is neither loopback, nor a local address/hostname of this machine, nor in trustedHosts (add it with --trusted-host ${req.headers.host} if it really is yours)`,
           ),
         )
         return true
@@ -2012,6 +2452,58 @@ export function createMobileHost(options: {
       }
       if (req.headers['sec-fetch-site'] === 'cross-site') {
         respondJson(res, 403, wireError(ErrorCode.CapabilityDenied, 'cross-site request rejected'))
+        return true
+      }
+
+      /**
+       * ── 管理员路由（`/mobile/admin/*`）────────────────────────────────────
+       *
+       * ## 为什么单开一个命名空间
+       *
+       * 清设备过去**没有正式路由**：只能改 `devices.json` 再立刻重启 DSH
+       * （`DeviceStore` 只在构造时 `load()`，手改的条目会被下一次 `touch()` 原样写回）。
+       * 现在 `POST /mobile/admin/devices/remove` 走 `DeviceStore.remove()`，
+       * 内存表与文件同时更新，**不需要重启**。
+       *
+       * ## 授权判据（与 A 的信任判据**同一套**）
+       *
+       *   `isLoopbackRequest(req)` **或** 该请求的 authority 落在受信集合里
+       *   （静态 `trustedHosts` ∪ 中继 ∪ `phoneBaseUrl` ∪ 自推导的本机地址/主机名）。
+       *
+       * ★ 为什么不能直接复用"已经过了栅栏"这件事：栅栏放行**回环 hostname**（`localhost` /
+       *   `127.0.0.1`）时并不看 socket 来源——那是为了兼容反代与 DNS rebinding 的判据。
+       *   一个局域网客户端完全可以发 `Host: localhost` 过栅栏。所以这里必须**另判**
+       *   `isLoopbackRequest`（看 socket 与 `x-forwarded-for`），而不是看 Host 长什么样。
+       *
+       * ## ★ 已知代价（写清楚，别当成没这回事）
+       *
+       * 自推导把"本机非内部 IPv4"也算作受信之后，**同一个局域网里的人**用
+       * `https://<本机IP>:<端口>/mobile/admin/devices/remove` 也能删设备记录。
+       * 这是"复用 A 的判据"的直接结果，收益是换网/换机不再需要手配；
+       * 代价是**局域网内的一次 DoS**（把所有人踢回重新配对），而**不是**权限提升：
+       * 删记录不会新增设备、不会授予任何能力位，重新配对仍需电脑端生成配对码（loopback）
+       * 并人工确认指纹。若要把这半边收紧，关掉本机 hostname 只是第一步，
+       * 真正的做法是给这条路由单独要求 loopback（把它放回 `LOCAL_ONLY`）——
+       * 那会牺牲"从手机上一键清设备"，所以本阶段按方案原文保留，
+       * 并把这一条列进 `16-插件封装-第一阶段.md` 的"会误伤真机/收紧建议"。
+       */
+      if (url.pathname.startsWith('/mobile/admin/')) {
+        if (!isAdminSourceTrusted(req, authority, httpTrust)) {
+          // ★ 拒绝时**不泄露设备信息**：不回显条数、不回显 deviceId 是否存在、不回显清单。
+          //   审计要落一条（这是"谁在敲门"的唯一痕迹），但详情里同样不带设备信息。
+          store.record({
+            deviceId: '(host)',
+            kind: 'deny',
+            target: url.pathname,
+            detail: `管理员路由拒绝：来源不是 loopback 也不在受信集合（Host=${req.headers.host ?? '(无)'}）`,
+            ok: false,
+          })
+          respondJson(res, 403, wireError(ErrorCode.CapabilityDenied, 'admin endpoints are only available from the host machine or a trusted authority'))
+          return true
+        }
+        void handleAdminHttp(req, res, url).catch((error: unknown) => {
+          respondJson(res, 500, wireError(ErrorCode.Internal, String((error as Error)?.message ?? error)))
+        })
         return true
       }
 
@@ -2169,9 +2661,16 @@ self.addEventListener('message', (event) => {
        * 用 `application/x-x509-ca-cert` ✓ —— 安卓/Chrome 见到这个类型会直接引导安装 ✓。
        */
       if (req.method === 'GET' && url.pathname === '/mobile/trust.crt') {
-        try {
-          const caPath = join(homedir(), '.dsh', 'storages', 'dsh-mobile', 'tls', 'lan-ca.pem')
-          const body = readFileSync(caPath)
+        /**
+         * ★ 路径不再写死 `homedir()/.dsh/...`，而是问证书管理器（`options.tls`）。
+         *
+         * 原先写死有两处坏：① `DSH_HOME` 不是 `~/.dsh` 时永远读不到（临时 DSH_HOME、
+         * 多 profile、换机都会踩）；② 证书现在由**插件自己生成**（见 `tls-cert.ts`），
+         * 路径只有那一处知道。写死就等于把"插件生成"与"手机下载"两条路各写一份。
+         */
+        const caPem = options.tls?.readCaPem()
+        if (caPem !== undefined) {
+          const body = Buffer.from(caPem, 'utf8')
           res.writeHead(200, {
             'content-type': 'application/x-x509-ca-cert',
             'content-length': String(body.length),
@@ -2179,11 +2678,16 @@ self.addEventListener('message', (event) => {
             'cache-control': 'no-store',
           })
           res.end(body)
-        } catch (error) {
+        } else {
+          const status = options.tls?.status()
           const hint =
-            '还没有本机 CA ✓。请在电脑上跑一次：\n' +
+            '还没有本机 CA。\n' +
+            (status === undefined
+              ? '本部署未注入证书管理器（cordis.ts 未启用）。\n'
+              : `证书目录：${status.directory}\n${status.ok ? '' : `原因：${status.error ?? '未知'}\n`}`) +
+            '插件首启会自动生成；也可以手工跑一次：\n' +
             '  node scripts/make-cert.mjs --ip <当前局域网IP>\n' +
-            '（它会同时生成 CA 与由它签发的服务器证书 ✓）\n'
+            '（它会同时生成 CA 与由它签发的服务器证书）\n'
           res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
           res.end(hint)
         }

@@ -50,8 +50,18 @@ const PHONE_IP = flag('phone-ip', '10.33.129.145')
  */
 const LAN_IP = flag('lan-ip', (await import(join(dirname(fileURLToPath(import.meta.url)), 'detect-lan-ip.mjs'))).detectLanIp() ?? '127.0.0.1')
 
-/** 宿主侧能力清单，与 `packages/host/src/index.ts` 的 HOST_FEATURES 对应。 */
-const EXPECTED_FEATURES = ['files.write', 'relay.dialer', 'relay.backhaul', 'pairing.ticketFallback']
+/** 宿主侧能力清单，与 `packages/host/src/index.ts` 的 HOST_FEATURES 对应（★ 两处必须一起改）。 */
+const EXPECTED_FEATURES = [
+  'files.write',
+  'relay.dialer',
+  'relay.backhaul',
+  'pairing.ticketFallback',
+  // ★ 插件封装第一阶段（2026-09-27）新增的四条 —— 与 HOST_FEATURES 同步
+  'trust.autoDerive',
+  'tls.selfSign',
+  'admin.devicesRemove',
+  'admin.selfcheck',
+]
 
 const problems = []
 const notes = []
