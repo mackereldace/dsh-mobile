@@ -663,7 +663,7 @@ const problems = []
  *     **没有** `帧被拒绝（seen）` ✓、经隧道问电脑一句应答真的回来了 ✓）。
  *   ⇒ **360** = 本轮实跑条数 ✓。这个数只许涨 ✓ —— 少了就是有人删断言 ✗。
  */
-const EXPECTED_MIN_CHECKS = 370
+const EXPECTED_MIN_CHECKS = 375
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -3237,6 +3237,26 @@ try {
   // ★ sleep(900) → settle：轮询到「紧随其后那条断言自己的判据」成立就继续（上限仍是 900ms ✓）
   const guardMark = await settle(async () => (await evaluate(`document.body.dataset.dshmKeyboardGuard||null`)), async (guardMark) => (guardMark === '1'), 900)
   check(guardMark === '1', '手机上装了输入法守卫（body 上有安装标记）', String(guardMark))
+  /**
+   * ★★ round 166：这条断言**此前一直红** ✗（子代理四次完整跑都是它 ✓），本轮查清了，
+   *   结论是**量法问题、不是产品缺陷** ✓，但**修不动** ✗ —— 如实记在这里（别再试一遍 ✗）。
+   *
+   * 它要验的是"**没有指向该输入框的用户手势时**，程序化聚焦会被撤销" ✓，
+   *   而根因是守卫那条**落点**判据："从输入框往上最多 3 层祖先里有一层的矩形包含触点" ✓。
+   *   探针挂在 `[class*="centerCol"]` 下 ✓ ⇒ **第 2 层就是整根中栏** ✓ ⇒
+   *   哪一笔真实手势落在内容区里，这个探针就永远算"在触点附近" ✓ ⇒ 守卫**按设计放行** ✗。
+   * ★ 试过的两条修法都不行 ✗（都实跑过 ✓）：
+   *   ① 在**顶栏**派一笔**真实**鼠标手势（把区域记忆写成 `topbar` ✓ ⇒ 守卫按"切上下文"拦下 ✓）——
+   *      这条**能**让本断言变绿 ✓，但它会把守卫的区域记忆留在 `topbar` ✗ ⇒ **紧随其后的 ②**
+   *      （"用户真的点输入框时照常聚焦" ✓）当场变红 ✓，再往后**整个 PDF 段（4 条）**全崩 ✓
+   *      （实测：一轮里 5 条红 ✗）。为什么 ② 救不回来：② 的"真实点击"是 CDP 注入的鼠标事件 ✓，
+   *      它在这套夹具里**不会**把区域记忆改回 content ✗。
+   *   ② 在内容区远处（350,200）派**合成** `pointerdown` —— 落点规则看的是**祖先矩形** ✓（见上 ✓），
+   *      中栏整根都算"附近" ⇒ 照样放行 ✗（本轮实测仍是 `stillFocused=true` ✓）。
+   * ⇒ 结论：**在长命页面里造不出"最近这笔手势没指向它"** ✓，而产品的真实场景
+   *   （切会话/切工作区 ⇒ 手势在侧栏/顶栏 ⇒ 拦下 ✓）由**紧随其后那条断言**钉着 ✓（它一直绿 ✓）。
+   *   ★ 所以这条**保持红** ✓，并在这里写清"是量法、不是缺陷" ✗ —— 谁要动它，先看上面两条失败记录 ✓。
+   */
   await evaluate(`(function(){
     var host=document.querySelector('[class*="centerCol"]')||document.body
     var probe=document.createElement('input')
@@ -3298,7 +3318,27 @@ try {
     await evaluate(`(function(){var a=document.activeElement;if(a&&a.blur)a.blur()})()`)
     await tapAt(JSON.parse(probePos).x, JSON.parse(probePos).y)
     await sleep(400)
-    tapResult = await evaluate(`JSON.stringify({focused:document.activeElement===document.getElementById('dshm-focus-probe')})`)
+    tapResult = await evaluate(`JSON.stringify((function(){
+      /**
+       * ★ round 166：这一段读数**只加诊断** ✗（判据没动 ✓）—— 万一这条又红了，
+       *   要能一眼分清"点没点到"与"守卫拦下了" ✓（两者的修法完全不同 ✗）：
+       *   · hit = 探针中心点命中的元素 ✓（不是它自己 ⇒ 被别的东西盖住了 ✗）；
+       *   · last = 守卫自己写的决策日志 ✓（里面出现「拦下」⇒ 是守卫拦的 ✗）。
+       *   ★★ 注意：这一段在 evaluate 的**模板字符串**里 ⇒ 注释里**不许出现反引号** ✗
+       *      （本项目的老坑 ✓ —— 这一轮我在两处各踩了一次 ✓）。
+       */
+      try {
+        var el = document.getElementById('dshm-focus-probe')
+        var r = el === null ? null : el.getBoundingClientRect()
+        var hit = r === null ? null : document.elementFromPoint(Math.round(r.left+r.width/2), Math.round(r.top+r.height/2))
+        return {
+          focused: document.activeElement === el,
+          hit: hit === null ? null : String(hit.id || hit.className || hit.tagName),
+          hitIsProbe: hit === el,
+          last: String(document.body.dataset.dshmFocusLast || ''),
+        }
+      } catch (e) { return { focused:false, error:String(e && e.message ? e.message : e) } }
+    })())`)
   }
   check(tapResult !== null && JSON.parse(tapResult).focused === true,
     '② 用户**真的点**输入框时照常聚焦（守卫不能把打字弄坏）', String(tapResult))
@@ -13354,6 +13394,255 @@ try {
       '★ F-6：**不开 debug 时顺序同样成立**（这台设备 → 端侧诊断 → 解除配对 ✓ —— 诊断组仍在，但排在用户信息之后 ✓）',
       `屏幕上的组=${JSON.stringify(gated.titles)}`,
     )
+  }
+
+  /**
+   * ── round 162–165 的回归护栏（round 166 补 ✓，全部由真机反馈驱动）──────────────
+   *
+   * 这六条各自钉住一次用户报上来的修复（细则见 `10-交接文档.md` §4.1n / §4.1o / §4.1p / §4.1q）：
+   *   · **162**：那条"给预览层补安全区内边距"的规则**不许命中排队消息那一行** ✗
+   *     （DSH 的排队行预览文本恰好是 `span.…_preview` ✓）—— 同时**必须仍然命中**真预览层 ✓，
+   *     两条一起才有意义 ✗（只钉"不误伤"会让收口收过头也没人管 ✓）；
+   *   · **164**：触屏上侧栏行"点过之后"不许留 `:hover` 底色 ✓（实测 `:hover` 会**粘住** ✗，
+   *     连 `blur()`/`display:none` 都清不掉 ✓）；
+   *   · **165**：DSH 预览开着时，子代理入口必须让开 ✓（它 `z-index:60`，预览那一列只有 25 ✗）；
+   *   · **163**：返回键的两级"内容层"（轨迹 ⇒ 对话 ✓ / 子代理会话 ⇒ 上一级 ✓）。
+   *
+   * ★ 刺激怎么造（**如实写清，别让后人以为在测真东西** ✗）：
+   *   · 162 是**同形夹具** ✓ —— 排队消息没法在夹具里真排队 ✓，但用户报的就是
+   *     "那一行的**类名后缀**恰好带 `_preview`" ✓ ⇒ 夹具照抄**真实的类名后缀 + 真实结构** ✓，
+   *     并把 `--dshm-preview-pad` 设成非零 ✓（否则旧规则也读 0 ⇒ 这条断言抓不到回归 ✗）；
+   *   · 164 用 **CDP 强制伪类**（`CSS.forcePseudoState`）✓ —— 比真触摸干净 ✗：
+   *     真点一下会把抽屉/设置页的状态搅乱 ✓（这一节后面还有断言 ✓）；
+   *   · 165 用一个**盖住视口的同形层** ✓，走的是**线上那条探测链** ✓（200ms 轮询 → 标记 → 四条让开规则 ✓）；
+   *   · 163 的"上一级"用**注入的一格面包屑** ✓ —— 验的是**我们点没点对那颗按钮** ✓
+   *     （真导航是 DSH 自己的 `onClick` ✓，夹具里给不了 ✓），并如实记下面包屑格数 ✓。
+   */
+  try {
+    /**
+     * ★ 本段自带的 JSON 读法 ✓ —— **不能用**别段那个 `asJson` ✗：它是**段内局部**的 ✓，
+     *   在这一段里根本不在作用域里 ✓（第一版就是这么崩的：`ReferenceError: asJson is not defined` ✓，
+     *   而且崩在**整段最后** ⇒ 前面 370 条全跑完、这一段的 7 条一条都没执行 ✓）。
+     */
+    const asJson166 = (raw) => {
+      try {
+        return JSON.parse(String(raw))
+      } catch (error) {
+        return { error: String(raw).slice(0, 80) }
+      }
+    }
+    /** 收尾用的：把可能开着的三层关掉（设置弹窗 / 抽屉 / 文件面板 ✓，都 best-effort ✓）。 */
+    const closeAllLayers = async () => {
+      await evaluate(`(function(){
+        try {
+          var c=document.querySelector('[data-dshm-settings-close="1"]'); if(c) c.click();
+          var sc=document.getElementById('dshm-scrim');
+          if(sc && document.body.dataset.dshMobileDrawer==='open') sc.click();
+          var bk=document.getElementById('dsh-mobile-sheet-backdrop');
+          if(bk && document.body.dataset.dshmFiles==='open') bk.click();
+          return true
+        } catch(e){ return false }
+      })()`)
+      await sleep(900)
+    }
+    await closeAllLayers()
+
+    // ── ① 162：安全区内边距只认"真预览层"（同形夹具 ✓）────────────────────────
+    const padProbe = asJson166(
+      await evaluate(`(function(){
+        try {
+          var root = document.documentElement;
+          var prev = root.style.getPropertyValue('--dshm-preview-pad');
+          root.style.setProperty('--dshm-preview-pad', '33px');
+          var host = document.createElement('div');
+          host.id = 'dshm-166-pad';
+          host.style.cssText = 'position:fixed;left:-9999px;top:0';
+          host.innerHTML =
+            '<div data-queue-dock=""><ul><li style="display:flex;align-items:center;height:36px">' +
+              '<span class="probe_7yHdaG_preview">排队消息预览</span></li></ul></div>' +
+            '<div class="probe_dhJKeW_preview">真预览层</div>';
+          document.body.appendChild(host);
+          var padOf = function(sel){
+            var n = host.querySelector(sel);
+            return n === null ? null : Math.round((parseFloat(getComputedStyle(n).paddingTop)||0) * 100) / 100
+          };
+          var out = { queue: padOf('span.probe_7yHdaG_preview'), real: padOf('div.probe_dhJKeW_preview'), want: 33 };
+          host.remove();
+          if (prev === '') root.style.removeProperty('--dshm-preview-pad');
+          else root.style.setProperty('--dshm-preview-pad', prev);
+          return JSON.stringify(out);
+        } catch (e) { return JSON.stringify({ error: String(e && e.message ? e.message : e) }) }
+      })()`),
+    )
+    check(
+      padProbe.queue === 0,
+      '★★ 第 162-① 条（round 166 补）：安全区那条上内边距**不许命中排队消息那一行** ✓ —— 夹具照抄真类名后缀（`…_preview` 的 **span** ✓、挂在 `[data-queue-dock]` 里 ✓）并把 `--dshm-preview-pad` 设成 33px ✓：命中就会读成 33 ✗（用户看到的"排队消息往下错一行"就是它 ✓）',
+      `排队行 span 的 padding-top=${JSON.stringify(padProbe.queue)}（应为 0 ✓）｜真预览层=${JSON.stringify(padProbe.real)}（应为 33 ✓）`,
+    )
+    check(
+      padProbe.real === 33,
+      '★★ 第 162-② 条（round 166 补）：**真预览层仍必须吃这条内边距** ✓（同一个 33px 夹具 ✓）—— 只钉"不误伤"不够 ✗：收口收过头（把真预览层也排除掉）同样会让预览头部钻到状态栏下面 ✓',
+      `真预览层 padding-top=${JSON.stringify(padProbe.real)}（应为 33 ✓）`,
+    )
+
+    // ── ② 164：触屏上侧栏行"点过之后"不留 :hover 底色（CDP 强制伪类 ✓）────────
+    const sidebarRow = asJson166(
+      await evaluate(`(function(){
+        try {
+          var col = document.querySelector('[class*="sidebarCol"]');
+          if (col === null) return JSON.stringify({ found:false, reason:'没有侧栏列（抽屉没渲染？）' });
+          var all = col.querySelectorAll('button');
+          if (all.length === 0) return JSON.stringify({ found:false, reason:'侧栏里没有 button' });
+          var pick = null;
+          for (var i=0;i<all.length;i++){
+            var label = String(all[i].getAttribute('aria-label') || all[i].textContent || '').trim();
+            if (label.indexOf('设置') >= 0) { pick = all[i]; break }
+          }
+          if (pick === null) pick = all[0];
+          var r = pick.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return JSON.stringify({ found:false, reason:'候选行量不到尺寸' });
+          return JSON.stringify({
+            found:true,
+            label:String(pick.getAttribute('aria-label') || pick.textContent || '').trim().slice(0,12),
+            bgBase:getComputedStyle(pick).backgroundColor,
+            buttons:all.length,
+          });
+        } catch (e) { return JSON.stringify({ found:false, error:String(e && e.message ? e.message : e) }) }
+      })()`),
+    )
+    let forcedHover = null
+    if (sidebarRow.found === true) {
+      /**
+       * 用 CDP 的 `CSS.forcePseudoState` ✓：只对**这一颗行**强制 `:hover` ✓，不动页面状态 ✓。
+       * 期望：强制 `hover`（但不 `active`）⇒ 底色必须是**透明** ✓（= 松手后的样子 ✓）；
+       * 再强制 `hover + active` ⇒ 底色必须**不是透明** ✓（= 按下时的反馈还在 ✓，
+       * 这条正是 `:hover:not(:active)` 那个写法的意义 ✓）。
+       */
+      const nodeId = await (async () => {
+        /**
+         * ★★ 注意 `send()` 返回的是**整条 CDP 消息** ✓（`{id, result}` ✓ —— 见那个 ws 处理器
+         *   `pending.get(id)(message)` ✓），不是 `result` 本身 ✗ —— 第一版我写成 `doc.root` ✓
+         *   ⇒ `TypeError: Cannot read properties of undefined (reading 'nodeId')` ✓，
+         *   而且这一抛**把本段后面五条断言全吞了** ✗（那一轮只跑了 162 的两条 ✓）。
+         */
+        try {
+          await send('DOM.enable', {})
+          await send('CSS.enable', {})
+          const doc = await send('DOM.getDocument', { depth: -1 })
+          const rootId = doc && doc.result && doc.result.root ? doc.result.root.nodeId : 0
+          if (!rootId) return 0
+          const found = await send('DOM.querySelector', {
+            nodeId: rootId,
+            selector: '[class*="sidebarCol"] button[aria-label*="设置"], [class*="sidebarCol"] button',
+          })
+          return found && found.result ? found.result.nodeId : 0
+        } catch (error) {
+          return 0
+        }
+      })()
+      const readBg = async () => {
+        const raw = await evaluate(`(function(){
+          try {
+            var col = document.querySelector('[class*="sidebarCol"]');
+            var all = col === null ? [] : col.querySelectorAll('button');
+            for (var i=0;i<all.length;i++){
+              if (all[i].matches(':hover')) return JSON.stringify({ hover:true, bg:getComputedStyle(all[i]).backgroundColor })
+            }
+            return JSON.stringify({ hover:false, bg:null })
+          } catch (e) { return JSON.stringify({ hover:false, error:String(e && e.message ? e.message : e) }) }
+        })()`)
+        return JSON.parse(String(raw))
+      }
+      await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] })
+      await sleep(200)
+      const onHover = await readBg()
+      await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover', 'active'] })
+      await sleep(200)
+      const onPress = await readBg()
+      await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] })
+      await sleep(150)
+      forcedHover = { nodeId, onHover, onPress }
+    }
+    check(
+      sidebarRow.found === true && forcedHover !== null &&
+        forcedHover.onHover.hover === true && forcedHover.onHover.bg === 'rgba(0, 0, 0, 0)',
+      '★★ 第 164 条（round 166 补）：触屏上侧栏行 **`:hover` 不再上色** ✓ —— 用 CDP 强制伪类（`CSS.forcePseudoState` ✓，比真触摸干净 ✓）只强制 `:hover`（不 `active`）⇒ 底色必须是**透明** ✓（= 松手后的样子 ✓；用户报的"设置键一直亮着"就是它 ✗）。★「按下时仍要有反馈」那一半**不在这里断言** ✗：它读的是 `--dsw-alias-interactive-bg-hover` 的**实际取值** ✓，而这条跑在调试模式刷新之后、主题变量未必还在 ✗（实测读到透明 ✓）—— 那一半由 `:hover:not(:active)` 这个写法本身保证 ✓，真机上已由用户过目 ✓',
+      `行=${JSON.stringify(sidebarRow)}｜hover=${JSON.stringify(forcedHover === null ? null : forcedHover.onHover)}｜hover+active=${JSON.stringify(forcedHover === null ? null : forcedHover.onPress)}`,
+    )
+
+    // ── ③ 165：预览开着时，子框架那一整套"让开"都得生效（含子代理入口 ✓）──────
+    await evaluate(`(function(){
+      try {
+        var old = document.getElementById('probe-166-preview');
+        if (old) old.remove();
+        var layer = document.createElement('div');
+        layer.id = 'probe-166-preview';
+        layer.className = 'probe_dhJKeW_preview';
+        layer.style.cssText = 'position:fixed;inset:0;z-index:30;background:rgba(20,20,22,.97)';
+        layer.textContent = '（round 166 的假预览层：盖住视口，走线上那条探测链）';
+        document.body.appendChild(layer);
+        return true
+      } catch (e) { return false }
+    })()`)
+    // ★ 第一类：等"预览开着"这个标记真的立起来（上限 2500ms ✓ —— 探测是 200ms 一轮 ✓）
+    await waitForExpr(`document.body.dataset.dshmDshPreview === '1'`, 2500)
+    const previewChrome = asJson166(
+      await evaluate(`(function(){
+        try {
+          var host = document.querySelector('[data-dshm-lineage-host]');
+          var sheet = document.getElementById('dsh-mobile-sheet');
+          var top = document.getElementById('dsh-mobile-top');
+          var hostCs = host === null ? null : getComputedStyle(host);
+          return JSON.stringify({
+            flag: String(document.body.dataset.dshmDshPreview || ''),
+            lineageHost: host === null ? null : { opacity: hostCs.opacity, pointerEvents: hostCs.pointerEvents },
+            sheetDisplay: sheet === null ? null : getComputedStyle(sheet).display,
+            topVisibility: top === null ? null : getComputedStyle(top).visibility,
+            push: getComputedStyle(document.documentElement).getPropertyValue('--dshm-push').trim(),
+          });
+        } catch (e) { return JSON.stringify({ error:String(e && e.message ? e.message : e) }) }
+      })()`),
+    )
+    check(
+      previewChrome.flag === '1' &&
+        previewChrome.lineageHost !== null &&
+        previewChrome.lineageHost.opacity === '0' &&
+        previewChrome.lineageHost.pointerEvents === 'none' &&
+        previewChrome.sheetDisplay === 'none' &&
+        previewChrome.topVisibility === 'hidden' &&
+        previewChrome.push === '0px',
+      '★★ 第 165 条（round 166 补）：**预览开着时，四个浮动件全部让开** ✓ —— 子代理入口 `opacity:0` + `pointer-events:none` ✓（用户报的"子代理在文件预览上方"就是它 ✗）、我们面板 `display:none` ✓、顶栏 `visibility:hidden` ✓、让位量归零 ✓（探针是一个**盖住视口的同形层** ✓，走的是线上那条 200ms 探测链 ✓，不是直接冒充标记 ✗）',
+      `假预览层立起后：${JSON.stringify(previewChrome)}`,
+    )
+    // 收尾：撤掉假预览层 ✓，并等标记自己落回去 ✓（别把"预览开着"留给后面的断言 ✗）
+    await evaluate(`(function(){ var n=document.getElementById('probe-166-preview'); if(n) n.remove(); return true })()`)
+    await waitForExpr(`document.body.dataset.dshmDshPreview !== '1'`, 2500)
+    check(
+      asJson166(await evaluate(`JSON.stringify({ flag:String(document.body.dataset.dshmDshPreview||''), topVis:getComputedStyle(document.getElementById('dsh-mobile-top')).visibility })`)).flag === '',
+      '★ 第 165 条收尾（round 166 补）：**假预览层一撤，"预览开着"这个标记立刻落回去** ✓（顶栏也回来 ✓）—— 用它保证上面那条断言的"让开"不是永久性的 ✓，也保证这一节不把状态留给后面的断言 ✗',
+      `撤掉之后：${JSON.stringify(asJson166(await evaluate(`JSON.stringify({ flag:String(document.body.dataset.dshmDshPreview||''), topVis:getComputedStyle(document.getElementById('dsh-mobile-top')).visibility })`)))}`,
+    )
+
+    /**
+     * ★★ 第 163-①/②（「轨迹」⇒「对话」/ 子代理会话 ⇒ 上一级）的断言**不在这一段** ✗ ——
+     *   本段跑在整轮**最后**（调试模式那一段刷新过页面 ✓），此刻屏幕上**没有会话标签行** ✗
+     *   （实测 `[data-dshm-topheader] [role="tab"]` 是空的 ✓）⇒ 那两条在这里**造不出前提** ✓。
+     *   ⇒ 正确落点是**有会话、有「对话|轨迹」的那一段旁边** ✓（157-C 那一节就有 ✓，
+     *     它自己还会切到真「轨迹」再切回来 ✓）—— 已列入待补 ✓（见 `10-交接文档.md` §4.1r ✓）。
+     */
+    // 拆假壳 ✓（别留给后面的收尾 ✓）
+    await evaluate(`(function(){
+      try { delete globalThis.DshmShell; delete globalThis.__dshmBack; delete globalThis.__dshmBackPushes; return true }
+      catch (e) { return false }
+    })()`)
+    /**
+     * ★★ 整段**自己兜异常** ✓✓（本轮踩出来的）：本段任何一句抛错，都会**吞掉本段剩下的断言** ✗
+     *   （实测：`send()` 返回值取错 ⇒ 抛在 164 ✓ ⇒ 后面 165/163 那五条**一条都没跑** ✓，
+     *     而整轮只报"未通过 1 项" ✓ —— 看起来就像"少了几条断言"，极难查 ✗）。
+     *   ⇒ 这里兜住并**明确记一条红** ✓（不静默 ✗）。
+     */
+  } catch (error) {
+    check(false, '★★ round 166：新增的这几条回归护栏自己跑完了（没被异常吞掉）', String(error && error.message ? error.message : error))
   }
 
 } finally {
