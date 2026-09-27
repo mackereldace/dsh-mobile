@@ -7350,6 +7350,36 @@
       '    width: 100% !important; min-width: 0 !important; max-width: none !important;',
       '  }',
       '  [class*="rightbarCol"] { z-index: 25 !important; }',
+      /**
+       * ★★ round 167（**用户拍板的改法** ✓）：DSH 预览开着时，**把预览那一整列抬到我们所有浮层之上** ✓
+       *   —— 用户原话："我理解你的改法，**只需要文件预览在最上面**，然后返回键就能平滑回到打开前了"✓。
+       *
+       * ## 为什么这比"把我们的面板藏起来"更稳 ✓
+       * round 158 的做法是"状态照旧 open ✓、但**不画面板**"（`body[data-dshm-dsh-preview="1"]
+       * #dsh-mobile-sheet{display:none}` ✓）—— 它依赖**我们那条 JS 探测链**（`dshPreviewSurface()` ✓）
+       * 判得准 ✗；**探测一旦漏判**（用户截图里就是这种情况：预览明明开着 ✓、面板却还画在上面 ✗），
+       * 面板就盖住了预览 ✗，而且"顶栏藏没藏"这个读数还会互相打架 ✓（截图里顶栏是藏着的 ✗）。
+       * ⇒ 改成**纯 CSS 的结构判据** ✓：`body:has(预览层)` ✓ —— 只要 DOM 里真有那一层 ✓，
+       *   不管是哪条路打开的、我们的 JS 有没有认出来 ✓，**预览都压在我们上面** ✓✓。
+       *
+       * ## 判据为什么与 round 162 一致 ✓
+       *   · `div[class*="_preview"]`、`div[class*="_document"]` ✓ —— 真预览层都是 **div** ✓
+       *     （`div.dhJKeW_preview` ✓、`div._0RKuNG_document` ✓，都是实测值 ✓）；
+       *   · `:not([data-queue-dock] *)` ✓ —— 排除"排队消息那一行的预览文本" ✓
+       *     （它是 `span._7yHdaG_preview` ✓，round 162 就是被它咬的 ✓）；两条一起才安全 ✓。
+       * ★ `:has()` 在本机和 DSH 自己的样式里都在用（`.uV2eYG_root:has([data-composer-stats])` ✓）⇒ 可放心用 ✓。
+       *
+       * ## 抬到 200 的取舍 ✓
+       *   · 必须 **> 85**（我们面板 ✓）—— 这样"面板盖住预览"这件事**结构上不可能** ✓；
+       *   · 必须 **< 200**（我们的瞬时提示条 `#dshm-shell-toast` ✓ 也是 200）—— 它要能压在预览上 ✓
+       *     （"连上了/失败"这类提示必须看得见 ✓）；同值 200 时后声明的赢 ✗（不可预期 ✓）⇒ 取 190 ✓。
+       *   · **返回键的层次不受影响** ✓：`dshmBack()` 的梯子里"DSH 预览"本来就排在"文件面板"**之前** ✓
+       *     （round 158 ✓）⇒ 按返回**先关预览** ✓、面板状态原封不动 ✓ ⇒ 预览一关、面板**立刻就在**
+       *     （同一个目录、同一份滚动位置 ✓）= 用户要的"平滑回到打开前" ✓✓。
+       */
+      '  body:has(div[class*="_preview"]:not([data-queue-dock] *), div[class*="_document"]) [class*="rightbarCol"] {',
+      '    z-index: 190 !important;',
+      '  }',
       '  [class*="handle"] { display: none !important; }',
 
       /* ③ 藏起 DSH 自带的侧栏开关：它的位置被侧栏位移牵连，改样式会一起被推走。
