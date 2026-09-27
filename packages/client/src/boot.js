@@ -4521,6 +4521,42 @@
       }
     }
     /**
+     * ★★ round 176（用户实拍：**PDF 预览**开着 ✓，而 `[layout]` 那行写着"还没有预览层"✗）：
+     *   `dshPreviewSurface()` 靠**类名**（`_preview` / `_document` ✓）认层 ✗ —— 而 PDF 那一层
+     *   显然不含这些类名 ✓ ⇒ 它返回 null ✓ ⇒ 上面那条"按 layer 的几何兜底"**根本没机会跑** ✗
+     *   ⇒ `previewOpen` 恒为 false ⇒ 本函数**什么都不做**（还会去 `restoreTopChrome()` ✗）
+     *   ⇒ 预览那条 `fixed/sticky` 顶栏没人推 ✓ ⇒ 它只能等 **DSH 自己**把位置摆好 = "过一会儿复位" ✓、
+     *   而那个时机不由我们控制 = 用户说的"**偶发**" ✓✓。
+     * ⇒ 这里补一条**完全不看类名**的判据 ✓（用的还是本函数既有的那套手法：**命中测试** ✓）：
+     *   "视口中心命中的那一层里，有没有一个盖住 ≥95%×95% 视口、且**不是我们的**元素" ✓。
+     *   · 为什么门槛取 95% 而不是 90% ✗：聊天界面的中栏 `centerCol` 也"几乎盖满"
+     *     （实测 ≈85% 高 ✓）—— 90% 有把它误判成预览的风险 ✗；预览那一层实测是 `412×877 / 412×915`
+     *     （≈100%×96% ✓）⇒ 95% 刚好把它留下、把中栏挡在外面 ✓。
+     *   · 为什么沿祖先链走 ✗：命中的可能是预览层**里面**的元素（PDF 的 canvas / iframe ✓）。
+     */
+    if (!previewOpen) {
+      try {
+        var midHit = document.elementFromPoint(
+          Math.round(window.innerWidth / 2),
+          Math.round(window.innerHeight / 2),
+        )
+        var walk = midHit
+        for (var walkDepth = 0; walkDepth < 8 && walk !== null && walk !== undefined; walkDepth++) {
+          var wr = walk.getBoundingClientRect()
+          var walkId = String(walk.id || '')
+          var isOurs = walkId.indexOf('dsh-mobile') === 0 || walkId.indexOf('dshm-') === 0
+          if (!isOurs && wr.width >= window.innerWidth * 0.95 && wr.height >= window.innerHeight * 0.95) {
+            previewOpen = true
+            break
+          }
+          if (walk === document.body) break
+          walk = walk.parentElement
+        }
+      } catch (error) {
+        void error
+      }
+    }
+    /**
      * ★ 预览**关掉**时，必须把之前推下去的还原 ✓。
      *   否则聊天界面会永久多出一段 48px 的空白 ✗（`margin-top` 是**写死在元素上**的 ✓，
      *   它不会因为预览关了而自己消失 ✓）—— 这是一类"修了 A 坏了 B"的典型 ✗，
@@ -4886,6 +4922,9 @@
    * 而"要不要把文件面板重新拉上来"必须分开（见 `dshPreviewMinimizedNotClosed` ✓）。
    */
   var dshmPreviewLastLayer = null
+  /** ★ round 176：认不出预览层时的诊断节流（签名 + 上次记录时刻 ✓，见 `dshPreviewSurface` ✓）。 */
+  var dshmPreviewMissSig = ''
+  var dshmPreviewMissAt = 0
 
   /**
    * ★★ round 157（B ✓）：**"为看 DSH 预览而收起的文件面板"要还回去** 的那笔记忆 ✓。
@@ -8219,6 +8258,56 @@
           var node = candidates[c]
           if (ours(node)) continue
           if (covers(node.getBoundingClientRect()) && visible(node)) return node
+        }
+        /**
+         * ★★ round 176 诊断（**照抄 round 158 解决 katex 那一版的手法** ✓）：
+         *   两条路都没认出来时，把"现场"记一行进调试框 ✓ ——
+         *   用户实拍：**PDF 预览**开着 ✓，而这行却写"还没有预览层"✗ ⇒ 我只有拿到真实 DOM 才能写出
+         *   **精确**判据 ✓（这条我已经猜了好几轮 ✗，这一手正是当年一次就解决的那一手 ✓）。
+         *   记录两样：
+         *     · **中心命中的祖先链**（tag.类名(宽×高) ✓，最多 8 层 ✓）—— 真预览层就在这条链上 ✓；
+         *     · **类名候选清单**（`[class*="_preview"]/[class*="_document"]` 扫到的 ✓ 各带 rect ✓）——
+         *       它为空 = "类名根本不同"✓；非空但没选中 = "是 covers/visible 把它挡了"✓，两者修法不同 ✗。
+         *   ★ 节流：本函数每 200ms 跑一次 ✗ ⇒ 最多 6 秒记一行 ✓，且**链路签名不变就不重复记** ✓。
+         */
+        try {
+          var midEl = document.elementFromPoint(
+            Math.round(window.innerWidth / 2),
+            Math.round(window.innerHeight / 2),
+          )
+          var chainText = []
+          var walker = midEl
+          for (var cd = 0; cd < 8 && walker !== null && walker !== undefined; cd++) {
+            var cwr = walker.getBoundingClientRect()
+            chainText.push(
+              String(walker.tagName || '').toLowerCase() + '.' +
+                String(walker.className || '').split(' ')[0] +
+                '(' + Math.round(cwr.width) + '×' + Math.round(cwr.height) + ')',
+            )
+            if (walker === document.body) break
+            walker = walker.parentElement
+          }
+          var candText = []
+          var allCands = document.querySelectorAll('[class*="_preview"], [class*="_document"]')
+          for (var cc = 0; cc < allCands.length && candText.length < 6; cc++) {
+            var ccr = allCands[cc].getBoundingClientRect()
+            candText.push(
+              String(allCands[cc].tagName || '').toLowerCase() + '.' +
+                String(allCands[cc].className || '').split(' ')[0] +
+                '(' + Math.round(ccr.width) + '×' + Math.round(ccr.height) + ')',
+            )
+          }
+          var missSig = chainText.join(' < ') + '||' + candText.join(',')
+          if (missSig !== dshmPreviewMissSig && Date.now() - dshmPreviewMissAt > 6000) {
+            dshmPreviewMissSig = missSig
+            dshmPreviewMissAt = Date.now()
+            debugBoxLine(
+              '[preview] 认不出预览层｜中心命中链=' + (chainText.length > 0 ? chainText.join(' < ') : '(空)') +
+                '｜类名候选=' + (candText.length > 0 ? candText.join('、') : '无'),
+            )
+          }
+        } catch (error) {
+          void error
         }
         return null
       } catch (error) {
