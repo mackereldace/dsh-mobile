@@ -7262,6 +7262,50 @@
       // 阴影投向**右侧**（盖在让位后的主页面上），这是"纵深"的来源
       '    box-shadow: 14px 0 36px rgba(0,0,0,.55);',
       '  }',
+      /**
+       * ★★ round 164（用户 B ✓）：**触屏上 `:hover` 是"粘"的** —— 用户原话：
+       *   "设置没问题，目前点击设置再返回，**设置键那里还是高亮聚焦**，这点不好"✓。
+       *
+       * ## 真因（源码 + 真触摸实测，两半都查了 ✓）
+       *   ① DSH 的「设置」触发键（`dsh-client-ui-settings-general` 的 `.…_trigger` ✓）
+       *      **只有 `:hover{background:var(--dsw-alias-interactive-bg-hover)}`** ✓、
+       *      底色是透明的（`background:0 0` ✓）—— 没有 `:focus` 规则 ✓；
+       *      ★ 而且它**故意**在弹窗关闭时把焦点还给这颗按钮 ✓
+       *      （源码：`if (wasOpen.current && !open) triggerButton.current?.focus()` ✓，
+       *       桌面端的无障碍惯例 ✓）—— 手机上这颗因此又"亮"又"聚焦" ✓。
+       *   ② 但真正**画出来**的那一层是 `:hover` ✓ —— 用真触摸事件（CDP）在探针页量到：
+       *      点过之后**连焦点都丢了，`:hover` 依然是 `true`** ✓，而且
+       *      `blur()` / `pointer-events` 关一帧 / `display:none` 一帧 **三种复位都清不掉** ✗
+       *      （只有"下一次在别处真触摸"才清 ✓）⇒ **没法用 JS 撤销** ✗，只能在样式上盖掉 ✓。
+       *      ★ 同一支探针也量到：加上下面这条规则之后，松手瞬间 `background-color`
+       *      就是 `rgba(0, 0, 0, 0)` ✓（粘住的 `:hover` 还在，但不再上色 ✓）。
+       *
+       * ## 为什么敢对"侧栏这一片"一刀切 ✓
+       * 实测这一片的底座**本来就是透明的** ✓：侧栏行 `.hHd-Xa_panelRow{background:0 0}` ✓、
+       * 设置触发键 `.…_trigger{background:0 0}` ✓ ⇒ 把 hover 那层淡色盖成"透明"
+       * 就等于**回到它本来的样子** ✓。
+       * ⚠️ **绝不能推广到全页** ✗✗：填充色按钮（那颗蓝色发送键 ✓）hover 用的是**另一个**变量 ✓，
+       *   一刀切会把它清成透明 ✓（比"亮着"难看得多 ✗）。
+       *
+       * ## 为什么必须是 `:hover:not(:active)` ✗✗
+       * 只写 `:hover` 会把**按下时**的反馈也一起抹掉 ✓ —— 而 round 160 已经关掉了
+       * 浏览器自带的点按高亮 ✓ ⇒ 那样就一点反馈都没有了 ✗。下面那条 `:active` 兜底
+       * 保证"按下去一定有反馈" ✓（这一片的行本来只有 `:hover`、没有自己的 `:active` ✓，
+       * 所以给它补一个同色的按下态 ✓）；松手后 `:active` 立刻结束 ⇒ 底色立刻消失 ✓✓。
+       *
+       * ⚠️ 只收 `background-color`，**不写 `background` 简写** ✗（简写会把 `background-image`
+       *   一起清掉 ✓ —— 我们的进度条与 DSH 的渐变都在用 ✓）。
+       */
+      '  @media (pointer: coarse) {',
+      '    [class*="sidebarCol"] button:hover:not(:active):not(:disabled),',
+      '    [class*="sidebarCol"] [role="button"]:hover:not(:active),',
+      '    [class*="sidebarCol"] a:hover:not(:active),',
+      '    .dshm-set-navcell:hover:not(:active) { background-color: transparent !important; }',
+      '    [class*="sidebarCol"] button:active:not(:disabled),',
+      '    [class*="sidebarCol"] [role="button"]:active {',
+      '      background-color: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08)) !important;',
+      '    }',
+      '  }',
       /* ── 推挤：主页面右移让出边栏宽度 ──────────────────────────────
          用 **transform**（GPU 合成，不逐帧布局）——之前用 left 位移，那是每帧重排，
          在 DSH 这种重 DOM 上会明显卡顿（用户反馈"卡顿不顺滑"）。
