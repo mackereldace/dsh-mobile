@@ -2562,6 +2562,59 @@
     return tryFrom(0, [])
   }
 
+  /**
+   * ★★ round 157（D ✓）：**会话级状态的唯一一份复位** ✓ —— 每一条拨号路径都必须经过它 ✓。
+   *
+   * ## 真机故障（用户原话）
+   * 把电脑端 DSH 远程关掉再重开 ⇒ 点手机页里那颗橙色「手动重连」⇒
+   * `手动重连失败：dsh-mobile: 所有候选端点都连不上`
+   * `（wss://100.123.136.82:3443/mobile/ws → dsh-mobile: 帧被拒绝（seen））` ✗。
+   *
+   * ## 根因
+   * `帧被拒绝（seen）` 来自**我们自己的反重放窗口**（`ReplayWindow.check` ✓）——
+   * 新会话的入站帧计数从 1 重来 ✓，却被拿去比**上一个会话的"已见"位图** ✗
+   * （`ServerAuthOk` 恒为 counter=1 ✓ ⇒ 老窗口已经把它标成"见过" ✓）⇒ 正常帧被判重放 ✗。
+   *
+   * 为什么会比到老位图 ✗：复位**散在两个地方、而且都不全** ✓——
+   *   · `scheduleReconnect` 的定时器体里**手工抄了五行**（`keys` / `inReplay` / `outCounter` ✓）；
+   *   · `openEndpoint` 入口那块抄了**另外六个字段**（`keys` / `nonceBase` / `pendingKeys` /
+   *     `transcript` / `hello` / `ephemeral` ✓），**漏了 `inReplay` 与 `outCounter`** ✗；
+   *   · 手动入口 `dialNow` **一处都没抄** ✗。
+   * ⇒ 只要这次拨号不是由那条定时器带起来的（按需重拨 `rpc` / `openStream` ⇒ `dialNow` ✓、
+   *   以及手动那一下 ✓），`inReplay` 就还是旧会话的 ✗ ⇒ 一连上就被自己拒掉 ✓✓。
+   *
+   * ## 为什么抽成**一个函数**（本项目对"同一个概念两份实现"零容忍 ✓）
+   * "新会话开始了 ⇒ 会话级状态必须归零"是**一个事实** ✓。两份抄写已经漂过一次 ✗
+   * （定时器体有 `inReplay`、`openEndpoint` 没有 ⇒ 两条路行为不同 ✓）——
+   * 不再抄第二遍 ✗：**所有人都调它** ✓（见下面两处调用点 ✓）。
+   *
+   * ## 哪些算"会话级"（含 `nonceBase` 的理由 ✓）
+   * 判据是"**它属于哪一次握手**"✓：
+   *   · `keys` / `pendingKeys` / `transcript` / `hello` / `ephemeral` —— 本次握手的中间物 ✓，
+   *     留着就会把上一次的 transcript 带进本次的 MAC / 会话标识校验 ✗；
+   *   · `nonceBase` —— **必须一起清** ✗✗：`onMessage` 开头判"还在不在明文握手阶段"
+   *     用的就是 `this.keys === undefined && this.nonceBase.server === undefined` ✓，
+   *     留下旧的 `server` 值会让宿主回的**明文 ServerHello 被当成会话帧解析** ✗
+   *     （round 156 抓到的真根之一 ✓：现象是"重连永远连不上"✗）；
+   *   · `inReplay` —— 本次会话的**入站**反重放窗口 ✓（本条故障的元凶 ✓）；
+   *   · `outCounter` —— 本次会话的**出站**计数 ✓（归 1 ✓：`ServerAuthOk` 之后会被写成 2 ✓，
+   *     与宿主"数据帧从 2 开始"的约定一致 ✓）。
+   * ★ 只清**会话级** ✗ —— 重试额度（`failStreak` / `autoReconnectDeadline` / `autoPaused` ✓）、
+   *   传输对象（`socket` / `ready` / `pingTimer` ✓）与"本次端点尝试"的两个码
+   *   （`attemptRejectionCode` / `attemptPendingCode` ✓，它们由 `openEndpoint` 每次尝试自己清 ✓）
+   *   都**不在这里**动 ✓（动了会吃掉用户点的那一下的额度和提示 ✓）。
+   */
+  Tunnel.prototype.resetSessionState = function () {
+    this.keys = undefined
+    this.pendingKeys = undefined
+    this.transcript = undefined
+    this.hello = undefined
+    this.ephemeral = undefined
+    this.nonceBase = { client: undefined, server: undefined }
+    this.inReplay = new ReplayWindow(1024)
+    this.outCounter = 1n
+  }
+
   /** 连接**一个**端点并完成握手。 */
   Tunnel.prototype.openEndpoint = function (url) {
     var self = this
@@ -2583,13 +2636,13 @@
        *   · 明文 LinkError 连 code 都读不出来 ⇒ "设备被撤销"识别不出来 ✗
        *     ⇒ 现象就是**永远重连、永不退回配对界面** ✓（用户报的那条 ✓）。
        * 端点回退（fallback）也走同一个坑 ✓ —— 所以复位放在**每次尝试的入口** ✓。
+       * ★★ round 157（D ✓）：这一整块**换成一个函数** ✓（`resetSessionState` ✓）——
+       *   原来这里手工抄了六个字段 ✗，而**漏了 `inReplay` / `outCounter`** ✗✗
+       *   ⇒ 只要拨号不是那条退避定时器带起来的（按需重拨 / 手动 ✓），
+       *   新会话的帧就会被旧会话的反重放位图拒掉（真机：`帧被拒绝（seen）`✗）。
+       *   现在**所有拨号路径**都在这里经过同一份复位 ✓ —— 谁也漏不掉 ✓。
        */
-      self.keys = undefined
-      self.nonceBase = { client: undefined, server: undefined }
-      self.pendingKeys = undefined
-      self.transcript = undefined
-      self.hello = undefined
-      self.ephemeral = undefined
+      self.resetSessionState()
       self.emitState('connecting')
       var socket
       try {
@@ -2790,9 +2843,15 @@
       self.stopKeepalive()
       self.ready = undefined
       self.socket = undefined
-      self.keys = undefined
-      self.inReplay = new ReplayWindow(1024)
-      self.outCounter = 1n
+      /**
+       * ★★ round 157（D ✓）：这里原来**手工抄了三行**（`keys` / `inReplay` / `outCounter` ✓）——
+       *   而 `openEndpoint` 入口那块抄的是**另外六个字段** ✗ ⇒ 两份抄写各漏一半 ✓✓：
+       *   走定时器这条路的会话状态齐 ✓、走按需重拨/手动那条路的 `inReplay` 却是旧的 ✗
+       *   （真机：手动重连一连上就被自己的反重放窗口拒掉，`帧被拒绝（seen）` ✗）。
+       *   现在**只有一份实现** ✓（`resetSessionState` ✓），这里只调它 ✓。
+       *   `socket` / `ready` / 保活是**传输级**的 ✓、不属于会话级 ✗ ⇒ 仍旧留在这里 ✓。
+       */
+      self.resetSessionState()
       void self.connect().catch(function (error) {
         console.warn('[dsh-mobile] 重连失败：', error)
       })
@@ -4121,6 +4180,98 @@
       void error
     }
     dshmPreviewEnterPlayed = false
+    /**
+     * ★★ round 157（B ✓）：这一下是**我们自己按下的关闭**（右滑返回 / 系统返回 ✓）——
+     *   它同时是"用户要回文件列表"那一下 ✓ ⇒ 把为此收起的文件面板还回去 ✓
+     *   （与 `syncDshPreviewState` 的关闭支调的是**同一个函数** ✓，只还一次 ✓）。
+     * ★ 放在**最后** ✓：先把预览态/顶栏/文档滚动都复位 ✓，再把面板拉上来 ✓ ——
+     *   否则"面板回来了、顶栏还在隐身"会闪一下 ✗。
+     */
+    restoreFilesAfterDshPreview('本机按下关闭')
+  }
+
+  /**
+   * ★★ round 157（B ✓）：这次"预览看不见了"是不是**只是被藏起来/最小化**（而不是关掉）✗。
+   *
+   * 两条判据（任一成立就算"不是关闭"✓）：
+   *   ① **页面自己不在前台** ✓（`document.visibilityState === 'hidden'` ✓ —— 切到后台 /
+   *      APK 被最小化 ✓）。这时 `elementFromPoint` 那一步必然量不到预览层 ✗，
+   *      但那只是"没在画"✗，不是用户关了它 ✓；
+   *   ② 那一层**还在文档里** ✓，而且它所在的右栏**仍然挂着"展开"标记**
+   *      （`[data-sidebar-right-panel][data-sidebar-right-open]` ✓）——
+   *      这正是 DSH 自己的"**最小化/仍开着、只是暂不可见**"与"收起（= 关闭）"的差别 ✓：
+   *      收起时那个属性会被摘掉 ✓（实测 DSH 的 CSS：`[data-sidebar-right-panel]` 基态
+   *      `visibility:hidden` + `translate(100%)` ✓，`[data-sidebar-right-open]` 才 `visibility:visible`✓）。
+   *
+   * ★ 判据都取**语义属性** ✓（不用哈希类名 ✗）：认不到右栏（例如预览正文挂在 body 下 ✓）
+   *   就只按①判 ✓ —— 认错的方向是"多恢复一次"✗，那是用户明确要的回来路 ✓；
+   *   漏认才会"凭空弹面板"✗✗，所以②只在**证据确凿**时才说"不是关闭"✓。
+   */
+  function dshPreviewMinimizedNotClosed() {
+    try {
+      if (document.visibilityState === 'hidden') return true
+      var layer = dshmPreviewLastLayer
+      if (layer === null || layer === undefined || layer.isConnected !== true) return false
+      if (typeof layer.closest !== 'function') return false
+      var panel = layer.closest('[data-sidebar-right-panel]')
+      if (panel === null || panel === undefined) return false
+      return panel.hasAttribute('data-sidebar-right-open') === true
+    } catch (error) {
+      // 判不出来就按"真的关掉了"处理 ✓（认错方向：宁可少弹一次面板，也绝不错过用户要的返回 ✓）
+      return false
+    }
+  }
+
+  /**
+   * ★★ round 157（B ✓）：DSH 预览关掉之后，把"为它收起的文件面板"**还回去** ✓（只还一次 ✓）。
+   *
+   * 这是**唯一一份实现** ✓：`syncDshPreviewState` 的关闭支与 `finishPreviewCloseNow`
+   * 都调它 ✓（两条路描述的是同一个事实：预览没了 ✓ —— 各写一遍就一定漂 ✗）。
+   *
+   * 落点用 `openFilesSheet(sheet, getTunnel, path)` ✓（与"点按钮打开面板"同一条路 ✓，
+   * 它会按 `path` 找到所属工作区并**直接落到那个目录** ✓）—— 所以"还在原目录"是**逐字节**
+   * 相同的路径 ✓，不是"回到工作区根"✗。
+   *
+   * @returns true = 确实把面板还回去了 ✓；false = 没有记忆 / 这次只是最小化 / 失败 ✓。
+   */
+  function restoreFilesAfterDshPreview(where) {
+    var memory = dshmFilesReturnAfterPreview
+    if (memory === null || memory === undefined) return false
+    /**
+     * ★ 护栏②：**只是被最小化不算关闭** ✗ —— 记忆**留着**（不消费 ✓），
+     *   等它真的被关掉时再还 ✓（用户要的是"关掉预览 ⇒ 回文件列表"，
+     *   而不是"预览一缩小 ⇒ 文件面板自己弹出来"✗）。这一支要留一行日志 ✗（不静默 ✓）。
+     */
+    if (dshPreviewMinimizedNotClosed()) {
+      debugBoxLine('[files] DSH 预览只是被藏起来/最小化（' + where + '）⇒ 先不还文件面板 ✓')
+      return false
+    }
+    // ★ 只恢复一次 ✓：先把记忆摘掉再动手 ✓（重开那一步是异步的 ✓，慢一拍就会还两次 ✗）
+    dshmFilesReturnAfterPreview = null
+    try {
+      debugBoxLine('[files] DSH 预览关闭（' + where + '）⇒ 回到文件列表的原目录：' + String(memory.path))
+      /**
+       * ★★ `setOpen(true)` + `renderFileBrowser(...)` = `openFilesSheet` 里"进入某个工作区"
+       *   那两步 ✓（**同一份实现** ✓，没有第二套渲染 ✗）。为什么不直接调 `openFilesSheet` ✗：
+       *   它会拿 `path` 去**字符串匹配**工作区表里的根 ✗ —— 而 macOS 的
+       *   `/var/…` 与 `/private/var/…` 是同一个目录的两种写法 ✓（本项目有 `samePath` 就是为它 ✓）
+       *   ⇒ 匹配不上就会落到"工作区列表"那一屏 ✗（用户要的"停在原目录"就没了 ✓）。
+       *   直接拿**这一屏自己的** `workspace` / `targets` 进去 ⇒ 落点**逐字节**就是 `state.path` ✓。
+       */
+      if (memory.sheet !== null && memory.sheet !== undefined && typeof memory.sheet.setOpen === 'function') {
+        memory.sheet.setOpen(true)
+      }
+      if (memory.workspace !== undefined && memory.workspace !== null) {
+        renderFileBrowser(memory.sheet, memory.workspace, memory.targets, memory.getTunnel, memory.path)
+      } else {
+        // 兜底（理论上不会走到 ✓）：没有工作区对象时按老路走一遍 ✓
+        void openFilesSheet(memory.sheet, memory.getTunnel, memory.path)
+      }
+      return true
+    } catch (error) {
+      debugBoxLine('[files] 还文件面板失败（' + where + '）：' + String(error && error.message ? error.message : error))
+      return false
+    }
   }
 
   function restoreTopChrome() {
@@ -4517,6 +4668,49 @@
   var dshmPreviewEnterPlayed = false
   var dshmPreviewPlays = 0
   var dshmTopBandTick = 0
+
+  /**
+   * ★★ round 157（B ✓）：**最近一次量到的 DSH 预览层** ✓（用来区分"关掉了"与"只是被藏起来/最小化"✗）。
+   *
+   * 为什么需要它 ✗：`dshPreviewSurface()` 的判据是"盖住视口 **且** 视口中心命中的是它" ✓ ——
+   * 面板被收起（DSH 自己那套是 `visibility:hidden` + 滑出屏外 ✓）或页面被切到后台时，
+   * 那一层**仍在文档里** ✓，只是量不到 ✗。两种情形在下游长得一模一样 ✓，
+   * 而"要不要把文件面板重新拉上来"必须分开（见 `dshPreviewMinimizedNotClosed` ✓）。
+   */
+  var dshmPreviewLastLayer = null
+
+  /**
+   * ★★ round 157（B ✓）：**"为看 DSH 预览而收起的文件面板"要还回去** 的那笔记忆 ✓。
+   *
+   * 用户原话（本轮第 2 条）："**2 不行**" ✓ —— 从文件面板点开一个文件 ⇒ DSH 预览开 ✓、
+   * 我们的面板被收掉（`openFileInDshPreview` 结尾那句 `setOpen(false)` ✓）⇒
+   * 用户按返回（预览关掉 ✓）时**底下已经没有面板了** ✗ ⇒ 直接落到聊天页 ✗。
+   * round 153 的"预览返回 ⇒ 回列表"只覆盖了**自家预览**那一屏（`currentView === 'preview'` ✓），
+   * DSH 自带预览这条路一直漏着 ✗。
+   *
+   * 形状：`{ sheet, getTunnel, path, workspace, targets, at }` ✓ ——
+   *   · `sheet` / `getTunnel` 是"重新打开面板"要用的两个东西 ✓；
+   *   · `path` 是**落点** ✓（`state.path` ✓ —— 用户要"停在原目录"✓，
+   *     ★ 不能拿 `sheet.restoreFiles` 顶替 ✗：那个落点是**工作区根**✓，不是当前目录 ✗）；
+   *   · `workspace` / `targets` 是**文件浏览器那一屏自己的两个入参** ✓ ——
+   *     恢复时直接调 `renderFileBrowser`（"打开某个工作区的文件列表"那份**唯一实现** ✓），
+   *     **不走 `openFilesSheet` 的"按路径找所属工作区"那一步** ✗✗。
+   *     为什么这条很要紧 ✓：macOS 上 `/var/…` 与 `/private/var/…` 是**同一个目录的两种写法** ✓
+   *     （本项目已有 `samePath` 就是为它写的 ✓）—— 工作区表里是宿主配置里那种写法 ✓、
+   *     而文件浏览器里的 `state.path` 是宿主 `list` 回的 **realpath** ✓ ⇒
+   *     拿 realpath 去跟表里的路径做**字符串前缀匹配**会**匹配不上** ✗ ⇒
+   *     面板重开却落到"工作区列表"那一屏 ✗（用户要的"停在原目录"就没了 ✓）。
+   *   · `at` 是**佩戴时刻** ✓（只作废"不是刚为它收起面板"的那种陈旧记忆 ✓，见 open 那一支 ✓）。
+   * 用完**立刻清** ✓（只恢复一次 ✓ —— `syncDshPreviewState` 与 `finishPreviewCloseNow`
+   * 两条路都会走到这里 ✓，不清就会弹两次 ✓）。
+   */
+  var dshmFilesReturnAfterPreview = null
+  /**
+   * 佩戴记忆与"预览真的开了"之间的合理间隔 ✓（桥 `open` 之后我们还要等
+   * `setTimeout(syncDshPreviewState, 0)` + 一帧 rAF ✓ ⇒ 实测在几百毫秒内 ✓）。
+   * 只用来**作废陈旧记忆** ✗（护栏①：不是从文件面板点开的预览，关掉后不许凭空弹面板 ✓）。
+   */
+  var DSH_PREVIEW_ARM_MS = 3000
 
   /** 在安全区那条带子里打几个点，看命中的是不是**我们之外的**可点控件 ✓（成本与 DOM 无关 ✓）。 */
   function probeTopBand(safeTop) {
@@ -4950,6 +5144,44 @@
       if (node === null || node === undefined || node.closest === undefined) return null
       var editable = node.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')
       if (editable !== null) return { reason: '输入框/可编辑区', node: describeNode(editable) }
+      /**
+       * ★★ round 157（C ✓）：**已知的横向拖动面要整笔让开** ✗ —— 用户本轮的原话：
+       *   "轨迹可以在时间轴横向选取时间，但我们的横滑仍然生效，你需要保证在**输入、模型、工具**
+       *    这一栏横向滑动的时候不触发横滑" ✓。
+       *
+       * ## 为什么下面那条"可横滚祖先"救不了它 ✗（这是本轮的关键）
+       * DSH 的轨迹时间轴**不是原生滚动，是 JS 拖动** ✓ ——
+       * 那个轨道的无障碍串写着「时间线概览；**水平拖动**可聚焦事件」✓
+       * （`dsh-client-ui-trajectory` 的 `timeline.overviewAria` ✓），
+       * 它自己处理 pointer 事件 ✓、`scrollWidth === clientWidth` ✗ ⇒
+       * 下面那条 `scrollWidth > clientWidth` 的几何判据**一条都不成立** ✗✓。
+       * ⇒ 必须再用**语义**认一遍 ✓（判据必须是用户/无障碍可见的东西 ✓，不是构建哈希类名 ✗）。
+       *
+       * ## 认哪些（安全失败式 ✓）
+       *   · `[role="slider"]` —— "能拖"这件事的定义本身 ✓，任何地方都认 ✓；
+       *   · `aria-label` 里含「时间线 / 拖动 / 轨迹」（以及英文 Timeline / Trajectory / drag ✓）的容器 ✓
+       *     —— 实测 DSH 轨迹视图那三个：`section[aria-label="轨迹时间线"]` ✓、
+       *     轨道 `div[aria-label="时间线概览；水平拖动可聚焦事件"]` ✓、
+       *     工具条 `[aria-label="轨迹工具栏"]` ✓ ⇒ 「输入 / 模型 / 工具」那一栏（泳道标签）
+       *     与轨道本体**都在 section 里面** ✓ 一笔全覆盖 ✓。
+       * ★ **认错的方向**：最多是"那一笔横滑不触发我们的导航"（用户再滑一次即可 ✓）；
+       *   漏认就是用户报的这条 bug ✓ ⇒ 宁可多让 ✓。
+       *
+       * ## 为什么要把后两条**限定在"不是我们自己的面板/抽屉"里** ✗（回归护栏 ✓）
+       * 光按文案匹配会误伤一条真实动线：**会话标题**里出现「轨迹」两个字时，
+       * 左抽屉里的会话行 `aria-label` 就可能带上它 ✗ ⇒ 在抽屉里横滑关不掉抽屉 ✗✗
+       * （用户第 4 条："防止一刀切让手把功能关死" ✓）。
+       * 而轨迹视图只可能长在对话区那一边 ✓ —— 抽屉与文件面板里没有它 ✓。
+       */
+      var slider = node.closest('[role="slider"]')
+      if (slider !== null) return { reason: '拖动面（role=slider）', node: describeNode(slider) }
+      if (node.closest('#dsh-mobile-sheet-panel') === null && node.closest('[class*="sidebarCol"]') === null) {
+        var dragSurface = node.closest(
+          '[aria-label*="时间线"], [aria-label*="拖动"], [aria-label*="轨迹"], ' +
+            '[aria-label*="timeline" i], [aria-label*="trajectory" i], [aria-label*="drag" i]',
+        )
+        if (dragSurface !== null) return { reason: '轨迹/时间线横向拖动面', node: describeNode(dragSurface) }
+      }
       /**
        * ★ 祖先链要**一路走到根**，不能只走 4 层 ✗。
        *
@@ -6748,14 +6980,58 @@
          `[class*="titleRow"] *` 命中的 ✓，连胶囊里的状态点/计数一起算 ✓；
          这里是同特异度、写在后头 ⇒ 后来者胜 ✓（`:not()` 里塞后代选择器在旧 WebView 上不保险 ✗）。 */
       '  [data-dshm-lineage] * { visibility: visible !important; }',
-      /* ★ 不许看起来像"第三个标签" ✓：做成**小胶囊**（状态点 + 计数 ✓）、**没有下划线** ✓、
-         字色比「对话/轨迹」再轻一档 ✓（那两个字标签用的是 tertiary ⇒ 这里用 caption ✓）。
-         只改**我们自己那一层**（`> button` ✓），DSH 点开后的那个菜单（fixed / 336px ✓）一个字不碰 ✓。 */
-      '  [data-dshm-lineage="count"] > button {',
-      '    background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.06)) !important;',
-      '    border-radius: 999px !important;',
-      '    padding: 3px 10px !important;',
-      '    color: var(--dsw-alias-label-caption, #8a9199) !important;',
+      /**
+       * ★★ round 157（A ✓）：**摆不好就不许露出来** ✗✗（用户 A1 的硬要求：
+       *   "宁可看不见，也不许压住 tab 或半卡"✓）。
+       *
+       * 时序上没有闪烁 ✓：`tagLineageEntry` 先打 `blocked` ✓、**同一帧里**紧接着
+       * `reflowLineageEntry()` 量到位再摘掉 ✓ —— 浏览器根本没有机会画那一帧 ✓。
+       * 特异度必须**压过**上面那条 `[data-dshm-lineage] *` ✗（两条都是 `!important`，
+       * 所以用"两个属性选择器"取胜 ✓）；连子树一起藏 ✓（状态点在子树里 ✓）。
+       * `visibility:hidden` 同时**拿掉命中测试** ✓ ⇒ 半卡住的入口也不会抢走点击 ✓。
+       */
+      '  [data-dshm-lineage][data-dshm-lineage-blocked="1"],',
+      '  [data-dshm-lineage][data-dshm-lineage-blocked="1"] * { visibility: hidden !important; }',
+      /**
+       * ★★ round 157（A ✓）：**做成与「对话 | 轨迹」同款** ✓ ——
+       *   用户原话："**风格和对话、轨迹两个不一样**" ✗（round 155 给它套了个小胶囊：
+       *   底色 + 999px 圆角 + 3px/10px 内边距 + caption 一档的字色 ✗）。
+       *
+       * 取值**逐条对齐 DSH 自己那两个 tab** ✓（实测 conversation 的 `*_tab`：
+       *   `font-size:13px; font-weight:500; line-height:16px;
+       *    color:var(--dsw-alias-label-tertiary); background:0 0; border:none` ✓）：
+       *   · 字：13px / 500 / 16px ✓；· 色：**未选中 tab 那一档**（tertiary ✓）；
+       *   · **胶囊底 / 边框 / 圆角全部去掉** ✗✗（"不一样"就是它们）；
+       *   · **不要下划线** ✗ —— tab 的 `padding:0 0 9px` 是给下划线留的位置 ✓，
+       *     而入口是个**控件**、不是选中态 tab ✓ ⇒ 内边距归零 ✓、`text-decoration:none` ✓。
+       * ★ 只改**我们自己那一层**（`> button` ✓），DSH 点开后的那个树菜单（fixed / 336px ✓）
+       *   一个字节不碰 ✓ —— 它不在 `[data-dshm-lineage] > button` 这条选择器里 ✓。
+       */
+      '  [data-dshm-lineage] > button {',
+      '    font-size: 13px !important;',
+      '    font-weight: 500 !important;',
+      '    line-height: 16px !important;',
+      '    color: var(--dsw-alias-label-tertiary, #8a9199) !important;',
+      '    background: none !important;',
+      '    border: 0 !important;',
+      '    border-radius: 0 !important;',
+      '    padding: 0 !important;',
+      '    min-height: 0 !important;',
+      '    box-shadow: none !important;',
+      '    text-decoration: none !important;',
+      '  }',
+      /* 悬停/键盘聚焦也别长出胶囊底来 ✓（DSH 自己那两个 tab 也没有 ✓）。 */
+      '  [data-dshm-lineage] > button:hover,',
+      '  [data-dshm-lineage] > button:focus-visible { background: none !important; }',
+      /**
+       * ★ 状态点（"有子代理在跑"时文字前那个小点 ✓）：**≤10px** ✓（这里 8px ✓）。
+       * 选择器只认**按钮里空的第一个孩子** ✓ —— 那个位置在两种形态里都只可能是状态点 ✓
+       * （计数是带文字的 span ✓、切换器名字也是带文字的 span ✓，空元素不可能是文字 ✓）
+       * ⇒ 既不误伤文字排版 ✓，也不用去猜 DSH 的哈希类名 ✗。
+       */
+      '  [data-dshm-lineage] > button > *:first-child:empty {',
+      '    width: 8px !important; height: 8px !important;',
+      '    border-radius: 50% !important; flex: none !important;',
       '  }',
       /* 切换器形态：显示的是**当前子代理的名字** ✓ ⇒ 给足最大宽度 + 截断 ✓
          （宽度上限由上面那个 `--dshm-lineage-max` 兜着 ✓，412px 屏上不会把 tab 挤走 ✓）。 */
@@ -7370,7 +7646,13 @@
     }
 
     syncDshPreviewState = function () {
-      var open = dshPreviewSurface() !== null
+      /**
+       * ★ round 157（B ✓）：那一层要**留住节点** ✓ —— "关掉了"与"只是被藏起来/最小化"
+       *   靠它区分（见 `dshPreviewMinimizedNotClosed` ✓，护栏②）。
+       */
+      var surface = dshPreviewSurface()
+      var open = surface !== null
+      if (surface !== null) dshmPreviewLastLayer = surface
       var was = document.body.dataset.dshmDshPreview === '1'
       /**
        * ★ 「关掉」要**连续缺席一小会儿**才算 ✓。
@@ -7384,6 +7666,21 @@
         document.body.dataset.dshmDshPreview = '1'
         // ★ "DSH 预览开着"也算一层 ✓ —— 上报给壳，系统返回先关它 ✓（见 dshmBack ✓）
         reportBackAvailable()
+        /**
+         * ★★ round 157（B ✓）：**护栏①** —— 这次预览**不是**"刚刚为它收起了文件面板"
+         *   的那一次 ⇒ 那笔记忆**当场作废** ✗（典型：用户点的是**聊天里的文件链接** ✓）。
+         *   不判这一下的后果：他从聊天里开预览、关掉 ⇒ 我们的文件面板**凭空弹出来** ✗✗。
+         *   判据取**佩戴时刻** ✓（`at` ✓）：刚收起面板那一下，桥 `open` 之后几百毫秒内
+         *   预览就会进 DOM ✓；隔着很久才开的另一次预览与那笔记忆毫无关系 ✗。
+         */
+        if (
+          !was &&
+          dshmFilesReturnAfterPreview !== null &&
+          Date.now() - dshmFilesReturnAfterPreview.at > DSH_PREVIEW_ARM_MS
+        ) {
+          dshmFilesReturnAfterPreview = null
+          debugBoxLine('[files] 这次 DSH 预览不是刚从文件面板点开的 ⇒ 不记返回点 ✓')
+        }
         /**
          * ★★ 预览打开期间**不让文档自己滚**（round 118，用户真机反馈：
          *   "上滑往下翻的时候会出现**两个滚动条**，页面来回上下晃动" ✗）。
@@ -7454,6 +7751,13 @@
         } catch (error) {
           void error
         }
+        /**
+         * ★★ round 157（B ✓）：**用户报到的那一条** —— 从文件面板点开的 DSH 预览关掉之后，
+         *   把为此收起的文件面板**还回去**（并落回原目录 ✓）。与 `finishPreviewCloseNow`
+         *   调的是**同一个函数** ✓（只还一次 ✓；"最小化"那一支由它自己挡掉 ✓）。
+         * ★ 放在这一支的**最后** ✓：三笔复位都做完了再拉面板 ✓（否则会闪一下 ✗）。
+         */
+        restoreFilesAfterDshPreview('预览层已消失')
       }
       if (open) {
         try {
@@ -7538,8 +7842,24 @@
        */
       if (shellBridge() !== undefined) {
         setInterval(function () {
-          pullShellInsets()
-          reflowLineageEntry()
+          /**
+           * ★★ round 157（A ✓）：两件事**各自兜住** ✓ —— 这里原来是裸的两句 ✗：
+           *   `pullShellInsets()` 一旦抛（壳那条桥在导航中间被换掉过 ✓），
+           *   后面的 `reflowLineageEntry()` 就**每次都被跳过** ✗✗，
+           *   而且 `setInterval` 里的异常是**完全静默**的 ✗ ⇒
+           *   真机上就是"入口一直停在一个错误的位置、日志里一个字都没有"✓✓。
+           * 这正是怀疑③的形状 ✓（吞掉的异常伪装成"按钮坏了"✓）。
+           */
+          try {
+            pullShellInsets()
+          } catch (error) {
+            noteLineageOnce('拉壳 insets 失败：' + String(error && error.message ? error.message : error))
+          }
+          try {
+            reflowLineageEntry()
+          } catch (error) {
+            noteLineageOnce('每秒对账时定位失败：' + String(error && error.message ? error.message : error))
+          }
         }, 1000)
       }
     } catch (error) {
@@ -7954,74 +8274,273 @@
        */
       var variant = /switcher/i.test(String(entry.className) + ' ' + String(trigger.className)) ? 'switcher' : 'count'
       if (entry.dataset.dshmLineage !== variant) entry.dataset.dshmLineage = variant
-      placeLineageEntry(header, entry)
+      /**
+       * ★★ round 157（A ✓）：**先按"不许露出来"待命** ✓ —— 紧接着的 `reflowLineageEntry()`
+       * 会在**同一帧里**量好、摆好、再把标记摘掉 ✓ ⇒ 浏览器根本没有机会画出"半卡"的那一帧 ✓
+       * （同一帧内先加属性再删属性，不会产生中间绘制 ✓）。
+       * 摆不好就一直留着这个标记 ✓（用户看到的是"没有入口"✓，而不是"压在轨迹上"✗✗）。
+       */
+      if (entry.dataset.dshmLineageBlocked !== '1') entry.dataset.dshmLineageBlocked = '1'
+      if (reflowLineageEntry() !== true) {
+        /**
+         * ★ 怀疑①的正面修法 ✓：**入口一出现就算一次** ✓ —— 上面那一次同步算可能太早
+         * （入口刚进 DOM、标签行还没排好 / 面板正在切换 ✓）⇒ 补一帧再量一次 ✓
+         * （一次性 ✓、带令牌 ✓，见 `scheduleLineageReflow` ✓）。
+         */
+        scheduleLineageReflow()
+      }
     }
 
     /**
-     * 把入口**摆到标签行右端** ✓（round 155 的第二半，纯几何 —— 由 `tagLineageEntry` 调 ✓）。
+     * ★★ round 157（A ✓）：**量了再放、放完复量** —— 把入口摆到标签行右端 ✓。
      *
-     * 三个变量都相对**包含块的内边距盒** ✓（`position:absolute` 的偏移语义就是它 ✓）：
-     * 包含块是谁由 `offsetParent` 说了算 ✓ —— **不假设**它是 `header` ✗
-     * （DSH 的哪一层带 `position` 是它自己的事 ✓，会随版本变 ✓）。
+     * ## 真机为什么是错的（用户截图：native 1200×2608 / dpr≈3）
+     * 顶栏底边 y≈276 ✓；入口只有下半截露在 y≈280–310、x≈150–380（CSS ≈ x 50–127）✗；
+     * 标签行「对话 轨迹」在 y≈320–370 ✓。⇒ **横向在左边、纵向被顶栏裁掉上半** ✗✗。
+     * 那个组合恰好是"**定位那一步在真机上根本没生效**"的形状 ✓：
+     * `titleRow` 现在是"零高度 + `overflow:visible`" ✓ ⇒ 入口退回**自然位置**渲染 ✓
+     * —— 它自己的包含块很窄（右缘 ≈ 127px ✓），于是 `right:0 / top:0` 的**兜底值**
+     * 正好把它放在 50–127 / 紧贴顶栏下沿 ✓（与截图逐点吻合 ✓）。
      *
-     * ★ 为什么是"算"而不是"写死一个像素" ✗：标签行的纵坐标 = 自建顶栏高度 +
-     *   安全区 + DSH 自己的 `margin-top:10px` ✓ —— 横竖屏/刘海/手势栏一变它就变 ✓。
+     * ## round 155 那套算法错在哪 ✗（本轮逐个排掉，见下 ✓）
+     * ① **只算一次、而且只跟着 120ms 去抖的观察者** ✗ —— 入口出现得比"第一次算"晚时，
+     *    算的那一下对象还不存在 ⇒ 只能靠后面的 DOM 变动再触发 ✓；而"入口一出现"这件事
+     *    本身是**属性/节点变动**，我们必须**自己主动补一次** ✓（见 `scheduleLineageReflow` ✓）。
+     * ② **三个变量写到了没被 `[data-dshm-lineage]` 命中的那一层** —— 排除 ✓：
+     *    变量写在 `entry.style` 上 ✓，而 `entry` 就是被打了 `data-dshm-lineage` 的那个节点 ✓
+     *    （`dataset` 与 `style` 同一层 ✓）⇒ **不是**这一条 ✓（但还是加了断言盯着 ✓）。
+     * ③ **`try/catch` 把异常吞了** ✗ —— 本轮修掉 ✓：`reflowLineageEntry` /
+     *    那条 1s 对账 / resize 那条路，凡是 catch 都**留一行日志** ✓
+     *    （本项目明文纪律：静默的失败在手机上只表现为"按钮坏了"✗）。
+     * ④ **`offsetParent` 不是真正的包含块** ✗✗ —— 这条**最可能**：`position:absolute` 的
+     *    偏移语义是"相对**最近的定位祖先**（或最近带 `transform`/`filter`/`contain` 的祖先 ✓）"，
+     *    而 `offsetParent` **跳过**那些"没定位但带 transform"的祖先 ✗ ⇒ 两者不是一回事 ✓。
+     *    旧代码拿 `offsetParent` 的 padding box 去算 ✓ ⇒ 一旦真包含块是**另一个盒子**
+     *    （入口挂在 `.crumbs` / `titleCluster` 那一串里 ✓），整块就**整体错位** ✓✓。
+     *
+     * ## 本轮的算法：**不猜包含块，改成闭环** ✓
+     * 先按老办法给一个**初值** ✓（只当起点 ✓），然后
+     * **写 → 量 → 修**，最多 3 轮 ✓：
+     *   · 目标：`中心 y == 标签行中心` ✓、`右缘 == 标签行右缘` ✓（各 ≤1px ✓）；
+     *   · 修正量 = **屏幕上量到的偏差** ✓ —— 偏移量（`right`/`top`）与屏幕位移
+     *     互为**反向的平移** ✓ ⇒ "右缘还差 dx" 就是 "`right` 再减 dx" ✓，
+     *     与包含块是谁**完全无关** ✓✓（这正是它能治④的原因 ✓）。
+     *   · 读完 `getBoundingClientRect()` 会强制布局 ✓ ⇒ 量到的就是刚写下的结果 ✓，不需要等帧 ✓。
+     *   · 3 轮之后**再量一次**：仍不齐 ⇒ 返回 false ⇒ 调用方把它藏起来 ✓
+     *     （"宁可看不见，也不许压住 tab 或半卡"✓）。
+     * ★ 另外**永远压不到「对话/轨迹」** ✓：`max-width` 就是"最右那个 tab 的右缘
+     *   到标签行右缘那点空地 − 10px" ✓，并且收敛后再做一次**零相交**检查 ✓（几何兜底 ✓）。
      */
     function placeLineageEntry(header, entry) {
-      var tabs = header.querySelector('[role="tablist"]')
-      if (tabs === null || tabs === undefined) return
-      var tabsRect = tabs.getBoundingClientRect()
-      if (tabsRect.height <= 0 || tabsRect.width <= 0) return
-      var box = entry.getBoundingClientRect()
-      var anchor = entry.offsetParent
-      if (anchor === null || anchor === undefined) anchor = document.body
-      if (anchor === null || anchor === undefined) return
-      var anchorRect = anchor.getBoundingClientRect()
-      // 包含块的内边距盒：`clientLeft/clientTop` 就是"border 之内"的那条线 ✓，
-      // 而 `clientWidth/clientHeight` 正好是盒子的宽高（含 padding、不含 border ✓）。
-      var cbTop = anchorRect.top + anchor.clientTop
-      var cbRight = anchorRect.left + anchor.clientLeft + anchor.clientWidth
-      /**
-       * 纵向：与「对话/轨迹」**那两个字标签**的中心对齐 ✓（不是与整行盒子对齐 ✗ ——
-       * tab 自带 9px 下内边距 + 下划线 ✓，按盒子对齐会看着偏低 ✓）。
-       */
-      var tabButtons = tabs.querySelectorAll('[role="tab"]')
-      var tabTop = tabsRect.top
-      var tabBottom = tabsRect.bottom
-      var tabsUsed = tabsRect.left
-      for (var i = 0; i < tabButtons.length; i++) {
-        var r = tabButtons[i].getBoundingClientRect()
-        if (i === 0 || r.top < tabTop) tabTop = r.top
-        if (i === 0 || r.bottom > tabBottom) tabBottom = r.bottom
-        if (r.right > tabsUsed) tabsUsed = r.right
+      var row = lineageTabRow(header)
+      if (row === null) {
+        noteLineageOnce('找不到「对话 | 轨迹」标签行 ⇒ 这一轮先不显示入口')
+        return false
       }
-      var tabCenterY = (tabTop + tabBottom) / 2
+      var tabsRect = row.rect
       /**
-       * 横向：右缘贴齐标签行右缘 ✓；宽度上限 = 从**最右那个 tab** 的右缘到标签行右缘
-       * 再留 10px 空气 ✓ ⇒ 入口再长也只会自己截断 ✓，绝不会压到「对话/轨迹」上 ✓。
+       * ★ 横向：右缘贴齐标签行右缘 ✓；宽度上限 = 从**最右那个 tab** 的右缘
+       * 到标签行右缘再留 10px 空气 ✓ ⇒ 入口再长也只在自己那块空地里截断 ✓。
        */
-      var maxWidth = Math.round(tabsRect.right - tabsUsed - 10)
-      if (!(maxWidth > 24)) maxWidth = 24
-      entry.style.setProperty('--dshm-lineage-right', Math.round(cbRight - tabsRect.right) + 'px')
-      entry.style.setProperty('--dshm-lineage-top', Math.round(tabCenterY - box.height / 2 - cbTop) + 'px')
+      var maxWidth = Math.round(tabsRect.right - row.rightMost - 10)
+      if (!(maxWidth > 24)) {
+        // 那块空地连一个入口都放不下（标签行太窄 / 太挤 ✓）⇒ 宁可什么都不显示 ✗
+        noteLineageOnce('标签行右端没有放得下入口的空地（' + maxWidth + 'px）⇒ 不显示')
+        return false
+      }
       entry.style.setProperty('--dshm-lineage-max', maxWidth + 'px')
+      /**
+       * 纵向的目标是「对话 | 轨迹」**那两个字标签**的中心 ✓（不是整行盒子的中心 ✗ ——
+       * tab 自带 9px 下内边距是给下划线留的 ✓，按盒子对齐会看着偏低 ✓）。
+       */
+      var targetCenterY = (row.tabTop + row.tabBottom) / 2
+      /**
+       * 初值：老办法（`offsetParent` 的 padding box ✓）—— **只当起点** ✓。
+       * 它即便整个错掉也没关系 ✓：下面那 3 轮闭环会把它拉回来 ✓
+       * （本轮③④两条怀疑就是这么被"绕过"的 ✓，不需要先证明它是哪一条 ✓）。
+       */
+      var anchor = entry.offsetParent
+      var cbTop = 0
+      var cbRight = tabsRect.right
+      if (anchor !== null && anchor !== undefined) {
+        var anchorRect = anchor.getBoundingClientRect()
+        cbTop = anchorRect.top + anchor.clientTop
+        cbRight = anchorRect.left + anchor.clientLeft + anchor.clientWidth
+      }
+      var box0 = entry.getBoundingClientRect()
+      var right = cbRight - tabsRect.right
+      var top = targetCenterY - box0.height / 2 - cbTop
+      var latest = box0
+      for (var attempt = 0; attempt < 3; attempt++) {
+        entry.style.setProperty('--dshm-lineage-right', Math.round(right) + 'px')
+        entry.style.setProperty('--dshm-lineage-top', Math.round(top) + 'px')
+        // 读 rect = 强制布局 ✓ ⇒ 拿到的是**刚写下**的结果 ✓（所以不需要等帧 ✓）
+        latest = entry.getBoundingClientRect()
+        if (!(latest.width > 0) || !(latest.height > 0)) {
+          noteLineageOnce('入口量不到尺寸（' + Math.round(latest.width) + '×' + Math.round(latest.height) + '）⇒ 不显示')
+          return false
+        }
+        var dy = targetCenterY - (latest.top + latest.height / 2)
+        var dx = tabsRect.right - latest.right
+        if (Math.abs(dy) <= 1 && Math.abs(dx) <= 1) break
+        right -= dx
+        top += dy
+      }
+      var dyFinal = targetCenterY - (latest.top + latest.height / 2)
+      var dxFinal = tabsRect.right - latest.right
+      if (Math.abs(dyFinal) > 1 || Math.abs(dxFinal) > 1) {
+        noteLineageOnce(
+          '入口摆不到位（中心差 ' + Math.round(dyFinal) + 'px / 右缘差 ' + Math.round(dxFinal) + 'px）⇒ 不显示',
+        )
+        return false
+      }
+      /**
+       * ★ 零相交兜底 ✓：即便对齐了，只要**真的压到**某颗 tab 上就不显示 ✓
+       *   （与 `max-width` 那条是两道独立的闸 ✓ —— 它管"宽度"，这条管"事实"✓）。
+       */
+      for (var t = 0; t < row.buttons.length; t++) {
+        var tabRect = row.buttons[t].getBoundingClientRect()
+        if (
+          latest.left < tabRect.right &&
+          latest.right > tabRect.left &&
+          latest.top < tabRect.bottom &&
+          latest.bottom > tabRect.top
+        ) {
+          noteLineageOnce('入口与「' + String(row.labels[t] || '') + '」重叠 ⇒ 不显示')
+          return false
+        }
+      }
+      noteLineageOnce('')
+      return true
     }
 
     /**
-     * 只把**已经标记好的**入口重新摆一次 ✓（round 155）。
+     * ★★ round 157（A ✓）：把标签行**连它那两个 tab 的带子**一起量出来 ✓。
+     *
+     * 判据用 `[role="tablist"]` ✓（**语义属性** ✓，不是构建哈希类名 ✗）。
+     * 实测 DSH 那两行就是同一个节点 ✓：`ConversationRoot_module_css_default.tabs`
+     * 上同时挂着 `role="tablist"` ✓ —— `display:flex` / 无 `width` ⇒ **撑满顶栏内容宽** ✓，
+     * 所以"它的右缘"才是用户说的"右端" ✓（`[class*="tabs"]` 只作旧版本的兜底 ✓）。
+     *
+     * @returns `{node, rect, buttons, labels, rightMost, tabTop, tabBottom}` 或 `null` ✓
+     *   （量不到就返回 null ✓ —— 调用方按"这一轮不显示"处理 ✓，绝不瞎定位 ✗）。
+     */
+    function lineageTabRow(header) {
+      var row = header.querySelector('[role="tablist"]')
+      if (row === null || row === undefined) row = header.querySelector('[class*="tabs"]')
+      if (row === null || row === undefined) return null
+      var rect = row.getBoundingClientRect()
+      if (!(rect.width > 0) || !(rect.height > 0)) return null
+      var buttons = row.querySelectorAll('[role="tab"]')
+      /**
+       * ★ 纵向必须量**那两个字标签**的带子 ✓（见 `placeLineageEntry` 里的说明 ✓）；
+       *   一个 tab 都没有（旧版本 / 结构变了 ✓）就退回整行盒子 ✓（宁可差一点，也不要崩 ✗）。
+       */
+      var tabTop = rect.top
+      var tabBottom = rect.bottom
+      var rightMost = rect.left
+      var labels = []
+      for (var i = 0; i < buttons.length; i++) {
+        var b = buttons[i].getBoundingClientRect()
+        if (i === 0) {
+          tabTop = b.top
+          tabBottom = b.bottom
+        } else {
+          if (b.top < tabTop) tabTop = b.top
+          if (b.bottom > tabBottom) tabBottom = b.bottom
+        }
+        if (b.right > rightMost) rightMost = b.right
+        labels.push(String(buttons[i].textContent || '').trim().slice(0, 12))
+      }
+      return {
+        node: row,
+        rect: rect,
+        buttons: buttons,
+        labels: labels,
+        rightMost: rightMost,
+        tabTop: tabTop,
+        tabBottom: tabBottom,
+      }
+    }
+
+    /**
+     * ★★ round 157（A ✓）：**同一条提示只记一行** ✓（观察者每 120ms 就可能跑一遍 ✗ ——
+     *   流式输出时把同一句错刷满调试框，等于把真正有用的那几行挤掉 ✓）。
+     * 传空串 = 复位 ✓（下一次失败会重新记一行 ✓，不会因为"记过就不记了"而漏掉新问题 ✗）。
+     */
+    var lineageLastNote = ''
+    function noteLineageOnce(message) {
+      if (message === '' || message === lineageLastNote) {
+        if (message === '') lineageLastNote = ''
+        return
+      }
+      lineageLastNote = message
+      try {
+        debugBoxLine('[lineage] ' + message)
+      } catch (error) {
+        void error
+      }
+    }
+
+    /**
+     * ★★ round 157（A ✓）：**入口一出现就算一次** ✓（怀疑①的正面修法 ✓）。
+     * 一次性、带令牌 ✓ —— 流式输出时 `schedule()` 每 120ms 就会调我们 ✗，
+     * 不加令牌就会排出一长串 0ms 任务把主线程占住 ✗。
+     */
+    var lineageReflowQueued = false
+    function scheduleLineageReflow() {
+      if (lineageReflowQueued) return
+      lineageReflowQueued = true
+      setTimeout(function () {
+        lineageReflowQueued = false
+        try {
+          reflowLineageEntry()
+        } catch (error) {
+          noteLineageOnce('补一次定位失败：' + String(error && error.message ? error.message : error))
+        }
+      }, 0)
+    }
+
+    /**
+     * 只把**已经标记好的**入口重新摆一次 ✓（round 155；round 157 加"摆不好就藏起来" ✓）。
      *
      * 与 `tagLineageEntry` 的分工：那个负责"认出元素 + 打标记 + 清理" ✓（走观察者 ✓），
-     * 这个只做几何 ✓ —— 给"**布局变了但 DOM 没变**"的那两条路用：
+     * 这个只做几何 ✓ + **显/隐的裁决** ✓ —— 给"**布局变了但 DOM 没变**"的那两条路用：
      *   · `resize` / 转屏 ✓；
      *   · 壳报安全区 ⇒ 顶栏 `padding-top` 变 ⇒ 标签行整体上下移动 ✓（见那条 1s 对账 ✓）。
      * 认不到就什么都不做 ✓（没有子代理时这里恒为 no-op ✓，一个像素都不动 ✓）。
+     *
+     * ★★ round 157（A ✓）两条纪律都在这里落地 ✗：
+     *   · **摆不齐 ⇒ 藏起来** ✓（`data-dshm-lineage-blocked` ✓ —— 宁可看不见，
+     *     也不许压住 tab 或半卡 ✓）；
+     *   · **catch 必须留一行日志** ✓（本项目明文纪律 ✓ —— 静默的失败在手机上
+     *     只表现为"那个按钮坏了"✗，本轮就是带着这条怀疑来的 ✓）。
+     *
+     * @returns true = 摆好了并且**正显示着** ✓；false = 没入口 / 没摆好（已藏起 ✓）。
      */
     function reflowLineageEntry() {
       var entry = document.querySelector('[data-dshm-lineage]')
-      if (entry === null || entry === undefined) return
+      if (entry === null || entry === undefined) return false
       var header = entry.closest('[data-dshm-topheader]')
-      if (header === null || header === undefined) return
-      placeLineageEntry(header, entry)
+      if (header === null || header === undefined) return false
+      var placed = false
+      try {
+        placed = placeLineageEntry(header, entry) === true
+      } catch (error) {
+        // ★ 绝不静默 ✗：这条异常以前会被吞掉，屏幕上只表现为"入口不见了"✗
+        noteLineageOnce('定位时出错（这一轮不显示入口 ✓）：' + String(error && error.message ? error.message : error))
+        placed = false
+      }
+      if (placed === true) {
+        if (entry.dataset !== undefined && entry.dataset.dshmLineageBlocked !== undefined) {
+          delete entry.dataset.dshmLineageBlocked
+        }
+        return true
+      }
+      if (entry.dataset !== undefined && entry.dataset.dshmLineageBlocked !== '1') {
+        entry.dataset.dshmLineageBlocked = '1'
+      }
+      return false
     }
 
     function syncTitle() {
@@ -8519,13 +9038,19 @@
         try {
           reflowLineageEntry()
         } catch (error) {
-          void error
+          /**
+           * ★★ round 157（A ✓）：**这里以前是 `void error`** ✗ —— 正是那条明文纪律
+           * 说的"吞掉会伪装成按钮坏了"✓。手机上没有任何控制台 ✓，
+           * 只留一行 `noteLineageOnce` ⇒ 真机排障至少能看见"定位失败"这四个字 ✓。
+           */
+          noteLineageOnce('resize/转屏时定位失败：' + String(error && error.message ? error.message : error))
         }
       }
       globalThis.addEventListener('resize', reflowLineage)
       globalThis.addEventListener('orientationchange', reflowLineage)
     } catch (error) {
-      void error
+      // ★ 同理：装不上监听也要留一行 ✓（不然"转屏之后位置就不对了"永远查不出来 ✗）
+      noteLineageOnce('装 resize/orientationchange 监听失败：' + String(error && error.message ? error.message : error))
     }
 
     /**
@@ -11829,11 +12354,20 @@
   /**
    * ★ round 117：把文件交给 **DSH 自带预览**（现在是**默认**路径 ✓ —— 用户："从现在起都用 dsh 预览" ✓）。
    *
+   * ★★ round 157（B ✓）：多了一个**返回落点**入参 ✓（`filesState` = 文件浏览器那一层的 state ✓）。
+   * 为什么必须有它 ✗：下面那句 `setOpen(false)` 会把文件面板整个收掉 ✓ ⇒
+   * 用户关掉 DSH 预览时**底下什么都没有** ✗ ⇒ 直接落到聊天页 ✗（用户："**2 不行**"✓）。
+   * 落点只能用**调用方**的 `state.path` ✓ —— 这个函数自己够不着它 ✗
+   * （`state` 长在 `renderFileBrowser` 那个闭包里 ✓），所以由调用方递进来 ✓，
+   * 且**不改 `sheet.restoreFiles`** ✗（那是"回工作区根"的落点 ✓，不是当前目录 ✗）。
+   *
+   * @param filesState - 可选：`{ path, getTunnel }`（文件浏览器那一屏的 state ✓）。
+   *   给了才记"返回点" ✓（= 这一下**确实是从文件面板点开的** ✓，护栏①）。
    * @returns `true` = 已经交给 DSH（调用方**不要**再渲染自家预览 ✗）；
    *          `false` = 桥不可用 / 打不开 ⇒ 调用方回退到自家预览 ✓，
    *                    并且这里已经**如实说明了原因** ✓（手机上不能"点了没反应" ✗）。
    */
-  function openFileInDshPreview(sheet, entry) {
+  function openFileInDshPreview(sheet, entry, filesState) {
     var bridge = dshPreview()
     if (bridge === undefined) {
       setNote('这个 DSH 版本还没有预览桥（重启 DSH 后可用 ✓）——先用手机自带的预览 ✓')
@@ -11854,6 +12388,33 @@
     }
     // 立刻同步一次"预览开着"✓（观察器要等下一帧 ✓，而这一步可能已经推开了布局 ✓）
     if (typeof syncDshPreviewState === 'function') setTimeout(syncDshPreviewState, 0)
+    /**
+     * ★★ round 157（B ✓）：**在收起面板之前**把"这一下是为了看预览"与**落点**记下来 ✓
+     *   （顺序不能反 ✗：`setOpen(false)` 一跑，面板状态就变了 ✓）。
+     * 两条前置缺一不可 ✓（护栏①的判据就在这里 ✓）：
+     *   · 调用方**递了 state** ✓ = 这一下是从**文件浏览器那一屏**点出来的 ✓；
+     *   · 面板**此刻真的开着** ✓ —— 不然就是"凭空记一笔"，关预览时会凭空弹面板 ✗。
+     * 落点取 `state.path` ✓（**当前目录** ✓ —— 用户要"停在原目录"，不是回工作区根 ✗）。
+     */
+    if (
+      filesState !== undefined &&
+      filesState !== null &&
+      typeof filesState.path === 'string' &&
+      document.body !== null &&
+      document.body !== undefined &&
+      document.body.dataset.dshmFiles === 'open'
+    ) {
+      dshmFilesReturnAfterPreview = {
+        sheet: sheet,
+        getTunnel: filesState.getTunnel,
+        path: filesState.path,
+        // ★ 这一屏自己的两个入参 ✓（恢复时直接进同一屏 ✓，不必按路径去猜工作区 ✓）
+        workspace: filesState.workspace,
+        targets: filesState.targets,
+        at: Date.now(),
+      }
+      debugBoxLine('[files] 为 DSH 预览收起文件面板（记住返回点：' + filesState.path + ' ✓）')
+    }
     // DSH 的预览开在它自己的右侧栏里 ✓ —— 把我们的文件面板收起来，别挡着它 ✓
     if (sheet !== undefined && sheet !== null && typeof sheet.setOpen === 'function') sheet.setOpen(false)
     return true
@@ -13200,8 +13761,11 @@
        *
        * 桥不可用 / 打不开时**如实说明并回退**到自家预览 ✓ ——
        * 不能让用户点了没反应 ✗（旧宿主、还没重启 DSH 都会走到这条路 ✓）。
+       * ★★ round 157（B ✓）：把这一屏的 `state` **一起递进去** ✓ —— 面板为此收起时，
+       *   它要给"预览关掉之后"留下**返回点**（至少 `state.path` = 当前目录 ✓，
+       *   用户要的是"回到文件列表并**停在原目录**"✓，不是回工作区根 ✗）。
        */
-      if (openFileInDshPreview(sheet, entry) === true) return
+      if (openFileInDshPreview(sheet, entry, state) === true) return
       renderFilePreview(sheet, state, entry)
     })
 

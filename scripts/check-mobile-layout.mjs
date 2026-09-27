@@ -92,8 +92,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  *   实测整轮 **≈ 400 秒** ✓ —— 距 420s 只剩二十来秒 ✗，机器一忙就会被强杀 ✓
  *   （同样是"断言全绿却 exit=2"那种最难读的现象 ✗）。抬高只会**少一次误杀** ✓，
  *   不会让任何断言变松 ✓。
+ *
+ *   ★★ round 157 从 480s 提到 **600s**（同一条理由 ✓，实测过 ✗）：这一轮加了
+ *   **四组**用户真机反馈的验收（A 子智能体入口 / B 预览返回 / C 轨迹横滑 / D 手动重连 ✓），
+ *   其中 A 要**换三次几何**（无安全区 / 有安全区 / 更窄 ⇒ 每次都要等布局与收敛 ✓）、
+ *   B 要**四次**"开面板→进工作区→进子目录→开预览→关预览"✓、C 还要切一次真「轨迹」视图 ✓
+ *   ⇒ 整轮实测已经**超过 480 秒** ✗（本轮第一次跑就是这么被强杀的 ✓，
+ *   而屏幕上最后那几十条**全是绿的** ✓ —— 又一次"全绿却 exit=2" ✗）。
+ *   抬到 600s 只买"不被误杀" ✓，一条断言都没放松 ✓。
  */
-const HARD_TIMEOUT_MS = Number(process.env['ML_TIMEOUT_MS'] ?? 480_000)
+const HARD_TIMEOUT_MS = Number(process.env['ML_TIMEOUT_MS'] ?? 600_000)
 
 /**
  * 本次运行启动的子进程 —— **退出时必须全部带走** ✗。
@@ -484,8 +492,28 @@ const problems = []
  *     批准后自动连上 ✓）+ 真失败**照旧第 5 轮停**（护栏 ✓）+ 这一节收尾把页面拨回活连接 ✓；
  *   · 156-C①～③（3 条 ✓）：关面板的**同步动画**（~50ms 仍在渲染且位移在途 ✓ /
  *     主页面让位与面板位移同一时长 ✓ / ~350ms 后真的不可见不可点 ✓）。
+ *
+ * ★★ round 157 加到 **360** ✓（+23 条 ✓，只加不减 ✓；四项用户真机反馈各一组 ✓）：
+ *   · **A**（11 条 ✓，`157-A-①～⑪`）：子智能体入口"**量了再放、放完复量**" ✓ ——
+ *     入口与「对话|轨迹」**中心对齐 + 右缘贴齐**（各 ≤1px ✓）、与两颗 tab **零相交** ✓、
+ *     **不被任何祖先裁剪** ✓、落在自建顶栏之下 ✓（量的全是**最终矩形** ✗不是我们设的样式 ✓），
+ *     三种几何都成立（无安全区 / 有顶部安全区 / 更窄 ✓）+ **入口晚于首次计算才出现** ✓ +
+ *     **摆不好就一点都不露** ✓ + 真触摸点得到 ✓ + 与 tab **同款**（13px/500/16px/tertiary、
+ *     无胶囊无下划线 ✓，切换器形态同款 ✓）+ 状态点 ≤10px ✓；
+ *   · **B**（6 条 ✓，`157-B-①～⑥`）：从文件面板点开的 DSH 预览**关掉后回到文件列表的原目录** ✓
+ *     （面板重开 ✓、面包屑 title **逐字节相同** ✓、真的有行 ✓）；
+ *     护栏：不是从面板打开的预览**不许凭空弹面板** ✓ / **只是被最小化不算关闭** ✓ /
+ *     **只恢复一次** ✓ 且不与"侧滑一键关面板"打架 ✓；
+ *   · **C**（4 条 ✓，`157-C-①～④`）：轨迹那一栏横滑**不触发我们的导航** ✓ ——
+ *     **可横滚祖先让手**（那层自己真的滚了 ✓）+ ★ **已知的横向拖动面让手**
+ *     （`scrollWidth === clientWidth` ⇒ 只有语义判据拦得住 ✓；我们既没 preventDefault
+ *     也没 stopPropagation ✓）+ **普通区域横滑照旧生效** ✓（回归护栏 ✓）+ 轨迹视图区 ✓；
+ *   · **D**（2 条 ✓，`157-D-①②`）：手动重连之后**新会话必须被接受** ✓
+ *     （旧会话的反重放窗口"见过"计数 ✓ ⇒ 关掉活连接 ⇒ 走 `dialNow` ⇒ 拨号真的发生 ✓、
+ *     **没有** `帧被拒绝（seen）` ✓、经隧道问电脑一句应答真的回来了 ✓）。
+ *   ⇒ **360** = 本轮实跑条数 ✓。这个数只许涨 ✓ —— 少了就是有人删断言 ✗。
  */
-const EXPECTED_MIN_CHECKS = 337
+const EXPECTED_MIN_CHECKS = 360
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -570,6 +598,12 @@ let sessionFixture = { title: undefined, ids: [] }
 const BIGDIR_SIZE = 15000
 const BIGDIR_WORKSPACE_ID = 'a11ce000-0000-4000-8000-000000b19d1r'
 const BIGDIR_DEMO = join(DSH_HOME, 'bigdir-demo')
+/**
+ * ★★ round 157（B ✓）："预览关掉后回到**原目录**"用的那一对夹具 ✓ ——
+ *   子目录名与里面那个文件名（都固定 ✓，免得断言跟着漂 ✗）。
+ */
+const RETURN_DEMO_DIR = '返回落点'
+const RETURN_DEMO_FILE = '返回落点.txt'
 let bigDirReady = false
 try {
   mkdirSync(join(BIGDIR_DEMO, '大目录'), { recursive: true })
@@ -577,6 +611,13 @@ try {
     writeFileSync(join(BIGDIR_DEMO, '大目录', `条目-${String(i).padStart(5, '0')}.txt`), 'x')
   }
   writeFileSync(join(BIGDIR_DEMO, 'README.md'), '# 大目录验收工作区\n')
+  /**
+   * ★★ round 157（B ✓）：再加一个**很小的子目录** ——
+   *   "预览关掉后**停在原目录**"必须有一个和"工作区根"**不同**的落点才验得出来 ✓；
+   *   用现成的「大目录」（15000 项 ✗）不行：列一次要十几秒 ✓。
+   */
+  mkdirSync(join(BIGDIR_DEMO, RETURN_DEMO_DIR), { recursive: true })
+  writeFileSync(join(BIGDIR_DEMO, RETURN_DEMO_DIR, RETURN_DEMO_FILE), '返回落点夹具-157\n')
   bigDirReady = true
 } catch (error) {
   console.log('  · 造大目录失败，那一段会如实报失败：' + String(error && error.message ? error.message : error))
@@ -1735,6 +1776,293 @@ try {
       `右端探针=${JSON.stringify(afterRemove.rightStrip)}`,
     )
 
+    /**
+     * ── round 157（A）：入口要"**量了再放、放完复量**"，并与「对话|轨迹」**同款** ────
+     *
+     * 真机实测（用户截图，native 1200×2608 / dpr≈3 ✓）：自建顶栏底边 y≈276 ✓；
+     * 入口只露出下半截（`…代理 ∨` 在 y≈280–310、x≈150–380 = CSS x 50–127）✗；
+     * 标签行「对话 轨迹」在 y≈320–370 ✓ ⇒ **横向在左边、纵向被顶栏裁掉上半** ✗✗。
+     * 那正是"定位那一步在真机上根本没生效"的形状 ✓：`titleRow` 是"零高度 + overflow:visible"✓，
+     * 入口退回**自然位置**渲染 ✓（它自己的包含块很窄 ⇒ `right:0/top:0` 的兜底值
+     * 恰好把它放在 50–127、紧贴顶栏下沿 ✓ —— 与截图逐点吻合 ✓）。
+     *
+     * ★ 判据**只量最终矩形** ✗不是我们设的样式 ✓（用户明确要求 ✓）：
+     *   · `|中心 y 差| ≤ 1px` ✓、`|右缘差| ≤ 1px` ✓；
+     *   · 与两颗 tab **零相交** ✓；
+     *   · **不被任何祖先裁剪** ✓（逐个祖先看：`overflow` 不是 visible 的，必须完整包含它 ✓）；
+     *   · 落在自建顶栏**之下** ✓（不能被顶栏盖住 —— 真机那条"上半被裁掉"就是这个 ✓）。
+     * ★ 三种几何都要成立 ✓：① 无安全区 ② 有顶部安全区（走壳 insets 桥 ✓）
+     *   ③ 更窄（360×740 ✓）。另外覆盖"**入口晚于首次计算才出现**"✓。
+     */
+    const lineage157Geom = async () =>
+      asJson155(
+        await evaluate(`(function(){
+          try{
+            /**
+             * ★ 与 round 155 那条探针同一个做法 ✓：外壳自己那两条**瞬时浮动提示条**
+             *   （[data-dshm-askbar] / [data-dshm-banner] ✓）position:fixed + z-index:200 ✓、
+             *   位置就在顶栏下方（top: 52px + 8px ✓）⇒ 会把这几点挡住 ✗。
+             *   它们是**既有**行为（与入口无关 ✓），而"入口点不点得到"要量的是**正常状态** ✓
+             *   ⇒ 量之前先按产品自己的做法收掉 ✓（产品用一个 15 秒的定时器删它们 ✓，这里只是不等它 ✓）。
+             */
+            function dropFloatBars(){
+              var bars=document.querySelectorAll('[data-dshm-askbar],[data-dshm-banner]')
+              var n=0
+              for(var i=0;i<bars.length;i++){ if(bars[i].parentElement!==null){ bars[i].parentElement.removeChild(bars[i]); n++ } }
+              return n
+            }
+            dropFloatBars()
+            function box(e){var r=e.getBoundingClientRect();
+              return {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),
+                right:Math.round(r.right),bottom:Math.round(r.bottom),
+                cx:Math.round(r.left+r.width/2),cy:Math.round(r.top+r.height/2)}}
+            var header=document.querySelector('[data-dshm-topheader]')
+            if(header===null) return JSON.stringify({error:'没有顶栏标记 data-dshm-topheader'})
+            var row=header.querySelector('[role="tablist"]')
+            if(row===null) return JSON.stringify({error:'顶栏里没有 role=tablist 的标签行'})
+            var tabs=[].slice.call(row.querySelectorAll('[role="tab"]'))
+            if(tabs.length<2) return JSON.stringify({error:'标签行里的 tab 少于两个'})
+            function st(e){var s=getComputedStyle(e);return {fontSize:s.fontSize,fontWeight:s.fontWeight,lineHeight:s.lineHeight,
+              color:s.color,background:s.backgroundColor,borderRadius:s.borderRadius,borderWidth:s.borderTopWidth,
+              textDecoration:s.textDecorationLine,paddingLeft:s.paddingLeft}}
+            var out={row:box(row),tabs:tabs.map(box),tabLabels:tabs.map(function(b){return String(b.textContent||'').trim()}),
+              viewport:{w:window.innerWidth,h:window.innerHeight},
+              safeTop:String(getComputedStyle(document.documentElement).getPropertyValue('--dshm-safe-top')).trim(),
+              blocker:(function(){var b=document.getElementById('dsh-mobile-top');return b===null?null:box(b)})()}
+            /**
+             * ★ 比的是**未选中那一颗 tab** 的样式 ✓ ——
+             *   选中的那颗（默认是「对话」✓）字色是 state-business-primary ✓，
+             *   拿它来当"同款"的基准会把**正确**的实现判红 ✗（本轮差点自己踩 ✓）。
+             */
+            var tabPick=null
+            for(var ti=0;ti<tabs.length;ti++){ if(tabs[ti].getAttribute('aria-selected')!=='true'){ tabPick=tabs[ti]; break } }
+            if(tabPick===null) tabPick=tabs[tabs.length-1]
+            out.tabStyleLabel=String(tabPick.textContent||'').trim()
+            out.tabStyle=st(tabPick)
+            var bandTop=Math.min.apply(null,out.tabs.map(function(t){return t.y}))
+            var bandBottom=Math.max.apply(null,out.tabs.map(function(t){return t.bottom}))
+            out.band={top:bandTop,bottom:bandBottom,cy:Math.round((bandTop+bandBottom)/2)}
+            var entry=document.querySelector('[data-dshm-lineage]')
+            if(entry===null||entry===undefined){out.entry=null;out.entryVisible=false;return JSON.stringify(out)}
+            out.entry=box(entry)
+            out.entryVariant=String(entry.getAttribute('data-dshm-lineage')||'')
+            out.blocked=entry.getAttribute('data-dshm-lineage-blocked')==='1'
+            var ecs=getComputedStyle(entry)
+            out.entryVisible=ecs.visibility==='visible'&&ecs.display!=='none'
+            var btn=entry.querySelector('button')
+            out.style=btn===null?null:st(btn)
+            out.dot=(function(){var d=entry.querySelector('button > *:first-child');if(d===null)return null;
+              var r=d.getBoundingClientRect();return {w:Math.round(r.width),h:Math.round(r.height),text:String(d.textContent||'')}})()
+            out.dy=out.entry.cy-out.band.cy
+            out.dx=out.entry.right-out.row.right
+            out.overlap=out.tabs.filter(function(t){return out.entry.x<t.right&&out.entry.right>t.x&&out.entry.y<t.bottom&&out.entry.bottom>t.y}).length
+            var clip=[];var n=entry.parentElement
+            while(n!==null&&n!==undefined&&n!==document.documentElement){
+              var s=getComputedStyle(n)
+              if(s.overflowX!=='visible'||s.overflowY!=='visible'){
+                var r=n.getBoundingClientRect()
+                var inside=out.entry.x>=Math.round(r.left)-1&&out.entry.right<=Math.round(r.right)+1&&
+                  out.entry.y>=Math.round(r.top)-1&&out.entry.bottom<=Math.round(r.bottom)+1
+                clip.push({cls:String(n.className||'').split(' ')[0],ov:s.overflowX+'/'+s.overflowY,inside:inside})
+              }
+              n=n.parentElement
+            }
+            out.clippers=clip
+            out.clipped=clip.filter(function(c){return c.inside!==true}).length
+            out.belowTopBar=out.blocker===null?true:out.entry.y>=out.blocker.bottom-1
+            var hit=document.elementFromPoint(out.entry.cx,out.entry.cy)
+            out.hitSelf=hit!==null&&(hit===entry||entry.contains(hit))
+            return JSON.stringify(out)
+          }catch(e){return JSON.stringify({error:String(e&&e.message?e.message:e)})}
+        })()`),
+      )
+    /** 一条断言里把"用户看得见的那几件事"一次问清 ✓（省条数、失败时信息仍然齐全 ✓）。 */
+    const geometryOk = (g) =>
+      g.error === undefined &&
+      g.entry !== null &&
+      g.entry !== undefined &&
+      g.blocked === false &&
+      g.entryVisible === true &&
+      Math.abs(g.dy) <= 1 &&
+      Math.abs(g.dx) <= 1 &&
+      g.overlap === 0 &&
+      g.clipped === 0 &&
+      g.belowTopBar === true &&
+      g.hitSelf === true
+    const geometryDetail = (g) =>
+      g.error !== undefined
+        ? `评估出错：${g.error}`
+        : `标签行=${JSON.stringify(g.row)}｜tab=${JSON.stringify(g.tabs)}｜带子中心=${g.band?.cy}｜入口=${JSON.stringify(g.entry)}` +
+          `｜中心差=${g.dy}px 右缘差=${g.dx}px｜相交=${g.overlap} 被裁=${g.clipped} 命中自己=${g.hitSelf} 在顶栏下=${g.belowTopBar}` +
+          `｜blocked=${g.blocked} 可见=${g.entryVisible}｜视口=${JSON.stringify(g.viewport)}（safe-top=${g.safeTop || '0'}）` +
+          `｜裁剪祖先=${JSON.stringify(g.clippers ?? [])}`
+
+    // ① 无安全区（基线视口 412×915 ✓）：注入计数形态 ⇒ 必须一次到位 ✓
+    await injectLineage('count')
+    await sleep(700)
+    const gA1 = await lineage157Geom()
+    check(
+      geometryOk(gA1),
+      '★ 157-A-① **无安全区**：入口与「对话|轨迹」**中心对齐 + 右缘贴齐**（各 ≤1px ✓）、与两颗 tab **零相交** ✓、**不被任何祖先裁剪** ✓、落在自建顶栏之下 ✓ —— 量的全是**最终矩形** ✗不是我们设的样式 ✓',
+      geometryDetail(gA1),
+    )
+
+    // ② 有顶部安全区（**走壳 insets 桥** ✓ —— `apk.apply` 就是壳推 insets 时网页做的那一下 ✓）
+    const applyInsTop = async (px) =>
+      String(
+        await evaluate(`(function(){
+          var api=globalThis.__DSH_MOBILE_BOOT__&&globalThis.__DSH_MOBILE_BOOT__.apk
+          if(!api||typeof api.apply!=='function') return 'no-api'
+          var ok=api.apply({seen:true,top:${px},bottom:0,ime:0,density:3,edgeToEdge:true})
+          return ok===true?'applied':'refused'
+        })()`),
+      )
+    const insTop40 = await applyInsTop(40)
+    /**
+     * ★ 无头夹具里**没有壳** ⇒ 那条 1s 的 insets 对账（只在 `installShell` 时按
+     *   `shellBridge() !== undefined` 装一次 ✓）根本没有装 ✗。
+     *   所以这里用**同一条 `reflowLineageEntry` 的另一个入口**（`resize` 监听 ✓）
+     *   把"安全区变了 ⇒ 重新收敛"这件事驱动起来 ✓ —— 真机上那条路由 1s 对账覆盖 ✓
+     *   （这一点在本轮报告里如实写明 ✓）。
+     */
+    await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+    await sleep(600)
+    const gA2 = await lineage157Geom()
+    check(
+      insTop40 === 'applied' && gA2.safeTop === '40px' && geometryOk(gA2),
+      '★ 157-A-② **有顶部安全区**（走壳 insets 桥把 `--dshm-safe-top` 给成 40px ✓）：标签行整体被推下去之后，入口**跟着重新收敛**（同四条判据一个不少 ✓）',
+      `insets=${insTop40}｜safe-top=${gA2.safeTop}｜${geometryDetail(gA2)}`,
+    )
+
+    // ③ 更窄（360×740 ✓ —— "更窄或横屏"二选一，窄屏对布局的扰动最小、结论最硬 ✓）
+    await send('Emulation.setDeviceMetricsOverride', { width: 360, height: 740, deviceScaleFactor: 2, mobile: true })
+    await sleep(900)
+    const gA3 = await lineage157Geom()
+    check(
+      geometryOk(gA3) && gA3.viewport?.w === 360,
+      '★ 157-A-③ **更窄的屏**（360×740 ✓）：入口在新几何下**重新收敛**（转屏/resize 那条路 ✓ —— 复用既有调用点，没有新增触发器 ✓）',
+      geometryDetail(gA3),
+    )
+    // 回正：视口 + 安全区都还原 ✓（后面的章节还要在 412×915 上量 ✓）
+    await send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2, mobile: true })
+    const insTop0 = await applyInsTop(0)
+    await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+    await sleep(900)
+    const gA4 = await lineage157Geom()
+    check(
+      insTop0 === 'applied' && gA4.viewport?.w === 412 && gA4.safeTop !== '40px' && geometryOk(gA4),
+      '★ 157-A-④ 视口与安全区**都还原之后**，入口**又一次收敛回原处**（收敛是幂等的 ✓ —— 不是"只有第一次对"✗）',
+      `insets=${insTop0}｜${geometryDetail(gA4)}`,
+    )
+
+    // ④ "入口晚于首次计算才出现"✓：先撤掉夹具、让它彻底冷下来，再注入 ✓
+    await removeLineage()
+    await sleep(1300)
+    const lateInjected = await injectLineage('count')
+    await sleep(700)
+    const gA5 = await lineage157Geom()
+    check(
+      lateInjected.ok === true && geometryOk(gA5),
+      '★ 157-A-⑤ **入口晚于首次计算才出现** ✓：撤掉夹具、等 1.3 秒（这一窗里没有任何"入口"被算过 ✓）之后**再注入** ⇒ 它一出现就被摆好 ✓（怀疑①的正面修法：`tagLineageEntry` 摆不齐时会**补量一帧** ✓）',
+      `注入=${JSON.stringify(lateInjected)}｜${geometryDetail(gA5)}`,
+    )
+
+    // ⑤ 摆不好就**不许露出来** ✓（用户硬要求："宁可看不见，也不许压住 tab 或半卡" ✓）
+    const squeezed = await evaluate(`(function(){
+      try{
+        var row=document.querySelector('[data-dshm-topheader] [role="tablist"]')
+        if(row===null) return false
+        row.style.width='40px'
+        return true
+      }catch(e){return false}
+    })()`)
+    await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+    await sleep(700)
+    const gA6 = await lineage157Geom()
+    const tabsBeforeSqueeze = JSON.stringify(gA5.tabs ?? null)
+    check(
+      squeezed === true && gA6.entry !== null && gA6.blocked === true && gA6.entryVisible === false,
+      '★ 157-A-⑥ 标签行被挤到**放不下入口**时（40px ✓）：入口**一点都不露** ✓（`data-dshm-lineage-blocked` ⇒ `visibility:hidden` ✓，连命中测试一起拿掉 ✓）—— 这正是"宁可看不见，也不许压住 tab 或半卡"✓',
+      `压缩成功=${squeezed}｜blocked=${gA6.blocked} 可见=${gA6.entryVisible}｜入口=${JSON.stringify(gA6.entry)}｜${geometryDetail(gA6)}`,
+    )
+    const unsqueezed = await evaluate(`(function(){
+      try{
+        var row=document.querySelector('[data-dshm-topheader] [role="tablist"]')
+        if(row===null) return false
+        row.style.width=''
+        return true
+      }catch(e){return false}
+    })()`)
+    await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+    await sleep(900)
+    const gA7 = await lineage157Geom()
+    check(
+      unsqueezed === true && geometryOk(gA7) && JSON.stringify(gA7.tabs) === tabsBeforeSqueeze,
+      '★ 157-A-⑦ 空档**还回来**之后入口恢复显示（`blocked` 不粘滞 ✓），而且从头到尾两颗 tab **一个像素都没动** ✓（与挤压之前那一帧逐点相同 ✓）',
+      `还原=${unsqueezed}｜${geometryDetail(gA7)}｜挤压前 tab=${tabsBeforeSqueeze}`,
+    )
+
+    // ⑥ 行为：真点一下必须还是它自己（改完样式不许把点击弄丢 ✓）
+    const spyReady = await evaluate(`(function(){
+      try{
+        var entry=document.querySelector('[data-dshm-lineage]')
+        var btn=entry===null?null:entry.querySelector('button')
+        if(btn===null) return false
+        globalThis.__dshmLineageClicks=0
+        if(globalThis.__dshmLineageSpy!==1){
+          btn.addEventListener('click',function(){ globalThis.__dshmLineageClicks=globalThis.__dshmLineageClicks+1 })
+          globalThis.__dshmLineageSpy=1
+        }
+        return true
+      }catch(e){return false}
+    })()`)
+    const clickCenter = gA7.entry === null || gA7.entry === undefined ? null : { x: gA7.entry.cx, y: gA7.entry.cy }
+    if (clickCenter !== null) {
+      await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: clickCenter.x, y: clickCenter.y, id: 1 }] })
+      await sleep(60)
+      await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    }
+    await sleep(500)
+    const clickRead = asJson155(
+      await evaluate(`JSON.stringify({clicks:globalThis.__dshmLineageClicks||0})`),
+    )
+    check(
+      spyReady === true && clickRead.clicks >= 1,
+      '★ 157-A-⑧ 那枚入口**真点得到它自己** ✓（`elementFromPoint(它的中心)` 命中它 ✓ + 在同一个点上发**真触摸** ⇒ 它自己的 click 真的收到 ✓ —— 用户要求"改完样式必须仍然可点"✓）',
+      `命中自己=${gA7.hitSelf}｜点击计数=${clickRead.clicks}｜触点=${JSON.stringify(clickCenter)}`,
+    )
+
+    // ⑦ 风格：与「对话 | 轨迹」**同款** ✓（用户："风格和对话、轨迹两个不一样" ✗）
+    const styleSame = (a, b) =>
+      a !== null && a !== undefined && b !== null && b !== undefined &&
+      a.fontSize === b.fontSize && a.fontWeight === b.fontWeight && a.lineHeight === b.lineHeight && a.color === b.color
+    const flatPill = (s) =>
+      s !== null && s !== undefined &&
+      (s.background === 'rgba(0, 0, 0, 0)' || s.background === 'transparent') &&
+      parseFloat(s.borderRadius) === 0 && parseFloat(s.borderWidth) === 0 &&
+      (s.textDecoration === 'none' || s.textDecoration === '') && parseFloat(s.paddingLeft) === 0
+    check(
+      styleSame(gA7.style, gA7.tabStyle) && flatPill(gA7.style),
+      '★ 157-A-⑨ 计数形态：字号/字重/行高/颜色与「对话|轨迹」**逐项相同** ✓（13px / 500 / 16px / 未选中 tab 那一档 tertiary ✓），而且**没有胶囊底、没有边框、圆角为 0、没有下划线、内边距为 0** ✓（原来那个 999px 圆角 + 3px/10px 内边距 + 底色就是用户说的"不一样"✗）',
+      `入口按钮样式=${JSON.stringify(gA7.style)}｜tab 按钮样式=${JSON.stringify(gA7.tabStyle)}`,
+    )
+    check(
+      gA7.dot !== null && gA7.dot !== undefined && gA7.dot.w <= 10 && gA7.dot.h <= 10,
+      '★ 157-A-⑩ 有子代理在跑时，文字前那个**小状态点 ≤10px** ✓（选择器只认"按钮里空的第一个孩子"—— 计数与名字都是带文字的 span ⇒ 不会误伤文字排版 ✓）',
+      `状态点=${JSON.stringify(gA7.dot)}`,
+    )
+    // ⑧ 切换器形态同样"同款" ✓
+    await injectLineage('switcher')
+    await sleep(800)
+    const gA8 = await lineage157Geom()
+    check(
+      geometryOk(gA8) && gA8.entryVariant === 'switcher' && styleSame(gA8.style, gA8.tabStyle) && flatPill(gA8.style),
+      '★ 157-A-⑪ **切换器形态**（当前就在子代理会话里 ✓）也是同款（字号/字重/行高/颜色逐项相同 ✓、无胶囊 ✓），并且照样**中心对齐 + 右缘贴齐 + 零相交 + 不被裁剪** ✓',
+      `形态=${gA8.entryVariant}｜入口样式=${JSON.stringify(gA8.style)}｜tab 样式=${JSON.stringify(gA8.tabStyle)}｜${geometryDetail(gA8)}`,
+    )
+    await removeLineage()
+    await sleep(600)
+
     const stats = await evaluate(`(function(){
       function box(e){var r=e.getBoundingClientRect();return {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}}
       var host=document.querySelector('[data-composer-stats]')
@@ -2674,7 +3002,7 @@ try {
   /** 调试框里最近的几行 `[swipe]` —— 滑动类断言失败时直接带上，省去"再猜一轮" ✓。 */
   const swipeLogs = async () => {
     const text = String(
-      await evaluate("String((document.getElementById('dsh-upload-debug')||{}).textContent||'')"),
+      await evaluate("String((document.getElementById('dshm-upload-debug')||{}).textContent||'')"),
     )
     return text
       .split('\n')
@@ -3440,6 +3768,336 @@ try {
       `输入框 @${cr.x},${cr.y}（宽 ${cr.w}）判定次数 ${beforeComposer} → ${afterComposer}`,
     )
   }
+  /**
+   * ── round 157（C）：轨迹里横滑**不许**触发我们的滑动导航 ────────────────
+   *
+   * 用户原话："轨迹可以在时间轴横向选取时间，但我们的横滑仍然生效，你需要保证在
+   * **输入、模型、工具**这一栏横向滑动的时候**不触发横滑**" ✓。
+   *
+   * ## 两条判据**并存**（第二条不能省 ✗）
+   * ① **可横滚祖先让手** ✓ —— 起点所在元素或祖先 `overflow-x` 是 `auto|scroll`
+   *    且 `scrollWidth > clientWidth` ⇒ 不认领（这一条 round 95 就有了 ✓）；
+   * ② ★ **已知的横向拖动面让手** ✓ —— DSH 的轨迹时间轴很可能是 **JS 拖动而不是原生滚动** ✗
+   *    （`dsh-client-ui-trajectory` 的无障碍串就写着「时间线概览；**水平拖动**可聚焦事件」✓）
+   *    ⇒ 那种元素 `scrollWidth === clientWidth` ✗，第①条**放行不了它** ✗✓。
+   *    所以再用**语义/结构**认一遍 ✓：`[role="slider"]` ✓、
+   *    `aria-label` 含「时间线 / 拖动 / 轨迹」的容器 ✓、以及轨迹视图区内部的横向拖动面 ✓。
+   *
+   * ## 回归护栏（第二条不能省的镜像 ✓）
+   * 普通区域横滑**仍然必须生效** ✓（左滑开文件目录 / 右滑开抽屉 ✓）——
+   * 防的是"一刀切让手把功能关死"✗。
+   *
+   * ★ 真手势读数 ✗不是合成事件 ✓：用 CDP 真触摸 ✓，并且
+   *   · 被让手的那一层**自己要真的有反应** ✓（原生滚动看 `scrollLeft` ✓；
+   *     JS 拖动面看"它自己的监听**收到了** touchmove ✓ 且 `defaultPrevented === false` ✓"）；
+   *   · 同时**我们**没产生动作 ✓（判定次数不变 ✓、两个抽屉都没开 ✓）。
+   * ★ 无头夹具里如果造不出真实时间轴，就按本项目既有做法**现场注入同形元素** ✓
+   *   （带上述语义属性 ✓）—— 哪部分是注入夹具、哪部分是真视图，报告里明说 ✓。
+   */
+  {
+    const cJson = (raw) => {
+      try {
+        return JSON.parse(String(raw))
+      } catch (error) {
+        return { error: String(raw).slice(0, 80) }
+      }
+    }
+    const cDirty = async () =>
+      Boolean(await evaluate(`document.body.dataset.dshmFiles==='open' || document.body.dataset.dshMobileDrawer==='open'`))
+    const cCloseAll = async () => {
+      await evaluate(`(function(){
+        if(document.body.dataset.dshmFiles==='open'){var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click()}
+        if(document.body.dataset.dshMobileDrawer==='open'){var s=document.getElementById('dsh-mobile-scrim');if(s)s.click()}
+      })()`)
+      await sleep(900)
+    }
+    await cCloseAll()
+    /**
+     * 现场注入两件同形夹具 ✓（与真实轨迹**同一套语义** ✓）：
+     *   · `dshm-157-drag`：**JS 拖动面**（`aria-label` 就是 DSH 那条 ✓、
+     *     `scrollWidth === clientWidth` ✓ —— 第①条判据对它无效 ✓，只有新判据能拦住 ✓）；
+     *   · `dshm-157-scroll`：**原生可横滚** + 同样的语义 ✓（两条判据都成立 ✓）。
+     * 两件都在 `centerCol` 里 ✓（真实轨迹就长在对话区那一边 ✓）；
+     * 拖动面上挂的是它**自己的** touchmove 监听 ✓ —— 记"事件有没有到达它"与
+     * "defaultPrevented" ✓（我们一旦 preventDefault 或 stopPropagation，这两个读数就会变 ✗）。
+     */
+    const injectedC = cJson(
+      await evaluate(`(function(){
+        try{
+          var old=document.getElementById('dshm-157-fixtures');
+          if(old) old.remove();
+          var col=document.querySelector('[class*="centerCol"]')||document.body;
+          var host=document.createElement('div');
+          host.id='dshm-157-fixtures';
+          host.style.cssText='position:fixed;left:8px;right:8px;top:250px;z-index:9999;';
+          var drag=document.createElement('div');
+          drag.id='dshm-157-drag';
+          drag.style.cssText='height:56px;display:flex;align-items:center;color:#ddd;background:#222;';
+          drag.setAttribute('aria-label','轨迹时间线');
+          var track=document.createElement('div');
+          track.id='dshm-157-track';
+          track.style.cssText='height:40px;flex:1;display:flex;align-items:center;';
+          track.setAttribute('aria-label','时间线概览；水平拖动可聚焦事件');
+          track.setAttribute('tabindex','0');
+          track.textContent='输入 / 模型 / 工具（注入的同形拖动面）';
+          drag.appendChild(track);
+          var scroll=document.createElement('div');
+          scroll.id='dshm-157-scroll';
+          scroll.style.cssText='height:56px;margin-top:6px;overflow-x:auto;';
+          scroll.setAttribute('aria-label','轨迹时间线');
+          var wide=document.createElement('div');
+          wide.style.cssText='width:1400px;height:40px;background:#333;color:#ddd;';
+          wide.textContent='很宽的原生横滚内容（注入夹具）';
+          scroll.appendChild(wide);
+          host.appendChild(drag);
+          host.appendChild(scroll);
+          col.appendChild(host);
+          globalThis.__dshm157Moves=0;
+          globalThis.__dshm157Prevented=0;
+          globalThis.__dshm157Stopped=0;
+          track.addEventListener('touchmove',function(e){
+            globalThis.__dshm157Moves=globalThis.__dshm157Moves+1;
+            if(e.defaultPrevented) globalThis.__dshm157Prevented=globalThis.__dshm157Prevented+1;
+          },{passive:true});
+          track.addEventListener('pointermove',function(e){
+            if(e.defaultPrevented) globalThis.__dshm157Stopped=globalThis.__dshm157Stopped+1;
+          },{passive:true});
+          var tr=track.getBoundingClientRect();
+          var sr=scroll.getBoundingClientRect();
+          return JSON.stringify({ok:true,
+            drag:{x:Math.round(tr.left+tr.width/2),y:Math.round(tr.top+tr.height/2),scrollW:track.scrollWidth,clientW:track.clientWidth},
+            scroll:{x:Math.round(sr.left+sr.width/2),y:Math.round(sr.top+sr.height/2),scrollW:scroll.scrollWidth,clientW:scroll.clientWidth}});
+        }catch(e){return JSON.stringify({ok:false,reason:String(e&&e.message?e.message:e)})}
+      })()`),
+    )
+    console.log(`  · [157-C] 注入的同形夹具=${JSON.stringify(injectedC)}`)
+
+    // ① 原生可横滚 + 语义 ⇒ 那层**自己滚了** ✓、我们**没动作** ✓
+    const scrollBefore = (await swipeState()).count
+    await evaluate(`(function(){var s=document.getElementById('dshm-157-scroll');if(s)s.scrollLeft=0})()`)
+    await gesture(injectedC.scroll?.x ?? 200, injectedC.scroll?.y ?? 300, -160, 2)
+    const scrollLeftAfter = Number(
+      await evaluate(`(function(){var s=document.getElementById('dshm-157-scroll');return s===null?0:Math.round(s.scrollLeft)})()`),
+    )
+    const scrollAfter = (await swipeState()).count
+    const scrollDirty = await cDirty()
+    check(
+      injectedC.ok === true &&
+        (injectedC.scroll?.scrollW ?? 0) > (injectedC.scroll?.clientW ?? 0) &&
+        scrollLeftAfter > 0 &&
+        scrollAfter === scrollBefore &&
+        scrollDirty === false,
+      '★ 157-C-① **可横滚祖先让手** ✓：真触摸横滑落在原生可横滚的那一层上 ⇒ **它自己真的滚了**（`scrollLeft` 从 0 变成 >0 ✓），而我们**一个动作都没产生** ✓（判定次数不变 ✓、两个抽屉都没开 ✓）',
+      `夹具=${JSON.stringify(injectedC.scroll)}｜scrollLeft 0 → ${scrollLeftAfter}｜判定次数 ${scrollBefore} → ${scrollAfter}｜有抽屉开着=${scrollDirty}`,
+    )
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await sleep(400)
+
+    // ② ★ JS 拖动面（scrollWidth === clientWidth ⇒ 第①条判据无效 ✓）⇒ 必须靠**语义**让手 ✓
+    await evaluate(`(function(){globalThis.__dshm157Moves=0;globalThis.__dshm157Prevented=0})()`)
+    const dragBefore = (await swipeState()).count
+    const dragLastBefore = (await swipeState()).last
+    await gesture(injectedC.drag?.x ?? 200, injectedC.drag?.y ?? 270, -150, 2)
+    const dragRead = cJson(await evaluate(`JSON.stringify({moves:globalThis.__dshm157Moves||0,prevented:globalThis.__dshm157Prevented||0})`))
+    const dragAfter = (await swipeState()).count
+    const dragDirty = await cDirty()
+    const dragLastAfter = (await swipeState()).last
+    check(
+      injectedC.ok === true &&
+        (injectedC.drag?.scrollW ?? -1) === (injectedC.drag?.clientW ?? -2) &&
+        dragRead.moves >= 1 &&
+        dragRead.prevented === 0 &&
+        dragAfter === dragBefore &&
+        dragDirty === false,
+      '★ 157-C-② ★ **已知的横向拖动面让手** ✓（`scrollWidth === clientWidth` ⇒ "可横滚祖先"那条**放行不了它** ✗，只有语义判据能拦 ✓）：真触摸横滑之后，它**自己的监听收到了事件** ✓、`defaultPrevented === false` ✓（= 我们既没 `preventDefault` 也没 `stopPropagation` ✓），而我们**没产生动作** ✓',
+      `拖动面夹具=${JSON.stringify(injectedC.drag)}｜它收到 touchmove ${dragRead.moves} 次、其中 defaultPrevented ${dragRead.prevented} 次｜判定次数 ${dragBefore} → ${dragAfter}（last: ${JSON.stringify(dragLastBefore)} → ${JSON.stringify(dragLastAfter)}）｜有抽屉开着=${dragDirty}`,
+    )
+
+    // ③ 回归护栏：**普通区域**同样的横滑仍然必须生效 ✓（否则就是把功能一刀切关死了 ✗）
+    await evaluate(`(function(){var h=document.getElementById('dshm-157-fixtures');if(h)h.remove()})()`)
+    await sleep(500)
+    await cCloseAll()
+    const plainBefore = (await swipeState()).count
+    await gesture(330, 700, -140, 4)
+    await sleep(900)
+    const plainState = await swipeState()
+    const openedByPlain = String(await evaluate(`String((document.body&&document.body.dataset.dshmFiles)||'')`))
+    check(
+      plainState.count > plainBefore && openedByPlain === 'open',
+      '★ 157-C-③ **回归护栏**：把夹具撤掉之后，**普通内容区**上同样一笔横滑照旧**打开文件面板** ✓（`open-files` ✓）—— 证明新判据只让开"另有含义"的那些面 ✓，没有把滑动导航一刀切关死 ✗',
+      `判定次数 ${plainBefore} → ${plainState.count}（last=${JSON.stringify(plainState.last)}）｜面板=${JSON.stringify(openedByPlain)}`,
+    )
+    await cCloseAll()
+
+    // ④ 真轨迹视图优先：能点到「轨迹」就用**真视图**量，造不出来才用注入的同形夹具（并说明 ✓）
+    const trajectoryProbe = cJson(
+      await evaluate(`(function(){
+        try{
+          var tabs=[].slice.call(document.querySelectorAll('[data-dshm-topheader] [role="tab"]'));
+          var tab=null;
+          for(var i=0;i<tabs.length;i++){ if(String(tabs[i].textContent||'').trim()==='轨迹'){ tab=tabs[i]; break } }
+          if(tab===null) return JSON.stringify({tab:false,reason:'顶栏里没有「轨迹」那颗 tab'});
+          return JSON.stringify({tab:true,label:String(tab.textContent||'').trim()});
+        }catch(e){return JSON.stringify({tab:false,reason:String(e&&e.message?e.message:e)})}
+      })()`),
+    )
+    let realTrajectory = false
+    let realSurface = null
+    if (trajectoryProbe.tab === true) {
+      await evaluate(`(function(){
+        var tabs=[].slice.call(document.querySelectorAll('[data-dshm-topheader] [role="tab"]'));
+        for(var i=0;i<tabs.length;i++){ if(String(tabs[i].textContent||'').trim()==='轨迹'){ tabs[i].click(); return true } }
+        return false;
+      })()`)
+      await sleep(2600)
+      realSurface = cJson(
+        await evaluate(`(function(){
+          try{
+            /**
+             * ★ 判据要**从手指底下那一点反推** ✓ —— 先找一个语义容器
+             *   （时间线那条带子 / 轨迹视图区 ✓），取它里面一点，再问
+             *   "这一点命中的元素往上找得到那个语义容器吗" ✓：
+             *   找到了 ⇒ 这一笔手势**确实落在它里面** ✓（挂在它身上的
+             *   touchmove 监听因此**必须**收到事件 ✓ —— 我们一旦 stopPropagation 就收不到 ✗）。
+             * ★ 上一版只按文档顺序取第一个匹配节点 ✗ —— 拿到的可能是**工具条**
+             *   （y≈104 ✓），而手势落在它下面那一层 ⇒ "它有反应"恒为 0 ✗（本轮实测 ✓），
+             *   于是那条读数等于没量 ✓。
+             */
+            var semantic='[aria-label*="时间线"],[aria-label*="轨迹"],[role="slider"]';
+            var anchors=document.querySelectorAll('[aria-label*="时间线"],[aria-label*="轨迹"],[role="slider"]');
+            var pick=null;
+            for(var i=0;i<anchors.length;i++){
+              var a=anchors[i];
+              if(a.closest('#dshm-157-fixtures')!==null) continue;
+              var ar=a.getBoundingClientRect();
+              if(ar.width<40||ar.height<20) continue;
+              var px=Math.round(ar.left+ar.width/2);
+              var py=Math.round(ar.top+ar.height/2);
+              if(px<2||py<2||px>window.innerWidth-2||py>window.innerHeight-2) continue;
+              var hit=document.elementFromPoint(px,py);
+              if(hit===null) continue;
+              var owner=hit.closest(semantic);
+              if(owner!==null){ pick={node:owner,x:px,y:py,anchorLabel:String(a.getAttribute('aria-label')||''),hitCls:String(hit.className||'').split(' ')[0]}; break }
+            }
+            if(pick===null) return JSON.stringify({found:false,count:anchors.length});
+            globalThis.__dshm157RealNode=pick.node;
+            var r=pick.node.getBoundingClientRect();
+            return JSON.stringify({found:true,label:String(pick.node.getAttribute('aria-label')||''),
+              cls:String(pick.node.className||'').split(' ')[0],
+              x:pick.x,y:pick.y,anchorLabel:pick.anchorLabel,hitCls:pick.hitCls,
+              scrollW:pick.node.scrollWidth,clientW:pick.node.clientWidth,count:anchors.length,
+              box:{x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}});
+          }catch(e){return JSON.stringify({found:false,reason:String(e&&e.message?e.message:e)})}
+        })()`),
+      )
+      realTrajectory = realSurface.found === true
+      if (realTrajectory) {
+        /**
+         * ★ 在**真节点**上挂一个**只读**探针 ✓（不改 DSH 的 DOM ✗：只留一个 JS 引用 ✓）——
+         *   记"它有没有收到 touchmove / pointermove"与"defaultPrevented"✓：
+         *   **收到** = 我们既没 `stopPropagation` 也没把它挡在外面 ✓；
+         *   `defaultPrevented === false` = 我们没 `preventDefault` ✓。
+         */
+        await evaluate(`(function(){
+          try{
+            var n=globalThis.__dshm157RealNode;
+            if(!n||typeof n.addEventListener!=='function') return false;
+            globalThis.__dshm157RealMoves=0;
+            globalThis.__dshm157RealPrevented=0;
+            if(n.__dshm157Spy!==true){
+              var bump=function(e){
+                globalThis.__dshm157RealMoves=(globalThis.__dshm157RealMoves||0)+1;
+                if(e.defaultPrevented) globalThis.__dshm157RealPrevented=(globalThis.__dshm157RealPrevented||0)+1;
+              };
+              n.addEventListener('touchmove',bump,{passive:true});
+              n.addEventListener('pointermove',bump,{passive:true});
+              n.__dshm157Spy=true;
+            }
+            return true;
+          }catch(e){return false}
+        })()`)
+      }
+    }
+    /**
+     * 真视图拿不到 ⇒ 退回**同形夹具** ✓（本项目既有做法 ✓）：
+     * 这一支在报告里明说"这一段是注入的"✓。
+     */
+    if (!realTrajectory) {
+      await evaluate(`(function(){
+        try{
+          var old=document.getElementById('dshm-157-fixtures');if(old)old.remove();
+          var col=document.querySelector('[class*="centerCol"]')||document.body;
+          var host=document.createElement('div');
+          host.id='dshm-157-fixtures';
+          host.style.cssText='position:fixed;left:8px;right:8px;top:250px;z-index:9999;';
+          var sec=document.createElement('section');
+          sec.setAttribute('aria-label','轨迹时间线');
+          sec.style.cssText='height:120px;background:#222;color:#ddd;';
+          var lane=document.createElement('div');
+          lane.textContent='输入 / 模型 / 工具';
+          lane.style.cssText='height:36px;';
+          var track=document.createElement('div');
+          track.id='dshm-157-realish';
+          track.setAttribute('aria-label','时间线概览；水平拖动可聚焦事件');
+          track.setAttribute('tabindex','0');
+          track.style.cssText='height:44px;background:#333;';
+          track.textContent='（注入的同形时间轴：真视图在本次夹具里造不出来）';
+          sec.appendChild(lane);sec.appendChild(track);host.appendChild(sec);
+          col.appendChild(host);
+          globalThis.__dshm157RealMoves=0;
+          globalThis.__dshm157RealPrevented=0;
+          track.addEventListener('touchmove',function(e){
+            globalThis.__dshm157RealMoves=globalThis.__dshm157RealMoves+1;
+            if(e.defaultPrevented) globalThis.__dshm157RealPrevented=globalThis.__dshm157RealPrevented+1;
+          },{passive:true});
+          var r=track.getBoundingClientRect();
+          return true;
+        }catch(e){return false}
+      })()`)
+      await sleep(400)
+      realSurface = cJson(
+        await evaluate(`(function(){
+          var t=document.getElementById('dshm-157-realish');
+          if(t===null) return JSON.stringify({found:false});
+          var r=t.getBoundingClientRect();
+          return JSON.stringify({found:true,label:String(t.getAttribute('aria-label')||''),
+            x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2),scrollW:t.scrollWidth,clientW:t.clientWidth});
+        })()`),
+      )
+      realTrajectory = false
+    }
+    if (realTrajectory === true) {
+      await evaluate(`(function(){globalThis.__dshm157RealMoves=0;globalThis.__dshm157RealPrevented=0})()`)
+    }
+    const realBefore = (await swipeState()).count
+    await gesture(realSurface?.x ?? 200, realSurface?.y ?? 280, -140, 2)
+    const realAfter = (await swipeState()).count
+    const realDirty = await cDirty()
+    const realRead = cJson(
+      await evaluate(`JSON.stringify({moves:globalThis.__dshm157RealMoves||0,prevented:globalThis.__dshm157RealPrevented||0})`),
+    )
+    check(
+      realSurface.found === true &&
+        realAfter === realBefore &&
+        realDirty === false &&
+        realRead.moves >= 1 &&
+        realRead.prevented === 0,
+      '★ 157-C-④ **轨迹视图区**（真视图优先 ✓）：在「轨迹时间线 / 时间线概览」那一片上横滑 ⇒ 我们**不认领** ✓（判定次数不变 ✓、抽屉没开 ✓），而那一层**自己收到了事件** ✓（`touchmove`/`pointermove` 计数 ≥1 ⇒ 我们既没 `stopPropagation` 也没把它挡在外面 ✓）且 `defaultPrevented === false` ✓（= 我们没 `preventDefault` ✓、事件按原样继续 ✓）',
+      `真轨迹视图可达=${trajectoryProbe.tab === true}｜用的是${realTrajectory ? '**真视图**' : '注入的同形夹具'}｜面=${JSON.stringify(realSurface)}｜判定次数 ${realBefore} → ${realAfter}｜那一层的读数=${JSON.stringify(realRead)}｜有抽屉开着=${realDirty}`,
+    )
+    // 收尾：撤掉注入夹具 ✓、把视图切回「对话」✓（后面的章节还要在聊天页上量 ✓）
+    await evaluate(`(function(){var h=document.getElementById('dshm-157-fixtures');if(h)h.remove()})()`)
+    if (trajectoryProbe.tab === true) {
+      await evaluate(`(function(){
+        var tabs=[].slice.call(document.querySelectorAll('[data-dshm-topheader] [role="tab"]'));
+        for(var i=0;i<tabs.length;i++){ if(String(tabs[i].textContent||'').trim()==='对话'){ tabs[i].click(); return true } }
+        return false;
+      })()`)
+      await sleep(1600)
+    }
+    await cCloseAll()
+  }
+
   // ── 设置界面的"两处之分"（round 83，用户第 5 点）────────────────────
   //
   // 用户的原话："修改目前聊天记录边栏的设置界面，目前的问题是窄屏强行放进电脑端的 ui 放不下，
@@ -4164,6 +4822,241 @@ try {
   await backToFiles()
   await evaluate(`(function(){var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click()})()`)
   await sleep(600)
+
+  /**
+   * ── round 157（B）：从文件面板点开的 DSH 预览，关掉后要**回到文件列表的原目录** ──
+   *
+   * 用户原话："**2 不行**" ✓ —— 动线：文件面板里点文件 ⇒ `entryRow` 的 click 先调
+   * `openFileInDshPreview(sheet, entry)` ✓（DSH 自带预览 ✓），而它结尾那句
+   * `sheet.setOpen(false)`（注释"别挡着它"✓）把**文件面板整个收掉** ✗ ⇒
+   * 用户按返回（预览关闭 ✓）时底下**没有面板** ✗ ⇒ 落到聊天页 ✗。
+   * round 153 的"预览返回 ⇒ 回列表"只覆盖了**自家预览**（`currentView === 'preview'` ✓）那条路 ✗。
+   *
+   * ★ 这一节量的是**用户在意的那件事** ✓（不是我们的标志位 ✗）：
+   *   · 面板 →（真桥 ✓）点文件 ⇒ 面板**真的收起** ✓、**返回点真的记住了** ✓
+   *     （调试框那一行里带着**绝对路径** ✓）；
+   *   · 关掉 DSH 预览 ⇒ 面板**重新打开** ✓、面包屑 title 上的目录**逐字节相同** ✓、
+   *     列表**真的有行** ✓；
+   *   · 护栏①：**不是**从文件面板打开的预览（直接调桥 ✓ = 聊天里文件链接那条路 ✓）
+   *     关掉之后**不许凭空弹出面板** ✓；
+   *   · 护栏②：**只是被最小化**（页面被切到后台 ✓）不算关闭 ⇒ 不弹面板 ✓；
+   *   · 护栏③：恢复**只发生一次** ✓，而且面板回来之后**侧滑一键关**照旧 ✓（不许打架 ✓）。
+   */
+  {
+    const bJson = (raw) => {
+      try {
+        return JSON.parse(String(raw))
+      } catch (error) {
+        return { error: String(raw).slice(0, 80) }
+      }
+    }
+    const bDebug = async () =>
+      String(await evaluate("String((document.getElementById('dshm-upload-debug')||{}).textContent||'')"))
+    const bPanelOpen = async () => String(await evaluate("String((document.body&&document.body.dataset.dshmFiles)||'')"))
+    const bMarker = async () => String(await evaluate("String((document.body&&document.body.dataset.dshmDshPreview)||'')"))
+    const bCrumb = async () =>
+      bJson(
+        await evaluate(`(function(){
+          var el=document.querySelector('.dshm-crumb-path')
+          return JSON.stringify({title:el===null?null:String(el.getAttribute('title')||''),text:el===null?null:String(el.textContent||'')})
+        })()`),
+      )
+    const bRows = async () => Number(await evaluate(`document.querySelectorAll('[data-dshm-fs-entry="1"]').length`))
+    const bEnterWorkspace = async () => {
+      await evaluate(`document.getElementById('dsh-mobile-files').click()`)
+      await sleep(1300)
+      await evaluate(`(function(){
+        var bar=document.querySelector('.dshm-files-toolbar');
+        var bs=bar===null?[]:[].slice.call(bar.querySelectorAll('button'));
+        for(var i=0;i<bs.length;i++){ if(/工作区/.test(bs[i].textContent||'')){bs[i].click();return true} }
+        return false;
+      })()`)
+      await sleep(1200)
+      await evaluate(`(function(){
+        var rows=[].slice.call(document.querySelectorAll('.dshm-ws'));
+        for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf('大目录验收工作区')>=0){ rows[i].click(); return true } }
+        return false;
+      })()`)
+      await sleep(1700)
+    }
+    const bClickRow = async (name) =>
+      Boolean(
+        await evaluate(`(function(){
+          var rows=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry="1"]'));
+          for(var i=0;i<rows.length;i++){
+            var n=rows[i].querySelector('.dshm-file-name');
+            if(n!==null&&String(n.textContent||'')===${JSON.stringify(name)}){
+              var head=rows[i].querySelector('.dshm-file-head')||rows[i];
+              head.click();
+              return true;
+            }
+          }
+          return false;
+        })()`),
+      )
+    /** 关掉 DSH 预览：走**屏幕上那颗收起键** ✓（= 用户实际会点的那一下 ✓）。 */
+    const bClosePreviewByButton = async () => {
+      const clicked = String(
+        await evaluate(`(function(){
+          var api=globalThis.__DSH_MOBILE_BOOT__&&globalThis.__DSH_MOBILE_BOOT__.apk
+          if(api&&typeof api.clickCollapse==='function') return String(api.clickCollapse()||'')
+          return '(没有探针)'
+        })()`),
+      )
+      await sleep(2800)
+      return clicked
+    }
+    const countOf = (text, needle) => String(text).split(needle).length - 1
+
+    // ① 前置：面板开在**子目录**里（"停在哪"才有意义 ✓），面包屑 title 就是绝对路径 ✓
+    await bEnterWorkspace()
+    const enteredSub = await bClickRow(RETURN_DEMO_DIR)
+    await sleep(1700)
+    const crumbAtSub = await bCrumb()
+    const rowsAtSub = await bRows()
+    check(
+      enteredSub === true && typeof crumbAtSub.title === 'string' && crumbAtSub.title.endsWith(RETURN_DEMO_DIR) && rowsAtSub >= 1,
+      '★ 157-B-① 前置：文件面板真的进到了**子目录**「返回落点」里（面包屑 title = 绝对路径 ✓、列表有行 ✓）—— "回到原目录"才有可判的东西 ✓',
+      `进子目录=${enteredSub}｜面包屑=${JSON.stringify(crumbAtSub)}｜行数=${rowsAtSub}`,
+    )
+
+    // ② 点文件 ⇒ 面板收起 + 返回点记住（那行日志里带着**绝对路径** ✓）
+    const debugBeforeArm = await bDebug()
+    const tapped = await bClickRow(RETURN_DEMO_FILE)
+    await sleep(2600)
+    const panelAfterTap = await bPanelOpen()
+    const markerAfterTap = await bMarker()
+    const debugAfterArm = await bDebug()
+    const armLines = String(debugAfterArm)
+      .split('\n')
+      .filter((line) => line.indexOf('为 DSH 预览收起文件面板') >= 0)
+    check(
+      tapped === true &&
+        panelAfterTap !== 'open' &&
+        armLines.length >= 1 &&
+        String(armLines[armLines.length - 1] || '').indexOf(crumbAtSub.title) >= 0,
+      '★ 157-B-② 点文件（桥回 `{ok:true}` ✓）⇒ 我们的文件面板**真的收起** ✓，而且**返回点当场被记住** ✓（调试框那一行里带着**当前目录的绝对路径** ✓ —— 落点取的是 `state.path` ✓，不是"工作区根"✗）',
+      `点到行=${tapped}｜面板=${JSON.stringify(panelAfterTap)}｜预览标记=${JSON.stringify(markerAfterTap)}｜记住返回点那一行=${JSON.stringify(armLines[armLines.length - 1] || '(没有)')}（调试框里一共 ${armLines.length} 行 ✓）`,
+    )
+
+    // ③ 关掉 DSH 预览 ⇒ 面板重开、目录**逐字节相同**、列表有行 ✓
+    const closeResult = await bClosePreviewByButton()
+    const restoreLines = String(await bDebug())
+      .split('\n')
+      .filter((line) => line.indexOf('⇒ 回到文件列表的原目录') >= 0)
+    const panelAfterClose = await bPanelOpen()
+    const markerAfterClose2 = await bMarker()
+    const crumbAfterRestore = await bCrumb()
+    const rowsAfterRestore = await bRows()
+    check(
+      panelAfterClose === 'open' &&
+        crumbAfterRestore.title === crumbAtSub.title &&
+        rowsAfterRestore >= 1 &&
+        restoreLines.length >= 1 &&
+        String(restoreLines[restoreLines.length - 1]).indexOf(crumbAtSub.title) >= 0,
+      '★ 157-B-③ **关掉 DSH 预览 ⇒ 文件面板重新打开，并且停在原来那个目录**（面包屑 title 与进预览之前**逐字节相同** ✓、列表真的有行 ✓）—— 这正是用户说的"2 不行"那件事 ✓',
+      `收起键=${JSON.stringify(closeResult)}｜预览标记=${JSON.stringify(markerAfterClose2)}｜面板=${JSON.stringify(panelAfterClose)}｜目录：之前=${JSON.stringify(crumbAtSub.title)} 之后=${JSON.stringify(crumbAfterRestore.title)}｜行数=${rowsAfterRestore}｜恢复日志=${JSON.stringify(restoreLines[restoreLines.length - 1] || '(没有)')}`,
+    )
+
+    // ④ 护栏①：预览**不是**从文件面板打开的（= 聊天里的文件链接 ✓）⇒ 关掉后不许凭空弹面板 ✓
+    await evaluate(`(function(){var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click()})()`)
+    await sleep(900)
+    const panelClosedNow = await bPanelOpen()
+    const directOpen = bJson(
+      await evaluate(`JSON.stringify((function(){
+        var b=globalThis.__DSHM_DSH_PREVIEW__
+        if(!b||typeof b.open!=='function') return {ok:false,reason:'没有预览桥'}
+        try{ var r=b.open({path:${JSON.stringify(join(BIGDIR_DEMO, RETURN_DEMO_DIR, RETURN_DEMO_FILE))}}); return {ok:!!(r&&r.ok)} }
+        catch(e){ return {ok:false,reason:String(e&&e.message?e.message:e)} }
+      })())`),
+    )
+    await sleep(2600)
+    const markerDirect = await bMarker()
+    const staleLines = String(await bDebug())
+      .split('\n')
+      .filter((line) => line.indexOf('不是刚从文件面板点开的') >= 0)
+    await bClosePreviewByButton()
+    const panelAfterDirect = await bPanelOpen()
+    check(
+      panelClosedNow !== 'open' &&
+        directOpen.ok === true &&
+        (markerDirect === '1' || staleLines.length >= 1) &&
+        panelAfterDirect !== 'open',
+      '★ 157-B-④ 护栏①：预览**不是从文件面板点开的**（直接调桥 ✓ = 聊天里文件链接那条路 ✓）⇒ 关掉之后文件面板**不许凭空弹出来** ✓（陈旧记忆会被那条"佩戴时刻"判据当场作废并记一行 ✓）',
+      `开预览前面板=${JSON.stringify(panelClosedNow)}｜直接调桥=${JSON.stringify(directOpen)}｜预览标记=${JSON.stringify(markerDirect)}｜作废日志=${JSON.stringify(staleLines[staleLines.length - 1] || '(没有)')}｜关掉后 面板=${JSON.stringify(panelAfterDirect)}`,
+    )
+
+    // ⑤ 护栏②：**只是被最小化**（页面切到后台 ✓）不算关闭 ⇒ 不弹面板 ✓，记忆留着 ✓
+    await bEnterWorkspace()
+    await bClickRow(RETURN_DEMO_DIR)
+    await sleep(1700)
+    await bClickRow(RETURN_DEMO_FILE)
+    await sleep(2600)
+    const hideFaked = await evaluate(`(function(){
+      try{
+        Object.defineProperty(document,'visibilityState',{configurable:true,get:function(){return 'hidden'}})
+        return document.visibilityState
+      }catch(e){return 'fail:'+String(e&&e.message?e.message:e)}
+    })()`)
+    const restoreBeforeMin = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+    await bClosePreviewByButton()
+    const minLines = String(await bDebug())
+      .split('\n')
+      .filter((line) => line.indexOf('只是被藏起来/最小化') >= 0)
+    const panelAfterMin = await bPanelOpen()
+    const restoreAfterMin = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+    await evaluate(`(function(){
+      try{ delete document.visibilityState; return true }catch(e){ return false }
+    })()`)
+    check(
+      hideFaked === 'hidden' &&
+        panelAfterMin !== 'open' &&
+        restoreBeforeMin >= 1 &&
+        restoreAfterMin === restoreBeforeMin &&
+        minLines.length >= 1,
+      '★ 157-B-⑤ 护栏②：**只是被最小化**（页面被切到后台 ✓）**不算关闭** ⇒ 文件面板**不弹出来** ✓（记住的那笔"返回点"留着 ✓，等它真被关掉时再还 ✓）—— 而且这一支**留了一行日志** ✓（不静默 ✗）',
+      `visibilityState=${JSON.stringify(hideFaked)}｜面板=${JSON.stringify(panelAfterMin)}｜恢复次数 ${restoreBeforeMin}→${restoreAfterMin}（应当不变 ✓）｜最小化日志=${JSON.stringify(minLines[minLines.length - 1] || '(没有)')}`,
+    )
+
+    // ⑥ 护栏③：恢复**只发生一次** ✓，而且面板回来之后**侧滑一键关**照旧 ✓（不许打架 ✓）
+    await bEnterWorkspace()
+    await bClickRow(RETURN_DEMO_DIR)
+    await sleep(1700)
+    await bClickRow(RETURN_DEMO_FILE)
+    await sleep(2600)
+    await bClosePreviewByButton()
+    const restoreAfterReal = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+    const panelReopened = await bPanelOpen()
+    await sleep(2200)
+    const restoreSettled = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+    const panelStillOne = await bPanelOpen()
+    // 侧滑一键关（round 145 的语义 ✓ —— 与"返回键逐级"刻意不同 ✓，别在这里打架 ✓）
+    const sheetCenter = bJson(
+      await evaluate(`(function(){
+        var p=document.getElementById('dsh-mobile-sheet-panel')
+        if(p===null) return JSON.stringify({x:300,y:600})
+        var r=p.getBoundingClientRect()
+        return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+Math.min(r.height-40,600-r.top))})
+      })()`),
+    )
+    await gesture(sheetCenter.x, sheetCenter.y, 150, 3)
+    await sleep(700)
+    const panelAfterSwipe = await bPanelOpen()
+    await sleep(1600)
+    const panelAfterSwipeSettled = await bPanelOpen()
+    check(
+      panelReopened === 'open' &&
+        panelStillOne === 'open' &&
+        restoreAfterReal >= 1 &&
+        restoreSettled === restoreAfterReal &&
+        panelAfterSwipe !== 'open' &&
+        panelAfterSwipeSettled !== 'open',
+      '★ 157-B-⑥ 护栏③：恢复**只发生一次** ✓（重开后再等 2.2 秒，恢复日志**一条都不多** ✓），而且面板回来之后**侧滑 = 一键关面板**照旧有效 ✓、关掉之后**不会被"恢复"再弹回来** ✓（不与侧滑/返回键层级打架 ✓）',
+      `重开=${JSON.stringify(panelReopened)}｜等 2.2s 后=${JSON.stringify(panelStillOne)}｜恢复次数 ${restoreAfterReal}→${restoreSettled}｜侧滑后=${JSON.stringify(panelAfterSwipe)}｜再等 1.6s=${JSON.stringify(panelAfterSwipeSettled)}`,
+    )
+    await evaluate(`(function(){var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click()})()`)
+    await sleep(600)
+  }
 
   // ── 公式渲染（round 97，用户反馈"md 预览公式不能显示"）──────────────────
   //
@@ -10011,6 +10904,107 @@ try {
       '★★ 第 152-⑪ 条：**手动重连真的连上了** —— 一次拨号 + 真握手，而且**经隧道问电脑一句、应答真的回来了**（不是"拨了一下就算过"✗）',
       `走=${JSON.stringify(manualOk.via)}｜拨号 ${JSON.stringify(manualOk.before)} → ${JSON.stringify(manualOk.after)}｜流=${JSON.stringify(String(manualOk.outcome).slice(0, 60))}｜RPC 往返=${JSON.stringify(manualOk.fetchOk)}｜活链路=${JSON.stringify(manualOk.live)}`,
     )
+    /**
+     * ── round 157（D）：**手动重连之后的"帧被拒绝（seen）"**（真机反馈，最高优先级 ✓）──
+     *
+     * 用户原话：把电脑端 DSH 远程关掉再重开 ⇒ 点手机页里那颗橙色「手动重连」⇒ **连不上** ✓：
+     *   `手动重连失败：dsh-mobile: 所有候选端点都连不上`
+     *   `（wss://100.123.136.82:3443/mobile/ws → dsh-mobile: 帧被拒绝（seen））`
+     * 根因：`帧被拒绝（seen）` 来自**我们自己的反重放窗口** ✓ —— 新会话的入站帧计数从 1 重来 ✓，
+     * 却拿去比**上一个会话的"已见"位图** ✗（`ServerAuthOk` 恒为 counter=1 ✓ ⇒ 老窗口已经
+     * 把它标成"见过"✓）⇒ 正常帧被判重放 ✗✗。
+     * 为什么手动那条路会这样 ✗：复位**散在两处、而且都不全** —— 退避定时器体里抄了三行 ✓、
+     * `openEndpoint` 入口那块抄了六个字段但**漏了 `inReplay`/`outCounter`** ✗、
+     * `dialNow`（手动）**一处都没碰** ✗ ⇒ 凡是"不是那条定时器带起来的"拨号，
+     * 新会话都会被旧位图拒掉 ✓✓。
+     *
+     * ★ 本轮的修法：抽成**唯一一份** `resetSessionState` ✓ 放进 `openEndpoint` 的
+     *   "每次尝试复位"块 ✓ ⇒ 自动 / 手动 / 多候选端点**全部覆盖** ✓，谁也漏不掉 ✓；
+     *   退避定时器体里那三行也改成调同一个函数 ✓（动作只有一份实现 ✓）。
+     *
+     * ★ 判据是**用户在意的那件事** ✓：手动重连之后**新会话必须被接受** ——
+     *   "连上了"要用"**经隧道问电脑一句、应答真的回来了**"来量 ✓（拨一下不算 ✓），
+     *   并且调试框里**不许再多出** `帧被拒绝` ✓。
+     * ★ 复现的前置**如实量出来** ✓：那条活会话的反重放窗口**真的"见过"计数** ✓
+     *   （`inReplay.started === true` ✓）—— 没有这个前置，这一节就是假绿 ✗。
+     */
+    {
+      const dJson = (raw) => {
+        try {
+          return JSON.parse(String(raw))
+        } catch (error) {
+          return { error: String(raw).slice(0, 80) }
+        }
+      }
+      const manualSeen = dJson(
+        await evaluate(`(async function(){
+          try{
+            var t = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.tunnel
+            if(!t) return JSON.stringify({error:'没有 __DSH_MOBILE_BOOT__.tunnel'})
+            var box = document.getElementById('dshm-upload-debug')
+            var text = function(){ return box===null ? '' : String(box.textContent||'') }
+            var countSeen = function(what){ return String(what).split('帧被拒绝').length - 1 }
+            /** 前置：这条活会话的**入站反重放窗口**真的见过计数 ✓（用户那条报错的前提 ✓） */
+            var dirty = { started: t.inReplay.started === true, highest: String(t.inReplay.highest) }
+            var seenBefore = countSeen(text())
+            /**
+             * ★ 掐掉"自动那一路" ✓：这一段里**只允许**手动那次拨号发生 ✓
+             *   （否则退避定时器会顺手把状态复位一遍 ⇒ 这一节就变成假绿 ✗✗）。
+             *   autoReconnect=false 让 scheduleReconnect 直接返回 ✓，不影响 dialNow ✓。
+             */
+            var prevAuto = t.config.autoReconnect
+            t.config.autoReconnect = false
+            var dialsBefore = globalThis.__dshmRcDials
+            // 模拟"电脑端关了再开"：手机这边那条 socket 已经死了 ✓
+            if (t.socket !== undefined) { try { t.socket.close() } catch (e) {} }
+            await new Promise(function(r){ setTimeout(r, 90) })
+            var liveBeforeDial = t.hasLiveSocket()
+            /**
+             * ★ 走**用户点橙色提示**那条真入口 ✓（dialNow ✓ —— 不是绕过它直接 connect ✗）
+             */
+            var dialErr = null
+            try { await t.dialNow(true) } catch (e) { dialErr = String(e && e.message ? e.message : e) }
+            var dialsAfter = globalThis.__dshmRcDials
+            var liveAfter = t.hasLiveSocket()
+            /** 硬证据：经隧道问电脑一句，**应答真的回来了**（拨一下不算连上 ✗） */
+            var fetchOk = 'error'
+            try {
+              var transport = globalThis.__DSH_TRANSPORT__
+              var response = await transport.fetch('/api/mobile/device/pending', { method: 'POST',
+                body: JSON.stringify({ type:'client-request', rpcId:'d157-verify', method:'mobile/device/pending', payload:{ args: {} } }) })
+              fetchOk = 'http:' + String(response.status)
+            } catch (e) { fetchOk = 'error:' + String(e && e.message ? e.message : e) }
+            t.config.autoReconnect = prevAuto
+            return JSON.stringify({
+              dirty: dirty, liveBeforeDial: liveBeforeDial, dialErr: dialErr,
+              dialed: dialsAfter - dialsBefore, liveAfter: liveAfter, fetchOk: fetchOk,
+              seenBefore: seenBefore, seenAfter: countSeen(text()),
+              highestAfter: String(t.inReplay.highest)
+            })
+          }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
+        })()`),
+      )
+      check(
+        manualSeen.error === undefined && manualSeen.dirty?.started === true && Number(manualSeen.dirty?.highest) >= 1,
+        '★ 157-D-① 前置（**复现的诚实性** ✓）：这条活会话的反重放窗口**真的"见过"计数**（`inReplay.started=true` ✓、`highest ≥ 1` ✓）—— 用户那条 `帧被拒绝（seen）` 的前提就在这里 ✓；没有这个前置，下面那条就是假绿 ✗',
+        manualSeen.error !== undefined
+          ? `评估出错：${manualSeen.error}`
+          : `反重放窗口：started=${JSON.stringify(manualSeen.dirty?.started)} highest=${JSON.stringify(manualSeen.dirty?.highest)}｜关掉活连接之后还有活 socket=${JSON.stringify(manualSeen.liveBeforeDial)}`,
+      )
+      check(
+        manualSeen.error === undefined &&
+          manualSeen.liveBeforeDial === false &&
+          manualSeen.dialed >= 1 &&
+          manualSeen.dialErr === null &&
+          manualSeen.liveAfter === true &&
+          manualSeen.fetchOk === 'http:200' &&
+          manualSeen.seenAfter === manualSeen.seenBefore,
+        '★★ 157-D-② **手动重连之后新会话必须被接受** ✓：旧会话的反重放窗口"见过"计数之后关掉活连接 ⇒ 走 `dialNow`（用户点橙色提示那条真入口 ✓）⇒ 拨号真的发生 ✓、**没有** `帧被拒绝（seen）` ✓、而且**经隧道问电脑一句、应答真的回来了**（`http:200` ✓）—— 这正是用户"手动重连连不上"那件事的反面 ✓',
+        manualSeen.error !== undefined
+          ? `评估出错：${manualSeen.error}`
+          : `拨号 ${JSON.stringify(manualSeen.dialed)} 次｜dialNow 报错=${JSON.stringify(manualSeen.dialErr)}｜活链路 ${JSON.stringify(manualSeen.liveBeforeDial)} → ${JSON.stringify(manualSeen.liveAfter)}｜RPC 往返=${JSON.stringify(manualSeen.fetchOk)}｜\`帧被拒绝\` 条数 ${JSON.stringify(manualSeen.seenBefore)} → ${JSON.stringify(manualSeen.seenAfter)}（不许增加 ✓）｜新会话 highest=${JSON.stringify(manualSeen.highestAfter)}`,
+      )
+    }
     check(
       Array.isArray(manualOk.net) && manualOk.net.filter((x) => x === 'online').length === 1 &&
         manualOk.net.filter((x) => x === 'offline').length === 1,
