@@ -43,10 +43,11 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { createHash, X509Certificate } from 'node:crypto'
 import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const flag = (name, fallback) => {
@@ -73,7 +74,7 @@ let failed = 0
  *   缺 SDK / 缺证书时本脚本本来就会**跳过**若干条 ✓（打印 `·` ✓），
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
- * ★★ 38 = 包信息 9 ✓ + APK 内容 4 ✓ + 资源文案 2 ✓ + dex 符号 21 ✓ + TOFU/链 2 ✓
+ * ★★ 40 = 包信息 9 ✓ + APK 内容 4 ✓ + 资源文案 2 ✓ + dex 符号 22 ✓ + TOFU/链 3 ✓
  *   （round 143 从 24 抬到 32 ✓ —— 加的 8 条全是"扫码配对"那条链上的 ✓：
  *    权限 1 ✓ + 清单里的深链 filter 1 ✓ + ScanActivity 1 ✓ + 扫码文案 1 ✓ +
  *    dex 里四个分组（深链 / 入口 / 相机 / 解码器 ✓）✓。
@@ -96,8 +97,15 @@ let failed = 0
  *      与"不固定的代偿（TOFU 闸门）真的在包里" ✓（第 2b 条那三组）✓。
  *      净变化 34 + 4 = 38 ✓（③/④ 两条**保留** ✓：③ 改成"电脑上有 CA 与叶子可验"✓，
  *      ④ 的 `-CAfile` 从 APK 里那张改成**电脑上**那张 ✓）。
+ *    ★★ round 5（2026-09-28）从 38 抬到 **40** ✓ —— 补的是 C2 里**唯一没有断言的那条缝**：
+ *      **指纹的"写法"契约**（宿主发冒号十六进制 95 字符 ✓，壳必须先归一化 ✓）。
+ *      ⑤a dex：`normalizeFingerprint` + `caFingerprintOf` + `formatFingerprintGroups` 在产物里 ✓
+ *          （少了归一化 ⇒ 带冒号的值长度 95 ⇒ 被判成"旧宿主" ⇒ `expectedCaFingerprint=null`
+ *           ⇒ **每次**首次连接都退化成人工确认 ✗ —— 不崩不报错，**只在手机上现形** ✗）；
+ *      ⑤b **可执行交叉验证**：宿主那串值按壳的规则归一化后，必须 == 独立算的 CA DER SHA-256 ✓
+ *          （这是"两侧算法一致"的**唯一**证明 ✓ —— 之前只有"两边各自的代码都在"✗，没有"两边相等"✗）。
  */
-const EXPECTED_MIN_CHECKS = 38
+const EXPECTED_MIN_CHECKS = 40
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -657,6 +665,29 @@ if (existsSync(aapt2)) {
     '★ 「忘记这台电脑」与已固定指纹可核验在 dex 里（`forgetThisComputer` 同时清 pin 与 pinned-slot ✓ + `pinnedCaFingerprint` 只读桥 ✓ + `KEY_PINNED_CA` 常量名 ✓ —— 少了前者，换电脑之后只能卸载重装 ✗；少了后者，用户没有任何可核对的线索 ✗）',
     missing(tofuForget).length === 0 ? tofuForget.join('、') : `缺 ${missing(tofuForget).join('、')}`,
   )
+  /**
+   * ★★ C2 第 ④ 组：**指纹"写法"契约的一半** —— 壳里那条**归一化流水线**必须在 ✓。
+   *
+   * 为什么非有不可 ✗：宿主发的是 Node 的 `X509Certificate.fingerprint256` ✓
+   * = **冒号十六进制、95 字符** ✓（见 `tls-cert.ts` 的 `certFingerprint` ✓）；
+   * 而壳自己算出来的是**纯十六进制 64 字符** ✓（`caFingerprintOf` 手写转换 ✓）。
+   * 两边**写法本来就不同** ✓，靠的是壳先 `normalizeFingerprint` 去冒号 + 大写 ✓，
+   * 再过一道 `length() != 64` 的闸门 ✓（见 `rememberTicketCaFingerprint` ✓）。
+   *
+   * ⇒ 少了归一化，带冒号的值长度是 **95** ✗ ⇒ 闸门把它判成"**旧宿主**"✗
+   *   ⇒ `expectedCaFingerprint = null` ✗ ⇒ **每一次**首次连接都退化成
+   *   "弹指纹让用户确认"✓ —— 不崩、不报错、只是**静默降级** ✗。
+   *   用户看到的是"新 APK 怎么每次都问我"✓，而**电脑上完全看不出来** ✗（真机上才现形 ✓）。
+   *
+   * ★ 这一组与后面的"指纹契约（可执行交叉验证）"是**一对** ✓：
+   *   这里证明"归一化在产物里"✓，那里证明"归一化之后两侧真的相等"✓。
+   */
+  const fpNormalize = ['normalizeFingerprint', 'caFingerprintOf', 'formatFingerprintGroups']
+  check(
+    hasAll(fpNormalize),
+    '★★ 指纹的归一化流水线在 dex 里（`normalizeFingerprint` 去冒号+大写 ✓ + `caFingerprintOf` 手写 64 位十六进制 ✓ + `formatFingerprintGroups` 人眼分组 ✓ —— 少了归一化，宿主那串带冒号的指纹会被当成"旧宿主" ⇒ 首次连接**每次都退化成人工确认** ✗，而手机上只表现为"怎么老问我"，电脑上完全看不出来 ✗）',
+    missing(fpNormalize).length === 0 ? fpNormalize.join('、') : `缺 ${missing(fpNormalize).join('、')}`,
+  )
 }
 
 // ── ③ ★★ C2：**本包不带任何固定 CA**，而"不固定的代偿"是这台电脑 CA/叶子这一对自洽 ✓
@@ -691,6 +722,65 @@ if (existsFile(liveCaPath) && existsFile(liveLeafPath)) {
   check(verified, '用电脑上的 CA 能验通电脑当前发的服务器证书（= TRUST 成立、TOFU 第 ② 步的"签得了吗"会通过 ✓；★ 这条**不**再说明"APK 里带对了 CA"✗ —— 包里已经没有 CA 了 ✓）', note)
 } else {
   console.log('  · （跳过链校验：电脑上还没有 CA/服务器证书 ✓ —— 先跑 node scripts/make-cert.mjs）')
+}
+
+// ── ⑤ ★★ 指纹契约：**两侧算法一致**的**可执行**交叉验证（宿主 ↔ 壳）
+//
+// 上面第 ④ 组（dex）证明了"归一化流水线在产物里" ✓；第 ③/④ 条证明了"这台电脑的链自洽" ✓。
+// 但**没有**任何一条断言证明：**宿主真正发出去的那串值，经壳的规则归一化之后，
+// 正好等于壳自己算出来的那串** ✗ —— 而那正是 `expected.equals(actual)` 能成立的**唯一条件** ✓。
+//
+// 这里把两侧的算法**都在这台电脑上真跑一遍**：
+//   · 宿主侧：Node 的 `X509Certificate.fingerprint256` ✓（= 票据里那个 `caFingerprint` ✓）；
+//   · 壳侧：`MainActivity.normalizeFingerprint` 的规则 —— **保留 hex 字符、丢掉其余、全部大写** ✓；
+//   · 再用**独立算的** SHA-256（直接对 DER 摘要 ✓）交叉验证，避免"两边一起错"✗。
+//
+// 它不成立时的表现（也正是它值得存在的理由 ✓）：不会崩、不会报错 ✗，
+// 只是 TOFU 从"自动按指纹比对"**静默降级**成"每次都弹框让用户确认" ✓ —— **只在手机上现形** ✗。
+// ★★ 取"宿主那一侧的值"必须用**宿主自己的实现** ✓ —— **不许在本脚本里重写一遍** ✗。
+//   理由（这条断言的全部意义所在 ✓）：如果重写一遍，那么将来 `tls-cert.ts` 换了算法，
+//   本断言**照样绿** ✗ ⇒ 它就成了"看着像在测宿主、其实在测我自己"✗（假绿 ✓）。
+//   所以这里 `import` 宿主构建产物里的 `ensureTlsMaterial` ✓ —— 它返回的 `status.caFingerprint`
+//   就是**进票据的那个值** ✓（`tls-cert.ts:395` ✓），因此**变异敏感** ✓。
+//   刻意在**临时目录**里生成一张 CA（**不碰这台电脑的证书** ✓）：指纹是对 DER 求的 ✓，
+//   与"用哪一张 CA"无关 ✓ —— 要证的是**两侧算法一致** ✓。
+const hostTlsLib = join(repoRoot, 'packages', 'host', 'lib', 'tls-cert.js')
+if (!existsSync(hostTlsLib)) {
+  console.log('  · （跳过指纹契约交叉验证：还没有 packages/host/lib ✓ —— 先跑 npm run build）')
+} else {
+  const contractDir = mkdtempSync(join(tmpdir(), 'dshm-fp-'))
+  let contractOk = false
+  let contractNote = ''
+  try {
+    const { ensureTlsMaterial } = await import(pathToFileURL(hostTlsLib).href)
+    const status = ensureTlsMaterial({ directory: contractDir })
+    const hostStyle = status.caFingerprint // ★ 宿主实现算出来的那一串（= 进票据的那一串 ✓）
+    const caPem = readFileSync(join(contractDir, 'lan-ca.pem'), 'utf8')
+    const independent = createHash('sha256').update(new X509Certificate(caPem).raw).digest('hex').toUpperCase()
+    const shellStyle = String(hostStyle ?? '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase() // 壳的归一化规则
+    /**
+     * ★★ 判据刻意**窄**（不宽 ✗）：只要求"**经壳的规则之后两侧相等、且长度 64**"✓。
+     *
+     * 为什么**不**要求"宿主必须发带冒号的"✗：那是宿主的**写法**，不是契约 ✗ ——
+     * 壳的归一化是"去掉所有非 hex 字符"✓，它对**带冒号 / 不带冒号 / 小写**都能吃 ✓。
+     * 若把 `includes(':')` 也写进判据，将来宿主**合法地**改成不带冒号就会被误判成红 ✗
+     * （这正是本项目反复强调的"**判据要窄**"✓：只在我们真的做错时才红 ✓）。
+     * 冒号在不在，只作为**读数**写进 detail ✓。
+     */
+    contractOk = hostStyle !== undefined && shellStyle.length === 64 && shellStyle === independent
+    contractNote =
+      `宿主实现给出 ${String(hostStyle ?? '(undefined)').length} 字符（${String(hostStyle ?? '').includes(':') ? '带冒号' : '无冒号'}）` +
+      `⇒ 按壳的规则归一化后 ${shellStyle.length} 字符；与独立 SHA-256 ${shellStyle === independent ? '一致 ✓' : '**不一致** ✗'}`
+  } catch (error) {
+    contractNote = String(error?.message ?? error)
+  } finally {
+    rmSync(contractDir, { recursive: true, force: true })
+  }
+  check(
+    contractOk,
+    '★★ 指纹契约成立（**宿主实现**给的那串，经壳的归一化规则后 == 独立算的 CA DER SHA-256 ✓ —— 这是两侧算法一致的**可执行证明** ✓；不成立时 TOFU 只会静默降级成"每次都弹框让人确认"✗，电脑上完全看不出来 ✗，而用户会以为"这包怎么老问"✓）',
+    contractNote,
+  )
 }
 
 rmSync(workDir, { recursive: true, force: true })
