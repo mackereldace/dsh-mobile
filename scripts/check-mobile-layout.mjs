@@ -17,12 +17,12 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { snapshotChromeClones, sweepChromeClones, removeQuietly } from './chrome-clone-guard.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { copyWorkspaceSessions, readProductionWorkspaceTable, writeWorkspaceTable } from './session-fixture.mjs'
+import { copyWorkspaceSessions, findSessionDir, readProductionWorkspaceTable, writeWorkspaceTable } from './session-fixture.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repoRoot = join(here, '..')
@@ -93,6 +93,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  *   （同样是"断言全绿却 exit=2"那种最难读的现象 ✗）。抬高只会**少一次误杀** ✓，
  *   不会让任何断言变松 ✓。
  *
+ *   ★★ round 158 从 600s 提到 **900s**，再提到 **1500s**（同一条理由 ✓，实测 ✗）：
+ *   这一轮又加了**两组真机反馈**的验收 —— A 要在**真实会话**上换**三次几何**
+ *   （412×915 / 真机 400×869+safe48 / 393×852+safe59 ✓，每次都要开抽屉、换会话、等收敛 ✓），
+ *   B 要**连做 3 轮**"面板→子目录→点文件→关预览"、再额外做一次"迟到预览"✓。
+ *   实测：900s 那一版会在**最后几段**被强杀 ✗（现象又是"断言几乎全绿却 exit=2"✗）。
+ *   抬高只**少一次误杀** ✓，一条断言都没放松 ✓。
+ *
  *   ★★ round 157 从 480s 提到 **600s**（同一条理由 ✓，实测过 ✗）：这一轮加了
  *   **四组**用户真机反馈的验收（A 子智能体入口 / B 预览返回 / C 轨迹横滑 / D 手动重连 ✓），
  *   其中 A 要**换三次几何**（无安全区 / 有安全区 / 更窄 ⇒ 每次都要等布局与收敛 ✓）、
@@ -101,7 +108,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  *   而屏幕上最后那几十条**全是绿的** ✓ —— 又一次"全绿却 exit=2" ✗）。
  *   抬到 600s 只买"不被误杀" ✓，一条断言都没放松 ✓。
  */
-const HARD_TIMEOUT_MS = Number(process.env['ML_TIMEOUT_MS'] ?? 600_000)
+const HARD_TIMEOUT_MS = Number(process.env['ML_TIMEOUT_MS'] ?? 1_500_000)
 
 /**
  * 本次运行启动的子进程 —— **退出时必须全部带走** ✗。
@@ -513,7 +520,7 @@ const problems = []
  *     **没有** `帧被拒绝（seen）` ✓、经隧道问电脑一句应答真的回来了 ✓）。
  *   ⇒ **360** = 本轮实跑条数 ✓。这个数只许涨 ✓ —— 少了就是有人删断言 ✗。
  */
-const EXPECTED_MIN_CHECKS = 360
+const EXPECTED_MIN_CHECKS = 370
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -649,6 +656,46 @@ if (fixtureTable === undefined) {
       ? '  · 没有可复制的会话日志，底部状态栏那一段将无法验证（会如实报失败）'
       : `  · 已准备 ${sessionFixture.ids.length} 个真实会话（工作区「${sessionFixture.title}」，只读复制）`,
   )
+  /**
+   * ★★ round 158（A ✓）：**还得把"子代理子会话"一起复制过来** ✗✗ ——
+   *   它们是**真实入口**能不能出现的分水岭 ✓。
+   *
+   * 为什么 `copyWorkspaceSessions` 不够 ✗：它只复制**工作区表 `sessionIds` 里列出的**会话 ✓，
+   *   而子代理子会话**不在那张表里** ✓（它们靠 `session.v3.jsonl.zstd` 头部那两行
+   *   `"origin":"subagent"` / `"parentSession":"session-…"` 归属到父会话 ✓）。
+   *   少了它们 ⇒ 真实入口**一个都不会出现** ✗ ⇒ round 155/157 只能用"注入的同形元素"验 ✓
+   *   —— 而**注入的那个形状与真机不一样** ✗✗（真机是
+   *   `crumbSeg > div[display:contents] > div.root > button` ✓，
+   *   注入的是 `crumbSeg > div > button` ✓）⇒ 整轮验收全绿、真机上入口"完全没有"✓✓
+   *   （round 158 复盘结论；根因与修法见 `tagLineageEntry` 的说明 ✓）。
+   *
+   * 做法：把**同一个 slug 目录**下所有会话目录整片复制过来 ✓（只读生产 ✓、
+   *   跳过 `session.lock` ✓、单会话 >8MB 的跳过 ✓ —— 与 `copyWorkspaceSessions` 同一套纪律 ✓）。
+   */
+  try {
+    const firstPrepared = sessionFixture.ids.length > 0 ? findSessionDir(join(process.env['HOME'] ?? '', '.dsh', 'sessions'), sessionFixture.ids[0]) : undefined
+    if (firstPrepared !== undefined) {
+      const slugDir = join(process.env['HOME'] ?? '', '.dsh', 'sessions', firstPrepared.slug)
+      const destDir = join(DSH_HOME, 'sessions', firstPrepared.slug)
+      mkdirSync(destDir, { recursive: true })
+      let extra = 0
+      for (const name of readdirSync(slugDir)) {
+        const src = join(slugDir, name)
+        let st
+        try { st = statSync(src) } catch { continue }
+        if (!st.isDirectory()) continue
+        if (existsSync(join(destDir, name))) continue
+        const log = join(src, 'session.v3.jsonl.zstd')
+        if (!existsSync(log)) continue
+        if (statSync(log).size > 8_000_000) continue
+        cpSync(src, join(destDir, name), { recursive: true, preserveTimestamps: true })
+        extra += 1
+      }
+      console.log(`  · 另复制同目录 ${extra} 个子代理子会话（真实入口要用 ✓）`)
+    }
+  } catch (error) {
+    console.log('  · 复制子代理子会话失败（round 158-A 会如实报失败）：' + String(error && error.message ? error.message : error))
+  }
 }
 
 const dsh = trackChild(spawn(
@@ -1393,7 +1440,16 @@ try {
       await sleep(5500)
       const hasBar = await evaluate(`(function(){
         var r=document.querySelector('[data-composer-stats]')
-        return r!==null&&r!==undefined&&(r.textContent||'').length>0 })()`)
+        var ok=r!==null&&r!==undefined&&(r.textContent||'').length>0
+        /**
+         * ★★ round 158（A ✓）：**还要这个会话没有"真入口"** ✗ —— 155/157-A 那两节的
+         *   基线是"**没有子代理时**标签行右端是空的"✓；而 round 158 起夹具里
+         *   真的存在带子代理子会话的会话了 ✓ ⇒ 点到那一个，基线就不是空的 ✗
+         *   （断言会变成假红 ✓）。判据用**语义属性** ✓（不是哈希类名 ✓）。
+         */
+        var h=document.querySelector('[data-dshm-topheader]')
+        var hasLineage=h!==null&&h!==undefined&&h.querySelectorAll('button[aria-haspopup="tree"]').length>0
+        return ok&&!hasLineage })()`)
       console.log(`    · 试第 ${i + 1} 个会话行「${String(clicked)}」→ 状态栏 ${hasBar === true ? '出现' : '没有'}`)
       if (hasBar === true) {
         openedSession = clicked
@@ -2062,6 +2118,288 @@ try {
     )
     await removeLineage()
     await sleep(600)
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * ★★ round 158（A）**真 DSH 上的"真实入口"**（不是注入的同形元素 ✗✗）
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * ## 为什么这一节非有不可（本轮最重要的教训 ✓）
+     * 上面那 11 条量的全是**注入**的元素 ✓（`crumbSeg > div > button` ✓），
+     * 而真机上 DSH 插槽外面还套着一层 **`display: contents` 的包装** ✗✗：
+     *   `span.crumbSeg > div[display:contents] > div.ZKlsPq_root > button[aria-haspopup=tree]`
+     * ⇒ `tagLineageEntry` 认的是那层**不生成盒子**的包装 ✓ ⇒ `getBoundingClientRect()` 恒 `0×0`
+     * ⇒ 闭环每一轮都在"量不到尺寸"那关退出 ⇒ `blocked` 永远摘不掉 ⇒ **真机上"完全没有"** ✓✓
+     * 而上面 11 条**全绿** ✗ —— 因为夹具的形状与真机不一样 ✓（"夹具不同构"的经典形态 ✓）。
+     *
+     * ## 这一节量的东西
+     *   ① 用**真有子代理的会话**里的**真入口**（`[data-dshm-injected]` / `[data-dshm-nested]`
+     *      都必须为 0 ✓ —— 这就是"这是真的、不是我注入的"的硬证据 ✓）；
+     *   ② 几何判据复用上面那套 `geometryOk` ✓（中心/右缘 ≤1px ✓、零相交 ✓、不被裁 ✓、点得到 ✓）；
+     *   ③ 真机几何 **400×869 + safe-top 48px**（用户调试框截图读数 ✓）与
+     *      另一组"非整百宽度 + 非 0 安全区"（393×852 + 59px ✓）；
+     *   ④ **真机那两层结构**（`display: contents` 包装 ✓）也钉成断言 ✓。
+     *
+     * ## 为什么放在这里（而不是脚本末尾 ✗）
+     * 这里**会话已经开着、隧道是活的** ✓；脚本末尾那几个导航之后隧道
+     * 停在"重连失败（已试 5 次）"（156-B 那一节留下的状态 ✓）⇒ 会话列表是空的 ✗
+     * （实测："暂无会话 / 连接异常" ⇒ 一条都点不出来 ✓）⇒ 那一节只能假红 ✗。
+     */
+    {
+      const realTriggerProbe = async () =>
+        asJson155(
+          await evaluate(`(function(){
+            try{
+              var header=document.querySelector('[data-dshm-topheader]')
+              var out={header:header!==null}
+              out.injected=document.querySelectorAll('[data-dshm-injected="lineage"]').length
+              out.nested=document.querySelectorAll('[data-dshm-nested="lineage"]').length
+              out.triggers=header===null?0:header.querySelectorAll('button[aria-haspopup="tree"]').length
+              var e=document.querySelector('[data-dshm-lineage]')
+              out.entryTag=e===null?null:String(e.tagName||'').toLowerCase()+'#'+String(e.id||'')+'.'+String(e.className||'').split(' ')[0]
+              out.entryDisplay=e===null?null:getComputedStyle(e).display
+              out.entryBox=e===null?null:(function(){var r=e.getBoundingClientRect();
+                return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)]})()
+              return JSON.stringify(out)
+            }catch(err){ return JSON.stringify({error:String(err&&err.message?err.message:err)}) }
+          })()`),
+        )
+      /**
+       * ★ 抽屉那颗键（`#dsh-mobile-nav`）与工作区行**都是开/关切换**的 ✓ ——
+       *   所以"打开抽屉"之前先看状态 ✓、"展开工作区"之前先看**有没有会话行** ✓
+       *   （第一跑就是无脑又点了一次工作区行 ⇒ 把已经展开的它**收起来了** ✗ ⇒
+       *    会话行数 0 ⇒ 一条会话都点不出来 ✓）。
+       * ★ 关闭抽屉要走 `#dsh-mobile-scrim` ✓（本项目**没有** `dsh-mobile-drawer-backdrop`
+       *   这个 id ✗ —— 老脚本里那些 `getElementById('dsh-mobile-drawer-backdrop')` 是空点 ✓）。
+       */
+      const closeDrawerNow = async () => {
+        for (let i = 0; i < 4; i++) {
+          const stillOpen = await evaluate(`(function(){
+            if(document.body.dataset.dshMobileDrawer!=='open') return false
+            var s=document.getElementById('dsh-mobile-scrim')
+            if(s) s.click()
+            if(document.body.dataset.dshMobileDrawer==='open'){ var n=document.getElementById('dsh-mobile-nav'); if(n) n.click() }
+            return document.body.dataset.dshMobileDrawer==='open' })()`)
+          if (stillOpen !== true) return true
+          await sleep(600)
+        }
+        return false
+      }
+      /** 打开抽屉、展开**真有会话**的那个工作区、把会话行等出来 ✓（每一步都等到位 ✗）。 */
+      const openSessionList = async () => {
+        await evaluate(`(function(){
+          if(document.body.dataset.dshMobileDrawer!=='open'){ var n=document.getElementById('dsh-mobile-nav'); if(n) n.click() }
+          return true })()`)
+        await sleep(1200)
+        for (let i = 0; i < 24; i++) {
+          const n = Number(await evaluate(`document.querySelectorAll('[class*="_projectRow"]').length`))
+          if (n > 0) break
+          await sleep(500)
+        }
+        const clickWorkspace = async () =>
+          evaluate(`(function(){
+            var title=${JSON.stringify(sessionFixture.title ?? '')}
+            var rows=[].slice.call(document.querySelectorAll('[class*="_projectRow"]'))
+            var target=null
+            for(var i=0;i<rows.length;i++){ if(title!==''&&(rows[i].innerText||'').indexOf(title)>=0){target=rows[i];break} }
+            if(target===null) target=rows[0]
+            if(target){ target.click(); return true }
+            return false })()`)
+        let rows = 0
+        for (let attempt = 0; attempt < 3; attempt++) {
+          for (let i = 0; i < 14; i++) {
+            rows = Number(await evaluate(`document.querySelectorAll('[class*="_sessionRow"]').length`))
+            if (rows > 0) return rows
+            await sleep(500)
+          }
+          await clickWorkspace()
+          await sleep(1600)
+        }
+        return rows
+      }
+      const sessionRows = await openSessionList()
+      let realRow = null
+      for (let i = 0; i < 8; i++) {
+        const clicked = await evaluate(`(function(){
+          var rows=[].slice.call(document.querySelectorAll('[class*="_sessionRow"]'))
+          var row=rows[${i}]; if(!row) return null
+          row.click(); return (row.innerText||'').replace(/\\s+/g,' ').slice(0,28) })()`)
+        if (clicked === null || clicked === undefined) break
+        await sleep(3200)
+        const t = await realTriggerProbe()
+        if (t.triggers >= 1) { realRow = clicked; break }
+      }
+      const drawerClosed = await closeDrawerNow()
+      await sleep(1200)
+      const gR1 = await lineage157Geom()
+      const tR1 = await realTriggerProbe()
+      check(
+        realRow !== null &&
+          tR1.header === true &&
+          tR1.triggers >= 1 &&
+          tR1.injected === 0 &&
+          tR1.nested === 0 &&
+          gR1.entry !== null &&
+          gR1.blocked === false &&
+          tR1.entryDisplay !== 'contents',
+        '★★ 158-A-① **真 DSH 的"真实入口"**认到了 ✓（`button[aria-haspopup="tree"]` ≥1 ✓、`[data-dshm-lineage]` 存在 ✓、`blocked` **没有** ✓）—— 而且这一个是**插件自己渲染的**、不是我注入的 ✓（`[data-dshm-injected]` 与 `[data-dshm-nested]` 都是 **0** ✓），标记落在**真的有盒子**的那一层上（`display` ≠ `contents` ✓ —— round 157 正是认到了 `display:contents` 的插槽包装层 ⇒ `0×0` ⇒ 真机"完全没有" ✗）',
+        `打开的会话行=${JSON.stringify(realRow)}｜会话行数=${sessionRows}｜抽屉已关=${drawerClosed}｜真入口=${JSON.stringify(tR1)}｜${geometryDetail(gR1)}`,
+      )
+      check(
+        geometryOk(gR1),
+        '★★ 158-A-② 真入口**看得见、摆得正、点得到**：`visibility/display` 正常 ✓、**不被任何祖先裁剪** ✓、与「对话|轨迹」**中心差 ≤1px + 右缘差 ≤1px** ✓、与两颗 tab **零相交** ✓、`elementFromPoint(中心)` **命中它自己** ✓（round 157 在真机上这些**一条都不成立** ✗）',
+        geometryDetail(gR1),
+      )
+      // ③ 真机几何 400×869 + safe-top 48px（用户真机调试框里那两个数 ✓）
+      await send('Emulation.setDeviceMetricsOverride', { width: 400, height: 869, deviceScaleFactor: 2, mobile: true })
+      const realIns48 = await applyInsTop(48)
+      await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+      await sleep(900)
+      const gR2 = await lineage157Geom()
+      check(
+        realIns48 === 'applied' && gR2.viewport?.w === 400 && gR2.safeTop === '48px' && geometryOk(gR2),
+        '★★ 158-A-③ **真机那一组几何也收敛**（400×869 + safe-top **48px** ✓ —— 用户真机调试框截图里就是这两个数 ✓；round 157 的三/四组几何里**没有**这一组 ✗）：真入口照样"看得见 + 中心/右缘 ≤1px + 零相交 + 不被裁 + 点得到"✓',
+        `insets=${realIns48}｜${geometryDetail(gR2)}`,
+      )
+      // ④ 再补一组"非整百宽度 + 非 0 安全区"（393×852 + 59px ✓）
+      await send('Emulation.setDeviceMetricsOverride', { width: 393, height: 852, deviceScaleFactor: 3, mobile: true })
+      const realIns59 = await applyInsTop(59)
+      await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+      await sleep(900)
+      const gR3 = await lineage157Geom()
+      check(
+        realIns59 === 'applied' && gR3.viewport?.w === 393 && gR3.safeTop === '59px' && geometryOk(gR3),
+        '★ 158-A-④ 再换一组**非整百宽度 + 非 0 安全区**（393×852 + safe-top 59px ✓）：真入口照样收敛 ✓（安全区一变，标签行整体下移 ⇒ 入口必须**跟着重新收敛** ✓，见那条 1s 对账 / resize 路 ✓）',
+        `insets=${realIns59}｜${geometryDetail(gR3)}`,
+      )
+      await send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2, mobile: true })
+      const realIns0 = await applyInsTop(0)
+      await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+      await sleep(700)
+      /**
+       * ⑤ ★★ 把**真机那两层结构**钉成断言 ✓ —— 就算哪天夹具里又造不出"真有子代理的会话"了，
+       *   这一条也跑不掉 ✓：`crumbSeg > div[display:contents]（实测 0×0 ✓）> div.root > button` ✓。
+       */
+      const nested = asJson155(
+        await evaluate(`(function(){
+          try{
+            var header=document.querySelector('[data-dshm-topheader]')
+            if(header===null) return JSON.stringify({ok:false,reason:'没有顶栏标记'})
+            var segs=header.querySelectorAll('[class*="crumbSeg"]')
+            if(segs.length===0) return JSON.stringify({ok:false,reason:'没有 crumbSeg'})
+            var seg=segs[segs.length-1]
+            var old=seg.querySelector('[data-dshm-nested="lineage"]')
+            if(old!==null) seg.removeChild(old)
+            var wrap=document.createElement('div')
+            wrap.setAttribute('data-dshm-nested','lineage')
+            wrap.style.display='contents'
+            var root=document.createElement('div')
+            root.className='dshm-fixture-nested-root'
+            root.style.display='inline-flex'
+            root.style.alignItems='center'
+            var btn=document.createElement('button')
+            btn.type='button'
+            btn.setAttribute('aria-haspopup','tree')
+            btn.setAttribute('aria-expanded','false')
+            btn.setAttribute('aria-label','子代理（验收注入：真机两层结构）')
+            btn.style.display='inline-flex'
+            btn.style.alignItems='center'
+            btn.style.minHeight='28px'
+            btn.style.fontSize='12px'
+            var dot=document.createElement('span')
+            dot.style.flex='none'; dot.style.width='10px'; dot.style.height='10px'; dot.style.borderRadius='50%'
+            dot.style.background='var(--dsw-alias-label-caption, #8a9199)'
+            var count=document.createElement('span')
+            count.textContent='2 个子代理'
+            btn.appendChild(dot); btn.appendChild(count)
+            root.appendChild(btn); wrap.appendChild(root); seg.appendChild(wrap)
+            return JSON.stringify({ok:true})
+          }catch(e){return JSON.stringify({ok:false,reason:String(e&&e.message?e.message:e)})}
+        })()`),
+      )
+      await sleep(1100)
+      /**
+       * ★ 包装层的 `display / rect` **必须等下一轮 `tagLineageEntry` 跑完再量** ✗ ——
+       *   刚 `appendChild` 的那一帧，它还是个"链上节点的非链孩子" ✓ ⇒ 被
+       *   `[data-dshm-lineage-chain] > *:not(...)` 判成 `display:none` ✓（实测就是 `none` ✗）；
+       *   下一轮把新链标好之后才轮到它 ✓。**在错误的那一刻量**正是本项目反复踩的坑 ✓
+       *   （"量之前先让它定下来"✓）。
+       */
+      const nestedSettled = asJson155(
+        await evaluate(`(function(){
+          var w=document.querySelector('[data-dshm-nested="lineage"]')
+          if(w===null) return JSON.stringify({found:false})
+          var r=w.getBoundingClientRect()
+          return JSON.stringify({found:true,display:getComputedStyle(w).display,
+            w:Math.round(r.width),h:Math.round(r.height)})
+        })()`),
+      )
+      const gNested = await lineage157Geom()
+      const tNested = await realTriggerProbe()
+      check(
+        nested.ok === true &&
+          nestedSettled.found === true &&
+          nestedSettled.display === 'contents' &&
+          nestedSettled.w === 0 &&
+          nestedSettled.h === 0 &&
+          tNested.entryDisplay !== 'contents' &&
+          geometryOk(gNested),
+        '★★ 158-A-⑤ **真机那两层结构**（`crumbSeg > div[display:contents]`（实测 **0×0** ✓）`> div.root > button` ✓）照样认得准、摆得正 ✓：`[data-dshm-lineage]` 落在**真的有盒子**的那一层上 ✓（`display` ≠ `contents` ✓）、中心/右缘 ≤1px ✓、零相交 ✓、不被裁 ✓、点得到 ✓ —— round 157 在这一条上会认到外层包装 ⇒ `0×0` ⇒ **藏起来** ✗✗',
+        `注入=${JSON.stringify(nested)}｜包装层（定下来之后）=${JSON.stringify(nestedSettled)}｜真入口=${JSON.stringify(tNested)}｜${geometryDetail(gNested)}`,
+      )
+      await evaluate(`(function(){var n=document.querySelector('[data-dshm-nested="lineage"]');if(n&&n.parentElement)n.parentElement.removeChild(n)})()`)
+      await sleep(700)
+      /**
+       * ⑥ **"藏起来"不许再当结论** ✗（源码级防呆 ✓）：`placeLineageEntry` 里那条
+       *   "摆不到位 ⇒ 不显示"必须**真的没了** ✓，改成"**就地显示** + 留一行日志"✓。
+       * 为什么不只用几何断言 ✗：几何断言证明的是"这一台机器这一刻摆得齐"✓；
+       *   而用户要的是"**摆不齐也不许不显示**"✓ —— 那是**代码路径**的性质 ✓，
+       *   只有源码级这一条能一直盯着它 ✓（本项目已有同形先例 ✓：`if (DEBUG_BOX_ON) {` 那几处 ✓）。
+       */
+      const srcLineage = readFileSync(join(repoRoot, 'packages', 'client', 'src', 'boot.js'), 'utf8')
+      check(
+        srcLineage.indexOf('⇒ 就地显示') >= 0 &&
+          srcLineage.indexOf('入口摆不到位（') < 0 &&
+          srcLineage.split('lineageGeneratesBox').length - 1 >= 2,
+        '★ 158-A-⑥ **"摆不齐就藏起来"这条兜底不许再回来**（源码级 ✓）：`placeLineageEntry` 里已经没有"入口摆不到位（…）⇒ 不显示"✗，改成"**就地显示** + 一行日志"✓；而且"只认真的有盒子的那一层"（`lineageGeneratesBox` ✓：定义 + 调用都在 ✓）—— 用户明确说过"完全没有"不可接受 ✓',
+        `就地显示=${srcLineage.indexOf('⇒ 就地显示') >= 0}｜旧文案还在=${srcLineage.indexOf('入口摆不到位（') >= 0}｜lineageGeneratesBox 出现次数=${srcLineage.split('lineageGeneratesBox').length - 1}`,
+      )
+      /**
+       * ★ 还原：把会话切回一个**没有真入口**的（= 上面 155/157-A 那一节用的那种 ✓）——
+       *   后面那些节（状态栏 / 文件面板 / 156 / 157-B/C）都在这张页面上跑 ✓，
+       *   不留一个"右端多一个入口"的状态给它们 ✗。
+       */
+      await evaluate(`(function(){
+        if(document.body.dataset.dshMobileDrawer!=='open'){ var n=document.getElementById('dsh-mobile-nav'); if(n) n.click() }
+        return true })()`)
+      await sleep(1100)
+      await evaluate(`(function(){
+        var title=${JSON.stringify(sessionFixture.title ?? '')}
+        var rows=[].slice.call(document.querySelectorAll('[class*="_projectRow"]'))
+        for(var i=0;i<rows.length;i++){ if(title!==''&&(rows[i].innerText||'').indexOf(title)>=0){rows[i].click();return true} }
+        if(rows[0]) rows[0].click()
+        return false })()`)
+      await sleep(1500)
+      for (let i = 0; i < 8; i++) {
+        const clicked = await evaluate(`(function(){
+          var rows=[].slice.call(document.querySelectorAll('[class*="_sessionRow"]'))
+          var row=rows[${i}]; if(!row) return null
+          row.click(); return true })()`)
+        if (clicked === null || clicked === undefined) break
+        await sleep(2600)
+        const t = await realTriggerProbe()
+        const hasBar = (await evaluate(`(function(){
+          var r=document.querySelector('[data-composer-stats]')
+          return r!==null&&r!==undefined&&(r.textContent||'').length>0 })()`)) === true
+        if (t.triggers === 0 && hasBar === true) break
+      }
+      await closeDrawerNow()
+      await sleep(1200)
+      const restoredNoEntry = await realTriggerProbe()
+      console.log(
+        `  · [round 158-A] 已把会话切回"没有真入口"的那一个 ✓（真入口=${restoredNoEntry.triggers} ✓、注入夹具=${restoredNoEntry.injected}/${restoredNoEntry.nested} ✓、safe-top=${realIns0} ✓）`,
+      )
+    }
 
     const stats = await evaluate(`(function(){
       function box(e){var r=e.getBoundingClientRect();return {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}}
@@ -4920,42 +5258,140 @@ try {
       `进子目录=${enteredSub}｜面包屑=${JSON.stringify(crumbAtSub)}｜行数=${rowsAtSub}`,
     )
 
-    // ② 点文件 ⇒ 面板收起 + 返回点记住（那行日志里带着**绝对路径** ✓）
+    /**
+     * ★★ round 158（B1 ✓）：**全程盯着 `body.dataset.dshmFiles`** ✓ ——
+     *   用户要的就是"没有中间那一帧"✓，而那一帧的判据只有一条：
+     *   **面板从头到尾没被关过** ✓（`data-dshm-files` 全程 `'open'` ✓）。
+     * 用页面里的 MutationObserver 记一笔**逐次变化**✓（只在轮询里点检会漏掉
+     * 那一瞬间的 `delete` ✗ —— 关掉再打开在两次采样之间就看不出来了 ✗）。
+     * ★ 模板字符串里**不许出现反引号** ✗（本项目的老坑 ✓）。
+     */
+    const filesWatchStart = async () =>
+      evaluate(`(function(){
+        try{
+          globalThis.__dshmFilesLog=[]
+          var body=document.body
+          globalThis.__dshmFilesLog.push(String(body.dataset.dshmFiles||'(无)'))
+          if(globalThis.__dshmFilesObs) globalThis.__dshmFilesObs.disconnect()
+          if(globalThis.__dshmFilesPoll) clearInterval(globalThis.__dshmFilesPoll)
+          var obs=new MutationObserver(function(){ globalThis.__dshmFilesLog.push(String(body.dataset.dshmFiles||'(无)')) })
+          obs.observe(body,{attributes:true,attributeFilter:['data-dshm-files']})
+          globalThis.__dshmFilesObs=obs
+          /**
+           * ★ 再挂一条 100ms 的**无条件采样** ✓ —— 只靠 attribute 事件的话，
+           *   这个属性一次都没变过就**只有 1 个样本** ✓，"全程"这句就没有说服力 ✗
+           *   （第一次跑就是这么假红了一下 ✓）。有了它，"全程 open"是**逐次可核**的 ✓。
+           */
+          globalThis.__dshmFilesPoll=setInterval(function(){
+            var log=globalThis.__dshmFilesLog
+            if(log.length<400) log.push(String(body.dataset.dshmFiles||'(无)'))
+          },100)
+          return true
+        }catch(e){ return false }
+      })()`)
+    const filesWatchRead = async () =>
+      bJson(
+        await evaluate(`(function(){
+          try{
+            if(globalThis.__dshmFilesPoll){ clearInterval(globalThis.__dshmFilesPoll); globalThis.__dshmFilesPoll=null }
+            var log=globalThis.__dshmFilesLog||[]
+            var bad=[]
+            for(var i=0;i<log.length;i++){ if(log[i]!=='open') bad.push(i+':'+log[i]) }
+            return JSON.stringify({samples:log.length,allOpen:bad.length===0,bad:bad.slice(0,4),
+              now:String(document.body.dataset.dshmFiles||'(无)')})
+          }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
+        })()`),
+      )
+
+    // ② 点文件 ⇒ **面板全程不被关** + 返回点记住 + DSH 预览真的开了
+    await filesWatchStart()
     const debugBeforeArm = await bDebug()
     const tapped = await bClickRow(RETURN_DEMO_FILE)
     await sleep(2600)
     const panelAfterTap = await bPanelOpen()
     const markerAfterTap = await bMarker()
+    const sheetDuringPreview = String(
+      await evaluate(`(function(){var s=document.getElementById('dsh-mobile-sheet');return s===null?'(无)':getComputedStyle(s).display})()`),
+    )
     const debugAfterArm = await bDebug()
     const armLines = String(debugAfterArm)
       .split('\n')
       .filter((line) => line.indexOf('为 DSH 预览收起文件面板') >= 0)
     check(
       tapped === true &&
-        panelAfterTap !== 'open' &&
+        panelAfterTap === 'open' &&
         armLines.length >= 1 &&
         String(armLines[armLines.length - 1] || '').indexOf(crumbAtSub.title) >= 0,
-      '★ 157-B-② 点文件（桥回 `{ok:true}` ✓）⇒ 我们的文件面板**真的收起** ✓，而且**返回点当场被记住** ✓（调试框那一行里带着**当前目录的绝对路径** ✓ —— 落点取的是 `state.path` ✓，不是"工作区根"✗）',
+      '★ 157-B-②（round 158 重钉 ✓）点文件（桥回 `{ok:true}` ✓）⇒ 我们的文件面板**全程保持打开**（`data-dshm-files` 仍是 `open` ✓ —— round 157 那条"真的收起"正是用户本轮否掉的 ✗），而且**返回点当场被记住** ✓（那一行里带着**当前目录的绝对路径** ✓）',
       `点到行=${tapped}｜面板=${JSON.stringify(panelAfterTap)}｜预览标记=${JSON.stringify(markerAfterTap)}｜记住返回点那一行=${JSON.stringify(armLines[armLines.length - 1] || '(没有)')}（调试框里一共 ${armLines.length} 行 ✓）`,
     )
 
-    // ③ 关掉 DSH 预览 ⇒ 面板重开、目录**逐字节相同**、列表有行 ✓
+    /**
+     * ★★ round 158（B1 ✓）**新断言**：预览那一层**真的盖住整屏** ✓，而且**我们的面板一个像素都不画** ✓。
+     *
+     * 为什么必须量这两条 ✗（真机实测，见 `10-交接文档.md` §4.18）：
+     *   "面板留在底下不会被看见"这句**不成立** ✗ —— 预览层是 `position: static` ✓、
+     *   整列只有 `z-index: 25` ✓，而我们面板是 `fixed; z-index: 85` ✗
+     *   ⇒ 面板会画在预览**上面** ✓（实测强开面板：x 148–412 那 264px 全盖住预览 ✓）。
+     *   所以"不收起面板"必须配一条"预览开着时不画面板"✓（`display: none` ✓、状态照旧 open ✓）。
+     */
+    const previewLayerBox = bJson(
+      await evaluate(`(function(){
+        var cs=document.querySelectorAll('[class*="_preview"],[class*="_document"]')
+        for(var i=0;i<cs.length;i++){
+          var r=cs[i].getBoundingClientRect()
+          if(r.width>=window.innerWidth*0.8&&r.height>=window.innerHeight*0.5){
+            return JSON.stringify({found:true,w:Math.round(r.width),h:Math.round(r.height),x:Math.round(r.left),y:Math.round(r.top)})
+          }
+        }
+        return JSON.stringify({found:false})
+      })()`),
+    )
+    const centerHit = String(
+      await evaluate(`(function(){
+        var hit=document.elementFromPoint(Math.round(window.innerWidth/2),Math.round(window.innerHeight/2))
+        if(hit===null) return '(空)'
+        var pv=hit.closest('[class*="_preview"],[class*="_document"]')
+        return JSON.stringify({tag:String(hit.tagName||'').toLowerCase(),inPreview:pv!==null,cls:String(hit.className||'').split(' ')[0]})
+      })()`),
+    )
+    check(
+      markerAfterTap === '1' &&
+        previewLayerBox.found === true &&
+        previewLayerBox.w >= 400 &&
+        previewLayerBox.h >= 800 &&
+        sheetDuringPreview === 'none' &&
+        centerHit.indexOf('"inPreview":true') >= 0,
+      '★ 158-B-① DSH 预览那一层**真的盖住整屏**（宽度 ≥ 视口 80% ✓、高度 ≥ 视口一半 ✓），而且预览开着时**我们的文件面板一个像素都不画**（`display:none` ✓、`data-dshm-files` 仍是 `open` ✓）⇒ `elementFromPoint(屏幕中心)` 命中的是**预览**而不是面板 ✓（实测面板 z-index 85 > 右栏 25 ⇒ 不主动不画就一定会盖住预览 ✗）',
+      `预览标记=${JSON.stringify(markerAfterTap)}｜预览层=${JSON.stringify(previewLayerBox)}｜面板 display=${JSON.stringify(sheetDuringPreview)}｜中心命中=${centerHit}`,
+    )
+
+    // ③ 关掉 DSH 预览 ⇒ 面板**本来就在**（全程没被关 ✓）、目录**逐字节相同**、列表有行 ✓
     const closeResult = await bClosePreviewByButton()
     const restoreLines = String(await bDebug())
       .split('\n')
       .filter((line) => line.indexOf('⇒ 回到文件列表的原目录') >= 0)
     const panelAfterClose = await bPanelOpen()
     const markerAfterClose2 = await bMarker()
+    const sheetAfterClose = String(
+      await evaluate(`(function(){var s=document.getElementById('dsh-mobile-sheet');return s===null?'(无)':getComputedStyle(s).display})()`),
+    )
     const crumbAfterRestore = await bCrumb()
     const rowsAfterRestore = await bRows()
+    const filesLog1 = await filesWatchRead()
     check(
       panelAfterClose === 'open' &&
         crumbAfterRestore.title === crumbAtSub.title &&
         rowsAfterRestore >= 1 &&
         restoreLines.length >= 1 &&
         String(restoreLines[restoreLines.length - 1]).indexOf(crumbAtSub.title) >= 0,
-      '★ 157-B-③ **关掉 DSH 预览 ⇒ 文件面板重新打开，并且停在原来那个目录**（面包屑 title 与进预览之前**逐字节相同** ✓、列表真的有行 ✓）—— 这正是用户说的"2 不行"那件事 ✓',
-      `收起键=${JSON.stringify(closeResult)}｜预览标记=${JSON.stringify(markerAfterClose2)}｜面板=${JSON.stringify(panelAfterClose)}｜目录：之前=${JSON.stringify(crumbAtSub.title)} 之后=${JSON.stringify(crumbAfterRestore.title)}｜行数=${rowsAfterRestore}｜恢复日志=${JSON.stringify(restoreLines[restoreLines.length - 1] || '(没有)')}`,
+      '★ 157-B-③（round 158 重钉 ✓）**关掉 DSH 预览 ⇒ 文件面板就在原来那个目录上**（面包屑 title 与进预览之前**逐字节相同** ✓、列表真的有行 ✓）—— 这正是用户说的"2 不行"那件事 ✓',
+      `收起键=${JSON.stringify(closeResult)}｜预览标记=${JSON.stringify(markerAfterClose2)}｜面板=${JSON.stringify(panelAfterClose)}｜面板 display=${JSON.stringify(sheetAfterClose)}｜目录：之前=${JSON.stringify(crumbAtSub.title)} 之后=${JSON.stringify(crumbAfterRestore.title)}｜行数=${rowsAfterRestore}｜恢复日志=${JSON.stringify(restoreLines[restoreLines.length - 1] || '(没有)')}`,
+    )
+    check(
+      filesLog1.allOpen === true && filesLog1.samples >= 3,
+      '★ 158-B-② **从点文件到关掉预览、再回到列表，`body.dataset.dshmFiles` 全程是 `open`** ✓（页面里的 MutationObserver 逐次记录 ✓ —— 一次都没变成空/别的值 ✓）⇒ 用户要的"**没有中间那一帧**"✓（round 157 是"关预览 ⇒ 重新打开面板"✗ ⇒ 先露出聊天页再滑进来 ✗）',
+      `逐次采样=${JSON.stringify(filesLog1)}`,
     )
 
     // ④ 护栏①：预览**不是**从文件面板打开的（= 聊天里的文件链接 ✓）⇒ 关掉后不许凭空弹面板 ✓
@@ -4992,6 +5428,7 @@ try {
     await sleep(1700)
     await bClickRow(RETURN_DEMO_FILE)
     await sleep(2600)
+    const panelBeforeMin = await bPanelOpen()
     const hideFaked = await evaluate(`(function(){
       try{
         Object.defineProperty(document,'visibilityState',{configurable:true,get:function(){return 'hidden'}})
@@ -5010,12 +5447,12 @@ try {
     })()`)
     check(
       hideFaked === 'hidden' &&
-        panelAfterMin !== 'open' &&
+        panelAfterMin === panelBeforeMin &&
         restoreBeforeMin >= 1 &&
         restoreAfterMin === restoreBeforeMin &&
         minLines.length >= 1,
-      '★ 157-B-⑤ 护栏②：**只是被最小化**（页面被切到后台 ✓）**不算关闭** ⇒ 文件面板**不弹出来** ✓（记住的那笔"返回点"留着 ✓，等它真被关掉时再还 ✓）—— 而且这一支**留了一行日志** ✓（不静默 ✗）',
-      `visibilityState=${JSON.stringify(hideFaked)}｜面板=${JSON.stringify(panelAfterMin)}｜恢复次数 ${restoreBeforeMin}→${restoreAfterMin}（应当不变 ✓）｜最小化日志=${JSON.stringify(minLines[minLines.length - 1] || '(没有)')}`,
+      '★ 157-B-⑤ 护栏②：**只是被最小化**（页面被切到后台 ✓）**不算关闭** ⇒ 文件面板**状态一点没变** ✓（既不许"弹出来"✗、也不许被这一下关掉 ✗ —— round 158 起面板全程 `open` ✓，所以判据从"不许变成 open"改成"**与最小化之前逐字相同**"✓，护栏的**意思一个字没松** ✓）、记住的那笔"返回点"留着 ✓（恢复计数不变 ✓）—— 而且这一支**留了一行日志** ✓（不静默 ✗）',
+      `visibilityState=${JSON.stringify(hideFaked)}｜面板 ${JSON.stringify(panelBeforeMin)}→${JSON.stringify(panelAfterMin)}（应当相同 ✓）｜恢复次数 ${restoreBeforeMin}→${restoreAfterMin}（应当不变 ✓）｜最小化日志=${JSON.stringify(minLines[minLines.length - 1] || '(没有)')}`,
     )
 
     // ⑥ 护栏③：恢复**只发生一次** ✓，而且面板回来之后**侧滑一键关**照旧 ✓（不许打架 ✓）
@@ -5056,8 +5493,119 @@ try {
     )
     await evaluate(`(function(){var c=document.getElementById('dsh-mobile-sheet-close');if(c)c.click()})()`)
     await sleep(600)
-  }
 
+    /**
+     * ★★ round 158（B2 ✓）：**连做 3 轮**"面板 → 子目录 → 点文件 → 关预览"，
+     *   **每一轮**都要"面板重开且停在同一个子目录" ✓ —— 用户原话：
+     *   "**打开多个文件（开一个退出不关闭）以后用返回键无法回到文件目录**"✗。
+     * 为什么必须 3 轮 ✗：round 157 那套记忆是**一次性**的 ✓、还带一条"佩戴时刻 >3000ms
+     *   当场作废"的守卫 ✗ —— 单轮测不出"第 N 轮之后失效"✓（第一版就是这么假绿的 ✗）。
+     */
+    {
+      const cycleOk = []
+      const cycleDetail = []
+      let allOpen = true
+      for (let cycle = 1; cycle <= 3; cycle++) {
+        await evaluate(`document.getElementById('dsh-mobile-files').click()`)
+        await sleep(1300)
+        await filesWatchStart()
+        await bEnterWorkspace()
+        const inSub = await bClickRow(RETURN_DEMO_DIR)
+        await sleep(1600)
+        const before = await bCrumb()
+        await bClickRow(RETURN_DEMO_FILE)
+        await sleep(2500)
+        const during = await bPanelOpen()
+        await bClosePreviewByButton()
+        await sleep(1200)
+        const after = await bCrumb()
+        const filesAfter = await bPanelOpen()
+        const log = await filesWatchRead()
+        if (filesAfter !== 'open' || log.allOpen !== true) allOpen = false
+        const ok = inSub === true && during === 'open' && after.title === before.title && after.title.endsWith(RETURN_DEMO_DIR)
+        cycleOk.push(ok)
+        cycleDetail.push(`第${cycle}轮 进子目录=${inSub} 预览中面板=${during} 目录=${JSON.stringify(after.title)} 全程open=${log.allOpen}`)
+      }
+      check(
+        cycleOk.every((x) => x === true) && allOpen === true,
+        '★ 158-B-③ **连做 3 轮**（面板 → 子目录 → 点文件 → 关预览 ⇒ 回到列表）**每一轮**都停在同一个子目录 ✓、且 `data-dshm-files` 全程 `open` ✓ —— 用户原话："**打开多个文件（开一个退出不关闭）以后用返回键无法回到文件目录**"✗ 的反面 ✓（round 157 的"一次性记忆"在第二轮之后就会失效 ✗）',
+        cycleDetail.join('｜'),
+      )
+    }
+
+    /**
+     * ★★ round 158（B2 ✓）**新断言**：**预览"迟到"也不许丢返回点** ✓。
+     *
+     * 真机根因（用户 B2 ✓）：round 157 判"这次预览是不是刚从文件面板点开的"**只看时间**
+     *   （`<= 3000ms` ✓）—— 文件一大 / 预览那一层进 DOM 一晚 ✓，记忆就被
+     *   `syncDshPreviewState` 那条"佩戴时刻"判据**当场作废** ✗ ⇒ 这一轮返回点没了 ✗
+     *   ⇒ 连续几轮里只要有一轮到得慢，就表现为"时灵时不灵"✓。
+     * 这里**确定性地**把时钟往前推 8 秒 ✓（`Date.now` 加偏移 ✓ = 模拟"预览晚到 8 秒"✓），
+     *   再看返回点还在不在 ✓ —— round 157 的实现会在这里丢掉返回点 ✗，round 158 不会 ✓。
+     * ★ 只在一小段里改 `Date.now` ✓，量完**立刻还原** ✓（免得影响别的定时器 ✗）。
+     */
+    {
+      await evaluate(`document.getElementById('dsh-mobile-files').click()`)
+      await sleep(1300)
+      await bEnterWorkspace()
+      await bClickRow(RETURN_DEMO_DIR)
+      await sleep(1600)
+      const beforeLate = await bCrumb()
+      const armedLate = await evaluate(`(function(){
+        try{ globalThis.__dshmRealNow = Date.now; return typeof globalThis.__dshmRealNow==='function' }catch(e){ return false }
+      })()`)
+      /**
+       * ★ 偏移必须落在**"点文件"与"发现预览"之间** ✗ —— 分两次 `evaluate` 会漏：
+       *   `openFileInDshPreview` 结尾那句 `setTimeout(syncDshPreviewState, 0)` 常常
+       *   在**我们第二次 evaluate 之前**就已经把预览标记写上了 ✓ ⇒ 进不了 `!was` 那一支 ✗
+       *   （第一次跑就是这么"两边日志都没有"的 ✓）。所以**在同一个任务里**先点、再改钟 ✓：
+       *   点的时候用的还是真实时钟 ✓（`at` 写对了 ✓），而预览被"发现"时看到的是 +8 秒 ✓。
+       */
+      const skew = await evaluate(`(function(){
+        try{
+          var rows=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry="1"]'))
+          for(var i=0;i<rows.length;i++){
+            var n=rows[i].querySelector('.dshm-file-name')
+            if(n!==null&&String(n.textContent||'')===${JSON.stringify(RETURN_DEMO_FILE)}){
+              var head=rows[i].querySelector('.dshm-file-head')||rows[i]
+              head.click()
+              var base=globalThis.__dshmRealNow||Date.now
+              Date.now=function(){ return base()+8000 }
+              return true
+            }
+          }
+          return false
+        }catch(e){ return false }
+      })()`)
+      await sleep(2600)
+      const lateMarker = await bMarker()
+      const lateKeep = countOf(await bDebug(), '迟了')
+      const lateDiscard = countOf(await bDebug(), '不是刚从文件面板点开的')
+      const restoreBeforeLate = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+      await bClosePreviewByButton()
+      await sleep(1200)
+      const restoreAfterLate = countOf(await bDebug(), '⇒ 回到文件列表的原目录')
+      const crumbAfterLate = await bCrumb()
+      const filesAfterLate = await bPanelOpen()
+      const unrestored = await evaluate(`(function(){
+        try{ if(globalThis.__dshmRealNow){ Date.now=globalThis.__dshmRealNow } return true }catch(e){ return false }
+      })()`)
+      check(
+        armedLate === true &&
+          skew === true &&
+          lateMarker === '1' &&
+          lateKeep >= 1 &&
+          lateDiscard === 0 &&
+          restoreAfterLate > restoreBeforeLate &&
+          crumbAfterLate.title === beforeLate.title &&
+          filesAfterLate === 'open' &&
+          unrestored === true,
+        '★ 158-B-④ **预览"迟到"也不算丢**：把时钟推快 8 秒（= 预览晚到 8 秒才进 DOM ✓）之后，那笔"从文件面板点开"的返回点**照样保留** ✓（日志写"迟了 …ms 也算 ✓"✓、**没有**"不是刚从文件面板点开的"那一行 ✗）⇒ 关掉预览仍然停在原目录 ✓ —— 这正是用户 B2"开多个文件以后返回键回不到文件目录"的根因（round 157 只看 3000ms 的窗口 ✗）',
+        `时钟推快=${skew}｜预览标记=${lateMarker}｜保留日志=${lateKeep}｜作废日志=${lateDiscard}（应为 0 ✓）｜恢复次数 ${restoreBeforeLate}→${restoreAfterLate}｜目录=${JSON.stringify(crumbAfterLate.title)}｜面板=${JSON.stringify(filesAfterLate)}｜时钟还原=${unrestored}`,
+      )
+    }
+
+  }
   // ── 公式渲染（round 97，用户反馈"md 预览公式不能显示"）──────────────────
   //
   // 三条：① 没有公式的文件**不下载**渲染器 ✓（懒加载，168 KB 不能白下 ✗）；
@@ -12544,6 +13092,7 @@ try {
       `屏幕上的组=${JSON.stringify(gated.titles)}`,
     )
   }
+
 } finally {
   try {
     process.kill(-dsh.pid, 'SIGKILL')

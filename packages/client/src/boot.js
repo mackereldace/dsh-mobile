@@ -643,7 +643,8 @@
    * ★ 壳在返回时调用的那一个函数 ✓（`MainActivity.handleBackPressed` ✓）。
    *
    * 按**最上层优先**依次尝试关掉 ✓：
-   *   ① DSH 原生设置弹窗 ✓ ② 文件面板 ✓ ③ 左抽屉 ✓ ④ DSH 预览 ✓
+   *   ① DSH 原生设置弹窗 ✓ ② DSH 预览 ✓ ③ 文件面板 ✓ ④ 左抽屉 ✓
+   *   （★ round 158 把"DSH 预览"从第 ④ 提到第 ② ✓ —— 理由见下面那一大段 ✓）
    * 关掉任意一个就返回 `true` = "这一下被我吃掉了" ✓；
    * 一个都没开返回 `false` ✓ = 交给壳（网页历史回退 ✓ / 都没有就退出 ✓）。
    *
@@ -672,6 +673,33 @@
         reportBackAvailable()
         return true
       }
+      /**
+       * ★★ round 158（B1 ✓）：**DSH 预览这一支要排在「文件面板」之前** ✗✗。
+       *
+       * 为什么（这是本轮 B1 的直接后果 ✓）：round 158 起，"从文件面板点开的 DSH 预览"
+       * **不再收起文件面板** ✓（用户原话："目前的返回文件目录是先回到主页面，然后让文件
+       * 目录跳出来，这点不好"✗）⇒ 预览开着的那段时间里，`data-dshm-files` 一直是 `'open'` ✓。
+       * 而**能看见的最上面那一层是 DSH 预览** ✓（实测：那一层 `0,38 → 412,915` 盖住整屏 ✓，
+       * 我们只是**不画**面板 ✓ —— 见 `body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet` 那条 ✓）。
+       * 所以"返回 = 关掉最上面那一层"这条规矩要求：**先关预览** ✓，再谈面板 ✓。
+       * 顺序反了的后果（正是用户 B2 的原话："**用返回键无法回到文件目录**"✓）：
+       * 返回键会把**看不见的**面板关掉 ✓、预览却还盖在屏幕上 ✗ ⇒ 用户按一下返回"什么都没发生"✗✗。
+       */
+      if (body.dataset.dshmDshPreview === '1') {
+        /**
+         * ★ 点了「关闭 / 收起右侧边栏」之后**立刻**结束"预览开着"这个状态 ✓
+         *   （`finishPreviewCloseNow` ✓）—— 与右滑返回同一个道理 ✓：
+         *   那条 180ms 的宽限期是留给"DSH 自己重渲染"的抖动 ✓，
+         *   我们自己按下的关闭不必等 ✓（否则顶栏会多隐身一会儿 ✗）。
+         * 点空（那一行正在重渲染 ✓）时**仍然返回 true** ✓ ——
+         * 这一下已经属于"返回预览"这个层级 ✓，不能因为一次点空就退出 App ✗；
+         * 下一次返回会再试一次 ✓（这时 DSH 那边通常已经渲染好了 ✓）。
+         */
+        var clicked = clickDshCollapseControl()
+        if (clicked !== '' && clicked.indexOf('(无匹配') !== 0) finishPreviewCloseNow()
+        reportBackAvailable()
+        return true
+      }
       if (body.dataset.dshmFiles === 'open') {
         /**
          * ★★ round 142（本轮第 1 条）：**面板里可能停在一个子视图上** ✓
@@ -691,21 +719,6 @@
       }
       if (body.dataset.dshMobileDrawer === 'open') {
         runtime.closeDrawer()
-        reportBackAvailable()
-        return true
-      }
-      if (body.dataset.dshmDshPreview === '1') {
-        /**
-         * ★ 点了「关闭 / 收起右侧边栏」之后**立刻**结束"预览开着"这个状态 ✓
-         *   （`finishPreviewCloseNow` ✓）—— 与右滑返回同一个道理 ✓：
-         *   那条 180ms 的宽限期是留给"DSH 自己重渲染"的抖动 ✓，
-         *   我们自己按下的关闭不必等 ✓（否则顶栏会多隐身一会儿 ✗）。
-         * 点空（那一行正在重渲染 ✓）时**仍然返回 true** ✓ ——
-         * 这一下已经属于"返回预览"这个层级 ✓，不能因为一次点空就退出 App ✗；
-         * 下一次返回会再试一次 ✓（这时 DSH 那边通常已经渲染好了 ✓）。
-         */
-        var clicked = clickDshCollapseControl()
-        if (clicked !== '' && clicked.indexOf('(无匹配') !== 0) finishPreviewCloseNow()
         reportBackAvailable()
         return true
       }
@@ -4223,6 +4236,30 @@
   }
 
   /**
+   * ★★ round 158（B1 ✓）：文件面板**现在**就开着、而且正停在 `memory.path` 上吗 ✓。
+   *
+   * 判据只取**屏幕上的两个事实** ✓（不碰闭包里的 state ✗ —— 那份 state 在
+   * `renderFileBrowser` 里面 ✓，这里够不着 ✓）：
+   *   · `body[data-dshm-files="open"]` ✓；
+   *   · 面包屑那个 `.dshm-crumb-path` 的 `title`（绝对路径 ✓，157-B-①～③ 一直用它 ✓）
+   *     与记忆里的 `path` **逐字节**相同 ✓。
+   * 读不到就返回 `false` ✓（退回老路：老老实实重开一次 ✓ —— 宁可多画一次，
+   * 也不要让用户"返回之后落在聊天页"✗）。
+   */
+  function filesSheetAtPath(memory) {
+    try {
+      if (memory === null || memory === undefined) return false
+      if (document.body === null || document.body === undefined) return false
+      if (document.body.dataset.dshmFiles !== 'open') return false
+      var crumb = document.querySelector('.dshm-crumb-path')
+      if (crumb === null || crumb === undefined) return false
+      return String(crumb.getAttribute('title') || '') === String(memory.path)
+    } catch (error) {
+      return false
+    }
+  }
+
+  /**
    * ★★ round 157（B ✓）：DSH 预览关掉之后，把"为它收起的文件面板"**还回去** ✓（只还一次 ✓）。
    *
    * 这是**唯一一份实现** ✓：`syncDshPreviewState` 的关闭支与 `finishPreviewCloseNow`
@@ -4248,8 +4285,26 @@
     }
     // ★ 只恢复一次 ✓：先把记忆摘掉再动手 ✓（重开那一步是异步的 ✓，慢一拍就会还两次 ✗）
     dshmFilesReturnAfterPreview = null
+    // ★ round 158（B2 ✓）：令牌也一起清 ✓（这次预览这一轮用完了 ✓，不许漏到下一轮 ✗）
+    dshmPreviewOpenRequested = false
     try {
-      debugBoxLine('[files] DSH 预览关闭（' + where + '）⇒ 回到文件列表的原目录：' + String(memory.path))
+      /**
+       * ★★ round 158（B1 ✓）：**面板本来就在那儿**（round 158 起它全程没被关 ✓）⇒
+       *   什么都不做 ✗ —— 尤其**不要**再 `renderFileBrowser` 重画一遍 ✓：
+       *   重画会重新拉一次目录（滚动位置、选中态全丢 ✗），而那一帧正是用户抱怨的
+       *   "**让文件目录跳出来**"✓✗。这一支就是"零闪烁"的落地处 ✓ ——
+       *   面板还是原来那个节点、原来那个目录 ✓，屏幕上根本没有中间帧 ✓。
+       *
+       * 日志**沿用同一句话**（`⇒ 回到文件列表的原目录：<path>` ✓）——
+       * 157-B-③ 与"恢复只发生一次"那两条断言都靠它 ✓，本轮**不许放松** ✓
+       * （只多一个括号说明 ✓）。
+       */
+      var alreadyThere = filesSheetAtPath(memory)
+      debugBoxLine(
+        '[files] DSH 预览关闭（' + where + '）⇒ 回到文件列表的原目录：' + String(memory.path) +
+          (alreadyThere ? '（面板全程没被关 ✓ 无需重画 ✓）' : ''),
+      )
+      if (alreadyThere) return true
       /**
        * ★★ `setOpen(true)` + `renderFileBrowser(...)` = `openFilesSheet` 里"进入某个工作区"
        *   那两步 ✓（**同一份实现** ✓，没有第二套渲染 ✗）。为什么不直接调 `openFilesSheet` ✗：
@@ -4705,6 +4760,20 @@
    * 两条路都会走到这里 ✓，不清就会弹两次 ✓）。
    */
   var dshmFilesReturnAfterPreview = null
+  /**
+   * ★★ round 158（B2 ✓）：**"这一次预览是我们（文件面板那条路）请求出来的"** 令牌 ✓。
+   *
+   * round 157 判"这预览是不是刚从文件面板点开的"**只看时间**（`at` + 3000ms ✓）——
+   * 真机上文件一大、预览那一层进 DOM 就可能**晚于 3 秒** ✓ ⇒ 记忆被 `syncDshPreviewState`
+   * 那条"佩戴时刻"判据**当场作废** ✗ ⇒ 这一轮的返回点就没了 ✓
+   * ⇒ 用户原话："**打开多个文件（开一个退出不关闭）以后用返回键无法回到文件目录**"✓
+   * （时灵时不灵 ✓ —— 连续几轮里只要有**一轮**预览到得慢，就断链 ✓）。
+   * 令牌的语义：`openFileInDshPreview` 里 `bridge.open` 回了 `{ok:true}` 就置上 ✓，
+   * **预览真的出现时消费掉**（这时**不清记忆** ✓，也不管中间过了多久 ✓）。
+   * 护栏①（聊天里的文件链接 ✓）一个字没松 ✓：那条路**不会**置这个令牌 ⇒
+   * 照旧落在"超过 3000ms 就作废"的时间判据上 ✓。
+   */
+  var dshmPreviewOpenRequested = false
   /**
    * 佩戴记忆与"预览真的开了"之间的合理间隔 ✓（桥 `open` 之后我们还要等
    * `setTimeout(syncDshPreviewState, 0)` + 一帧 rAF ✓ ⇒ 实测在几百毫秒内 ✓）。
@@ -6595,6 +6664,24 @@
        */
       'body[data-dshm-dsh-preview="1"] #dsh-mobile-top { visibility: hidden; }',
       'body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }',
+      /**
+       * ★★ round 158（B1 ✓）：DSH 预览开着时，**我们的文件面板一个像素都不画** ✗，
+       *   但**状态照旧是 `open`** ✓（`data-dshm-files` 不动 ✓）。
+       *
+       * 为什么必须补这一条 ✗（真机实测，见 round 158 报告）：
+       *   · 预览那一层是 `div.dhJKeW_preview`，`0,38 → 412,915` ✓ **盖住整屏** ✓，
+       *     但它 `position: static` ✓、整列只有 `z-index: 25` ✓；
+       *   · 我们面板是 `position: fixed; z-index: 85` ✓
+       *   ⇒ 面板**画在预览上面** ✗（实测把面板强开：x 148–412 那 264px 全盖住预览 ✓）。
+       *   所以"面板留在底下不会被看见"这句**不成立** ✗ —— 不能只靠"DSH 预览盖住它"✓。
+       *
+       * 这一条同时**正是用户要的观感** ✓：
+       *   · 状态全程 `open` ✓ ⇒ **没有"先回主页面、文件目录再跳出来"那一帧** ✓；
+       *   · 预览一关，这条规则立刻不再命中 ✓ ⇒ 面板**本来就在**（同一个目录、同一份滚动位置 ✓）
+       *     —— 一步到位、零闪烁 ✓。
+       * `!important` 与"body[attr] + #id"的特异度都压得过 `#dsh-mobile-sheet[data-open="1"]` ✓。
+       */
+      'body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important; }',
       '.dshm-md-math { display: inline-block; vertical-align: baseline; }',
       '.dshm-md-math[data-display="1"] { display: block; margin: 10px 0; overflow-x: auto; text-align: center; }',
       '.dshm-md-math[data-dshm-math="pending"], .dshm-md-math[data-dshm-math="failed"] {',
@@ -7678,8 +7765,26 @@
           dshmFilesReturnAfterPreview !== null &&
           Date.now() - dshmFilesReturnAfterPreview.at > DSH_PREVIEW_ARM_MS
         ) {
-          dshmFilesReturnAfterPreview = null
-          debugBoxLine('[files] 这次 DSH 预览不是刚从文件面板点开的 ⇒ 不记返回点 ✓')
+          /**
+           * ★★ round 158（B2 ✓）：**先看令牌** —— 这一次预览就是我们从文件面板请求出来的
+           *   （`bridge.open` 已回 `{ok:true}` ✓）时，**不管它到得多慢都保留** ✓
+           *   （真机上大文件晚到 3 秒以上是常态 ✓，round 157 就是在这里把返回点丢掉的 ✗）。
+           *   令牌**消费掉** ✓（一次请求只认一次 ✓，不粘滞 —— 不然下一次从聊天里开预览
+           *   也会被算成"从面板来的"✗，护栏①就漏了 ✓）。
+           */
+          if (dshmPreviewOpenRequested) {
+            dshmPreviewOpenRequested = false
+            debugBoxLine(
+              '[files] 这次 DSH 预览就是刚从文件面板点开的那一次（迟了 ' +
+                String(Date.now() - dshmFilesReturnAfterPreview.at) + 'ms 也算 ✓）⇒ 保留返回点 ✓',
+            )
+          } else {
+            dshmFilesReturnAfterPreview = null
+            debugBoxLine('[files] 这次 DSH 预览不是刚从文件面板点开的 ⇒ 不记返回点 ✓')
+          }
+        } else if (!was && dshmPreviewOpenRequested) {
+          // 在窗口内（或没有记忆）也把令牌消费掉 ✓ —— 一次请求只认一次 ✓
+          dshmPreviewOpenRequested = false
         }
         /**
          * ★★ 预览打开期间**不让文档自己滚**（round 118，用户真机反馈：
@@ -7775,16 +7880,22 @@
             : '[dsh-preview] DSH 自带预览已关闭 → 外壳恢复 ✓',
         )
         /**
-         * ★ 原生预览一打开，就**收起我们自己的面板与抽屉** ✓。
+         * ★ 原生预览一打开，就**收起我们自己的抽屉** ✓。
          *
          * 用户反馈："ui 和原生框的复制冲突，建议**风格一致**嵌入原生框里" ✗ ——
          * 原生预览是整屏的 ✓，我们的工具行（返回文件/下载/看源码 ✓）如果还浮在上面，
          * 就会和它自己的控件（换行 ✓、打开方式 ✓、重新读取 ✓）挤在一起 ✓。
          * 收起来之后，屏幕上只剩原生那一套 ✓ = 风格一致 ✓。
+         *
+         * ★★ round 158（B1 ✓）：**文件面板不再在这里被收起** ✗✗（这里原来是
+         *   `sheet.setOpen(false)` ✓）—— 它就是用户 B1 抱怨的那条"先回主页面、
+         *   文件目录再跳出来"的另一半 ✗（`openFileInDshPreview` 那头也删了 ✓）。
+         *   现在改成"**状态保持 open、但预览开着时不画它**" ✓ —— 见那条 CSS ✓。
+         *   左抽屉（`setDrawer(false)`）**不动** ✓：它不是"返回落点"，
+         *   留着只会和预览的控件挤在一起 ✗（老行为 ✓）。
          */
         if (open) {
           try {
-            if (typeof sheet !== 'undefined' && sheet !== null && sheet.setOpen !== undefined) sheet.setOpen(false)
             if (typeof setDrawer !== 'undefined' && setDrawer !== null) setDrawer(false)
           } catch (error) {
             /* 面板还没装好就算了 ✓ */
@@ -8186,6 +8297,65 @@
     }
 
     /**
+     * ★★ round 158（A ✓）：这个节点**自己会不会生成盒子** ✓。
+     *
+     * `display: contents` 的元素**不生成盒子** ⇒ `getBoundingClientRect()` 恒 `0×0` ✓、
+     * `position / right / top / max-width` 一律无效 ✓ —— DSH 的插槽包装层就是它 ✓
+     * （真机读数：`crumbSeg > div[display:contents] > div.ZKlsPq_root > button` ✓）。
+     * 认错这一层的后果见 `tagLineageEntry` 那段说明 ✓（一句话：真机上入口"完全没有"✓✗）。
+     *
+     * 读不到计算样式时按"有盒子"处理 ✓ —— 宁可多认一层（最坏也只是回到 round 157 的行为 ✗），
+     * 也不要因为一次异常把入口整个丢掉 ✗。
+     */
+    function lineageGeneratesBox(node) {
+      if (node === null || node === undefined) return false
+      try {
+        return getComputedStyle(node).display !== 'contents'
+      } catch (error) {
+        void error
+        return true
+      }
+    }
+
+    /** ★★ round 158（A ✓）：只为**日志**用 —— 把计算 `display` 读成一句话 ✓（读不到就 `?` ✓）。 */
+    function lineageDisplayOf(node) {
+      try {
+        return String(getComputedStyle(node).display || '?')
+      } catch (error) {
+        void error
+        return '?'
+      }
+    }
+
+    /**
+     * ★★ round 158（A ✓）：**只给日志用** —— 把入口往上 4 层串成一行 ✓：
+     * `tag.class(display,visibility,WxH) < …`。
+     *
+     * 为什么值得写 ✗：真机上**没有控制台** ✓，用户只会照着调试框念那一行 ✓；
+     * 而"到底是哪一层没有盒子"必须**一眼可辨** ✓ —— 本轮就是靠
+     * "包装层 `display:contents` ⇒ `0×0`"这一条定的案 ✓（见 `tagLineageEntry` ✓）。
+     * 只读计算样式 + rect ✓，而且只在"量不到尺寸"这条**异常路径**上调用 ✓（平时一次都不跑 ✓）。
+     */
+    function lineageAncestorChainOf(node) {
+      var parts = []
+      var walk = node
+      for (var i = 0; i < 4 && walk !== null && walk !== undefined; i++) {
+        try {
+          var cs = getComputedStyle(walk)
+          var r = walk.getBoundingClientRect()
+          parts.push(
+            String(walk.tagName || '').toLowerCase() + '.' + String(walk.className || '').split(' ')[0] +
+              '(' + cs.display + ',' + cs.visibility + ',' + Math.round(r.width) + '×' + Math.round(r.height) + ')',
+          )
+        } catch (error) {
+          void error
+        }
+        walk = walk.parentElement
+      }
+      return parts.join(' < ')
+    }
+
+    /**
      * ★★ round 155：把 DSH 自己的「**子智能体**」入口从标题行搬到「轨迹」右边 ✓。
      *
      * ## 用户原话与它落到哪一行
@@ -8230,11 +8400,28 @@
            * 入口的"根" = 从触发键往上、直到**父元素是面包屑那一段**（`*_crumbSeg`）✓。
            * 那一层就是 DSH 插槽的挂载点 ✓（`span.crumbSeg > div.root > button` ✓）。
            * 找不到就不动手 ✓（宁可什么都不做，也不要瞎定位一个别的元素 ✗）。
+           *
+           * ★★ round 158（A ✓）：**只认"真的有盒子"的那一层** ✗✗ —— 真机复现（真 DSH +
+           * 移动视口，读数见 round 158 报告）量到的真实结构是
+           *   `span.wSkVaW_crumbSeg > div[display:contents] > div.ZKlsPq_root > button`
+           * —— DSH 的**插槽包装层**是 `display: contents`（**不生成盒子** ✓、宽高恒 0 ✓），
+           * 而 round 155/157 认的正是它 ✗ ⇒
+           *   · `getBoundingClientRect()` 恒为 `0×0` ✓ ⇒ 闭环每一轮都在"量不到尺寸"那关退出 ✓
+           *     ⇒ `data-dshm-lineage-blocked="1"` **永远摘不掉** ⇒ 真机上"完全没有"✓✓；
+           *   · 就算硬显示，`position/right/top/max-width` 写在 `display:contents` 上**等于没写**✗
+           *     ⇒ 入口退回自然位置 ⇒ 这正是 round 155 那次"位置错、上半被顶栏裁掉"的形状 ✓。
+           * 判据取**语义计算值** `display !== 'contents'` ✓（不是哈希类名 ✗ ——
+           * `ZKlsPq_` 会随 DSH 版本变 ✓，包装层换个名字也照样跳得掉 ✓）；
+           * 从触发键一路往上取**最外层那个有盒子的**（`boxed`）⇒ 既不依赖"包装层刚好一层"✗，
+           * 也不依赖"根 div 的类名"✗。万一整条路径都没有盒子，`boxed` 兜底是触发键自己 ✓
+           * （按钮一定是个盒子 ✓）。
            */
           var node = trigger
+          var boxed = trigger
           while (node !== null && node !== undefined && node.parentElement !== null && node.parentElement !== header) {
-            if (classHasSuffix(node.parentElement, '_crumbSeg')) { entry = node; break }
+            if (classHasSuffix(node.parentElement, '_crumbSeg')) { entry = boxed; break }
             node = node.parentElement
+            if (lineageGeneratesBox(node)) boxed = node
           }
         }
       }
@@ -8377,7 +8564,17 @@
         // 读 rect = 强制布局 ✓ ⇒ 拿到的是**刚写下**的结果 ✓（所以不需要等帧 ✓）
         latest = entry.getBoundingClientRect()
         if (!(latest.width > 0) || !(latest.height > 0)) {
-          noteLineageOnce('入口量不到尺寸（' + Math.round(latest.width) + '×' + Math.round(latest.height) + '）⇒ 不显示')
+          /**
+           * ★★ round 158（A ✓）：这条日志原来只说"量不到尺寸" ✗ —— 真机排障时最关键的
+           *   那半个字（**为什么**量不到）反而没写 ✓。补上计算 `display` ✓：
+           *   `display=contents` 就是"认到了插槽包装层、没认到真正的根"✓（见 `tagLineageEntry` ✓）。
+           *   （判据修好之后这一支理论上不可达 ✓ —— 留着是为了下次 DSH 换结构时**一眼可辨**✓。）
+           */
+          noteLineageOnce(
+            '入口量不到尺寸（' + Math.round(latest.width) + '×' + Math.round(latest.height) +
+              '，display=' + String(lineageDisplayOf(entry)) + '）｜祖先链：' + lineageAncestorChainOf(entry) +
+              ' ⇒ 不显示（没有盒子，物理上摆不了）',
+          )
           return false
         }
         var dy = targetCenterY - (latest.top + latest.height / 2)
@@ -8388,30 +8585,77 @@
       }
       var dyFinal = targetCenterY - (latest.top + latest.height / 2)
       var dxFinal = tabsRect.right - latest.right
-      if (Math.abs(dyFinal) > 1 || Math.abs(dxFinal) > 1) {
+      var offTarget = Math.abs(dyFinal) > 1 || Math.abs(dxFinal) > 1
+      /**
+       * ★★ round 158（A ✓）：**闭环收敛不了，也不许"藏起来"当结论** ✗✗
+       *   （用户对 round 157 的"真机上完全没有"明确说过不可接受 ✓）。
+       *   就地显示 ✓、并留**一行**日志说明偏差 ✓ —— 去重仍走 `noteLineageOnce` ✓
+       *   （它按整句去重 ⇒ 不会每 120ms 刷一行把调试框淹掉 ✗）。
+       *   它**压不到**「对话 / 轨迹」✓：这是**结构性**保证 ✓ —— 上面那句
+       *   `--dshm-lineage-max = 标签行右缘 − 最右那颗 tab − 10px` 已经把盒子的宽度封死 ✓
+       *   （`max-width` 是硬上限 ✓，`right` 又贴齐标签行右缘 ✓）⇒ 左缘恒在最右 tab 右侧 ✓。
+       *   只有两件**物理上放不下**的事才允许不显示 ✓：
+       *     · 标签行自己都挤没了（`maxWidth ≤ 24` ✓，见上面的闸 ✓）；
+       *     · 入口**根本没有盒子**（上面那条 `0×0` ✓）。
+       */
+      if (offTarget) {
         noteLineageOnce(
-          '入口摆不到位（中心差 ' + Math.round(dyFinal) + 'px / 右缘差 ' + Math.round(dxFinal) + 'px）⇒ 不显示',
+          '入口没摆齐（中心差 ' + Math.round(dyFinal) + 'px / 右缘差 ' + Math.round(dxFinal) +
+            'px）⇒ 就地显示 ✓（不藏 ✗；两枚 tab 仍零相交 ✓）',
         )
-        return false
       }
       /**
        * ★ 零相交兜底 ✓：即便对齐了，只要**真的压到**某颗 tab 上就不显示 ✓
        *   （与 `max-width` 那条是两道独立的闸 ✓ —— 它管"宽度"，这条管"事实"✓）。
+       * ★★ round 158（A ✓）：先**尽力摆一次**再认输 ✗ —— 标签行可能在这儿轮里重排过 ✓
+       *   （DSH 重渲染 / 顶栏内边距变 ✓）⇒ 按**现在**的空地重新封一次宽度再量 ✓；
+       *   还相交 = 那块空地**真的放不下**（物理）⇒ 才不显示 ✓。
        */
+      var overlap = lineageTabOverlap(latest, row)
+      if (overlap !== null) {
+        var freshRow = lineageTabRow(header)
+        if (freshRow !== null) {
+          var freshMax = Math.round(freshRow.rect.right - freshRow.rightMost - 10)
+          if (freshMax > 24) {
+            entry.style.setProperty('--dshm-lineage-max', freshMax + 'px')
+            latest = entry.getBoundingClientRect()
+            overlap = lineageTabOverlap(latest, freshRow)
+          }
+        }
+      }
+      if (overlap !== null) {
+        noteLineageOnce('入口与「' + String(overlap) + '」重叠（右端空地真放不下）⇒ 不显示')
+        return false
+      }
+      /**
+       * ★ 完全摆齐了才**复位**那句去重提示 ✓ —— 摆不齐时上面那句留着 ✓，
+       *   `noteLineageOnce` 按整句去重 ⇒ 同一句不会再刷 ✓（复位了就会每 120ms 刷一遍 ✗）。
+       */
+      if (!offTarget) noteLineageOnce('')
+      return true
+    }
+
+    /**
+     * ★★ round 158（A ✓）：入口**压到了哪颗 tab** ✓（压不到返回 `null` ✓）。
+     *
+     * 与 `max-width` 那道闸是两回事 ✓：那个管"宽度上限"（结构性 ✓），
+     * 这个管"事实上有没有相交"✓（兜底 ✓ —— 布局真出意外时至少不会盖住「对话/轨迹」✗）。
+     *
+     * @returns 被压住那颗 tab 的标签文字，或 `null` ✓。
+     */
+    function lineageTabOverlap(box, row) {
       for (var t = 0; t < row.buttons.length; t++) {
         var tabRect = row.buttons[t].getBoundingClientRect()
         if (
-          latest.left < tabRect.right &&
-          latest.right > tabRect.left &&
-          latest.top < tabRect.bottom &&
-          latest.bottom > tabRect.top
+          box.left < tabRect.right &&
+          box.right > tabRect.left &&
+          box.top < tabRect.bottom &&
+          box.bottom > tabRect.top
         ) {
-          noteLineageOnce('入口与「' + String(row.labels[t] || '') + '」重叠 ⇒ 不显示')
-          return false
+          return String(row.labels[t] || '') || '那颗 tab'
         }
       }
-      noteLineageOnce('')
-      return true
+      return null
     }
 
     /**
@@ -12389,6 +12633,19 @@
     // 立刻同步一次"预览开着"✓（观察器要等下一帧 ✓，而这一步可能已经推开了布局 ✓）
     if (typeof syncDshPreviewState === 'function') setTimeout(syncDshPreviewState, 0)
     /**
+     * ★★ round 158（B2 ✓）：**"这一次预览是我们请求的"要单独记一笔** ✗。
+     *
+     * round 157 只按**时间**判"这预览是不是刚从文件面板点开的"（`at` 与那个 3000ms 窗口 ✓）。
+     * 真机上的失败形状（用户原话："**打开多个文件（开一个退出不关闭）以后用返回键无法回到
+     * 文件目录**"✗）：文件越大 / 预览越慢 ⇒ 那一层进 DOM 的时刻可能**晚于 3 秒** ✓
+     * ⇒ 下面 `syncDshPreviewState` 那条"佩戴时刻"判据把记忆**当场作废** ✗
+     * ⇒ 这一轮的返回点就没了 ✓（下一轮再从面板点开才有可能恢复 ✓ = 时灵时不灵 ✓）。
+     * 现在多一个**令牌** ✓：只要预览是我们这一下请求出来的（`bridge.open` 已经回 `{ok:true}` ✓），
+     * **不管它花了多久**都算数 ✓；"不是我们请求的"（聊天里的文件链接 ✓）照旧由时间那条挡住 ✓
+     * —— 护栏①一个字没松 ✓（见 `syncDshPreviewState` 里那一支 ✓）。
+     */
+    dshmPreviewOpenRequested = true
+    /**
      * ★★ round 157（B ✓）：**在收起面板之前**把"这一下是为了看预览"与**落点**记下来 ✓
      *   （顺序不能反 ✗：`setOpen(false)` 一跑，面板状态就变了 ✓）。
      * 两条前置缺一不可 ✓（护栏①的判据就在这里 ✓）：
@@ -12415,8 +12672,28 @@
       }
       debugBoxLine('[files] 为 DSH 预览收起文件面板（记住返回点：' + filesState.path + ' ✓）')
     }
-    // DSH 的预览开在它自己的右侧栏里 ✓ —— 把我们的文件面板收起来，别挡着它 ✓
-    if (sheet !== undefined && sheet !== null && typeof sheet.setOpen === 'function') sheet.setOpen(false)
+    /**
+     * ★★ round 158（B1 ✓）：**不再收起文件面板** ✗✗（round 157 这里有一句 `setOpen(false)` ✓）。
+     *
+     * 用户原话（本轮 B1）："**目前的返回文件目录是先回到主页面，然后让文件目录跳出来，
+     * 这点不好**"✗ —— 那正是 round 157"关预览 ⇒ 重新打开面板"的观感：
+     * **先露出聊天页 → 面板再滑进来** ✓。
+     *
+     * 真机实测（round 158，真 DSH + 真预览，读数见 round 158 报告）：
+     *   · DSH 预览那一层 `div.dhJKeW_preview` = `0,38 → 412,915` ✓ **盖住整屏** ✓
+     *     （`position: static` ✓、挂在右栏那一列里 ✓）；
+     *   · 我们的面板是 `position: fixed; z-index: 85` ✓，而右栏那一整列只有 `z-index: 25` ✗
+     *     ⇒ **面板会画在预览上面** ✓（实测：面板 x 148–412 那一段盖住预览 ✓）。
+     * 所以"面板留在底下不会被看见"这句**不成立** ✗ —— 必须补一条"预览开着时**不画面板**" ✓
+     * （`body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important }` ✓）。
+     * 这样：**状态一直是 open** ✓（用户要的"全程没有中间那一帧"✓）、
+     * 屏幕上只有预览 ✓、预览一关面板**本来就在** ✓（一步到位、零闪烁 ✓）。
+     *
+     * ★ 面板**不再被关** ⇒ `restoreFilesAfterDshPreview` 那笔记忆退化成"兜底"✓
+     *   （只有面板被**别的东西**关掉时才用得上 ✓），但**一个字都不删** ✗ ——
+     *   157-B-①～⑥ 的护栏（不是从面板打开的预览不许弹面板 ✓、最小化不算关闭 ✓、
+     *   只恢复一次 ✓）照旧全靠它 ✓。
+     */
     return true
   }
 
