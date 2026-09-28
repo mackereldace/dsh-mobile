@@ -310,6 +310,20 @@ echo "学校/局域网    : https://${TLS_AUTHORITY}/mobile（已作为候选端
 [ -n "$TS_AUTHORITY" ] && echo "Tailscale      : ${TS_AUTHORITY}（校外入口 https://${TS_AUTHORITY}/mobile）"
 echo
 
+# ★★ 手工启动的**第一个坑**（2026-09-28 真实事故 ✓，用户真机上踩了一次 ✗）：
+#   本脚本**只负责起进程** ✓ —— 它**不会**把仓库里的插件代码装进 profile ✗。
+#   于是"刚改完插件 → 手工重启 → 行为一个字没变" ✓，而**每条读数看起来都正常** ✓
+#   （进程换了新 PID ✓、端口都在听 ✓、日志全绿 ✓）⇒ 极难自查 ✓。
+#   那次事故的铁证：进程命令行**带着 `--trusted-host`**（看着像 restart-lan.sh 起的 ✓），
+#   但 profile 里 `cordis.patch.yml` 与插件的 mtime 都还是**上一次安装**的时间 ✓。
+#   ★ 这里**刻意不复算哈希**（那会是同一套"仓库 vs profile"判定的第二份实现 ✗）——
+#     只提醒一句"要带代码就换那条命令" ✓，判据仍然只有 restart-lan.sh 一处 ✓。
+if [ "${RESTART:-0}" != "1" ]; then
+  echo "[start-lan] ⚠ 手工启动**不会重装插件**：若你刚改过仓库里的插件代码（packages/*/src、native/ 等），"
+  echo "            请改用   bash scripts/restart-lan.sh   —— 它会先比对仓库与 profile、需要时重装再重启。"
+  echo
+fi
+
 # 端口占用前置检查：避免"监听起不来、DSH 却照常启动"的半死状态。
 #
 # ★ C1 之后 3081（明文）与 3443（TLS）都由 **DSH 自己的进程**监听，而插件里
