@@ -8104,6 +8104,21 @@
       '  color: var(--dsw-alias-label-tertiary, #7d858e);',
       '}',
       '#dshm-stats[data-on="1"] { display: flex; }',
+      /**
+       * ★★ DSH 0.17 把插槽包装层写成了**内联 `display: contents`** ✗ ⇒ 那个元素
+       *   **不生成盒子** ⇒ 写在它身上的 `width / max-width / box-sizing` **一律无效** ✗
+       *   （规则确实命中 ✓、`matches: true` ✓，但 `getBoundingClientRect()` 恒 `0×0` ✓）。
+       *   症状（用户原话）：输入框下方那条状态栏比输入框宽、左右不齐 ✓。
+       *   ⇒ 必须先把包装层变回**真实盒子**（`display: block !important` ✓），下面三条才有意义 ✓。
+       *   真机实测：状态栏与输入卡片都归到 `336 @32..368` ✓（左差 0 / 右差 0 ✓），
+       *   且输入卡片与隐藏宿主行的几何**一字未动** ✓。
+       */
+      'div[data-slot="conversation.composer.dock"] {',
+      '  display: block !important;',
+      '  box-sizing: border-box !important;',
+      '  max-width: 100% !important;',
+      '  width: 100% !important;',
+      '}',
       /* ★★ round 125：底部**手势小白条**会压住输入区最底下那一行 ——
          也就是这条自绘状态栏（「上下文用量」那一行）✗（用户真机反馈，约 40% 字高被盖 ✓）。
          真机实测：navigationBars.bottom = systemGestures.bottom =
@@ -8215,6 +8230,26 @@
 
       /* ── 窄屏布局改写：只在窄屏生效，桌面窗口不受影响 ─────────────── */
       '@media (max-width: 1023px) {',
+      /**
+       * ★★ 底部状态栏三段各自弹的那个 DSH 面板里，**只有「上下文」那个矮一截、低一截** ✗
+       *   （用户原话："那三个控件点开以后的页面只有上下文的沉下去了"✓）。
+       *   真机自然值是"内容少 16px、位置低 21px、宽度窄 36px、横向还偏右 56px"✗
+       *   —— 它的锚点是输入框里那颗**被我们隐身的环** ✓，DSH 给的是**一次性算好的内联坐标** ✓
+       *   （不是 CSS anchor positioning ✗ ⇒ 搬锚点没用 ✓，实测纹丝不动 ✓）。
+       *   ⇒ 只能从面板自己身上纠：补高、同宽、`top: auto` 关掉内联 top、`bottom` 抄
+       *     另外两个面板的**计算值** `53.8333px`（不是"锚点到视口底"✗ —— 那会把它抬到上半屏 ✗）。
+       *   ★ 选择器**只认这一个组件的类** ✗ —— 用 `[class*="_panel"]` 会把 panelList/panelRow/… 全钉死 ✗
+       *     （真机上用户立刻反馈"全都变得特别高"✗）。构建哈希会随 DSH 改版变 ⇒ 退化为原样 ✓
+       *     （宁可失效、不可误伤 ✓）。
+       *   真机实测：三个面板都 `h158 w300`、底边同为 `b816`、上下文 `l32` ✓。
+       */
+      '  .JObwrW_panel {',
+      '    min-height: 158px !important;',
+      '    width: min(300px, 100vw - 24px) !important;',
+      '    top: auto !important;',
+      '    bottom: 53.8333px !important;',
+      '    left: 32px !important;',
+      '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
              必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
              浏览器会把中栏自动放进第 1 条轨道（0px）→ 主体宽度变 0（真实回归）。 */

@@ -103,6 +103,49 @@ const HOST_FEATURES = [
 ] as const
 
 /** 插件配置。 */
+/**
+ * ★★ 按**网关自己的签名**调 `openWireStream` ✓ —— 这是 2026-09-28 Windows 实机那场
+ * "手机永远正在重连中"的**真正根因** ✓。
+ *
+ * ## 为什么必须按 arity 分派（不能只写死一种 ✗）
+ *
+ * `dsh-api-gateway` 的签名**跨版本变过** ✓：
+ * ```
+ * 0.1.5-rc.1 : async openWireStream(endpoint, payload, signal) { … }
+ * 0.1.7-rc.2 : async openWireStream(endpoint, payload, uplink, peer, signal, control) {
+ *                if (endpoint === REMOTE_EVENT_STREAM_ENDPOINT) {   // ← "$events"
+ *                  releaseUplink(uplink); return this.openRemoteEvents(payload, signal)
+ *                } …
+ *              }
+ * ```
+ * 插件原先**写死 3 个参数** ✓ ⇒ 在 0.1.7 上 `signal` 落进 `uplink` 位、
+ * 真 `signal` 是 `undefined` ⇒ `$events` 那一支 `AbortSignal.any([undefined, …])` **当场抛** ✗
+ * ⇒ **实时事件流永远建不起来** ✓。
+ *
+ * ★ 为什么这条极难查 ✗✗：**一元 RPC 全部正常** ✓（它们走 `remoteRequest`、`undefined`
+ * 会被静默省略 ✓）⇒ 页面能渲染、能配对、`connectedDevices` 也正常 ✓，
+ * **只有侧栏一直「重新连接中」** ✓。实机审计里 115 次 `$events` **全失败** ✓，
+ * 原因都是同一句 `signals[0] is not of type AbortSignal` ✓。
+ *
+ * ★ 判据用 `Function.length`（**声明了几个形参** ✓）而不是版本号字符串 ✓ ——
+ *   版本号要读 package.json（可能被打包改变 ✗），arity 就在函数自己身上 ✓。
+ *   `uplink` / `peer` 传 `undefined` 与网关**自己的进程内载体**完全一致 ✓
+ *   （它就这么转：`(e, p, u, pe, s) => this.openWireStream(e, p, u, pe, s, new AbortController())` ✓）。
+ */
+export function callOpenWireStream(
+  gateway: { readonly openWireStream?: (endpoint: string, payload: unknown, ...rest: unknown[]) => Promise<AsyncIterable<unknown>> },
+  endpoint: string,
+  payload: unknown,
+  signal: AbortSignal,
+): Promise<AsyncIterable<unknown>> {
+  const open = gateway.openWireStream
+  if (typeof open !== 'function') throw new TypeError('gateway.openWireStream 不存在')
+  // ≥5 个形参 ⇒ 新版六参签名（signal 在第 5 位、第 6 位要一个 AbortController ✓）
+  if (open.length >= 5) return open(endpoint, payload, undefined, undefined, signal, new AbortController())
+  // 否则按老三参（signal 在第 3 位 ✓）
+  return open(endpoint, payload, signal)
+}
+
 export interface MobileHostConfig {
   enabled: boolean
   /** 配对码有效期（毫秒）。 */
@@ -207,7 +250,13 @@ export interface RemoteGateway {
    * 症状具有很强误导性：一元调用全部正常、界面能渲染，只是**永远显示"重连中"、
    * 看不到任何会话历史**——因为承载事件的那条流从未建立。
    */
-  openWireStream?(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
+  /**
+   * ★★ 这个方法的**签名跨 DSH 版本不一样** ✗（2026-09-28 Windows 实机定因 ✓）：
+   *   · DSH **0.1.5-rc.1**（本机）：`(endpoint, payload, signal)` —— 3 个 ✓
+   *   · DSH **0.1.7-rc.2**（Windows 实机）：`(endpoint, payload, uplink, peer, signal, control)` —— 6 个 ✓
+   * 所以这里写成"前两个固定、其余任意" ✓（两种都类型通过 ✓，具体怎么调见 `callOpenWireStream` ✓）。
+   */
+  openWireStream?(endpoint: string, payload: unknown, ...rest: unknown[]): Promise<AsyncIterable<unknown>>
 }
 
 /** 设备管理更新入参。 */
@@ -1894,7 +1943,7 @@ export function createMobileHost(options: {
     signal: AbortSignal,
   ): Promise<AsyncIterable<unknown>> {
     if (typeof options.gateway.openWireStream === 'function') {
-      return options.gateway.openWireStream(endpoint, payload, signal)
+      return callOpenWireStream(options.gateway, endpoint, payload, signal)
     }
     return options.gateway.stream(toGatewayArgs(endpoint, payload, signal))
   }
