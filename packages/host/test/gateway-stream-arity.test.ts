@@ -26,7 +26,14 @@ function fakeGateway(arity: number): {
   calls: unknown[][]
 } {
   const calls: unknown[][] = []
-  const open = (...args: unknown[]): Promise<AsyncIterable<unknown>> => {
+  /**
+   * ★★ 假网关**必须用 `this`** ✗✗（第一版没用 ⇒ 漏掉了"取出来裸调会丢 this"这个真 bug ✓）：
+   *   真网关里是 `this.openRemoteEvents(payload, signal)` ✓ ⇒ 裸调会抛
+   *   `Cannot read properties of undefined (reading 'openRemoteEvents')` ✓。
+   *   所以这里也走 `this` ✓ —— 实现一旦丢绑定，这条测试就会红 ✓（本地 0.1.7 实例上真实发生过 ✓）。
+   */
+  const open = function (this: { marker?: string }, ...args: unknown[]): Promise<AsyncIterable<unknown>> {
+    if (this === undefined || this === null) throw new TypeError("Cannot read properties of undefined (reading 'openRemoteEvents')")
     calls.push(args)
     const empty = async function* (): AsyncIterable<unknown> {
       /* 空流就够 ✓ —— 这条测试只关心"怎么调的" ✓ */
@@ -35,7 +42,7 @@ function fakeGateway(arity: number): {
   }
   // 形参个数是**可配置**的（真实函数读的是声明形参 ✓）—— 用 defineProperty 精确设定 ✓
   Object.defineProperty(open, 'length', { value: arity, configurable: true })
-  return { gateway: { openWireStream: open }, calls }
+  return { gateway: { openWireStream: open as never }, calls }
 }
 
 describe('callOpenWireStream（跨 DSH 版本的签名分派）', () => {

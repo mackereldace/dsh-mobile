@@ -140,10 +140,18 @@ export function callOpenWireStream(
 ): Promise<AsyncIterable<unknown>> {
   const open = gateway.openWireStream
   if (typeof open !== 'function') throw new TypeError('gateway.openWireStream 不存在')
+  /**
+   * ★★ **必须带着 `this` 调** ✗✗（2026-09-28 本地 0.1.7 实例上真复现过 ✓）：
+   *   网关那份实现里是 `this.openRemoteEvents(payload, signal)` ✓ ⇒ 一旦把方法**取出来存变量**
+   *   再裸调 ✓，`this` 就没了 ⇒ 报 `Cannot read properties of undefined (reading 'openRemoteEvents')` ✗
+   *   （我先写成 `const open = …; open(...)` ✗ ⇒ 就是这个错 ✓）。
+   *   ★ 原来的代码是对的（`options.gateway.openWireStream(...)` **方法调用** ✓）——
+   *   是我为了抽函数把它改坏的 ✓。所以这里统一用 `.call(gateway, …)` ✓。
+   */
   // ≥5 个形参 ⇒ 新版六参签名（signal 在第 5 位、第 6 位要一个 AbortController ✓）
-  if (open.length >= 5) return open(endpoint, payload, undefined, undefined, signal, new AbortController())
+  if (open.length >= 5) return open.call(gateway, endpoint, payload, undefined, undefined, signal, new AbortController())
   // 否则按老三参（signal 在第 3 位 ✓）
-  return open(endpoint, payload, signal)
+  return open.call(gateway, endpoint, payload, signal)
 }
 
 export interface MobileHostConfig {
