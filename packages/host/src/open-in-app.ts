@@ -26,7 +26,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
-import { isAbsolute, join, sep } from 'node:path'
+import { isAbsolute, delimiter, join, sep } from 'node:path'
 
 /** 一个可用的"打开方式"目标。 */
 export interface OpenInAppTarget {
@@ -122,19 +122,86 @@ const CANDIDATES: readonly Candidate[] = [
   { id: 'opencode', label: 'OpenCode', macApp: 'OpenCode' },
 ]
 
-/** 在 PATH 上找可执行文件（不执行 `which`，只查常见目录，避免启动子进程）。 */
-function findOnPath(command: string): string | undefined {
-  const dirs = (process.env['PATH'] ?? '').split(':').filter((part) => part.length > 0)
-  const extra = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin']
-  for (const dir of [...dirs, ...extra]) {
-    const full = join(dir, command)
-    try {
-      if (existsSync(full)) return full
-    } catch {
-      /* 权限问题忽略 */
+/**
+ * ★★ 纯函数版"在 PATH 上找可执行文件"（**可注入 ⇒ 能在电脑上真跑一遍** ✓）。
+ *
+ * ## 为什么必须把它拆出来 ✗✗（Windows 兼容，2026-09-28）
+ *
+ * 修之前这里是**两处 unix 假设** ✓，在两台 Windows 上是**整条功能消失** ✗：
+ *   ① `PATH` 的分隔符写死成 `':'` ✗ —— Windows 用的是 **`';'`** ✓
+ *      （Node 的 `path.delimiter` 正好就是它 ✓）。照 `':'` 切，整条 PATH 会变成一个
+ *      **巨长的假目录名** ✓ ⇒ `existsSync` 永远 false ⇒ **一个命令都找不到** ✗；
+ *   ② Windows 的可执行文件**带扩展名** ✓（`code.cmd` / `code.exe` ✓，
+ *      清单在环境变量 `PATHEXT` 里 ✓）。只试 `join(dir,'code')` ⇒ 永远不存在 ✗。
+ * ⇒ 症状是**静默**的：手机上那个「用 VS Code 打开」的选项**根本不出现** ✓
+ *   （不报错、列表里就是没有它 ✓）—— 而上次 Windows 实机测试**没覆盖到这块** ✗
+ *   （§4.1af 验的是监听 / TLS / manifest / 票据 ✓）。
+ *
+ * ★ 为什么拆成"可注入 delimiter / exts"✗：真平台上换不了 OS ✓ ——
+ *   不注入就只能"读代码觉得对" ✓，那正是本项目反复栽的那个坑 ✓（§五 28 ✓）。
+ *
+ * @param command 命令名（不带扩展名也要能找 ✓，已带扩展名也照样能找 ✓）
+ * @param options `pathValue` = PATH 原文 ✓；`delimiter` = 该平台的分隔符 ✓；
+ *                `exts` = 要依次试的后缀 ✓（**空串放第一个** ⇒ 先试原样 ✓）；
+ *                `extraDirs` = PATH 之外再补几个目录 ✓（macOS 上 Homebrew 那套 ✓）。
+ */
+export function resolveOnPath(
+  command: string,
+  options: {
+    readonly pathValue: string
+    readonly delimiter: string
+    readonly exts: readonly string[]
+    readonly extraDirs?: readonly string[]
+  },
+): string | undefined {
+  if (command.length === 0) return undefined
+  const dirs = options.pathValue.split(options.delimiter).filter((part) => part.length > 0)
+  for (const dir of [...dirs, ...(options.extraDirs ?? [])]) {
+    for (const ext of options.exts) {
+      const full = join(dir, command + ext)
+      try {
+        if (existsSync(full)) return full
+      } catch {
+        /* 权限问题忽略 */
+      }
     }
   }
   return undefined
+}
+
+/** Windows 的 `PATHEXT`（拿不到就给一份默认 ✓ —— 别因为环境变量缺失就整条功能消失 ✗）。 */
+function windowsExecutableExtsFor(env: Record<string, string | undefined>): readonly string[] {
+  const raw = env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD'
+  // ★ 空串放第一个 ✓：命令自己已经带 `.cmd` 时先按原样试 ✓（否则会去找 `code.cmd.EXE` ✗）
+  return ['', ...raw.split(';').filter((ext) => ext.length > 0)]
+}
+
+/**
+ * ★★ "按平台选对参数"这一步**也**必须可注入 ✗✗ —— 否则测试只能证明纯函数对 ✓，
+ *   证明不了**接线**对 ✓：有人把 `os === 'win32'` 那两处改坏（回到 `:` 分隔 / 不试扩展名 ✗），
+ *   `resolveOnPath` 的用例**照样全绿** ✗，而 Windows 上功能整条消失 ✗。
+ *
+ * @param os `os.platform()` 的值（`'win32'` / `'darwin'` / `'linux'` ✓）
+ * @param env 环境变量（只读 `PATH` 与 `PATHEXT` ✓）
+ */
+export function findOnPathFor(
+  command: string,
+  os: string,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return resolveOnPath(command, {
+    pathValue: env['PATH'] ?? '',
+    // ★ `path.delimiter` 只是"当前平台"的值 ✓ —— 这里要的是**被问的那个平台** ✓
+    delimiter: os === 'win32' ? ';' : ':',
+    exts: os === 'win32' ? windowsExecutableExtsFor(env) : [''],
+    // ★ 这几个目录**只有 unix 才有** ✓ —— 在 Windows 上补它们等于白跑一轮 existsSync ✗
+    extraDirs: os === 'win32' ? [] : ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin'],
+  })
+}
+
+/** 在 PATH 上找可执行文件（不执行 `which`/`where`，只查目录，避免启动子进程）。 */
+function findOnPath(command: string): string | undefined {
+  return findOnPathFor(command, platform(), process.env)
 }
 
 /**
