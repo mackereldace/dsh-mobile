@@ -576,14 +576,33 @@
     var fingerprint = fingerprintFromConfig(config)
     if (fingerprint === undefined) fingerprint = currentHostFingerprint()
     if (fingerprint === undefined) return false
+    /**
+     * ★ 顺手把 manifest 取一次 ✓（`phoneBaseUrl` 与**机器名**都在里面 ✓）——
+     *   行名要用它 ✓，而这台宿主此刻就在眼前 ✓（manifest 是同源的 ✓，换到另一台时取到的是那一台的名字 ✓
+     *   ⇒ **各自的名字进各自的记录** ✓，绝不串台 ✗）。失败不抛 ✓（`loadManifestBaseUrl` 永不 reject ✓）。
+     */
+    loadManifestBaseUrl()
     hostRecordUpsert({
       fingerprint: fingerprint,
       slots: hostSlotsForConfig(config),
+      label: manifestNameForRecord(),
       lastState: 'connected',
       lastSeenAt: Date.now(),
     })
     setActiveHost(fingerprint)
     return true
+  }
+
+  /**
+   * 要写进**这台宿主**记录里的显示名 ✓（拿不到 ⇒ `undefined` ✓ —— `hostRecordUpsert` 只在前者非空时覆盖 ✓，
+   * 于是**旧名字不会被空值冲掉** ✓）。
+   *
+   * ★ 只有"与页面同源的那台"才配用它 ✗✗：`manifestMachineName` 是**当前这个源**报的名字 ✓，
+   *   而这条记录必须是**当前这台宿主** ✓ —— 调用点都在"刚连上/刚配对这台"的路上 ✓，
+   *   指纹也是当场解析出来的 ✓（`fingerprintFromConfig` / `currentHostFingerprint` ✓）。
+   */
+  function manifestNameForRecord() {
+    return manifestMachineName !== null && manifestMachineName.length > 0 ? manifestMachineName : undefined
   }
 
   // ─────────────── 设置页「连接与设备」里的**宿主列表**（P1a 第 ③ 条 ✓）───────────────
@@ -596,6 +615,66 @@
       if (typeof url === 'string' && url.length > 0) return url
     }
     return '（没有记录地址）'
+  }
+
+  /**
+   * 这个槽地址在**壳里真能用**的那条 URL ✓（面板的提示与 P1b 的切换按钮都用它 ✓）。
+   *
+   * ★ 为什么必须补 `/mobile/app` ✗✗（**用户 2026-09-28 真机踩到** ✓）：
+   *   壳的「改地址」框是**你输什么就加载什么** ✓（`MainActivity.promptForAddress` 只补 scheme ✓、
+   *   **不补路径** ✗），而槽里存的是**裸源**（`https://主机:端口` ✓）。照原样填 ⇒ 落到 DSH 的
+   *   **电脑版**根路径 ⇒ **401** ✗（实测正文：`dsh web authentication required; reopen the URL printed by dsh web.` ✓）。
+   *   面板原来那句提示写的就是"填上面这个地址" ✗ ⇒ 用户照做**必然**走进 401 ✓ —— **是我们的文案错** ✓。
+   * ★ 已经有路径的（如壳的默认链接 `…/mobile/app` ✓）**原样保留** ✓ —— 用户明确要别的页时不许拦 ✗。
+   */
+  function hostAppUrl(address) {
+    if (typeof address !== 'string' || address.length === 0) return address
+    var path = null
+    try {
+      path = new URL(address, location.href).pathname
+    } catch (error) {
+      void error
+      return address
+    }
+    if (path !== null && path !== '' && path !== '/') return address
+    var trimmed = address.charAt(address.length - 1) === '/' ? address.slice(0, -1) : address
+    return trimmed + '/mobile/app'
+  }
+
+  /**
+   * 壳里有没有**"点一台就切过去"**那条桥 ✓（P1b ✓）。
+   * ★★ 老 APK 没有它 ✗ ⇒ 那时**绝不画按钮** ✗（画出来就是"点了没反应"✓，本项目零容忍 ✓），
+   *   退回"用「改地址」填…"的**可操作提示** ✓ —— 用户今天照着做就能办成 ✓。
+   */
+  function shellSwitchHostBridge() {
+    var bridge = shellBridge()
+    if (bridge === undefined) return undefined
+    try {
+      return typeof bridge.switchHost === 'function' ? bridge : undefined
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * 面板一行叫什么 ✓ —— **只认记录里那个名字** ✓（`hostRecordLabel` ✓）。
+   *
+   * ★ 机器名从哪来 ✗✗（**别在这里再算一遍** ✗）：宿主在 `manifest.machineName` 里自报 ✓，
+   *   产品在**取到的那一刻**就把它写进**宿主自己那条记录** ✓
+   *   （见 `loadManifestBaseUrl` 与 `noteHostConnected` ✓）——记录是**唯一事实来源** ✓：
+   *   面板读它 ✓，从**别的**宿主那边看这一行也读得到 ✓（跨源读不到对方的 manifest ✓，
+   *   只能靠对方那次连接自己写下来 ✓）。
+   *   ★ 这里曾经还写过一层"当前那台就用 manifest 里的机器名"✗ —— **变异检查把它打不红** ✓
+   *   （记录里已经有了 ✓，那层永远不生效 ✓）⇒ 按"同一个概念不许两套来源"删掉 ✓。
+   *
+   * 为什么非要用机器名 ✗✗：壳里那两条默认链接的名字**永远是「学校」** ✓
+   * （`defaultLinkLabel` 只分 Tailscale / 其它 ✓）⇒ **两台电脑都叫「学校」** ✗，等于没名字 ✓
+   * （用户 2026-09-28 真机验收时看到的正是这个 ✓）。
+   * ★ 拿不到机器名（老宿主没这个字段 ✓）⇒ 退回既有兜底 ✓ —— **绝不编一个名字** ✗。
+   */
+  function hostsPanelRowLabel(record) {
+    return hostRecordLabel(record)
   }
 
   /**
@@ -613,10 +692,16 @@
     for (var i = 0; i < records.length; i++) {
       var record = records[i]
       var active = current !== undefined && record.fingerprint === current
+      var address = hostPrimaryAddress(record)
       rows.push({
         fingerprint: record.fingerprint,
-        label: hostRecordLabel(record),
-        address: hostPrimaryAddress(record),
+        label: hostsPanelRowLabel(record),
+        address: address,
+        /**
+         * ★ 这一行**在壳里真能用**的那条 URL ✓（补了 `/mobile/app` ✓，见 `hostAppUrl` ✓）——
+         * P1b 的按钮与降级提示都读它 ✓，两边不许各拼一次 ✗。
+         */
+        appUrl: hostAppUrl(address),
         fingerprintShort: formatFingerprint(record.fingerprint).slice(0, 9) + '…',
         active: active,
         state: typeof record.lastState === 'string' && record.lastState.length > 0 ? record.lastState : '（未知）',
@@ -630,10 +715,11 @@
    *
    * ## 规矩（用户明确要求，违反即是 bug ✗）
    *   · **当前那台**：显示名 + 地址 + 指纹短串 ✓，并明写「当前」✓；
-   *   · **其它那几台**：★ **不画"切换"按钮** ✗ —— P1b 才有那条桥 ✓
-   *     （`MainActivity.changeAddress()` 不接受参数 ✗，真要在壳内换源必须加新桥 + 重装 APK ✗）。
-   *     改成一句**可操作的提示** ✓："切过去：用「改地址」填这个地址"✓ ——
-   *     用户照着做**今天就能办成** ✓，而不是点了没反应 ✗（本项目对"画一颗死按钮"零容忍 ✓）。
+   *   · **其它那几台**：★★ **壳里有那条桥就画真按钮** ✓（P1b：`switchHost` ✓，点一下就切过去 ✓）；
+   *     ★★ **没有那条桥（老 APK）就绝不画按钮** ✗✗ —— 画出来就是"点了没反应"✗
+   *     （本项目对死按钮**零容忍** ✓），退回一句**可操作的提示** ✓；
+   *     而且提示里这回给的是**真能用**的地址 ✓（补了 `/mobile/app` ✓）——
+   *     原来说"填上面这个地址"是**裸源** ✗ ⇒ 用户照做必然落到 401 ✗（**2026-09-28 真机踩到，是我们的文案错** ✓）。
    *   · 一条都没登记 ⇒ 一句人话 ✓（不画空表格 ✗）。
    *
    * ★ 渲染只读**行模型** ✓（`hostsPanelRows()` ✓）—— 面板与验收不会各算一份 ✓。
@@ -658,14 +744,69 @@
         ),
       )
       if (!row.active) {
-        var hint = document.createElement('div')
-        hint.className = 'dshm-set-hint'
-        hint.dataset.dshmHostHint = row.fingerprint
-        hint.textContent = '切过去：用「改地址」填上面这个地址（P1b 才会有"点一下直接切"）。'
-        group.appendChild(hint)
+        if (shellSwitchHostBridge() !== undefined) {
+          group.appendChild(makeHostSwitchButton(row))
+        } else {
+          var hint = document.createElement('div')
+          hint.className = 'dshm-set-hint'
+          hint.dataset.dshmHostHint = row.fingerprint
+          hint.textContent =
+            '切过去：用「改地址」填 ' +
+            row.appUrl +
+            '（这个外壳版本还没有"点一下直接切"；装上新 APK 后这里会出现按钮）'
+          group.appendChild(hint)
+        }
       }
     }
     return group
+  }
+
+  /**
+   * 一颗「切到这台」按钮 ✓（P1b ✓ —— 调壳的 `switchHost` ✓）。
+   *
+   * ★ 为什么单独成一个函数 ✗✗（不是洁癖 ✓）：直接在 `for` 循环里写 `function(){…}` 闭包，
+   *   会**捕获同一个 `row` 变量** ✓（`var` 是函数作用域 ✓）⇒ 每颗按钮都切向**最后那一台** ✗✗。
+   *   函数作用域一隔，每颗按钮各自拿到自己那一行 ✓。
+   *
+   * ★ 失败**不许静默** ✗：按钮下面按需长出一句可读提示 ✓（与「改地址」那颗同一个写法 ✓，
+   *   用既有类 `dshm-set-hint` ✓，不新造样式 ✗）。切成功的路径**不写提示** ✓ ——
+   *   壳会立刻 `loadUrl` 换页 ✓，写什么都会被冲掉 ✓。
+   */
+  function makeHostSwitchButton(row) {
+    var hint = null
+    var button = toolButton('切到 ' + row.label, function () {
+      var bridge = shellSwitchHostBridge()
+      if (bridge === undefined) {
+        showHostSwitchHint('这个外壳版本已经没有「点一下直接切」了（多半是刚换了外壳）')
+        return
+      }
+      var failure = null
+      try {
+        var result = bridge.switchHost(row.appUrl)
+        // 契约与 scanPair 同一形状 ✓（见 MainActivity.switchHost ✓）：ok / busy / untrusted / error
+        if (result === 'busy') failure = '已经有一个切换在进行，稍等'
+        else if (result === 'untrusted') failure = '这个外壳不认这台电脑的页面'
+        else if (typeof result === 'string' && result !== 'ok') failure = '切换失败：' + result
+      } catch (problem) {
+        failure = describeError(problem)
+      }
+      if (failure !== null) showHostSwitchHint(failure)
+    })
+    // ★ 给验收脚本一个**稳定的定位钩子** ✓（文案会改 ✓，这个属性不会 ✓）
+    button.dataset.dshmHostSwitch = row.fingerprint
+    button.title = '在壳里切到 ' + row.appUrl
+    function showHostSwitchHint(text) {
+      if (hint === null) {
+        hint = document.createElement('div')
+        hint.className = 'dshm-set-hint'
+        hint.dataset.dshmHostSwitchHint = row.fingerprint
+        if (button.parentNode !== null) {
+          button.parentNode.insertBefore(hint, button.nextSibling)
+        }
+      }
+      hint.textContent = text
+    }
+    return button
   }
 
   // ─────────────────── 旧键：归属校验回退 + 一次性迁移 ✗ ───────────────────
@@ -4282,6 +4423,23 @@
   var manifestBaseUrl = null
   /** 是否**成功**取到过 ✓（成功过就不再取 ✓；失败**不置位** ⇒ 下一次上报会重试 ✓ —— 自愈 ✓）。 */
   var manifestBaseUrlSettled = false
+  /**
+   * ★ 宿主自己报的**机器名** ✓（`manifest.machineName` ✓，形如 `Mac-mini-2024.local` ✓）——
+   * 面板的行名用它 ✓。
+   *
+   * 为什么必须向宿主问名字 ✗✗：壳里那两条默认链接的名字永远是「**学校**」✓
+   * （`defaultLinkLabel` 只分 Tailscale / 其它 ✓）⇒ **两台电脑都会叫「学校」** ✗，
+   * 等于没有名字 ✓（用户 2026-09-28 真机验收时就是这么看到的 ✓）。
+   * ★ 拿不到（老宿主没这个字段 ✓）⇒ 保持 `null` ✓，行名退回既有兜底 ✓ —— **绝不编** ✗。
+   */
+  var manifestMachineName = null
+  /**
+   * 机器名这一路**问过没有** ✓ —— 与 `phoneBaseUrl` 分开记 ✓。
+   * 为什么不能共用 `manifestBaseUrlSettled` ✗：老宿主没有 `machineName` 字段 ✓，
+   * 那份 manifest 仍然是"问过了" ✓ —— 不结案的话每次上报都白 fetch 一次 ✗。
+   * ★ 失败（网络 / 不是 JSON ✓）**一律不置位** ⇒ 下一次上报重试 ✓（自愈 ✓）。
+   */
+  var manifestMachineSettled = false
   /** 正在飞的那一次 fetch ✓（同一时刻只发一次 ✓ —— 两个上报点都调它也不会打两枪 ✓）。 */
   var manifestFetchInFlight = null
 
@@ -4295,7 +4453,8 @@
    * @returns Promise&lt;string|null&gt; —— 拿到的地址 ✓，或 null ✓。
    */
   function loadManifestBaseUrl() {
-    if (manifestBaseUrlSettled) return Promise.resolve(manifestBaseUrl)
+    // ★ 两路都问过才算结案 ✓（老宿主那一路也要结案 ✗ —— 否则每次上报都白 fetch ✓）
+    if (manifestBaseUrlSettled && manifestMachineSettled) return Promise.resolve(manifestBaseUrl)
     if (manifestFetchInFlight !== null) return manifestFetchInFlight
     var promise = Promise.resolve()
       .then(function () {
@@ -4311,6 +4470,31 @@
         if (typeof value === 'string' && value.length > 0) {
           manifestBaseUrl = value
           manifestBaseUrlSettled = true
+        }
+        /**
+         * ★ 机器名（可选字段 ✓）：拿到就用 ✓，拿不到就是"这家宿主没报" ✓ ——
+         * **两种都算问过了** ✓（`manifestMachineSettled = true` 放在这一支里、
+         * 只要响应是个对象就置位 ✓）⇒ 老宿主只多花一次 fetch ✓，不会每次都问 ✗。
+         */
+        if (body !== null && typeof body === 'object') {
+          manifestMachineSettled = true
+          var machine = body.machineName
+          if (typeof machine === 'string' && machine.length > 0) {
+            manifestMachineName = machine
+            /**
+             * ★ 拿到就**当场补写**这条记录 ✓ —— 不能只等"下一次连接" ✗✗：
+             *   面板上"另一台"那一行读的是**它自己记录里**的名字 ✓（跨源读不到对方的 manifest ✓），
+             *   所以每台必须在**自己那次连接**里把自己的名字落进记录 ✓，否则永远是「学校」✗。
+             * ★ 写的只能是**当前这台** ✓（`currentHostFingerprint()` ✓，与 ticket/baseUrl 同一套口径 ✓）。
+             * 失败一律吞 ✓（名字只是显示 ✓，绝不许影响连接 ✗）。
+             */
+            try {
+              var current = currentHostFingerprint()
+              if (current !== undefined) hostRecordUpsert({ fingerprint: current, label: machine })
+            } catch (error) {
+              void error
+            }
+          }
         }
         return manifestBaseUrl
       })
@@ -4579,11 +4763,14 @@
     // ★ 身份写入口 ✓（配对配置必须跨源存活 ✗ —— 否则壳一换地址，新源就是"没配对" ✗）
     writeIdentityKey(STORAGE_KEY, JSON.stringify(config), fingerprint)
     if (fingerprint === undefined) return
+    // ★ 配对当次也把 manifest 取一次 ✓（机器名要进这条记录 ✓，同源 ✓ ⇒ 是这一台的名字 ✓）
+    loadManifestBaseUrl()
     // P1a：把这台宿主记进目录并标成当前 ✓（面板要列的就是它 ✓；失败绝不影响配对 ✗）
     try {
       hostRecordUpsert({
         fingerprint: fingerprint,
         slots: hostSlotsForConfig(config),
+        label: manifestNameForRecord(),
         lastState: config !== null && config !== undefined && config.pairingTicket !== undefined ? 'pairing' : undefined,
         lastSeenAt: Date.now(),
       })

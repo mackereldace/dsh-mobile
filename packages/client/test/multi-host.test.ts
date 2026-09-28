@@ -56,6 +56,8 @@ interface Sandbox {
   vault: Map<string, string>
   /** 因配额/异常写不进去的键（本测试里不用）。 */
   warnings: string[]
+  /** ★ 壳那条「点一下直接切」的桥**被谁调过、传的是什么 URL** ✓（P1b 的判据 ✓）。 */
+  switchCalls: string[]
 }
 
 interface BootOptions {
@@ -71,6 +73,17 @@ interface BootOptions {
    *   凡是要验 label 的用例，**必须**在这里喂两条带名字的槽 ✓。
    */
   shellSlots?: Array<{ label: string; url: string }>
+  /**
+   * 假壳 `GET /mobile/manifest` 的答复 ✓（`phoneBaseUrl` / `machineName` ✓）。
+   * 默认 `{}` ✓（= 老宿主：两个字段都没有 ✓ —— 产品必须**照旧能用**且**绝不编名字** ✗）。
+   */
+  manifest?: Record<string, unknown>
+  /**
+   * 假壳有没有 P1b 那条 `switchHost` 桥 ✓。
+   * ★ 默认 **false** ✓（= 老 APK ✓）：这时面板**一颗按钮都不许画** ✗✗ ——
+   *   这条断言就是"死按钮零容忍"那条规矩的可执行版本 ✓。
+   */
+  switchHost?: boolean
 }
 
 /** 假壳的 `vaultSet` 语义与 Java 侧**同一份约定** ✓：值为 `null` ⇒ 删除 ✓，其余原样 `put` ✓。 */
@@ -88,6 +101,8 @@ function bootInSandbox(options: BootOptions): Sandbox {
   const store = new Map<string, string>(Object.entries(options.store ?? {}))
   const vault = new Map<string, string>(Object.entries(options.vault ?? {}))
   const warnings: string[] = []
+  /** ★ 壳那条切换桥收到的每一次调用 ✓（判据：**URL 对不对** ✓，不是"函数被调过"✗）。 */
+  const switchCalls: string[] = []
 
   const makeElement = (tag: string): Record<string, unknown> => {
     const element: Record<string, unknown> = {
@@ -103,7 +118,17 @@ function bootInSandbox(options: BootOptions): Sandbox {
       parentNode: null,
       setAttribute: () => {},
       removeAttribute: () => {},
-      addEventListener: () => {},
+      /**
+       * ★ 事件**要真的能触发** ✗✗（原来是空实现 ✓）：P1b 那颗「切到这台」按钮的行为
+       *   只有"点一下看壳收到什么"才验得到 ✓ —— 断言"按钮存在"等于只验了个摆设 ✗。
+       *   这里记下回调 ✓，测试用 {@link fireClick} 打它 ✓（判据仍是**生产代码自己挂的那个回调** ✓）。
+       */
+      addEventListener: (type: string, handler: () => void) => {
+        const listeners = element['__listeners'] as Record<string, Array<() => void>>
+        if (!Array.isArray(listeners[type])) listeners[type] = []
+        listeners[type].push(handler)
+      },
+      __listeners: {} as Record<string, Array<() => void>>,
       removeEventListener: () => {},
       remove: () => {},
       replaceChildren: () => {},
@@ -187,7 +212,15 @@ function bootInSandbox(options: BootOptions): Sandbox {
       addEventListener() {}
       removeEventListener() {}
     },
-    fetch: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    /**
+     * ★ manifest 桩：只答 `/mobile/manifest` ✓（其它请求照旧给 `{}` ✓）——
+     *   产品必须"拿不到就算没拿到" ✓，所以默认那份里两个字段都没有 ✓。
+     */
+    fetch: async (input: unknown) => {
+      const url = String(input)
+      const body = url.indexOf('/mobile/manifest') >= 0 ? (options.manifest ?? {}) : {}
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
     MutationObserver: class {
       observe() {}
       disconnect() {}
@@ -208,6 +241,15 @@ function bootInSandbox(options: BootOptions): Sandbox {
       insets: () => JSON.stringify({ seen: false }),
       platform: () => JSON.stringify({ android: 34 }),
       changeAddress: () => {},
+      // ★ P1b 的桥 ✓ —— **默认不提供** ✗（= 老 APK ✓，那时面板一颗按钮都不许有 ✓）
+      ...(options.switchHost === true
+        ? {
+            switchHost: (url: string) => {
+              switchCalls.push(String(url))
+              return 'ok'
+            },
+          }
+        : {}),
       scanPair: () => 'ok',
       notify: () => {},
       backAvailable: () => {},
@@ -227,7 +269,7 @@ function bootInSandbox(options: BootOptions): Sandbox {
   const api = root?.apk
   assert.ok(root !== undefined, 'boot.js 应装上 __DSH_MOBILE_BOOT__ ✓')
   assert.ok(api !== undefined && api !== null, 'boot.js 应装上 __DSH_MOBILE_BOOT__.apk ✓')
-  return { api, root: root as { forget: () => void }, store, vault, warnings }
+  return { api, root: root as { forget: () => void }, store, vault, warnings, switchCalls }
 }
 
 /** 一份"属于某个指纹"的配对配置（旧键 / 带指纹键共用同一个形状 ✓）。 */
@@ -508,7 +550,38 @@ function elementText(element: Record<string, unknown>): string {
   return parts.join('\n')
 }
 
-test('★ 面板：列出所有宿主、标出当前那台；非当前那台给可操作提示、且**没有**死按钮', () => {
+/**
+ * 把 manifest 那条异步链推完 ✓（产品里 `loadManifestBaseUrl()` 是异步的 ✓，
+ * 机器名要等它落地才读得到 ✓）。用真定时器 ✓ —— 沙箱里那个是被换掉的 ✓。
+ */
+async function settleManifest(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve))
+}
+
+/**
+ * 真的**点**一下这个元素 ✓（把它自己登记的回调按顺序跑一遍 ✓）。
+ *
+ * 为什么要这个 ✗：P1b 那颗「切到这台」按钮的全部价值就在"点下去壳收到什么" ✓ ——
+ * 只断言"按钮在"是假判据 ✗（本项目对"断言打在手段上"零容忍 ✓）。
+ */
+function fireClick(element: Record<string, unknown>): void {
+  const listeners = (element['__listeners'] ?? {}) as Record<string, Array<() => void>>
+  for (const handler of listeners['click'] ?? []) handler()
+}
+
+/** 递归找出满足条件的元素 ✓（面板断言要打在**生产渲染出来的那棵树**上 ✓）。 */
+function findAll(
+  element: Record<string, unknown>,
+  match: (candidate: Record<string, unknown>) => boolean,
+  found: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  if (match(element)) found.push(element)
+  const children = Array.isArray(element['children']) ? (element['children'] as Array<Record<string, unknown>>) : []
+  for (const child of children) findAll(child, match, found)
+  return found
+}
+
+test('★ 面板：列出所有宿主、标出当前那台；**老包（没有切换桥）** ⇒ 一颗按钮都不许有 ✗', () => {
   const sandbox = bootInSandbox({
     host: HOST_A,
     vault: {
@@ -529,17 +602,78 @@ test('★ 面板：列出所有宿主、标出当前那台；非当前那台给�
   assert.ok(text.includes('电脑甲'), '面板上要有当前那台的显示名 ✓：' + text)
   assert.ok(text.includes('电脑乙'), '面板上要有另一台的显示名 ✓：' + text)
   assert.ok(text.includes('当前'), '当前那台要明确标出「当前」✓：' + text)
-  assert.ok(text.includes(ORIGIN_B + '/mobile/app'), '另一台要显示它的地址（槽 ✓）：' + text)
-  assert.ok(text.includes('改地址'), '另一台要给"用改地址填这个地址"的可操作提示 ✓：' + text)
-  // ★ 不许画"点了没反应"的按钮 ✗（P1b 才有切换桥 ✓）
-  const buttons: string[] = []
-  const walk = (element: Record<string, unknown>): void => {
-    if (String(element['tagName']).toLowerCase() === 'button') buttons.push(elementText(element))
-    const children = Array.isArray(element['children']) ? (element['children'] as Array<Record<string, unknown>>) : []
-    for (const child of children) walk(child)
+  assert.ok(text.includes(ORIGIN_B + '/mobile/app'), '另一台要出现它的地址（槽 ✓）：' + text)
+  // ★★ P1b：老包**没有** switchHost 桥 ⇒ 一颗按钮都不许画 ✗（画出来就是死按钮 ✓）
+  const buttons = findAll(panel.group, (element) => String(element['tagName']).toLowerCase() === 'button')
+  assert.equal(buttons.length, 0, '老包这一组里一颗按钮都不许有（死按钮零容忍 ✗）：' + buttons.map(elementText).join('｜'))
+  assert.ok(text.includes('改地址'), '老包要给"用改地址填"的可操作提示 ✓：' + text)
+  // ★ 真机踩到的那条：提示里必须是**真能用**的地址（补了 /mobile/app ✓）——
+  //   原来给的是裸源 ✗ ⇒ 用户照做落到 DSH 电脑版根路径 ⇒ 401 ✗
+  assert.ok(
+    text.includes(ORIGIN_B + '/mobile/app'),
+    '提示里给的地址必须是壳里真能用的那条（补 /mobile/app ✓）：' + text,
+  )
+  assert.equal(panel.rows[1]?.['appUrl'], ORIGIN_B + '/mobile/app', '行模型里那条可用地址也要对 ✓')
+})
+
+test('★★ P1b：新包有切换桥 ⇒ 非当前那台画**真按钮**，点下去把**真能用的 URL** 交给壳 ✓', () => {
+  const sandbox = bootInSandbox({
+    host: HOST_A,
+    switchHost: true,
+    vault: {
+      ['dsh-mobile.host:' + FP_A]: hostConfig(ORIGIN_A, FP_A),
+      ['dsh-mobile.host:' + FP_B]: hostConfig(ORIGIN_B, FP_B),
+      'dsh-mobile.hosts': JSON.stringify([
+        hostRecordJson(FP_A, '电脑甲', ORIGIN_A + '/mobile/app'),
+        // ★ 槽是**裸源**（真实形态 ✓）—— 点下去必须补成 /mobile/app，否则就是 401 ✗
+        hostRecordJson(FP_B, '电脑乙', ORIGIN_B),
+      ]),
+    },
+  })
+  const panel = sandbox.api.hostsPanel()
+  const buttons = findAll(panel.group, (element) => String(element['tagName']).toLowerCase() === 'button')
+  assert.equal(buttons.length, 1, '只有"非当前那台"才配一颗切换按钮（当前那台不画 ✓）：' + buttons.map(elementText).join('｜'))
+  const switchDataset = (buttons[0]?.['dataset'] ?? {}) as Record<string, unknown>
+  assert.equal(switchDataset['dshmHostSwitch'], FP_B, '按钮要挂在**另一台**的指纹上 ✓')
+  // ★★ 真点一下：判据是"壳收到了什么 URL" ✓，不是"按钮存在"✗
+  fireClick(buttons[0] as Record<string, unknown>)
+  assert.deepEqual(sandbox.switchCalls, [ORIGIN_B + '/mobile/app'], '点按钮必须让壳去加载**补好路径**的那条 URL ✓')
+  // 成功那一次不写失败提示 ✓（壳马上换页 ✓，写了也会被冲掉 ✓）
+  const text = elementText(panel.group)
+  assert.equal(text.includes('切换失败'), false, '成功路径不许留失败提示 ✗：' + text)
+})
+
+test('★★ 面板行名用宿主自己报的**机器名**（拿不到就不许编 ✗）', async () => {
+  const records = [hostRecordJson(FP_A, '学校', ORIGIN_A), hostRecordJson(FP_B, '学校', ORIGIN_B)]
+  const seeded = {
+    ['dsh-mobile.host:' + FP_A]: hostConfig(ORIGIN_A, FP_A),
+    ['dsh-mobile.host:' + FP_B]: hostConfig(ORIGIN_B, FP_B),
+    'dsh-mobile.hosts': JSON.stringify(records),
   }
-  walk(panel.group)
-  assert.equal(buttons.length, 0, '这一组里一颗按钮都不许有（非当前那台更不能有死按钮 ✗）：' + buttons.join('｜'))
+  const pairing = {
+    baseUrl: ORIGIN_A,
+    tunnelUrl: 'wss://' + HOST_A + '/mobile/ws',
+    pinnedHostFingerprint: FP_A,
+  }
+
+  // ── ① 宿主报了机器名 ⇒ 当前那台显示机器名 ✓（"两台都叫学校"等于没名字 ✗）
+  const withName = bootInSandbox({ host: HOST_A, manifest: { machineName: 'Mac-mini-2024.local' }, vault: seeded })
+  withName.api.storeHost(pairing) // ★ 触发"连接时取 manifest"那条生产路径 ✓
+  await settleManifest() // ★ 它是异步的 ✓ —— 不等它落地就会误判成"宿主没报" ✗
+  assert.equal(withName.api.hostsPanel().rows[0]?.['label'], 'Mac-mini-2024.local', '当前那台要用它自己报的机器名 ✓')
+  const namedText = elementText(withName.api.hostsPanel().group)
+  assert.ok(namedText.includes('Mac-mini-2024.local'), '面板上要看得见机器名 ✓：' + namedText)
+  // ★ 还要**落进记录** ✓：面板上"另一台"那一行读的是它自己记录里的名字 ✓（读不到对方的 manifest ✓）
+  const stored = withName.api.hosts().find((item) => item['fingerprint'] === FP_A)
+  assert.equal(stored?.['label'], 'Mac-mini-2024.local', '机器名要写进这台宿主的记录 ✓（否则从别台看它还是「学校」✗）')
+
+  // ── ② 老宿主没这个字段 ⇒ 行名退回目录里既有那个名字 ✓（**绝不编** ✗、也不许漏 undefined ✗）
+  const withoutName = bootInSandbox({ host: HOST_A, vault: seeded })
+  withoutName.api.storeHost(pairing)
+  await settleManifest()
+  assert.equal(withoutName.api.hostsPanel().rows[0]?.['label'], '学校', '拿不到机器名 ⇒ 退回目录里那个名字 ✓')
+  const plainText = elementText(withoutName.api.hostsPanel().group)
+  assert.equal(plainText.includes('undefined'), false, '行名里绝不许漏出 undefined ✗：' + plainText)
 })
 
 test('★ 壳里带名字的槽必须给本宿主补上名字（且**只补名字**、绝不把别家的地址记进来 ✗）', () => {
