@@ -43,6 +43,12 @@ interface BootApi {
   deviceRejection: (code: string, detail: string) => boolean
   hostsPanel: () => { rows: Array<Record<string, unknown>>; group: Record<string, unknown> }
   storeHost: (config: Record<string, unknown>) => boolean
+  /**
+   * ★ 面上**既有**的入口（round 131 ✓）：走**生产那条**上报路径（`prepareEndpointSlots` ✓）
+   * ⇒ 它才是"该去取 manifest"的地方 ✓（本测试靠它触发取 manifest，而不是让产品在连接时
+   *  偷偷多取一次 ✗ —— 那样会把 fetch 提前到验收夹具装桩之前 ✗）。
+   */
+  reportSlots: (configLike: Record<string, unknown>) => unknown
   storedHost: () => Record<string, unknown> | null
 }
 
@@ -241,6 +247,8 @@ function bootInSandbox(options: BootOptions): Sandbox {
       insets: () => JSON.stringify({ seen: false }),
       platform: () => JSON.stringify({ android: 34 }),
       changeAddress: () => {},
+      // ★ 上报槽那条路会调它 ✓（生产里是真的桥 ✓；这里只要不抛就行 ✓）
+      setEndpointSlots: () => {},
       // ★ P1b 的桥 ✓ —— **默认不提供** ✗（= 老 APK ✓，那时面板一颗按钮都不许有 ✓）
       ...(options.switchHost === true
         ? {
@@ -658,7 +666,10 @@ test('★★ 面板行名用宿主自己报的**机器名**（拿不到就不许
 
   // ── ① 宿主报了机器名 ⇒ 当前那台显示机器名 ✓（"两台都叫学校"等于没名字 ✗）
   const withName = bootInSandbox({ host: HOST_A, manifest: { machineName: 'Mac-mini-2024.local' }, vault: seeded })
-  withName.api.storeHost(pairing) // ★ 触发"连接时取 manifest"那条生产路径 ✓
+  // ★ 触发取 manifest 的**唯一**生产路径 ✓：上报候选槽（`prepareEndpointSlots` ✓）——
+  //   产品刻意**不**在连接时提前取 ✗（那会把 fetch 提前到验收夹具装桩之前 ✗ ⇒
+  //   套件里"manifest 取不到"那条再也复现不出来 ✓，子代理交单时点名过 ✓）。
+  await withName.api.reportSlots(pairing)
   await settleManifest() // ★ 它是异步的 ✓ —— 不等它落地就会误判成"宿主没报" ✗
   assert.equal(withName.api.hostsPanel().rows[0]?.['label'], 'Mac-mini-2024.local', '当前那台要用它自己报的机器名 ✓')
   const namedText = elementText(withName.api.hostsPanel().group)
@@ -669,7 +680,7 @@ test('★★ 面板行名用宿主自己报的**机器名**（拿不到就不许
 
   // ── ② 老宿主没这个字段 ⇒ 行名退回目录里既有那个名字 ✓（**绝不编** ✗、也不许漏 undefined ✗）
   const withoutName = bootInSandbox({ host: HOST_A, vault: seeded })
-  withoutName.api.storeHost(pairing)
+  await withoutName.api.reportSlots(pairing)
   await settleManifest()
   assert.equal(withoutName.api.hostsPanel().rows[0]?.['label'], '学校', '拿不到机器名 ⇒ 退回目录里那个名字 ✓')
   const plainText = elementText(withoutName.api.hostsPanel().group)

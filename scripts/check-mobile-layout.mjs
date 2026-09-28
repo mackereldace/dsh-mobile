@@ -443,7 +443,8 @@ const problems = []
  *   ★ 夹具也补了一条：安装插件时多了 `--extra-endpoint https://100.64.0.7:3443` ✓
  *     —— 没有它就只有一条候选，"两个槽"这一节根本测不到 ✗（壳清单本身不受影响 ✓）。
  *   ★ 又补 **4** 条（同轮 ✓，盯的是**身份 vault 的双向同步** ✓ —— 这一条不留白 ✗）：
- *     ⑦ 走真实 `storeHost` 写一次 ⇒ `vaultSet` 真的被调、载荷含 `dsh-mobile.host` ✓；
+ *     ⑦ 走真实 `storeHost` 写一次 ⇒ `vaultSet` 真的被调、载荷含**该宿主带指纹的**身份键 ✓
+ *       （P1a 之后写下去的不是基名 ✗ —— 键名由产品按当前源现算 ✓）；
  *     ⑧ 删除 ⇒ 载荷里该键的值是**显式 `null`**（不是 `undefined`/被省掉 ✗）；
  *     ⑨ vault 里有值的被恢复、值为 `null` 的**不**写回本机 ✓；
  *     ⑩ **本机空 + 身份只在壳的库里** ⇒ 新文档一加载就恢复，且**早于**"是否已配对"的判断 ✓
@@ -12653,13 +12654,26 @@ try {
      *
      * ★ 对照组更重要：**没有壳时必须照旧丢弃** ✓ —— 多个验收脚本跑在无壳的无头 Chrome 里 ✓，
      *   那里的 `readStoredHost` 行为一个字都不能变 ✗。
-     * ⚠️ 结束时把**真实那份**配置放回去 ✓（后面的桌面端一节还要靠它保持"手机表面"的现状 ✓）。
+     *
+     * ★★ P1a 口径（这一节有两处必须跟着改 ✗，都不是产品坏了 ✓）：
+     *   · 夹具写的是**基名** `dsh-mobile.host` ✓（= 老用户升级那条路 ✓），归属由这份配置
+     *     自带的 `pinnedHostFingerprint` 证明 ✓ ⇒ 产品会**顺手迁移**：配置搬到
+     *     `dsh-mobile.host:<指纹>` ✓、**基名键被删掉** ✗（这正是它的承诺 ✓）。
+     *     所以"配置没丢"的判据不能再是"基名键还在"✗（那样必假红 ✓），
+     *     改成"**配置还在本机、而且在带指纹的那把键里**"✓ —— 键名靠**前缀扫描**取 ✓，
+     *     绝不写死任何指纹 ✗（指纹是产品按当前源算的 ✓）。
+     *   · 对照组必须在"本机**两种形态都没有**这份配置"的前提下跑 ✗：迁移已经把带指纹
+     *     那份写进本机了 ✓，不先清掉，对照组会被**带指纹那条豁免**接住 ✗（`readStoredHost`
+     *     的 `rootedByFingerprint` ✓）⇒ 测出来的就不是"没有壳 ⇒ 照旧丢弃"了 ✗。
+     * ⚠️ 结束时把**真实那几份**（配置 + 宿主目录）放回去 ✓（后面的桌面端一节还要靠它 ✓）。
      */
     const crossSource = asJson(
       await evaluate(`(function(){
         try {
           var KEY='dsh-mobile.host';
           var saved=localStorage.getItem(KEY);
+          var savedHosts=localStorage.getItem('dsh-mobile.hosts');
+          var savedActive=localStorage.getItem('dsh-mobile.hosts.active');
           var cross=JSON.stringify({
             baseUrl:${JSON.stringify(TAILSCALE_ORIGIN)},
             tunnelUrl:${JSON.stringify('wss://100.64.0.7:3443/mobile/ws')},
@@ -12667,6 +12681,15 @@ try {
           });
           var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
           if(!api) return JSON.stringify({error:'没有 __DSH_MOBILE_BOOT__.apk'});
+          /** 本机现存的**带指纹 host 键**里、值就是这份 cross 的那些 ✓（前缀扫 ✓，不写死指纹 ✗）。 */
+          var scopedHolding=function(){
+            var hits=[];
+            for (var i=0;i<localStorage.length;i++){
+              var k=localStorage.key(i);
+              if(typeof k==='string' && k.indexOf('dsh-mobile.host:')===0 && localStorage.getItem(k)===cross) hits.push(k);
+            }
+            return hits;
+          };
           globalThis.DshmShell = {
             version: function(){ return '0.1.0+BUILD-VERIFY' },
             insets: function(){ return JSON.stringify({seen:true,top:24,bottom:0,ime:0,density:3,edgeToEdge:true}) },
@@ -12679,19 +12702,42 @@ try {
             },
             setEndpointSlots: function(){}
           };
+          /**
+           * ★ 这一节验的场景 = **换到一个新源** ✓ ⇒ 先把本机这一台的**目录**清掉 ✓：
+           *   只要目录里还留着"槽 = 当前源"的那条记录 ✓，currentHostFingerprint() 就会
+           *   解析到**目录里那一台** ✗（hostFingerprintMatchingOrigin ✓），
+           *   这份 cross 根本不是被测对象 ✗ —— 原来那条断言在 P1a 之后假红，一半出在这里 ✓。
+           */
+          localStorage.removeItem('dsh-mobile.hosts');
+          localStorage.removeItem('dsh-mobile.hosts.active');
           localStorage.setItem(KEY,cross);
           var withShell = api.storedHost();
-          var keptLocally = localStorage.getItem(KEY)!==null;
-          // 对照组：拆掉壳 ⇒ 同一份配置必须**照旧**被丢弃 ✓
+          var scopedKeys = scopedHolding();
+          /**
+           * ★★ 判据改成"**配置还在本机、而且在带指纹的那把键里**"✓（原来数的是基名键 ✗，
+           *   而 P1a 的迁移**就是要删掉基名键** ✓）。
+           */
+          var keptLocally = scopedKeys.length===1;
+          var baseGone = localStorage.getItem(KEY)===null;
+          // 对照组：本机**两种形态都没有**这份配置 + 拆掉壳 ⇒ 同一份配置必须**照旧**被丢弃 ✓
           try { delete globalThis.DshmShell; } catch(e) {}
+          localStorage.removeItem(KEY);
+          for (var n=0;n<scopedKeys.length;n++) localStorage.removeItem(scopedKeys[n]);
           localStorage.setItem(KEY,cross);
           var withoutShell = api.storedHost();
-          var droppedLocally = localStorage.getItem(KEY)===null;
-          // 收尾：把真实那份放回去（这一节结束之后页面必须回到原来的状态 ✓）
+          var droppedLocally = localStorage.getItem(KEY)===null && scopedHolding().length===0;
+          // 收尾：把真实那几份放回去（这一节结束之后页面必须回到原来的状态 ✓）
+          localStorage.removeItem(KEY);
+          var leftovers=scopedHolding();
+          for (var q=0;q<leftovers.length;q++) localStorage.removeItem(leftovers[q]);
           if(saved===null) localStorage.removeItem(KEY); else localStorage.setItem(KEY,saved);
+          if(savedHosts===null) localStorage.removeItem('dsh-mobile.hosts'); else localStorage.setItem('dsh-mobile.hosts',savedHosts);
+          if(savedActive===null) localStorage.removeItem('dsh-mobile.hosts.active'); else localStorage.setItem('dsh-mobile.hosts.active',savedActive);
           return JSON.stringify({
             accepted:withShell!==null,
             keptLocally:keptLocally,
+            scopedKeys:scopedKeys,
+            baseGone:baseGone,
             baseUrlKept:withShell!==null && String(withShell.baseUrl)===${JSON.stringify(TAILSCALE_ORIGIN)},
             staleTunnelDropped:withShell!==null && withShell.tunnelUrl===undefined,
             staleEndpointGone:withShell!==null && Array.isArray(withShell.tunnelUrls) &&
@@ -12704,11 +12750,12 @@ try {
       })()`),
     )
     check(
-      crossSource.accepted === true && crossSource.keptLocally === true && crossSource.baseUrlKept === true &&
-        crossSource.staleTunnelDropped === true && crossSource.staleEndpointGone === true &&
+      crossSource.accepted === true && crossSource.keptLocally === true && crossSource.baseGone === true &&
+        crossSource.baseUrlKept === true && crossSource.staleTunnelDropped === true &&
+        crossSource.staleEndpointGone === true &&
         crossSource.pageOriginPresent === true && crossSource.droppedWithoutShell === true,
-      '★ 壳上报的槽里出现过的**跨源**来源**不丢配置**（换源能用的前提 ✓），且那份**过期的 tunnelUrl 被丢掉**（否则换源后先白等 8 秒 ✗；候选从当前页面源开始 ✓）—— 对照组：**没有壳时照旧丢弃** ✓',
-      `有壳：接受=${crossSource.accepted}｜本机还在=${crossSource.keptLocally}｜baseUrl 保留=${crossSource.baseUrlKept}｜旧 tunnelUrl 已丢=${crossSource.staleTunnelDropped}｜旧端点不在候选里=${crossSource.staleEndpointGone}｜页面源在候选里=${crossSource.pageOriginPresent}；无壳：照旧丢弃=${crossSource.droppedWithoutShell}｜err=${crossSource.error ?? '(无)'}`,
+      '★ 壳上报的槽里出现过的**跨源**来源**不丢配置**（换源能用的前提 ✓），且那份**过期的 tunnelUrl 被丢掉**（否则换源后先白等 8 秒 ✗；候选从当前页面源开始 ✓）—— 配置落在**该宿主的带指纹键**里 ✓（基名被迁移删掉 ✓）；对照组：**没有壳时照旧丢弃** ✓',
+      `有壳：接受=${crossSource.accepted}｜本机还在（带指纹键）=${crossSource.keptLocally}｜键=${JSON.stringify(crossSource.scopedKeys)}｜基名已删=${crossSource.baseGone}｜baseUrl 保留=${crossSource.baseUrlKept}｜旧 tunnelUrl 已丢=${crossSource.staleTunnelDropped}｜旧端点不在候选里=${crossSource.staleEndpointGone}｜页面源在候选里=${crossSource.pageOriginPresent}；无壳：照旧丢弃=${crossSource.droppedWithoutShell}｜err=${crossSource.error ?? '(无)'}`,
     )
 
     /**
@@ -12717,11 +12764,22 @@ try {
      * 为什么这三条必须存在：vault 一旦不工作，现象是"**壳切了源、页面看着正常、身份却丢了**"✗
      * —— 正是本项目反复吃亏的"验收绿、真机红"那一类 ✗。所以判据一律是**可观察结果** ✓：
      *   · ⑦ **写入镜像**：走真实的 `storeHost`（`pair()` 与配对落盘都用它 ✓）⇒ `vaultSet` 被调、
-     *     载荷里含 `dsh-mobile.host` ✓；
+     *     载荷里含**该宿主的**身份键 `dsh-mobile.host:<指纹>` ✓（★ P1a 之后写下去的**不是**基名 ✗
+     *     —— 键名由产品按当前源算 ✓，夹具里不写死任何指纹 ✗）；
      *   · ⑧ **显式删除**：删除时载荷里该键的值必须是 `null` ✓ —— **不是**"把键从补丁里省掉"✗
      *     （`JSON.stringify({k:undefined})` 会变 `{}` ⇒ 壳里的旧值原封不动 ✗）；
-     *   · ⑨ **值为 `null` 的不恢复** ✓（壳的"删除"语义 ✓）；有值的那个必须被恢复 ✓。
+     *   · ⑨ **值为 `null` 的不恢复** ✓（壳的"删除"语义 ✓）；有值的那个必须被恢复 ✓
+     *     （库里的键同样是**带指纹**的形态 ✓）。
      * ⑩（"恢复必须**早于**是否已配对的判断"✓）在文件末尾 —— 它要**新开一个文档**才验得了 ✓。
+     *
+     * ★★ P1a 的两条夹具条件（不满足它们，测的就不是产品的承诺 ✗）：
+     *   ① **归属要能确定** ✓ —— 指纹由 `currentHostFingerprint()` 解析 ✓，而它只认
+     *      "本页票据 / **目录里按 origin 反查** / 本机旧 host 自带指纹"这几种来源 ✓。
+     *      所以这三个用例都把**目录**里放一条**本宿主**的记录（槽 = 当前源 ✓）——
+     *      与 `multi-host.test.ts` 里"目录里 B 的槽就是当前源"同一套条件 ✓；
+     *      定不下来时产品按已定决策**故意什么都不做** ✓，那就不是在测它的承诺了 ✗。
+     *   ② **键名要按产品算** ✓ —— 用例里用 `api.currentFingerprint()` 现算 ✓，
+     *      绝不写死某个指纹 ✗（指纹每次都变 ✓ —— 这条坑本项目犯过 ✗）。
      *
      * 假壳里放一个**真在动的**键值库 ✓（`vaultGet`/`vaultSet` 按合并语义 ✓、值 `null` = 删除 ✓，
      * 与 Java 侧同一份约定 ✓），并把每一次 `vaultSet` 的**原始载荷**记下来 ✓
@@ -12765,37 +12823,75 @@ try {
           ${VAULT_SHELL};
           var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
           if(!api) return JSON.stringify({error:'没有 __DSH_MOBILE_BOOT__.apk'});
-          var KEY='dsh-mobile.host';
-          var saved=localStorage.getItem(KEY);
+          var BASE='dsh-mobile.host';
+          var saved=localStorage.getItem(BASE);
+          var savedHosts=localStorage.getItem('dsh-mobile.hosts');
+          var savedActive=localStorage.getItem('dsh-mobile.hosts.active');
+          /**
+           * ★ 归属可定（见本节开头 ① ✓）：目录里先放一条**本宿主**的记录
+           *   （槽 = 当前源 ✓）⇒ currentHostFingerprint() 走"目录按 origin 反查"就定得下来 ✓，
+           *   于是键名可以由**产品自己**算（api.currentFingerprint() ✓），不写死指纹 ✓。
+           */
+          var FP='MIRROR-FP';
+          globalThis.__dshmVault['dsh-mobile.hosts']=JSON.stringify([
+            {fingerprint:FP,label:'verify',slots:[{label:'verify',url:location.origin+'/mobile/app'}],lastState:'paired',lastSeenAt:1,updatedAt:1}
+          ]);
+          var fingerprint=api.currentFingerprint();
+          var KEY=BASE+':'+String(fingerprint);
           globalThis.__dshmVaultSets.length=0;
-          api.storeHost({baseUrl:'https://vault-mirror.example',tunnelUrl:'wss://vault-mirror.example/mobile/ws',pinnedHostFingerprint:'MIRROR-FP'});
+          api.storeHost({baseUrl:'https://vault-mirror.example',tunnelUrl:'wss://vault-mirror.example/mobile/ws',pinnedHostFingerprint:FP});
           var sets=globalThis.__dshmVaultSets.slice();
+          var mirrored=null, hostPayloads=0, baseLeaked=false;
+          for (var i=0;i<sets.length;i++){
+            var payload=null;
+            try { payload=JSON.parse(sets[i]) } catch(e) { continue }
+            if(payload===null||typeof payload!=='object') continue;
+            if(Object.prototype.hasOwnProperty.call(payload,BASE)) baseLeaked=true;
+            if(Object.prototype.hasOwnProperty.call(payload,KEY)){ hostPayloads++; mirrored=payload[KEY] }
+          }
           var local=localStorage.getItem(KEY);
-          var mirrored=null;
-          try { mirrored=JSON.parse(sets[sets.length-1])[KEY]; } catch(e) {}
-          // 收尾：把真实那份放回去（假库随假壳一起在节末销毁 ✓）
-          if(saved===null) localStorage.removeItem(KEY); else localStorage.setItem(KEY,saved);
-          return JSON.stringify({calls:sets.length, mirrored:mirrored, local:local});
+          // 收尾：把真实那几份放回去（假库随假壳一起在节末销毁 ✓）
+          localStorage.removeItem(KEY);
+          if(saved===null) localStorage.removeItem(BASE); else localStorage.setItem(BASE,saved);
+          if(savedHosts===null) localStorage.removeItem('dsh-mobile.hosts'); else localStorage.setItem('dsh-mobile.hosts',savedHosts);
+          if(savedActive===null) localStorage.removeItem('dsh-mobile.hosts.active'); else localStorage.setItem('dsh-mobile.hosts.active',savedActive);
+          return JSON.stringify({calls:sets.length, fingerprint:fingerprint, key:KEY, mirrored:mirrored, hostPayloads:hostPayloads, local:local, baseLeaked:baseLeaked});
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
     )
     check(
-      identityMirror.calls === 1 && typeof identityMirror.mirrored === 'string' &&
+      identityMirror.calls >= 1 && identityMirror.hostPayloads === 1 &&
+        typeof identityMirror.fingerprint === 'string' && identityMirror.key === 'dsh-mobile.host:' + identityMirror.fingerprint &&
+        typeof identityMirror.mirrored === 'string' &&
         identityMirror.mirrored.indexOf('vault-mirror.example') >= 0 &&
-        identityMirror.local === identityMirror.mirrored,
-      '★ 走**真实的 `storeHost`**（`pair()` 与配对落盘都用它 ✓）写一次身份 ⇒ `vaultSet` **真的被调到**、载荷里含 `dsh-mobile.host` ✓（不是"函数存在"✗），且本机那份一致 ✓',
-      `vaultSet 次数=${identityMirror.calls}｜载荷里的 host=${String(identityMirror.mirrored).slice(0, 58)}…｜本机与载荷一致=${identityMirror.local === identityMirror.mirrored}｜err=${identityMirror.error ?? '(无)'}`,
+        identityMirror.local === identityMirror.mirrored && identityMirror.baseLeaked === false,
+      '★★ 走**真实的 `storeHost`**（`pair()` 与配对落盘都用它 ✓）写一次身份 ⇒ `vaultSet` **真的被调到**（≥1 次 ✓）、载荷里含**该宿主的**身份键 `dsh-mobile.host:<指纹>` ✓（键名由产品按当前源现算 ✓，**不是基名** ✗），且本机那份与载荷逐字一致 ✓',
+      `vaultSet 次数=${identityMirror.calls}｜当前指纹=${JSON.stringify(identityMirror.fingerprint)}｜写下的键=${JSON.stringify(identityMirror.key)}｜含该键的载荷数=${identityMirror.hostPayloads}｜载荷里的 host=${String(identityMirror.mirrored).slice(0, 58)}…｜本机与载荷一致=${identityMirror.local === identityMirror.mirrored}｜载荷里出现基名=${identityMirror.baseLeaked}｜err=${identityMirror.error ?? '(无)'}`,
     )
 
-    /** ⑧ 显式删除：载荷必须是**显式的 `null`** ✓。 */
+    /**
+     * ⑧ 显式删除：载荷必须是**显式的 `null`** ✓。
+     *
+     * ★ P1a 口径：删的是**带宿主指纹**的那把键 ✓（键名由产品现算 ✓，夹具先让归属可定 ✓
+     *   —— 见本节开头 ①②）✗ 不是基名：对基名调写入口，产品会把它**命名空间化** ✓，
+     *   于是"删的到底是哪把键"就说不清了 ✗。
+     */
     const identityDelete = asJson(
       await evaluate(`(function(){
         try {
           ${VAULT_SHELL};
           var api = globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.apk;
           if(!api) return JSON.stringify({error:'没有 __DSH_MOBILE_BOOT__.apk'});
-          var KEY='dsh-mobile.lastGoodEndpoint';
-          var saved=localStorage.getItem(KEY);
+          var BASE='dsh-mobile.lastGoodEndpoint';
+          var saved=localStorage.getItem(BASE);
+          var savedHosts=localStorage.getItem('dsh-mobile.hosts');
+          var savedActive=localStorage.getItem('dsh-mobile.hosts.active');
+          var FP='DELETE-FP';
+          globalThis.__dshmVault['dsh-mobile.hosts']=JSON.stringify([
+            {fingerprint:FP,label:'verify',slots:[{label:'verify',url:location.origin+'/mobile/app'}],lastState:'paired',lastSeenAt:1,updatedAt:1}
+          ]);
+          var fingerprint=api.currentFingerprint();
+          var KEY=BASE+':'+String(fingerprint);
           localStorage.setItem(KEY,'wss://stale.example/mobile/ws');
           globalThis.__dshmVault[KEY]='wss://stale.example/mobile/ws';
           globalThis.__dshmVaultSets.length=0;
@@ -12809,19 +12905,32 @@ try {
           } catch(e) {}
           var localGone=localStorage.getItem(KEY)===null;
           var vaultGone=globalThis.__dshmVault[KEY]===undefined;
-          if(saved===null) localStorage.removeItem(KEY); else localStorage.setItem(KEY,saved);
-          return JSON.stringify({returned:returned, calls:sets.length, present:present, value:value, localGone:localGone, vaultGone:vaultGone, raw:sets[sets.length-1]||null});
+          // 收尾
+          localStorage.removeItem(KEY);
+          if(saved===null) localStorage.removeItem(BASE); else localStorage.setItem(BASE,saved);
+          if(savedHosts===null) localStorage.removeItem('dsh-mobile.hosts'); else localStorage.setItem('dsh-mobile.hosts',savedHosts);
+          if(savedActive===null) localStorage.removeItem('dsh-mobile.hosts.active'); else localStorage.setItem('dsh-mobile.hosts.active',savedActive);
+          return JSON.stringify({fingerprint:fingerprint, key:KEY, returned:returned, calls:sets.length, present:present, value:value, localGone:localGone, vaultGone:vaultGone, raw:sets[sets.length-1]||null});
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
     )
     check(
-      identityDelete.calls === 1 && identityDelete.present === true && identityDelete.value === 'null' &&
-        identityDelete.localGone === true && identityDelete.vaultGone === true,
-      '★ 删除身份键时**载荷里该键的值是显式 `null`** ✓（不是 `undefined` ✗、也不是"把键从补丁里省掉"✗ —— 那样 `JSON.stringify` 会给出 `{}`，壳里的旧值就留下了 ✗）；本机与壳的库同时删掉 ✓',
-      `vaultSet 载荷=${identityDelete.raw}｜键在载荷里=${identityDelete.present}｜值=${identityDelete.value}｜本机已删=${identityDelete.localGone}｜壳库已删=${identityDelete.vaultGone}｜err=${identityDelete.error ?? '(无)'}`,
+      typeof identityDelete.fingerprint === 'string' && identityDelete.key === 'dsh-mobile.lastGoodEndpoint:' + identityDelete.fingerprint &&
+        identityDelete.returned === true && identityDelete.calls === 1 && identityDelete.present === true &&
+        identityDelete.value === 'null' && identityDelete.localGone === true && identityDelete.vaultGone === true,
+      '★ 删除身份键时**载荷里该键的值是显式 `null`** ✓（不是 `undefined` ✗、也不是"把键从补丁里省掉"✗ —— 那样 `JSON.stringify` 会给出 `{}`，壳里的旧值就留下了 ✗）；本机与壳的库同时删掉 ✓（删的是**当前宿主的** `dsh-mobile.lastGoodEndpoint:<指纹>` ✓，不是基名 ✗）',
+      `当前指纹=${JSON.stringify(identityDelete.fingerprint)}｜键=${JSON.stringify(identityDelete.key)}｜vaultSet 载荷=${identityDelete.raw}｜键在载荷里=${identityDelete.present}｜值=${identityDelete.value}｜本机已删=${identityDelete.localGone}｜壳库已删=${identityDelete.vaultGone}｜err=${identityDelete.error ?? '(无)'}`,
     )
 
-    /** ⑨ 值为 `null` 的不恢复；有值的必须恢复 ✓。 */
+    /**
+     * ⑨ 值为 `null` 的不恢复；有值的必须恢复 ✓。
+     *
+     * ★ P1a 口径：库里放的是**带宿主指纹**的那几条 ✓（键名由产品现算 ✓），
+     *   并且夹具要让"这个源属于哪台宿主"**确定得下来** ✓（目录里一条本宿主的记录 ✓ ——
+     *   见本节开头 ①②）✗：没有它产品按已定决策"确定不了归属就什么都不做" ✓，
+     *   这一条就会以"什么都没恢复"假红 ✗，而那**不是**它在这里的承诺 ✓
+     *   （"确定不了归属就不动"已在 `multi-host.test.ts` 里单独钉着 ✓）。
+     */
     const restoreNull = asJson(
       await evaluate(`(function(){
         try {
@@ -12830,28 +12939,45 @@ try {
           if(!api) return JSON.stringify({error:'没有 __DSH_MOBILE_BOOT__.apk'});
           var HOST='dsh-mobile.host', DEV='dsh-mobile.device-key', CLAIM='dsh-mobile.claimed-ticket';
           var savedHost=localStorage.getItem(HOST);
-          var vaultHost=JSON.stringify({baseUrl:'https://from-vault.example',tunnelUrl:'wss://from-vault.example/mobile/ws',pinnedHostFingerprint:'VAULT-FP'});
-          globalThis.__dshmVault[HOST]=vaultHost;
-          globalThis.__dshmVault[DEV]=null;
-          globalThis.__dshmVault[CLAIM]=null;
-          localStorage.removeItem(HOST);
-          localStorage.removeItem(DEV);
-          localStorage.removeItem(CLAIM);
+          var savedHosts=localStorage.getItem('dsh-mobile.hosts');
+          var savedActive=localStorage.getItem('dsh-mobile.hosts.active');
+          var FP='RESTORE-FP';
+          globalThis.__dshmVault['dsh-mobile.hosts']=JSON.stringify([
+            {fingerprint:FP,label:'verify',slots:[{label:'verify',url:location.origin+'/mobile/app'}],lastState:'paired',lastSeenAt:1,updatedAt:1}
+          ]);
+          var fingerprint=api.currentFingerprint();
+          var hostKey=HOST+':'+String(fingerprint);
+          var devKey=DEV+':'+String(fingerprint);
+          var claimKey=CLAIM+':'+String(fingerprint);
+          var vaultHost=JSON.stringify({baseUrl:'https://from-vault.example',tunnelUrl:'wss://from-vault.example/mobile/ws',pinnedHostFingerprint:FP});
+          globalThis.__dshmVault[hostKey]=vaultHost;
+          globalThis.__dshmVault[devKey]=null;
+          globalThis.__dshmVault[claimKey]=null;
+          localStorage.removeItem(hostKey);
+          localStorage.removeItem(devKey);
+          localStorage.removeItem(claimKey);
           var restored=api.restoreIdentity();
-          var host=localStorage.getItem(HOST);
-          var dev=localStorage.getItem(DEV);
-          var claim=localStorage.getItem(CLAIM);
+          var host=localStorage.getItem(hostKey);
+          var dev=localStorage.getItem(devKey);
+          var claim=localStorage.getItem(claimKey);
           var second=api.restoreIdentity();
+          // 收尾
+          localStorage.removeItem(hostKey);
+          localStorage.removeItem(devKey);
+          localStorage.removeItem(claimKey);
           if(savedHost===null) localStorage.removeItem(HOST); else localStorage.setItem(HOST,savedHost);
-          return JSON.stringify({restored:restored, hostFromVault:host===vaultHost, dev:dev, claim:claim, second:second});
+          if(savedHosts===null) localStorage.removeItem('dsh-mobile.hosts'); else localStorage.setItem('dsh-mobile.hosts',savedHosts);
+          if(savedActive===null) localStorage.removeItem('dsh-mobile.hosts.active'); else localStorage.setItem('dsh-mobile.hosts.active',savedActive);
+          return JSON.stringify({fingerprint:fingerprint, key:hostKey, restored:restored, hostFromVault:host===vaultHost, dev:dev, claim:claim, second:second});
         } catch (e) { return JSON.stringify({error:String(e&&e.message?e.message:e)}) }
       })()`),
     )
     check(
-      restoreNull.restored === 1 && restoreNull.hostFromVault === true &&
+      typeof restoreNull.fingerprint === 'string' && restoreNull.key === 'dsh-mobile.host:' + restoreNull.fingerprint &&
+        restoreNull.restored === 1 && restoreNull.hostFromVault === true &&
         restoreNull.dev === null && restoreNull.claim === null && restoreNull.second === 0,
-      '★ vault 里**有值**的身份键被恢复 ✓、值为 `null` 的（= 壳明确的删除语义 ✓）**不写回本机** ✓；再跑一次不重复恢复 ✓（本机已有 ⇒ 以本机为准 ✓）',
-      `恢复条数=${restoreNull.restored}（第二次=${restoreNull.second}）｜host 来自 vault=${restoreNull.hostFromVault}｜device-key=${JSON.stringify(restoreNull.dev)}｜claimed-ticket=${JSON.stringify(restoreNull.claim)}｜err=${restoreNull.error ?? '(无)'}`,
+      '★ vault 里**有值**的身份键被恢复 ✓、值为 `null` 的（= 壳明确的删除语义 ✓）**不写回本机** ✓；再跑一次不重复恢复 ✓（本机已有 ⇒ 以本机为准 ✓）—— 库里那几条都是**当前宿主的带指纹形态** ✓',
+      `当前指纹=${JSON.stringify(restoreNull.fingerprint)}｜键=${JSON.stringify(restoreNull.key)}｜恢复条数=${restoreNull.restored}（第二次=${restoreNull.second}）｜host 来自 vault=${restoreNull.hostFromVault}｜device-key=${JSON.stringify(restoreNull.dev)}｜claimed-ticket=${JSON.stringify(restoreNull.claim)}｜err=${restoreNull.error ?? '(无)'}`,
     )
 
     // 收尾：拆掉假壳 ✓（桌面端那一节是另一次导航 ✓，但别把痕迹留在这个文档里 ✓）
@@ -13184,8 +13310,11 @@ try {
   // 本文件前面那种"加载完再塞 `DshmShell`"的手法在这里**不成立** ✗
   // （那时 `boot()` 早就跑完、早就判过"有没有配对" ✗）。
   // 所以用 CDP 的 `Page.addScriptToEvaluateOnNewDocument` ✓ 在**新文档的第一时间**
-  // 做两件事：① 清掉本机身份键（并把"清之前有没有"记下来 ✓）；② 塞一个假壳，
-  // 它的键值库里有 `dsh-mobile.host` / `dsh-mobile.device-key` ✓。
+  // 做两件事：① 把本机那些**身份键**清掉（基名 + **带指纹**两种形态 ✓、外加宿主目录 ✓
+  // —— 不这样清，"本机是空的"就是假的 ✗），并把"清掉了哪些"记下来 ✓；② 塞一个假壳，
+  // 它的键值库里有**该宿主的带指纹身份**（`dsh-mobile.host:<指纹>` / `dsh-mobile.device-key:<指纹>` ✓）
+  // **以及一条宿主目录记录**（槽 = 本页源 ✓ ⇒ 归属可定 ✓ —— 没有它产品会按
+  // "确定不了归属就什么都不做"故意不动 ✗，那这一条就不是在测它的承诺了 ✗）。
   //
   // 于是"恢复"只有一个可能来源（壳的库 ✓），而断言看的是**页面自己的结论**：
   // config 在 ✓ / 传输层建起来了 ✓ ⇒ 页面按**已配对**走 ✓。
@@ -13202,36 +13331,84 @@ try {
     }
     const APP_PATH = '/mobile/app'
     const APP_URL = `https://${LAN_IP}:${TLS_PORT}${APP_PATH}`
+    /**
+     * ★ P1a：指纹是**这个夹具自己定的** ✓（不是产品按当前源算的那个 ✓）——
+     *   它只用来"点名库里的那几条身份" ✓，键名一律由**前缀扫描**取 ✓（不写死 ✗）。
+     */
+    const FP = 'INJECTED-FROM-VAULT'
     const VAULT_HOST = JSON.stringify({
       baseUrl: `https://${LAN_IP}:${TLS_PORT}`,
       // ★ 端点故意指到一个**没人听**的端口 ✓：这一条要验的是"页面有没有按已配对走"✓，
       //   不是"隧道能不能连上"✗ —— 指到真实端口反而会拿**假设备密钥**去握手、平添噪音 ✓。
       tunnelUrl: 'wss://127.0.0.1:9/mobile/ws',
-      pinnedHostFingerprint: 'INJECTED-FROM-VAULT',
+      pinnedHostFingerprint: FP,
     })
     const VAULT_DEVICE = JSON.stringify({
       deviceId: 'web-from-vault',
       publicKey: 'AA',
       privateKeyJwk: { kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA', d: 'AA' },
     })
+    /**
+     * ★★ 归属可定（这一条夹具的**要害** ✓）：目录里放一条**本宿主**的记录，
+     *   它的槽就是本页源 ✓ ⇒ `currentHostFingerprint()` 走"目录按 origin 反查"定得下来 ✓
+     *   —— 与 `multi-host.test.ts` 里"目录里 B 的槽就是当前源"同一套条件 ✓。
+     */
+    const VAULT_HOSTS = JSON.stringify([
+      {
+        fingerprint: FP,
+        label: 'verify',
+        slots: [{ label: 'verify', url: `https://${LAN_IP}:${TLS_PORT}${APP_PATH}` }],
+        lastState: 'paired',
+        lastSeenAt: 1,
+        updatedAt: 1,
+      },
+    ])
     const injectedSource = `(function(){
       try {
-        var KEYS=['dsh-mobile.host','dsh-mobile.device-key','dsh-mobile.claimed-ticket','dsh-mobile.lastGoodEndpoint'];
-        var had={};
-        for (var i=0;i<KEYS.length;i++){
-          had[KEYS[i]] = localStorage.getItem(KEYS[i])!==null;
-          localStorage.removeItem(KEYS[i]);
+        /**
+         * ★★ P1a：本机要**真的空** ✗ —— 要清的不只是那四条**基名**键 ✓，
+         *   还有它们的**带指纹形态**（「基名 + 冒号 + 指纹」✓）与宿主目录那两个键 ✓：
+         *   本机只要还留着带指纹那份身份 ✓、或一条"槽 = 当前源"的目录记录 ✓，
+         *   "身份只在壳的库里"这个前提就不成立 ✗（那这一条测的就不是"恢复"了 ✗）。
+         */
+        var BASES=['dsh-mobile.host','dsh-mobile.device-key','dsh-mobile.claimed-ticket','dsh-mobile.lastGoodEndpoint'];
+        var doomed=[];
+        for (var i=0;i<localStorage.length;i++){
+          var k=localStorage.key(i);
+          if(typeof k!=='string') continue;
+          var hit=(k==='dsh-mobile.hosts'||k==='dsh-mobile.hosts.active');
+          for (var j=0;!hit && j<BASES.length;j++){
+            if(k===BASES[j] || k.indexOf(BASES[j]+':')===0) hit=true;
+          }
+          if(hit) doomed.push(k);
         }
-        // ★ 证据分两半 ✓：「had」证明这个注入**真的跑到过**（否则下面的"清空了"可以平凡为真 ✗）；
-        //   「hostAfterClear / deviceAfterClear」证明 **boot.js 跑起来的那一刻本机是空的** ✓
+        var had={};
+        for (var m=0;m<doomed.length;m++){ had[doomed[m]]=true; localStorage.removeItem(doomed[m]) }
+        // ★ 证据分两半 ✓：「cleared」证明这个注入**真的跑到过**（否则下面的"清空了"可以平凡为真 ✗）；
+        //   「hostAfterClear / deviceAfterClear / scopedLeft」证明 **boot.js 跑起来的那一刻本机是空的** ✓
         //   （本注入在文档第一时间执行 ✓ —— 与真机上 Java 注入桥的时机等价 ✓）。
         globalThis.__dshmIdentityAtStart = {
           had: had,
+          cleared: doomed,
           hostAfterClear: localStorage.getItem('dsh-mobile.host'),
-          deviceAfterClear: localStorage.getItem('dsh-mobile.device-key')
+          deviceAfterClear: localStorage.getItem('dsh-mobile.device-key'),
+          scopedLeft: (function(){
+            var n=0;
+            for (var q=0;q<localStorage.length;q++){
+              var kk=localStorage.key(q);
+              if(typeof kk==='string' && (kk.indexOf('dsh-mobile.host:')===0 || kk.indexOf('dsh-mobile.device-key:')===0)) n++;
+            }
+            return n;
+          })()
         };
       } catch (e) { globalThis.__dshmIdentityAtStart = {error:String(e&&e.message?e.message:e)} }
-      globalThis.__dshmVault = ${JSON.stringify({ 'dsh-mobile.host': VAULT_HOST, 'dsh-mobile.device-key': VAULT_DEVICE, 'dsh-mobile.claimed-ticket': null })};
+      globalThis.__dshmVault = ${JSON.stringify({
+        'dsh-mobile.hosts': VAULT_HOSTS,
+        'dsh-mobile.hosts.active': FP,
+        ['dsh-mobile.host:' + FP]: VAULT_HOST,
+        ['dsh-mobile.device-key:' + FP]: VAULT_DEVICE,
+        ['dsh-mobile.claimed-ticket:' + FP]: null,
+      })};
       globalThis.__dshmVaultSets = [];
       globalThis.DshmShell = {
         version: function(){ return '0.1.0+BUILD-VERIFY' },
@@ -13265,12 +13442,29 @@ try {
           // ★ getConfig 挂在 __DSH_MOBILE_BOOT__ **本身**上 ✗ 不在 .apk 里 ✓
           //   （第一版就是读错了地方 ⇒ 拿到 undefined ⇒ 白白红了一条 ✓）。
           var config = boot && typeof boot.getConfig === 'function' ? boot.getConfig() : undefined;
+          /**
+           * ★ 键名一律**前缀扫描**取 ✓（不带任何写死的指纹 ✗）—— 恢复出来的
+           *   必须是"**带指纹**那份" ✓，基名那两条**不许**被写回来 ✗。
+           */
+          var scopedHostKey=null, scopedHost=null, scopedDeviceKey=null, scopedDevice=null, scopedClaimed=null;
+          for (var i=0;i<localStorage.length;i++){
+            var k=localStorage.key(i);
+            if(typeof k!=='string') continue;
+            if(k.indexOf('dsh-mobile.host:')===0){ scopedHostKey=k; scopedHost=localStorage.getItem(k) }
+            if(k.indexOf('dsh-mobile.device-key:')===0){ scopedDeviceKey=k; scopedDevice=localStorage.getItem(k) }
+            if(k.indexOf('dsh-mobile.claimed-ticket:')===0){ scopedClaimed=localStorage.getItem(k) }
+          }
           return JSON.stringify({
             hasApi: !!(boot && boot.apk),
             atStart: globalThis.__dshmIdentityAtStart || null,
-            host: localStorage.getItem('dsh-mobile.host'),
-            device: localStorage.getItem('dsh-mobile.device-key'),
-            claimed: localStorage.getItem('dsh-mobile.claimed-ticket'),
+            scopedHostKey: scopedHostKey,
+            scopedHost: scopedHost,
+            scopedDeviceKey: scopedDeviceKey,
+            scopedDevice: scopedDevice,
+            scopedClaimed: scopedClaimed,
+            baseHost: localStorage.getItem('dsh-mobile.host'),
+            baseDevice: localStorage.getItem('dsh-mobile.device-key'),
+            baseClaimed: localStorage.getItem('dsh-mobile.claimed-ticket'),
             hasConfig: config !== undefined && config !== null,
             pinned: config === undefined || config === null ? null : String(config.pinnedHostFingerprint || ''),
             tunnel: boot === undefined ? 'none' : typeof boot.tunnel,
@@ -13285,16 +13479,27 @@ try {
       await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: added.result.identifier })
     }
     const atStart = booted.atStart !== null && typeof booted.atStart === 'object' ? booted.atStart : {}
-    const injectedRan = atStart.had !== undefined && typeof atStart.had === 'object' &&
-      atStart.had['dsh-mobile.host'] === true
-    const emptyAtBoot = atStart.hostAfterClear === null && atStart.deviceAfterClear === null
+    /**
+     * ★ 注入**真的跑到过** ✓：标记在、没有 error、且带上了"清掉了哪些"的清单 ✓ ——
+     *   比原来"基名 host 必须存在"稳 ✓（P1a 之后本机那份可能是**带指纹**形态 ✓，
+     *   按基名数会假红 ✗；而"注入有没有跑"由**结果**兜底 ✓：没跑 ⇒ 没有假壳 ⇒
+     *   页面根本配不上对 ⇒ 下面 `pinned` 那条当场红 ✓）。
+     */
+    const injectedRan = atStart.error === undefined && atStart.had !== undefined &&
+      atStart.had !== null && typeof atStart.had === 'object' && Array.isArray(atStart.cleared)
+    const emptyAtBoot = atStart.hostAfterClear === null && atStart.deviceAfterClear === null &&
+      atStart.scopedLeft === 0
     check(
       booted.hasApi === true && injectedRan && emptyAtBoot &&
-        booted.host === VAULT_HOST && typeof booted.device === 'string' && booted.device.length > 0 &&
-        booted.claimed === null && booted.hasConfig === true && booted.pinned === 'INJECTED-FROM-VAULT' &&
+        String(booted.scopedHostKey).indexOf('dsh-mobile.host:') === 0 && booted.scopedHostKey !== 'dsh-mobile.host' &&
+        booted.scopedHost === VAULT_HOST &&
+        String(booted.scopedDeviceKey).indexOf('dsh-mobile.device-key:') === 0 &&
+        typeof booted.scopedDevice === 'string' && booted.scopedDevice.length > 0 &&
+        booted.scopedClaimed === null && booted.baseHost === null && booted.baseDevice === null &&
+        booted.baseClaimed === null && booted.hasConfig === true && booted.pinned === FP &&
         booted.tunnel === 'object' && booted.path === APP_PATH,
-      '★ **本机 localStorage 是空的、身份只在壳的库里** ⇒ 新文档一加载就**恢复** ✓，并且这步发生在**"是否已配对"的判断之前** ✓（页面按已配对走：config 与传输层都在 ✓ —— 恢复晚一步这里就是"尚未配对"、隧道根本不建 ✗，正是换源后"页面能开却点不动"✗ 的根因 ✓）',
-      `注入真的跑到过=${injectedRan}（清空之前本机有=${JSON.stringify(atStart.had ?? null)}）｜boot 那一刻本机为空=${emptyAtBoot}（host=${atStart.hostAfterClear === null ? 'null' : JSON.stringify(atStart.hostAfterClear)}｜device=${atStart.deviceAfterClear === null ? 'null' : JSON.stringify(atStart.deviceAfterClear)}）｜恢复后 host 与 vault 逐字一致=${booted.host === VAULT_HOST}｜device 存在=${typeof booted.device === 'string' && booted.device.length > 0}｜claimed=${JSON.stringify(booted.claimed)}｜config 在=${booted.hasConfig}｜config.pinned=${booted.pinned}｜tunnel=${booted.tunnel}｜path=${booted.path}｜boot 期写库=${booted.vaultSets} 次｜err=${booted.error ?? '(无)'}`,
+      '★ **本机 localStorage 是空的、身份只在壳的库里** ⇒ 新文档一加载就**恢复** ✓（恢复出来的是**该宿主的带指纹键** ✓，基名那两条**不许**被写回来 ✗），并且这步发生在**"是否已配对"的判断之前** ✓（页面按已配对走：config 与传输层都在 ✓ —— 恢复晚一步这里就是"尚未配对"、隧道根本不建 ✗，正是换源后"页面能开却点不动"✗ 的根因 ✓）',
+      `注入真的跑到过=${injectedRan}（清掉了 ${Array.isArray(atStart.cleared) ? atStart.cleared.length : -1} 个本机键：${JSON.stringify(atStart.cleared ?? null)}）｜boot 那一刻本机为空=${emptyAtBoot}（host=${atStart.hostAfterClear === null ? 'null' : JSON.stringify(atStart.hostAfterClear)}｜device=${atStart.deviceAfterClear === null ? 'null' : JSON.stringify(atStart.deviceAfterClear)}｜带指纹残留=${JSON.stringify(atStart.scopedLeft)}）｜恢复后的键=${JSON.stringify({host: booted.scopedHostKey, device: booted.scopedDeviceKey})}｜host 与 vault 逐字一致=${booted.scopedHost === VAULT_HOST}｜device 存在=${typeof booted.scopedDevice === 'string' && booted.scopedDevice.length > 0}｜基名 host/device/claimed=${JSON.stringify([booted.baseHost, booted.baseDevice, booted.baseClaimed])}｜带指纹 claimed=${JSON.stringify(booted.scopedClaimed)}｜config 在=${booted.hasConfig}｜config.pinned=${booted.pinned}｜tunnel=${booted.tunnel}｜path=${booted.path}｜boot 期写库=${booted.vaultSets} 次｜err=${booted.error ?? '(无)'}`,
     )
   }
 

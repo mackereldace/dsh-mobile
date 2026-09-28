@@ -576,12 +576,6 @@
     var fingerprint = fingerprintFromConfig(config)
     if (fingerprint === undefined) fingerprint = currentHostFingerprint()
     if (fingerprint === undefined) return false
-    /**
-     * ★ 顺手把 manifest 取一次 ✓（`phoneBaseUrl` 与**机器名**都在里面 ✓）——
-     *   行名要用它 ✓，而这台宿主此刻就在眼前 ✓（manifest 是同源的 ✓，换到另一台时取到的是那一台的名字 ✓
-     *   ⇒ **各自的名字进各自的记录** ✓，绝不串台 ✗）。失败不抛 ✓（`loadManifestBaseUrl` 永不 reject ✓）。
-     */
-    loadManifestBaseUrl()
     hostRecordUpsert({
       fingerprint: fingerprint,
       slots: hostSlotsForConfig(config),
@@ -597,6 +591,13 @@
    * 要写进**这台宿主**记录里的显示名 ✓（拿不到 ⇒ `undefined` ✓ —— `hostRecordUpsert` 只在前者非空时覆盖 ✓，
    * 于是**旧名字不会被空值冲掉** ✓）。
    *
+   * ★★ **取 manifest 的活儿不在这里** ✗✗（2026-09-28 血的教训 ✓）：这里曾经在
+   *   `noteHostConnected` / `storeHost` 里各"顺手取一次"✗ —— 看起来只是早几毫秒 ✓，
+   *   实际把那次同源 fetch **提前到验收夹具装桩之前** ✓ ⇒ 真 manifest 被缓存 ✓ ⇒
+   *   套件里"manifest 取不到时上报照常发生"那条**再也复现不出来** ✓（两条既有断言变红 ✗，
+   *   子代理交单时点名 ✓）。**唯一该发起它的地方是既有的上报路径**
+   *   （`prepareEndpointSlots` ✓，round 139 就是为它写的 ✓）——
+   *   名字在 fetch 的 `.then` 里当场落进记录 ✓ ⇒ **不依赖谁先谁后** ✓。
    * ★ 只有"与页面同源的那台"才配用它 ✗✗：`manifestMachineName` 是**当前这个源**报的名字 ✓，
    *   而这条记录必须是**当前这台宿主** ✓ —— 调用点都在"刚连上/刚配对这台"的路上 ✓，
    *   指纹也是当场解析出来的 ✓（`fingerprintFromConfig` / `currentHostFingerprint` ✓）。
@@ -4763,8 +4764,6 @@
     // ★ 身份写入口 ✓（配对配置必须跨源存活 ✗ —— 否则壳一换地址，新源就是"没配对" ✗）
     writeIdentityKey(STORAGE_KEY, JSON.stringify(config), fingerprint)
     if (fingerprint === undefined) return
-    // ★ 配对当次也把 manifest 取一次 ✓（机器名要进这条记录 ✓，同源 ✓ ⇒ 是这一台的名字 ✓）
-    loadManifestBaseUrl()
     // P1a：把这台宿主记进目录并标成当前 ✓（面板要列的就是它 ✓；失败绝不影响配对 ✗）
     try {
       hostRecordUpsert({
