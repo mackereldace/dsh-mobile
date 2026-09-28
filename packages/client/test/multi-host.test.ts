@@ -65,6 +65,12 @@ interface BootOptions {
   store?: Record<string, string>
   /** 假壳身份库的种子（跨源 ✓）。 */
   vault?: Record<string, string>
+  /**
+   * 假壳 `endpoints` 给的默认链接槽 ✓（**机器级** ✓ —— 现实里它只认自己那一套地址 ✓）。
+   * ★ 默认空数组 ✗ 会让"壳里的名字进不了目录"这类 bug 溜过去 ✗（真机上就是这么漏的 ✗）——
+   *   凡是要验 label 的用例，**必须**在这里喂两条带名字的槽 ✓。
+   */
+  shellSlots?: Array<{ label: string; url: string }>
 }
 
 /** 假壳的 `vaultSet` 语义与 Java 侧**同一份约定** ✓：值为 `null` ⇒ 删除 ✓，其余原样 `put` ✓。 */
@@ -198,7 +204,7 @@ function bootInSandbox(options: BootOptions): Sandbox {
       version: () => 'test-shell-1',
       vaultGet: () => JSON.stringify(Object.fromEntries(vault)),
       vaultSet: (payload: string) => applyVaultPatch(vault, payload),
-      endpoints: () => JSON.stringify({ slots: [], timeoutMs: 2000 }),
+      endpoints: () => JSON.stringify({ slots: options.shellSlots ?? [], timeoutMs: 2000 }),
       insets: () => JSON.stringify({ seen: false }),
       platform: () => JSON.stringify({ android: 34 }),
       changeAddress: () => {},
@@ -534,4 +540,51 @@ test('★ 面板：列出所有宿主、标出当前那台；非当前那台给�
   }
   walk(panel.group)
   assert.equal(buttons.length, 0, '这一组里一颗按钮都不许有（非当前那台更不能有死按钮 ✗）：' + buttons.join('｜'))
+})
+
+test('★ 壳里带名字的槽必须给本宿主补上名字（且**只补名字**、绝不把别家的地址记进来 ✗）', () => {
+  /**
+   * ★ 真机验收抓到的 bug ✓：`hostSlotsForConfig` 把 `readDefaultLinks()` 的返回值
+   *   （`{slots, timeoutMs}` **对象** ✓）当**数组**用 ✗（`links.length` 恒为 `undefined`）——
+   *   于是壳里「学校」这种名字**一次都进不了目录** ✗ ⇒「电脑」那一组永远显示兜底
+   *   「（未命名）」✗（用户看自己唯一的电脑叫"未命名" ✗）。桩以前给的是 `slots: []` ✗，
+   *   所以这条一直溜过去了 ✗ —— 现在桩按用例喂带名字的槽 ✓。
+   * ★ 第二个断言守的是**修法不许过头** ✗：壳里那两条默认链接是**机器级**的 ✓
+   *   （它只认自己那一套地址 ✓）。若无条件塞进"当前这台宿主"的记录 ✗，
+   *   在第二台上就会把**第一台的地址**记到第二台名下 ✗ —— 而指纹归属正是
+   *   **按槽认源**的（`hostFingerprintMatchingOrigin` ✓）⇒ 会认错机器 ✗（比少个名字严重得多 ✗）。
+   */
+  const sandbox = bootInSandbox({
+    host: HOST_A,
+    shellSlots: [
+      { label: '学校', url: ORIGIN_A + '/mobile/app' },
+      { label: 'Tailscale', url: 'https://100.123.136.82:3443/mobile/app' },
+    ],
+  })
+  // 走生产落盘路径 ✓（配对成功那条 ✓），不直接塞记录 ✗
+  sandbox.api.storeHost({
+    baseUrl: ORIGIN_A,
+    tunnelUrl: 'wss://' + HOST_A + '/mobile/ws',
+    pinnedHostFingerprint: FP_A,
+  })
+  const record = sandbox.api.hosts().find((item) => item['fingerprint'] === FP_A)
+  assert.ok(record !== undefined, '配对后必须记下这台宿主 ✓')
+  const slots = Array.isArray(record['slots']) ? (record['slots'] as Array<Record<string, unknown>>) : []
+  const mine = slots.find((slot) => String(slot['url']).indexOf(HOST_A) >= 0)
+  assert.ok(mine !== undefined, '本记录里应有"当前源"这一槽 ✓：' + JSON.stringify(slots))
+  assert.equal(
+    mine['label'],
+    '学校',
+    '★ 壳里那个名字必须落到本记录的槽上 ✓（以前这里是空串 ⇒ 面板只能显示「（未命名）」✗）',
+  )
+  // ★★ 只补名字、不新增槽：那条**不属于本记录**的地址一个字都不许记 ✗
+  assert.equal(
+    slots.some((slot) => String(slot['url']).indexOf('100.123.136.82') >= 0),
+    false,
+    '壳里那条不属于本记录的地址绝不许被记进来 ✗（否则指纹匹配会认错机器 ✗）：' + JSON.stringify(slots),
+  )
+  // 名字最终要体现在**真渲染产物**上 ✓（不是"某处字符串存在" ✓）
+  const text = elementText(sandbox.api.hostsPanel().group)
+  assert.ok(text.indexOf('学校') >= 0, '面板上应显示「学校」✓：' + text)
+  assert.equal(text.indexOf('（未命名）'), -1, '有名字了就不许再显示兜底 ✗：' + text)
 })

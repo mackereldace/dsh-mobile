@@ -508,14 +508,16 @@
 
   /**
    * 一台宿主有哪些槽 ✓（`{label,url}` 数组 ✓）—— 来源与优先级：
-   *   ① 壳里那两组默认链接 ✓（同一台电脑的其它槽 ✓ —— 换源后仍要能认出"这是我" ✓）；
-   *   ② 票据 / 配置里的 `endpoints`、`baseUrl`、`tunnelUrls` ✓；③ 当前页面源 ✓。
+   *   ① 票据 / 配置里的 `endpoints`、`baseUrl`、`tunnelUrls` ✓；② 当前页面源 ✓；
+   *   ③ 壳里那两组默认链接**只用来补名字** ✓（见下面那段 ★ 修 ✓）。
    * ★ 存的是**地址**不是隧道端点 ✓：匹配只比 `host` ✓（http/ws 与 https/wss 同机同槽 ✓）。
    * ★ 槽集里**不**放配对票据 / baseUrl 之外的配置字段 ✗（宿主记录是**目录**，不是配对配置 ✓）。
    */
   function hostSlotsForConfig(config) {
     var slots = []
     var seen = {}
+    /** host → 在 `slots` 里的下标 ✓（补名字时要按 host 找回那一槽 ✓）。 */
+    var indexByHost = {}
     var add = function (url, label) {
       if (typeof url !== 'string' || url.length === 0) return
       var host = ''
@@ -526,10 +528,9 @@
       }
       if (host === '' || seen[host] === true) return
       seen[host] = true
+      indexByHost[host] = slots.length
       slots.push({ label: typeof label === 'string' ? label : '', url: url })
     }
-    var links = readDefaultLinks()
-    for (var i = 0; i < links.length; i++) add(links[i].url, links[i].label)
     if (config !== null && config !== undefined && typeof config === 'object') {
       var endpoints = Array.isArray(config.endpoints) ? config.endpoints : []
       for (var j = 0; j < endpoints.length; j++) add(endpoints[j])
@@ -538,6 +539,32 @@
       for (var k = 0; k < tunnelUrls.length; k++) add(tunnelUrls[k])
     }
     add(location.origin)
+    /**
+     * ★ 修（**真机验收抓到的** ✓）：`readDefaultLinks()` 返回的是 `{slots, timeoutMs}` **对象** ✓，
+     *   这里以前当**数组**用 ✗（`links.length` 恒为 `undefined` ⇒ 循环一次都不跑 ✗）——
+     *   于是壳里那两个**带名字**的槽（「学校」「Tailscale」✓）被静默丢掉 ✗，
+     *   本记录一个 label 都留不下 ⇒ 面板永远显示兜底「（未命名）」✗。
+     * ★ 但**只补名字、不新增槽** ✗：壳里那两条默认链接是**机器级**的（它只认自己那一套地址 ✓），
+     *   无条件 `add` 会在"第二台宿主"上把**第一台的地址**记到第二台名下 ✗ ——
+     *   而指纹归属正是**按槽认源**的（`hostFingerprintMatchingOrigin` ✓）⇒ 会张冠李戴 ✗。
+     *   所以只有"本来就已经属于本记录"的 host 才接受这个名字 ✓（错了也只是少个名字 ✓，不会认错机器 ✓）。
+     */
+    var shellSlots = readDefaultLinks().slots
+    for (var i = 0; i < shellSlots.length; i++) {
+      var shellSlot = shellSlots[i]
+      if (shellSlot === null || typeof shellSlot !== 'object') continue
+      var shellLabel = typeof shellSlot.label === 'string' ? shellSlot.label : ''
+      if (shellLabel.length === 0) continue
+      var shellHost = ''
+      try {
+        shellHost = new URL(shellSlot.url, location.href).host
+      } catch (error) {
+        void error
+      }
+      if (shellHost === '' || indexByHost[shellHost] === undefined) continue
+      var target = slots[indexByHost[shellHost]]
+      if (target.label.length === 0) target.label = shellLabel
+    }
     return slots
   }
 
