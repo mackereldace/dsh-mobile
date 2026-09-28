@@ -465,5 +465,9 @@ echo "  Ctrl-C 停止 DSH，插件内监听随之停止。"
 echo
 
 # 交给 start-lan.sh：它负责停旧实例、写 listener 配置、启动 DSH
-exec env RESTART=1 DSH_HOME="$DSH_HOME_RESOLVED" DSH_PORT="$DSH_PORT" PROXY_PORT="$PROXY_PORT" \
+# ★ DSHM_FROM_RESTART_LAN=1 是给 start-lan.sh 看的**唯一**信号 ✓：
+#   它据此知道"这次是官方路径（已经比对过仓库 vs profile、需要时重装过了 ✓）" ⇒ 不再唠叨那句提醒 ✓。
+#   ★ 为什么不用 `RESTART` 当信号 ✗✗：用户**手工**跑 `RESTART=1 bash scripts/start-lan.sh`
+#     时它也等于 1 ✓ ⇒ 提醒会被吞掉 ✓ —— 而 2026-09-28 那次事故正是这种手工重启 ✓（见 §4.1am）。
+exec env RESTART=1 DSHM_FROM_RESTART_LAN=1 DSH_HOME="$DSH_HOME_RESOLVED" DSH_PORT="$DSH_PORT" PROXY_PORT="$PROXY_PORT" \
   bash "${SCRIPT_DIR}/start-lan.sh"

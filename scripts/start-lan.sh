@@ -318,7 +318,9 @@ echo
 #   但 profile 里 `cordis.patch.yml` 与插件的 mtime 都还是**上一次安装**的时间 ✓。
 #   ★ 这里**刻意不复算哈希**（那会是同一套"仓库 vs profile"判定的第二份实现 ✗）——
 #     只提醒一句"要带代码就换那条命令" ✓，判据仍然只有 restart-lan.sh 一处 ✓。
-if [ "${RESTART:-0}" != "1" ]; then
+# ★ 判据是"**谁叫起来的**" ✗，不是 `RESTART` ✓：restart-lan.sh 会带 DSHM_FROM_RESTART_LAN=1 ✓；
+#   凡是**直接**跑 start-lan.sh（无论带不带 RESTART=1 ✓）都算手工路径 ⇒ 提醒 ✓。
+if [ "${DSHM_FROM_RESTART_LAN:-0}" != "1" ]; then
   echo "[start-lan] ⚠ 手工启动**不会重装插件**：若你刚改过仓库里的插件代码（packages/*/src、native/ 等），"
   echo "            请改用   bash scripts/restart-lan.sh   —— 它会先比对仓库与 profile、需要时重装再重启。"
   echo
