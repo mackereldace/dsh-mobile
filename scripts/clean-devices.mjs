@@ -15,9 +15,18 @@
  * 幂等：没有 revoked 条目时什么也不做（仍会做一次备份）。备份文件名带时间戳，不覆盖。
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-const home = process.env.DSH_HOME || join(process.env.HOME || '', '.dsh')
+/**
+ * ★ Windows 兼容（2026-09-28，用户要求"保证兼容"）：**不许只认 `process.env.HOME`** ✗ ——
+ *   Windows 上通常**没有** `HOME` 这个变量 ✓（那边是 `USERPROFILE` / `HOMEDRIVE`+`HOMEPATH` ✓）
+ *   ⇒ 老写法会落成**相对路径** `.dsh` ✓，于是脚本去**当前目录**找设备表 ✗，
+ *   报出来的还是一句"没找到设备注册表"✓ —— 用户完全看不出是"找错了地方"✗。
+ *   `os.homedir()` 由 Node 按平台解析 ✓（Windows 上就是 `C:\Users\<名>` ✓）——
+ *   `packages/host/src/cordis.ts:117` 的运行时早就这么兜了 ✓，这里跟上 ✓。
+ */
+const home = process.env.DSH_HOME || join(homedir(), '.dsh')
 const dir = join(home, 'storages', 'dsh-mobile')
 const file = join(dir, 'devices.json')
 
