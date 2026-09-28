@@ -78,7 +78,7 @@ S → C  ServerHello   （封装为 {e, sh}，见 §3.2）
              hostSigningKey, hostFingerprint, signature}
 
        客户端：验 hostFingerprint == SHA256(hostSigningKey)[0..16]
-              验 signature == Ed25519_verify(hostSigningKey, transcript)   ← 失败必须立即中止
+              验 signature == ECDSA-P256_verify(hostSigningKey, transcript)   ← 失败必须立即中止
        两端各自：K_c2s / K_s2c / K_confirmC / K_confirmS
                 = HKDF-SHA256(ikm=ss, salt=transcriptHash, info=<各自标签>, len=32)
 
