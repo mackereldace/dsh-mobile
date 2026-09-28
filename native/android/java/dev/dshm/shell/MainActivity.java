@@ -83,13 +83,20 @@ import org.json.JSONObject;
  *
  * ## 它带来的"少一次"
  *
- * 1. **证书固定**（{@link #pinCa}）✓ —— 只认"我们这台电脑"那张 CA：
+ * 1. **证书固定**（{@link #pinCaForAuthority}）✓ —— 只认"我们这台电脑"那张 CA：
  *    不用在系统里装 CA ✓、没有"网络可能受到监控"的常驻提示 ✓。
  *    ★★ C2（round 154）：固定的来源从**编译期**（CA 打进 `assets/dshm_ca.pem` ⇒ 一机一包 ✗）
  *    改成 **TOFU**（第一次连某台电脑时确认它的 CA ✓，见 {@link #tofuTrustOnce} ✓）——
  *    于是**一个包能连任何一台电脑** ✓，而安全性不降 ✓：确认要靠**带外**票据里的
  *    `caFingerprint` 比对（或用户明确确认 ✓），**绝不静默接受未知证书** ✗。
  *    回退链是"先读 pin ✓、读不到再退回 assets ✓"⇒ 老包与滚回那条路一个字不变 ✓；
+ *    ★★ C3（2026-09-28）：固定的**粒度**从"一份单值"改成"**按 authority 各存一份**"✓
+ *    （`pinned-ca:<host:port>` ✓，见 {@link PinStore} ✓）—— 起因是用户真机报的
+ *    "装了两台电脑之后，**从 Windows 切回 Mac 被拒**"✗（`tofu_mismatch` ✓，且**时有时无** ✓）：
+ *    单值那份被两台电脑**抢**✓，后连的那台把 pin 覆盖掉 ✗ ⇒ 切回前一台时"证书与 pin 不符"✗
+ *    ⇒ 走 TOFU 失败（★ 切换那条路**没有票据** ✓ ⇒ 只能靠这个 pin ✓ ⇒ 必然踩到 ✗）。
+ *    旧键 `pinned-ca` 只在"**这台电脑的证书确实认它**"时被**认领** ✓（写新键 + 删旧键 ✓），
+ *    认不出就**忽略旧值** ✓ 走 TOFU ✓ —— **绝不**把它当成"任何 authority 都对"✗；
  * 2. **地址可编辑**（{@link #promptForAddress}）✓ —— 家里/学校 IP 变了，
  *    在 APP 里改一下即可 ✓，**不用重装、不用重新配对** ✓；
  * 3. **失败即提示**（{@link #onReceivedError}）✓ —— 打不开就弹地址输入 ✓，
@@ -229,6 +236,8 @@ public class MainActivity extends android.app.Activity {
     //   · switch-timeout-ms  单槽等待上限 ✓（默认 2000 ✓，夹在 200..10000 ✓）
     //   · pinned-slot        可空 ✓ —— 本轮**不做界面** ✗（协议里留着 ✓）
     //   · identity-vault     网页侧身份键的 JSON 对象 ✓（见 ShellBridge#vaultGet ✓）
+    //   · pinned-ca:<host:port>  ★★ C3：已信任的 CA，**按 authority 各存一份** ✓（见 PinStore ✓）
+    //   · pinned-ca          旧键（**单值** ✗）—— 只在"该 authority 的证书确实认它"时被**认领** ✓
 
     /** 候选端点槽：JSON 数组 `[{"label":"学校","url":"https://…/mobile/app"},…]` ✓。 */
     private static final String KEY_ENDPOINT_SLOTS = "endpoint-slots";
@@ -237,7 +246,7 @@ public class MainActivity extends android.app.Activity {
     /** 钉死的槽（可空的字符串 ✓ —— 本轮只存/只报，不做界面 ✗）。 */
     private static final String KEY_PINNED_SLOT = "pinned-slot";
     /**
-     * ★★ C2：**TOFU 落盘的那张 CA**（PEM 原文 ✓ —— 不是指纹 ✗）。
+     * ★★ C2：TOFU 落盘的那张 CA（PEM 原文 ✓ —— 不是指纹 ✗）。
      *
      * 为什么存 PEM 而不是指纹 ✗：`pinCa()` 要拿**整张证书**去 `checkServerTrusted`
      * 验链 ✓（指纹只能回答"是不是同一张"✓，回答不了"这张签没签服务器那张"✗）。
@@ -245,11 +254,27 @@ public class MainActivity extends android.app.Activity {
      * 为什么放 SharedPreferences ✓：与 `KEY_URL` / `KEY_ENDPOINT_SLOTS` 同一套 ✓，
      * 天然跨源 ✓（WebView 换源 = 换 localStorage ✓，但 prefs 不换 ✓）。
      *
-     * 生命周期：**第一次**连某台电脑时由 {@link #tofuTrustOnce} 写入 ✓；
-     * 「忘记这台电脑」把它与 {@link #KEY_PINNED_SLOT} 一起清掉 ✓
+     * ★★ C3：它现在只是**旧键** ✓ —— "已信任的 CA"已经改成**按 authority 各存一份** ✓
+     * （键名推导与旧值迁移全在 {@link PinStore} ✓）。为什么要改 ✗（用户 2026-09-28 真机报的 ✓）：
+     * 手机装了两台电脑（Mac 生产 + Windows ✓）之后，**从 Windows 切回 Mac 被拒** ✗
+     * （提示 `tofu_mismatch`：证书与票据指纹不一致 ✓），而且**时有时无** ✗
+     * （取决于最后连的是哪台 ✓）。根因就是这**一个**槽位被两台电脑抢 ✓：
+     * 连 Windows 时把 pin 覆盖成 Windows 的 CA ✗ ⇒ 再切回 Mac 时 `pinCa()` 拿 Mac 的证书跟
+     * **Windows 那份 pin** 比 ✗ ⇒ 不一致 ⇒ 走 TOFU 失败 ⇒ 拒绝 ✓
+     * （★ 而"换源/切槽"那条路**没有票据** ✓ ⇒ `tofuTrustOnce` 只能靠这个 pin ✓ ⇒ 必然踩到 ✗）。
+     *
+     * 本常量留着 ✓ 两个理由：
+     *   ① 它是**升级前那些手机上唯一的记录** ✓ —— 升级后第一次连某台电脑时，只有
+     *      "这台电脑的证书确实认这张旧 CA"才把它**认领**成该 authority 的专属 pin ✓
+     *      （写新键 ✓、删旧键 ✓）；认不出就**忽略旧值** ✓ 走 TOFU ✓ ——
+     *      ★ 绝不许把它当成"任何 authority 都对"✗（那是给别的电脑开后门 ✗）；
+     *   ② `check-apk.mjs` 用它的**常量名**当"pin 落盘那一段还在产物里"的判据之一 ✓。
+     *
+     * 生命周期：**第一次**连某台电脑时由 {@link #tofuTrustOnce} 写入该 authority 的专属键 ✓；
+     * 「忘记这台电脑」把它（**只**这一份 ✓）+ 旧键 + {@link #KEY_PINNED_SLOT} 一起清掉 ✓
      * （只清一个 ⇒ 换了宿主之后旧 pin 会把新宿主全部拒掉 ✗，这是 TOFU 的经典陷阱 ✓）。
      */
-    private static final String KEY_PINNED_CA = "pinned-ca";
+    private static final String KEY_PINNED_CA = PinStore.LEGACY_KEY;
     /** 网页侧身份键的哑存储（JSON 对象 ✓ —— 壳不解释语义 ✓）。 */
     private static final String KEY_IDENTITY_VAULT = "identity-vault";
 
@@ -920,13 +945,26 @@ public class MainActivity extends android.app.Activity {
             String shortFingerprint = "";
             String source = "none";
             try {
-                String pinned = prefs.getString(KEY_PINNED_CA, null);
+                /**
+                 * ★★ C3：报的是**当前这台电脑**（= 当前页面 / 当前槽那个 authority ✓）的 pin ✓。
+                 *
+                 * 为什么必须按 authority 取 ✗：多宿主之后 prefs 里同时躺着好几台电脑的 pin ✓ ——
+                 * 随便拿一份报出去，网页上就会显示"手机固定的是 B 的指纹"✗（而人正对着 A 的配对页核对 ✓）
+                 * ⇒ "逐段核对指纹"这件事**从有用变成误导** ✗。
+                 *
+                 * ★ 这里**没有服务器证书** ⇒ 旧键**不认领** ✓（见 {@link PinStore#read} ✓）：
+                 *   认领需要"这台电脑的证书确实认旧值"这条判据 ✓，而它只在那条 TLS 路上才有 ✓。
+                 *   真机上的顺序是 TLS **先**发生 ✓ ⇒ 页面跑到这里时，该认领的早就认领完了 ✓
+                 *   （真要还没认领，这里如实报"没有"✓ —— 也不许猜 ✗）。
+                 */
+                String authority = currentAuthority();
+                String pinned = loadPinnedCaFromPrefs(authority, null);
                 if (pinned != null && !pinned.trim().isEmpty()) {
                     shortFingerprint = formatFingerprintGroups(caFingerprintOf(pinned), true);
                     source = shortFingerprint.isEmpty() ? "none" : "pinned";
                 } else {
                     // 老包才有内置 CA ✓（新包里 assets/dshm_ca.pem 已经不存在 ✓）
-                    String builtin = pinnedCaShortFingerprint();
+                    String builtin = pinnedCaShortFingerprint(authority);
                     if (!builtin.isEmpty()) {
                         shortFingerprint = builtin;
                         source = "assets";
@@ -1570,7 +1608,8 @@ public class MainActivity extends android.app.Activity {
          * ★★ 证书信任 —— WebView 只有在**默认校验失败**时才会走到这里 ✓。
          *
          * 三条路，**先严后宽**（顺序不能换 ✗）：
-         *   ① **已知身份**：`pinCa()` 用"当前信任的那张 CA"（先 pin ✓、再 assets 回退 ✓）
+         *   ① **已知身份**：`pinCaForAuthority()` 用"**这台电脑**当前信任的那张 CA"
+         *      （先读该 authority 的 pin ✓、读不到再 assets 回退 ✓ —— C3）
          *      验一遍链 ✓ ⇒ 通过 `proceed()` ✓、不通过继续往下 ✓；
          *   ② **未知身份 ⇒ TOFU**（C2 新增 ✓）：{@link #tofuTrustOnce} 去把这台电脑的 CA
          *      取回来、与**带外**票据里的指纹比对（或要用户明确确认 ✓）⇒
@@ -1593,8 +1632,21 @@ public class MainActivity extends android.app.Activity {
         public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
             try {
                 X509Certificate served = x509Of(error);
-                if (served != null && pinCa(served)) {
-                    Log.i(TAG, "证书已由本机 CA 验证通过，继续加载 ✓");
+                /**
+                 * ★★ C3：这张证书属于**哪个 authority** ✓ —— pin 是**按 authority 各存一份**的 ✓
+                 * （见 {@link PinStore} ✓）。先看**这次请求自己**的 URL ✓（`error.getUrl()` ✓），
+                 * 认不出才回落到"当前页面 / 当前槽"✓（见 {@link #authorityOfRequest} ✓）。
+                 * ★ 取到 `null` ⇒ `pinCa` 直接不通过 ✓ ⇒ 走 TOFU ✓（要人点信任 ✓）——
+                 * 方向永远是**收紧** ✓，而不是"认不出就随便找一份 pin 来用"✗。
+                 */
+                String authority = authorityOfRequest(error == null ? null : error.getUrl());
+                if (served != null && pinCaForAuthority(served, authority)) {
+                    /**
+                     * ★ C3：日志里**带上 authority** ✓ —— 多宿主之后"验证通过"这句话必须能回答
+                     *   "**用的是哪台电脑**那份 pin"✓（真机上出问题时，这是唯一能念出来的一行 ✓；
+                     *   配对页那张「连接」卡显示的也是同一条 ✓）。
+                     */
+                    Log.i(TAG, "证书已由本机 CA 验证通过（authority=" + authority + " ✓ 用的是它专属的那份 pin ✓），继续加载 ✓");
                     noteServerResponded("TLS 握手成功（本机 CA 验通 ✓）");
                     handler.proceed();
                     return;
@@ -1879,11 +1931,12 @@ public class MainActivity extends android.app.Activity {
     //   ⇒ 一个包只能连那一台电脑 ✗（一机一包 ✓）。
     // ★★ C2 之后：信任来自"**第一次**连这台电脑时确认它的 CA" ✓（TOFU ✓，
     //   与 SSH 的 known_hosts 同一个模型 ✓）：
-    //     ① `onReceivedSslError` 里 `pinCa()` 不通过 ⇒ **未知身份** ✓；
+    //     ① `onReceivedSslError` 里 `pinCaForAuthority()` 不通过 ⇒ **未知身份** ✓；
     //     ② 取 `/mobile/trust.crt` ✓（就走这张**还没验证**的证书 ✓ —— 这正是 TOFU 的定义 ✓）；
     //     ③ 算 SHA-256 指纹 ✓，与**带外**（二维码/配对票据 ✓）里的 `caFingerprint` 比对 ✓；
     //        票据里没有 ⇒ **把指纹显示给用户、要用户明确点「信任」** ✓；
-    //     ④ 一致 ⇒ 落盘到 prefs（{@link #KEY_PINNED_CA} ✓）⇒ 才 `proceed()` ✓。
+    //     ④ 一致 ⇒ 落盘到 prefs（**这台电脑专属**的 `pinned-ca:<host:port>` ✓ ——
+    //        C3 起按 authority 各存一份 ✓）⇒ 才 `proceed()` ✓。
     //   ★ 任何一条不成立 ⇒ `cancel()` + 提示 ✓。**绝不静默接受未知证书** ✗ ——
     //     省掉第 ③ 步就是把"编译期固定"换成"盲信第一次" ✓，那是**安全倒退** ✓
     //     （配网时的中间人可以永久冒充宿主 ✓）。
@@ -1891,6 +1944,48 @@ public class MainActivity extends android.app.Activity {
     // 回退链**必须先读 pin、读不到再退回 assets** ✓：老包（CA 还打在包里 ✓）
     // 的行为因此一个字都不变 ✓ —— 滚回只需恢复 `build-apk.mjs` 那一步 ✓，
     // **不需要改壳代码** ✓。
+    //
+    // ★★ C3（2026-09-28 ✓）：pin **从"一份单值"改成"按 authority 各存一份"** ✓。
+    //
+    // 起因是用户真机报的一条 ✓：手机装了两台电脑（Mac 生产 + Windows ✓）之后，
+    // **从 Windows 切回 Mac 时被拒** ✗（提示 `tofu_mismatch`：证书与票据指纹不一致 ✓），
+    // 只能重新扫 Mac 的码 ✓；而且**时有时无** ✗（取决于最后连的是哪台 ✓）。
+    //
+    // 根因（读代码定死 ✓）：`pinned-ca` 是**一份单值** ✗ ⇒ 两台电脑**抢同一个槽位** ✓：
+    // 连 Windows 时把 pin 覆盖成 Windows 的 CA ✗ ⇒ 再切回 Mac 时 `pinCa()` 拿 Mac 的证书
+    // 跟**Windows 那份 pin** 比 ✗ ⇒ 不一致 ⇒ 走 TOFU 失败 ⇒ 拒绝 ✓
+    // （★ 切换那条路**没有票据** ✓ ⇒ `tofuTrustOnce` 只能靠这个 pin ✓ ⇒ 必然踩到 ✗）。
+    //
+    // 改法只有三条 ✓，**没有一条放宽安全** ✗：
+    //   ① 存/读/忘都按 **authority**（`host:port` ✓，小写 + 带端口 ✓）各来一份 ✓；
+    //   ② 旧键 `pinned-ca` 只在"**该 authority 的证书确实认这张旧 CA**"时被**认领** ✓
+    //      （写新键 ✓、删旧键 ✓）；认不出就**忽略旧值** ✓ 走 TOFU ✓ ——
+    //      ★ 绝不许把它当成"任何 authority 都对"✗（那是给别的电脑开后门 ✗）；
+    //   ③ `pinCa(served, caPem)` 那条**验链语义一个字不改** ✗ —— 认领用的判据就是它 ✓。
+    // ⇒ 键名推导与认领判据全在 {@link PinStore} 里 ✓（零 android 依赖 ✓ ⇒ 电脑上能跑测试 ✓）。
+
+    /**
+     * {@link PinStore} 的哑存储 ✓ —— 把 `SharedPreferences` 收到那三条最小面上 ✓
+     * （纯类不许碰 `android.*` ✗，测试才能在电脑的 JVM 上跑 ✓）。
+     *
+     * `put` / `remove` 都用 `commit()` ✓（同步 ✓ —— "落盘成功才算数"这条既有约定一个字不改 ✓）。
+     */
+    private final PinStore.Kv prefsKv = new PinStore.Kv() {
+        @Override
+        public String get(String key) {
+            return prefs.getString(key, null);
+        }
+
+        @Override
+        public boolean put(String key, String value) {
+            return prefs.edit().putString(key, value).commit();
+        }
+
+        @Override
+        public boolean remove(String key) {
+            return prefs.edit().remove(key).commit();
+        }
+    };
 
     /** 从 SslError 取出服务器证书（API 29+ 有公开 API ✓；更老的版本只能放弃固定 ✓）。 */
     private X509Certificate x509Of(SslError error) {
@@ -1902,15 +1997,52 @@ public class MainActivity extends android.app.Activity {
     }
 
     /**
-     * 用**当前信任的那张 CA** 验证这张证书 ✓ —— 顺序是 **先读 pin、读不到再退回 assets** ✓。
+     * 「当前这台电脑」的 authority ✓（规范化的 `host:port` ✓，见 {@link PinStore#authorityOf} ✓）：
+     * **当前页面 / 当前槽**是哪个 authority ✓。
+     *
+     * 先看 `currentUrl` ✓（正在显示 / 正在加载的那一页 ✓），再看 `attemptingUrl` ✓
+     * （换槽正在试、而 `currentUrl` 还没跟上的那一瞬 ✓ —— 两者在 `beginSlot` 里本来就同值 ✓，
+     * 这一手只是兜底 ✓）。都认不出 ⇒ `null` ✓ ⇒ 调用方（读 pin / 忘记）**什么都不做** ✓，绝不去猜 ✗。
+     */
+    private String currentAuthority() {
+        String authority = PinStore.authorityOf(currentUrl);
+        if (authority != null) return authority;
+        return PinStore.authorityOf(attemptingUrl);
+    }
+
+    /**
+     * **这次 TLS 请求**属于哪个 authority ✓：先认**它自己**的 URL ✓（`SslError.getUrl()` ✓），
+     * 认不出才回落到"当前页面 / 当前槽"✓（见 {@link #currentAuthority} ✓）。
+     *
+     * 为什么以"请求自己的 URL"为准 ✗：`onReceivedSslError` 也**会被子资源触发** ✓ ——
+     * 拿"当前页面"去顶替它，就等于**用页面那个 authority 的 pin 去验另一个 authority 的证书** ✗
+     * （正是本次要修的那种"张冠李戴"✓）。
+     */
+    private String authorityOfRequest(String url) {
+        String authority = PinStore.authorityOf(url);
+        return authority != null ? authority : currentAuthority();
+    }
+
+    /**
+     * 用**这个 authority 当前信任的那张 CA** 验证这张证书 ✓ ——
+     * 顺序是 **先读该 authority 的 pin（含旧键安全认领 ✓）、读不到再退回 assets** ✓。
      *
      * 为什么必须是这个顺序（而不是"pin 与 assets 谁先都行"✗）：
      *   pin 是"用户/带外票据**在这台电脑上**确认过的那张" ✓；assets 是"打包时那台电脑那张" ✓。
      *   打了新包之后 assets 里**什么都没有** ✓ ⇒ 只有 pin 这条路 ✓；
      *   而老包（assets 里还有 CA）在**没配过对**时靠 assets 照旧能用 ✓ —— 两条路并存 ✓。
+     *
+     * ★★ C3：判据多了"**哪个 authority**"这一维 ✓（见 {@link PinStore} ✓）：
+     *   `authority` 认不出（`null` ✓）⇒ `PinStore.keyFor` 也是 `null` ✓ ⇒ **不读任何 pin** ✓
+     *   ⇒ 直接不通过 ⇒ 走 TOFU ✓。★ 这里**没有**"找一份别的电脑的 pin 来试试"这种兜底 ✗ ——
+     *   那正是本次要修的后门 ✓。
+     *
+     * ★ 名字里带 `ForAuthority` 不是啰嗦 ✗：下面那个 `pinCa(served, caPem)`（"用**指定**的 CA 验链"✓）
+     *   与它**参数表一模一样**（都是 `X509Certificate, String` ✓）—— 不加区分就是同一个重载 ✗，
+     *   而"哪个读的是这台电脑信任的那张、哪个是别人递过来的一张"这件事**最容易看串行** ✗。
      */
-    private boolean pinCa(X509Certificate served) {
-        return pinCa(served, loadPinnedCa());
+    private boolean pinCaForAuthority(X509Certificate served, String authority) {
+        return pinCa(served, loadPinnedCa(authority, served));
     }
 
     /**
@@ -1946,23 +2078,18 @@ public class MainActivity extends android.app.Activity {
     }
 
     /**
-     * 读"当前该信哪张 CA"✓：**prefs 里的 pin 优先** ✓，没有（或读坏了 ✓）再退回
-     * 打包进 assets 的那张 ✓（`assets/dshm_ca.pem` ✓ —— C2 之后的新包里**没有这个文件** ✓，
-     * 于是这里自然返回 null ✓ ⇒ 走 TOFU ✓）。
+     * 读"**这个 authority** 该信哪张 CA"✓：**prefs 里该 authority 的 pin 优先** ✓，
+     * 没有（或读坏了 ✓）再退回打包进 assets 的那张 ✓（`assets/dshm_ca.pem` ✓ ——
+     * C2 之后的新包里**没有这个文件** ✓，于是这里自然返回 null ✓ ⇒ 走 TOFU ✓）。
      *
-     * ★ 读坏了**不算"读到了"** ✓：半截 PEM 拿去建信任库只会一路抛异常 ✓，
-     *   表现得像"证书突然全不认了"✗；退回 assets / TOFU 才是可用的行为 ✓（并记一行日志 ✓）。
+     * ★ `served` 只在**旧键认领**那一步用得上 ✓（"这张旧 CA 到底签没签这台电脑的证书"✓）：
+     *   传 `null` = 这次**没有判据** ✓（网页那条只读桥就是这种 ✓）⇒ 旧键**不认领** ✓、
+     *   而该 authority 的专属那份照读 ✓。★ 判据本体就是既有的
+     *   {@link #pinCa(X509Certificate, String)}（用**指定**的 CA 验链 ✓）—— **语义一个字没改** ✗。
      */
-    private String loadPinnedCa() {
-        try {
-            String pinned = prefs.getString(KEY_PINNED_CA, null);
-            if (pinned != null && pinned.contains("BEGIN CERTIFICATE") && parseCa(pinned) != null) {
-                return pinned;
-            }
-            if (pinned != null) Log.w(TAG, "prefs 里的 pin 读不出来（当作没有 ✓ —— 走 assets 回退 / TOFU ✓）");
-        } catch (Throwable t) {
-            Log.w(TAG, "读 pin 失败（当作没有 ✓）", t);
-        }
+    private String loadPinnedCa(String authority, X509Certificate served) {
+        String pinned = loadPinnedCaFromPrefs(authority, served);
+        if (pinned != null) return pinned;
         try (InputStream in = getAssets().open("dshm_ca.pem")) {
             ByteArrayOutputStream buffer = new ByteArrayOutputStream();
             byte[] chunk = new byte[4096];
@@ -1976,11 +2103,51 @@ public class MainActivity extends android.app.Activity {
         }
     }
 
-    /** 把 CA PEM 落盘 ✓（`commit()` 同步 ✓ —— 落盘成功才允许 `proceed()` ✓，见 {@link #tofuTrustOnce} ✓）。 */
-    private boolean savePinnedCa(String caPem) {
+    /**
+     * 只读 prefs ✓（**没有就返回 `null`** ✗ —— **不碰 assets** ✗）：该 authority 专属的那份 ✓，
+     * 读不到再看旧键能不能**安全认领** ✓（判据 / 认领 / 删旧键全在 {@link PinStore#read} ✓）。
+     *
+     * 为什么把这一步单独抽出来 ✗：网页那条只读桥（{@link ShellBridge#pinnedCaFingerprint} ✓）
+     * 必须能区分"**prefs 里的 pin**"（`source:"pinned"` ✓）与"**老包内置的 CA**"
+     * （`source:"assets"` ✓）✓ —— 合约里这两个值不同 ✓（配对页据此显示不同的提示 ✓）。
+     *
+     * ★ 读坏了**不算"读到了"** ✓：半截 PEM 拿去建信任库只会一路抛异常 ✓，
+     *   表现得像"证书突然全不认了"✗；退回 assets / TOFU 才是可用的行为 ✓（并记一行日志 ✓）。
+     */
+    private String loadPinnedCaFromPrefs(String authority, X509Certificate served) {
+        try {
+            PinStore.Pin pin = PinStore.read(prefsKv, authority,
+                    served == null ? null : caPem -> pinCa(served, caPem));
+            if (pin.fromLegacy()) {
+                Log.i(TAG, "旧键 " + KEY_PINNED_CA + " 与这台电脑（" + pin.key + "）的证书一致 ✓ ⇒ 认领为它的专属 pin ✓"
+                        + "（写新键 ✓" + (pin.persisted ? "" : "、★ 但写盘失败 ✗ ⇒ 下次会再认领一遍")
+                        + "、删旧键 ✓）");
+            } else if (pin.legacy == PinStore.Legacy.REJECTED) {
+                Log.w(TAG, "旧键 " + KEY_PINNED_CA + " 签不了这台电脑（" + pin.key + "）的证书 ✗ ⇒ **忽略旧值** ✓"
+                        + "（旧键原样留着 ✓ —— 它可能是另一台电脑的记录 ✓）⇒ 走 assets 回退 / TOFU ✓");
+            }
+            if (pin.pem == null) return null;
+            if (pin.pem.contains("BEGIN CERTIFICATE") && parseCa(pin.pem) != null) return pin.pem;
+            Log.w(TAG, "prefs 里的 pin 读不出来（当作没有 ✓ —— 走 assets 回退 / TOFU ✓）");
+            return null;
+        } catch (Throwable t) {
+            Log.w(TAG, "读 pin 失败（当作没有 ✓）", t);
+            return null;
+        }
+    }
+
+    /**
+     * 把 CA PEM 落盘到**该 authority 专属**的键 ✓（`commit()` 同步 ✓ ——
+     * 落盘成功才允许 `proceed()` ✓，见 {@link #tofuTrustOnce} ✓）。
+     *
+     * ★ 只写专属键 ✓、**不碰旧键** ✗（见 {@link PinStore#write} ✓）：
+     *   此刻确认的是**一台新**电脑 ✓ —— 旧键里那台**还没认领**的电脑的记录，
+     *   凭什么因为"又连了一台"就没了 ✗。
+     */
+    private boolean savePinnedCa(String authority, String caPem) {
         if (caPem == null || !caPem.contains("BEGIN CERTIFICATE")) return false;
         try {
-            return prefs.edit().putString(KEY_PINNED_CA, caPem).commit();
+            return PinStore.write(prefsKv, authority, caPem);
         } catch (Throwable t) {
             Log.w(TAG, "pin 落盘失败 ✗", t);
             return false;
@@ -1988,24 +2155,38 @@ public class MainActivity extends android.app.Activity {
     }
 
     /**
-     * ★★ 「忘记这台电脑」✓ —— **同时**清 `KEY_PINNED_CA` 与 `KEY_PINNED_SLOT` ✓。
+     * ★★ 「忘记这台电脑」✓ —— 清**当前这台电脑**（当前页面 / 当前槽那个 authority ✓）的 pin ✓
+     * + 旧键 ✓ + 全局的 {@link #KEY_PINNED_SLOT} ✓。
      *
-     * 为什么两个都要清 ✗：pin 决定"信哪张 CA" ✓、pinned-slot 决定"先试哪个地址"✓ ——
+     * 为什么几个都要清 ✗：pin 决定"信哪张 CA" ✓、pinned-slot 决定"先试哪个地址"✓ ——
      * 换了宿主之后，只清一个就会出现"连过去的还是旧那台"或者"旧 pin 把新宿主全拒掉"✗
      * （后者正是 TOFU 的经典操作陷阱 ✓）。清完**再连会重新走一次 TOFU** ✓（有票据就更省事 ✓）。
+     *
+     * ★★ C3：**只清当前这个 authority** 那份 ✗ —— "忘一台、两台都要重配"是不能接受的 ✓：
+     *   多宿主之后 prefs 里可能同时躺着 Mac 与 Windows 两份 pin ✓，
+     *   只要按前缀扫一遍（`pinned-ca:*` ✓）就会把另一台也清掉 ✗（而人根本联想不到是这里 ✓）
+     *   ⇒ {@link PinStore#forget} 是**只按确定的键逐个删** ✓、结构上就没有"扫前缀"那条路 ✓。
+     *   ★ 认不出 authority 时它**一份都不动** ✓（宁可什么都不清 ✓，也绝不猜"用户可能指的是哪一台"✗）。
+     *
+     * ★ {@link #KEY_PINNED_SLOT}（全局 ✓）照旧一起清 ✓：它不是"哪台电脑的证书"✗，
+     *   只是"先试哪个地址"的顺序偏好 ✓；本轮它**没有界面**（只存 / 只报 ✓），
+     *   要按 authority 存得先有写它的界面与协议 ✓ —— 留作后续 ✓（不是本单的范围 ✗）。
      */
     private void forgetThisComputer() {
         boolean hadAny = false;
+        String authority = currentAuthority();
         try {
-            hadAny = prefs.getString(KEY_PINNED_CA, null) != null
-                    || prefs.getString(KEY_PINNED_SLOT, null) != null;
-            // ★ 两个键一起清 ✓（见方法注释 ✓）；`commit()` 同步 ✓ —— 清完才有"已经忘了"这个事实 ✓
-            prefs.edit().remove(KEY_PINNED_CA).remove(KEY_PINNED_SLOT).commit();
+            // ★ 只删"这个 authority 那份 + 旧键"✓（另一台电脑的 pin**一份都不许动** ✗）
+            hadAny = PinStore.forget(prefsKv, authority);
+            hadAny = prefs.getString(KEY_PINNED_SLOT, null) != null || hadAny;
+            // ★ pinned-slot 照旧一起清 ✓（见方法注释 ✓）；`commit()` 同步 ✓ —— 清完才有"已经忘了"这个事实 ✓
+            prefs.edit().remove(KEY_PINNED_SLOT).commit();
         } catch (Throwable t) {
             Log.w(TAG, "清 pin / pinned-slot 失败 ✗", t);
         }
         expectedCaFingerprint = null;
-        Log.i(TAG, "已忘记这台电脑（pin + pinned-slot 都清了 ✓，下次连接重新确认身份 ✓）");
+        Log.i(TAG, "已忘记这台电脑（authority=" + authority + " ✓：它的专属 pin + 旧键 + pinned-slot 都清了 ✓，"
+                + "下次连接重新确认身份 ✓；★ 别的电脑的 pin 一份都没动 ✓）");
         /** ★ 必须是**事实上最终**的局部变量 ✓ —— 下面那个 lambda 要捕获它 ✓（`hadAny` 不行 ✗）。 */
         final boolean hadPin = hadAny;
         runOnUiThread(() -> Toast.makeText(MainActivity.this,
@@ -2085,9 +2266,15 @@ public class MainActivity extends android.app.Activity {
         return out.toString();
     }
 
-    /** 给 {@link ShellBridge#pinnedCaFingerprint} 用的短指纹（前 16 位 ✓）；没 pin 返回空串 ✓。 */
-    private String pinnedCaShortFingerprint() {
-        String pem = loadPinnedCa();
+    /**
+     * 给 {@link ShellBridge#pinnedCaFingerprint} 与「电脑地址」框用的短指纹（前 16 位 ✓）；
+     * 没有返回空串 ✓。
+     *
+     * ★ C3：**必须传 authority** ✓ —— 报的是"**这台电脑**固定了哪一张"✓，
+     *   而不是"prefs 里随便哪一份"✗（见 {@link ShellBridge#pinnedCaFingerprint} ✓）。
+     */
+    private String pinnedCaShortFingerprint(String authority) {
+        String pem = loadPinnedCa(authority, null);
         if (pem == null) return "";
         return formatFingerprintGroups(caFingerprintOf(pem), true);
     }
@@ -2104,6 +2291,15 @@ public class MainActivity extends android.app.Activity {
     private static final class TofuAttempt {
         private final SslErrorHandler handler;
         /**
+         * ★★ C3：这一 attempt 属于**哪台电脑**（规范化的 `host:port` ✓）。
+         *
+         * 为什么必须带在 attempt 上 ✗：结案那一步（{@link #finishTofuWithPin} ✓）要**按 authority**
+         * 落盘 ✓ —— 而它离"认源"那一步隔着取 CA 的线程与（可能有的）用户确认框 ✓，
+         * 中间还可能换过槽 ✓ ⇒ 到那时再去读 `currentUrl` 已经是**另一个**源了 ✗
+         * （那就会把 A 的 CA 存到 B 的键上 ✗ —— 正是本次要修的那类"张冠李戴"✓）。
+         */
+        private final String authority;
+        /**
          * 这一 attempt 开始时那一槽的**代次**（{@link #slotGeneration} ✓）。
          * 结案时对不上 ⇒ 说明中间已经换过槽 ✓ ⇒ **不要再放行**那一次的加载 ✗
          * （放行一个"上一槽"的加载会与当前槽抢 WebView ✓ —— 见 {@link #finishTofuWithPin} ✓）。
@@ -2112,8 +2308,9 @@ public class MainActivity extends android.app.Activity {
         private Runnable watchdog;
         private boolean settled;
 
-        TofuAttempt(SslErrorHandler handler, int generation) {
+        TofuAttempt(SslErrorHandler handler, String authority, int generation) {
             this.handler = handler;
+            this.authority = authority;
             this.generation = generation;
         }
 
@@ -2137,6 +2334,7 @@ public class MainActivity extends android.app.Activity {
      * ```
      * 未知身份（pinCa 不通过）
      *   → 认得出源吗？（scheme://authority ✓）       认不出 ⇒ false（调用方 cancel ✓）
+     *   → 认得出 authority 吗？（host:port ✓）        认不出 ⇒ false（调用方 cancel ✓）★ C3
      *   → 已经在 TOFU 了吗？                          是     ⇒ false（调用方 cancel ✓）
      *   → GET <源>/mobile/trust.crt（超时 6s ✓）      失败/超时/非 200 ⇒ cancel + 提示 ✓
      *   → 算 SHA-256 指纹 + 验链（这张 CA 真的签了服务器那张吗 ✓）
@@ -2163,12 +2361,24 @@ public class MainActivity extends android.app.Activity {
             Log.w(TAG, "TOFU：认不出这次连接的源（scheme://authority ✗）⇒ 拒绝 ✓");
             return false;
         }
+        /**
+         * ★★ C3：**认不出 authority 就拒绝** ✓（而不是"随便找个键存下去"✗）。
+         *   存不进一个**确定属于这台电脑**的键 ⇒ 下次连接还用不上它 ✓
+         *   ⇒ 这次确认等于白确认了 ✗；更糟的是它会被写进**别人**的槽位 ✗。
+         *   方向永远是**收紧** ✓：这一次连不上（并留一行日志 ✓），而不是留一个错位的信任 ✗。
+         */
+        final String authority = PinStore.authorityOf(origin);
+        if (authority == null) {
+            Log.w(TAG, "TOFU：认不出这次连接的 authority（host:port ✗：" + origin + "）⇒ 拒绝 ✓"
+                    + "（存不进一个确定属于这台电脑的键 ✓ —— 绝不写进别人的槽位 ✗）");
+            return false;
+        }
         if (tofuInFlight) {
             Log.w(TAG, "TOFU：已经有一个在进行中（不叠第二个 ✓）⇒ 这一次拒绝 ✓");
             return false;
         }
         final String expected = expectedCaFingerprint;
-        final TofuAttempt attempt = new TofuAttempt(handler, slotGeneration);
+        final TofuAttempt attempt = new TofuAttempt(handler, authority, slotGeneration);
         tofuInFlight = true;
         /**
          * ★ 这几秒里**先不换槽** ✓（TOFU 要取 CA，可能还要等用户点一下 ✓）：
@@ -2296,9 +2506,16 @@ public class MainActivity extends android.app.Activity {
         });
     }
 
-    /** 落盘 + 放行 ✓（**落盘成功**才放行 ✗ —— 落盘失败还放行等于"下次又得重来"✓，不如明说 ✓）。 */
+    /**
+     * 落盘 + 放行 ✓（**落盘成功**才放行 ✗ —— 落盘失败还放行等于"下次又得重来"✓，不如明说 ✓）。
+     *
+     * ★★ C3：落盘的键是**这台电脑专属**的那一份 ✓（`pinned-ca:<host:port>` ✓ ——
+     *   见 {@link #savePinnedCa} 与 {@link PinStore#write} ✓）。`attempt.authority` 就是
+     *   "认源那一步"定下来的那个 authority ✓ —— 不是"现在 `currentUrl` 是谁"✗
+     *   （取 CA 这几秒里完全可能已经换过槽 ✓，那就把 A 的 CA 存到 B 的键上了 ✗）。
+     */
     private void finishTofuWithPin(TofuAttempt attempt, String caPem) {
-        if (!savePinnedCa(caPem)) {
+        if (!savePinnedCa(attempt.authority, caPem)) {
             Log.w(TAG, "TOFU：pin 落盘失败 ✗ ⇒ 拒绝（不假装成功 ✓）");
             settleTofu(attempt, false, R.string.tofu_unavailable);
             return;
@@ -2307,7 +2524,8 @@ public class MainActivity extends android.app.Activity {
         expectedCaFingerprint = null;
         if (caFingerprintOf(caPem) != null) {
             Log.i(TAG, "TOFU：已固定这台电脑的 CA ✓（前 16 位 "
-                    + formatFingerprintGroups(caFingerprintOf(caPem), true) + " ✓，存进 " + KEY_PINNED_CA + " ✓）");
+                    + formatFingerprintGroups(caFingerprintOf(caPem), true) + " ✓，存进 "
+                    + PinStore.keyFor(attempt.authority) + " ✓ —— 只属于 " + attempt.authority + " ✓）");
         }
         /**
          * ★ 结案时**已经换过槽**了吗 ✓（`slotGeneration` 变了 ✓）⇒ **不放行那一次的加载** ✗。
@@ -3060,7 +3278,12 @@ public class MainActivity extends android.app.Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             box.addView(forget, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            String pinnedShort = pinnedCaShortFingerprint();
+            /**
+             * ★ C3：报的是**当前这台电脑**（当前页面 / 当前槽那个 authority ✓）的指纹 ✓ ——
+             *   与"勾了忘记会清哪一份"**正好是同一个 authority** ✓（否则用户看到的是 A 的指纹、
+             *   清掉的却是 B 的记录 ✗，那比不显示更糟 ✓）。
+             */
+            String pinnedShort = pinnedCaShortFingerprint(currentAuthority());
             String message = pinnedShort.isEmpty()
                     ? hint + "\n\n" + getString(R.string.address_no_pin)
                     : hint + "\n\n" + getString(R.string.address_pinned, pinnedShort);

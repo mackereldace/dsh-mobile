@@ -455,10 +455,10 @@ if (existsSync(aapt2)) {
    * 网页侧探不到那条桥 ✓ ⇒ 面板**刻意不画按钮** ✓（这是设计 ✓，但也意味着
    * "新的 APK 装上去却什么都没有" ✗）—— 两种都只能在 dex 里判 ✓。
    */
-  const hostUrlFix = ['MobileUrl', 'switchHost', 'loadHostUrl']
+  const hostUrlFix = ['MobileUrl', 'switchHost', 'loadHostUrl', 'PinStore']
   check(
     hasAll(hostUrlFix),
-    '地址归一化与切换桥都在 dex 里（`MobileUrl` + `switchHost` + `loadHostUrl` ✓ —— 少了归一化，改地址填裸域名仍会落到 `/` 的 401 ✗；少了 `switchHost`，面板那颗「切到这台」永远不出现 ✗）',
+    '地址归一化 + 切换桥 + 按台各存一份的 CA pin 都在 dex 里（`MobileUrl` + `switchHost` + `loadHostUrl` + `PinStore` ✓ —— 少了归一化，改地址填裸域名仍会落到 `/` 的 401 ✗；少了 `switchHost`，面板那颗「切到这台」永远不出现 ✗；少了 `PinStore`，「从 Windows 切回 Mac」会被单值 pin 判成"指纹不一致"✗，而且手机上只表现为"连不上"✗）',
     missing(hostUrlFix).length === 0 ? hostUrlFix.join('、') : `缺 ${missing(hostUrlFix).join('、')}`,
   )
   /**

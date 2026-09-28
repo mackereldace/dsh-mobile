@@ -62,8 +62,16 @@
     <string name="tofu_mismatch">这台电脑给的证书与配对票据里的指纹不一致，已拒绝连接——可能有人在中间冒充这台电脑。请在电脑上重新生成配对码，再扫一次。</string>
     <string name="tofu_unavailable">取不到这台电脑的证书（超时或打不开），已拒绝连接。请确认手机与电脑在同一网络，或重新扫一次配对码。</string>
     <string name="tofu_forgotten">已忘记这台电脑：下次连接会重新核对它的证书指纹。</string>
-    <string name="tofu_nothing_pinned">本来就没有固定任何电脑的证书（不用清）。</string>
+    <!--
+      ★ C3：文案从"本来就没有固定**任何电脑**的证书"改成"**这台电脑**本来就没有固定的证书"。
+      为什么必须改 ✗：C3 之前 prefs 里**只有一份** pin ✓ ⇒ "任何电脑"与"这台电脑"恰好等价 ✓；
+      现在每台电脑各存一份 ✓（见 PinStore ✓）⇒ 用户对着 Mac 点了「忘记」，而 Windows 的 pin
+      还好好地在 prefs 里 ✓ —— 这时说"任何电脑都没有固定证书"就是**假话** ✗，
+      而"忘记"这个动作的语义**只针对当前这台** ✓（另一台的记录一份都不许动 ✗）。
+    -->
+    <string name="tofu_nothing_pinned">这台电脑本来就没有固定的证书（不用清；别的电脑的记录没有动）。</string>
     <string name="address_forget">忘记这台电脑（换电脑后必须勾：会同时清掉已固定的证书与钉死的地址）</string>
     <string name="address_pinned">手机已固定这台电脑的证书，指纹前 16 位：%1$s</string>
-    <string name="address_no_pin">手机还没有固定任何电脑的证书：连上时会先让你核对一次指纹。</string>
+    <!-- ★ C3：同上 —— "任何电脑"改成"这台电脑"（现在每台电脑各存一份 ✓，说"任何"就是假话 ✗） -->
+    <string name="address_no_pin">手机还没有固定这台电脑的证书：连上时会先让你核对一次指纹。</string>
 </resources>
