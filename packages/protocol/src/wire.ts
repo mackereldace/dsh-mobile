@@ -454,6 +454,18 @@ export interface MobileManifest {
   hostId: string
   hostFingerprint: string
   hostName: string
+  /**
+   * 本机**机器名**（形如 `Mac-mini-2024.local`）—— ★ **可选** ✓。
+   *
+   * 与 `hostName` 不是一回事：`hostName` 是 DSH 里那台宿主的**显示名**
+   * （用户可改 ✓），而这条是 `os.hostname()` 报出来的机器名 ✓
+   * （手机端"按槽认源、给宿主补名字"时用它 ✓）。
+   *
+   * ★ **拿不到就不写这个键** ✗（绝不写 `undefined` 占位 ✓）：
+   *   旧客户端读到多余键会直接忽略 ✓，但多一个 `undefined` 会让
+   *   "没有" 与 "有但为空" 分不开 ✗ —— 那正是"静默失败"的温床 ✓。
+   */
+  machineName?: string
   /** shim 脚本地址与完整性哈希，外壳可校验。 */
   shimUrl: string
   shimSha256: string

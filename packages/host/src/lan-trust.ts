@@ -57,7 +57,7 @@
  * 回环"，比平常更严，而不是更松。方向刻意选这一侧：闸门失效时宁可 403 也不放行。
  */
 
-import { hostname as osHostname, networkInterfaces as osNetworkInterfaces } from 'node:os'
+import { hostname as osHostname, networkInterfaces as osNetworkInterfaces, platform as osPlatformName } from 'node:os'
 
 /**
  * 网卡条目（只取用得到的三个字段）。
@@ -116,6 +116,45 @@ function safeHostname(): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * 本机**机器名** ✓（形如 `Mac-mini-2024.local`）—— manifest 的可选 `machineName` 用它 ✓。
+ *
+ * ## 为什么要单独抽一个函数（而不是在调用处各写一份）
+ *
+ * "机器名从哪来"必须**只有一处实现** ✓：这里与 `localHostNames()` 共用同一个取值口
+ * （`safeHostname` ✓）。它在 `lan-trust.ts` 里而不是调用方那边，是因为"本机 hostname
+ * 怎么处理"这件事本来就归这个模块管 ✓（证书 SAN、信任推导、面板补名字三处必须是同一个名字 ✓）。
+ *
+ * ## 形态（三种情况都说清，别猜 ✗）
+ *
+ *   · 已经带点（macOS 的 `Mac-mini-2024.local` ✓、或完整域名 ✓）⇒ **原样返回** ✓ ——
+ *     "名字真的会被广播/解析"的形态就是它自己 ✓；
+ *   · 裸名 + **macOS**（`platform === 'darwin'`）⇒ 补成 `<裸名>.local` ✓ ——
+ *     Bonjour/mDNS 广播的就是这个名字 ✓（与 `scripts/make-cert.mjs` 里证书 SAN 的约定一致 ✓）；
+ *   · ★ 裸名 + **Windows / Linux** ⇒ **原样返回** ✗，**不补** `.local` ✗ ——
+ *     Windows 的 `os.hostname()` 是 `DESKTOP-ABC1234` 这种裸名 ✓（实测见交接文档 §4.1af ✓），
+ *     补出来的 `DESKTOP-ABC1234.local` 在那台机器上**根本不解析** ✗，
+ *     而它正是要拿去当**面板行名给人看**的 ✓ ⇒ 补了就是给用户看一个假名字 ✗。
+ *
+ * ★ 平台要**显式传进来**（默认 `os.platform()` ✓）：这是"显示名对不对"的判据之一 ✓，
+ *   而单测必须在任何一台开发机上都得到同一个结论 ✗（不许把开发机的平台偷偷带进断言 ✗）。
+ *
+ * ★ 大小写**保持 `os.hostname()` 的原样** ✓（这是给人看的机器名 ✓）；
+ *   信任匹配集合 `localHostNames()` 才做小写归一 ✓（那是判据，不是展示 ✗）—— 两者目的不同，
+ *   刻意不合并，但取值口是同一个 ✓。
+ *
+ * ★ 拿不到（`os.hostname()` 抛错 / 空）⇒ 返回**空串** ✓ ⇒ 调用方**省略这个键** ✓
+ *   （绝不写 `undefined` 或空串 ✗ —— 那会把"没有"和"有但为空"混成一件事 ✗）。
+ */
+export function localMachineName(rawHostname?: string, platform: string = osPlatformName()): string {
+  const raw = (rawHostname ?? safeHostname()).trim().replace(/\.$/, '')
+  if (raw === '') return ''
+  // 已经带点 ⇒ 原样（`.local` 与完整域名都属于"这个名字本来就存在"）
+  if (raw.includes('.')) return raw
+  // 裸名：只有 macOS 才补 `.local`（Bonjour 广播的就是它）；Windows/Linux 补了不解析 ⇒ 原样
+  return platform === 'darwin' ? `${raw}.local` : raw
 }
 
 /**

@@ -45,6 +45,7 @@ import { DeviceCallQueue, DEVICE_CAPABILITIES, type DeviceCapability } from './d
 import {
   deriveLanTrust,
   isIpLiteralHostname,
+  localMachineName,
   matchesDerivedTrust,
   type LanTrustSnapshot,
   type NetworkInterfacesReader,
@@ -1497,14 +1498,27 @@ export function createMobileHost(options: {
       /**
        * ★ 这里多出两个 `MobileManifest` 里没有的字段（`tls` / `dshFrontend`）。
        *
-       * 为什么可以有：本阶段**不许改 `packages/protocol`**（交接纪律），而
+       * 为什么可以有：当初本阶段**不许改 `packages/protocol`**（交接纪律），而
        * "证书生成失败必须明说"（B1）与"DSH 前端漂移要在 manifest 里提示不兼容"（doc 15 §4.2）
        * 都要求 manifest 带上这两条状态。做法是返回一个**结构上兼容** MobileManifest 的更大对象
        * —— TS 允许，JSON 多两个键，手机端旧代码读到多余字段直接忽略。
        * 字段名刻意加前缀式命名（`tls` / `dshFrontend`），避免将来与 DSH 官方加的字段撞名。
+       *
+       * ★ 更正（本轮）：`machineName` 已经**正式进了** `MobileManifest` 协议
+       *   （`packages/protocol/src/wire.ts` ✓，可选字段 ✓），不再走"结构兼容"这条旁路 ✓。
+       *   上面两条仍然是旁路（它们带的是本部署的实现状态 ✓，不是协议字段 ✓）。
        */
       const tls = options.tls?.status()
       const probe = probeDshFrontend(options.distIndex?.())
+      /**
+       * ★ 机器名（`machineName` ✓，可选字段 ✓）。
+       *
+       * 取值**只有一个口**：`localMachineName()` ✓（`lan-trust.ts` 里那套
+       * `os.hostname()` 处理 ✓，与信任推导 / 证书 SAN 用的是同一个名字 ✓）——
+       * 可注入的 `options.hostname` 走同一条路 ✓，测试才演得了"拿不到机器名"✓。
+       * 拿不到 ⇒ 空串 ⇒ 下面**省略这个键** ✓（写 `undefined` 会让形状凭空多一个键 ✗）。
+       */
+      const machineName = localMachineName(options.hostname?.())
       const manifest: MobileManifest & {
         tls?: {
           ok: boolean
@@ -1518,6 +1532,8 @@ export function createMobileHost(options: {
         hostId: options.identity.hostId,
         hostFingerprint: fingerprint(options.identity.signingKey.publicKey),
         hostName: options.identity.hostName,
+        // ★ 可选：拿不到机器名就**不出现这个键** ✓（见上面 localMachineName 的说明 ✓）
+        ...(machineName === '' ? {} : { machineName }),
         shimUrl: '/mobile/boot.js',
         shimSha256: options.bootScript?.().sha256 ?? '',
         clientBundleVersion: options.clientBundleVersion ?? '0.1.0',
@@ -2892,8 +2908,37 @@ if (window.crypto && window.crypto.subtle) {
 } else { var t=cli.rows[3]; t.cells[1].textContent='不可用（非安全上下文）'; t.cells[1].className='bad'; }
 row(cli,'是否装了加密隧道', String(!!globalThis.__DSH_TRANSPORT__));
 row(cli,'隧道当前状态', globalThis.__DSH_MOBILE_BOOT__ ? String(globalThis.__DSH_MOBILE_BOOT__.state()) : '（本页不是 DSH 界面，正常）');
-var raw=null; try { raw=localStorage.getItem('dsh-mobile.host') } catch(e){}
-document.getElementById('store').textContent = raw === null ? '（空 —— 尚未配对）' : raw;
+// ── 本地已存的配对配置（★ P1a：读要带指纹优先 ✗ 见下）────────────────────────
+var storeBox=document.getElementById('store');
+storeBox.textContent='（读取中…）';
+function diagLocal(key){ try { return localStorage.getItem(key) } catch (e) { return null } }
+// 基名 host 配置里的宿主指纹（坏 JSON / 缺字段 ⇒ undefined，绝不抛）
+function diagOwnerFingerprint(raw){ if (typeof raw!=='string'||raw.length===0) return undefined;
+  try { var v=JSON.parse(raw).pinnedHostFingerprint; return (typeof v==='string'&&v.length>0)?v:undefined } catch (e) { return undefined } }
+/**
+ * ★★ 带指纹优先、基名兜底 ✓ —— 与 boot.js 的 readIdentityKeyValue、配对页的
+ *   readIdentityRaw **同一口径** ✓（键名改了，读者必须跟着改 ✓；见 §4.1ai ✓）。
+ * ★ 一个身份都没有 ⇒ 写「未知」✓ —— **绝不**写成「（空 —— 尚未配对）」✗：
+ *   读不到只能说明"本浏览器里没读到" ✓，说明不了"没配对" ✗（身份可能在壳里 ✓）。
+ *   本项目明文纪律：**拿不到就写未知、不许编** ✓。
+ */
+function diagShowStore(fingerprint){
+  var scoped=(typeof fingerprint==='string'&&fingerprint.length>0)?('dsh-mobile.host:'+fingerprint):null;
+  var raw=null, source=null;
+  if (scoped!==null) { raw=diagLocal(scoped); if (raw!==null) source=scoped; }
+  if (raw===null) {
+    // 基名兜底：**归属必须可证**（基名配置里的指纹 == 本机指纹）才敢用 ✗
+    var legacy=diagLocal('dsh-mobile.host');
+    if (legacy!==null && scoped!==null && diagOwnerFingerprint(legacy)===fingerprint) { raw=legacy; source='dsh-mobile.host（基名兜底，指纹已核对）'; }
+    else if (legacy!==null && scoped===null) { raw=legacy; source='dsh-mobile.host（基名；拿不到本机指纹 ⇒ 归属未核对）'; }
+  }
+  if (raw===null) { storeBox.textContent='未知 —— 本浏览器里没有读到这台电脑的身份（拿不到就写未知，绝不编结论）'; return }
+  storeBox.textContent='来源：'+source+'\\n'+raw;
+}
+fetch('/mobile/manifest',{headers:{'accept':'application/json'}})
+  .then(function(r){ return r.ok ? r.json() : null })
+  .then(function(m){ diagShowStore(m && typeof m.hostFingerprint==='string' ? m.hostFingerprint : null) })
+  .catch(function(){ diagShowStore(null) });
 // 上一页（DSH 界面）留下的痕迹：boot.js 会把隧道状态与最后错误写在这里
 var prev=null; try { prev=localStorage.getItem('dsh-mobile.lastTunnel') } catch(e){}
 document.getElementById('prev').textContent = prev === null ? '（无 —— 还没进过 DSH 界面）' : prev;
@@ -2909,7 +2954,7 @@ else {
     var t=(e.at||'').slice(11,19);
     return t+'  '+String(e.state)+(e.error?('  err='+String(e.error).slice(0,80)):'')+(e.attempt?('  attempt='+e.attempt):'');
   });
-  box.textContent=lines.join('\n');
+  box.textContent=lines.join('\\n');
 }
 // 捕获本页脚本错误（若有）
 var errs=document.getElementById('errs');

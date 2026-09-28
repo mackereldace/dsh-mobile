@@ -215,6 +215,13 @@
         <div class="card">
           <h2 style="margin-top:0">已配对的电脑</h2>
           <div id="phone-hosts" class="muted">（无）</div>
+          <!--
+            ★ 必须写清"壳里那份不归这个页面管" ✗（§4.1ai ✓）：
+              本页只碰得到 localStorage ✓，「解除」删的是**本浏览器**里的身份 ✓；
+              壳（App）自己库里那份要清得用 App 设置里的「忘记这台电脑」✓ ——
+              不写这一句，用户会以为点了「解除」就全清了 ✗（"假成功"的一种 ✗）。
+          -->
+          <p class="note" id="identity-scope-note">这里的「解除」只清<strong>本浏览器</strong>保存的身份。App（壳）自己库里那份<strong>不在这个页面能管的范围</strong>——要清它请用 App 设置里的「忘记这台电脑」。</p>
         </div>
       </section>
 
@@ -437,9 +444,156 @@
       // ───────────────────────── 手机侧 ─────────────────────────
 
       var STORE_KEY = 'dsh-mobile.host'
+      var DEVICE_KEY = 'dsh-mobile.device-key'
+      var CLAIMED_KEY = 'dsh-mobile.claimed-ticket'
+      var LAST_ENDPOINT_KEY = 'dsh-mobile.lastGoodEndpoint'
 
-      function readStored() {
-        try { var raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : null } catch (e) { return null }
+      /**
+       * 这台宿主的**全部**身份键（基名形态）✓。
+       *
+       * 「解除」要按这份名单逐条删 ✓ —— 少一条就是"点了像成功、其实没删" ✗
+       * （P1a 之后身份在 <键>:<指纹> 里 ✓，只删基名等于什么都没删 ✓；见 §4.1ai ③）。
+       */
+      var IDENTITY_BASE_KEYS = [STORE_KEY, DEVICE_KEY, CLAIMED_KEY, LAST_ENDPOINT_KEY]
+
+      /**
+       * 指纹形态的判据 —— 与 boot.js 的 validHostFingerprint **逐字同一口径** ✓。
+       * 页面**不发明第二套** ✗：两套判据迟早会分叉，症状是"一边认、一边不认" ✓。
+       */
+      function validHostFingerprint(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9_.-]{8,}$/.test(value)
+      }
+
+      function readLocal(key) {
+        try { return localStorage.getItem(key) } catch (e) { return null }
+      }
+      function writeLocal(key, value) {
+        try { localStorage.setItem(key, value) } catch (e) { /* 隐私模式等：写不进去也不许把页面弄崩 */ }
+      }
+      function removeLocal(key) {
+        try { localStorage.removeItem(key) } catch (e) { /* 同上 */ }
+      }
+
+      /** 基名 + 指纹 ⇒ 真正的键名 ✓（与 boot.js 的 identityKeyFor 同一口径 ✓）。 */
+      function scopedKey(base, fingerprint) {
+        return validHostFingerprint(fingerprint) ? base + ':' + fingerprint : base
+      }
+
+      /** 一段配置 JSON 里的宿主指纹 ✓（坏 JSON / 缺字段 ⇒ undefined ✓，绝不抛 ✗）。 */
+      function configFingerprint(raw) {
+        if (typeof raw !== 'string' || raw.length === 0) return undefined
+        try {
+          var value = JSON.parse(raw).pinnedHostFingerprint
+          return validHostFingerprint(value) ? value : undefined
+        } catch (e) { return undefined }
+      }
+
+      /**
+       * ★★ 本页对应的宿主指纹 —— **只**来自本页的 /mobile/manifest ✓
+       * （页面不猜端口、也不猜指纹 ✗；这与 boot.js 的"先用票据"是同一件事：
+       * 本页没有票据可读时，manifest 就是这台宿主自己报的身份 ✓）。
+       *
+       * 取到一次就记下来 ✓（同一页里没必要反复问）；拿不到 ⇒ 走下面那条**基名自证**兜底 ✓。
+       */
+      var manifestFingerprint = null
+      async function currentFingerprint() {
+        if (validHostFingerprint(manifestFingerprint)) return manifestFingerprint
+        try {
+          var manifest = await api('/mobile/manifest')
+          if (manifest && validHostFingerprint(manifest.hostFingerprint)) {
+            manifestFingerprint = manifest.hostFingerprint
+            return manifestFingerprint
+          }
+        } catch (e) { /* 拿不到就说拿不到：走下面的基名自证兜底 ✓ */ }
+        /**
+         * ★ manifest 拿不到时的兜底：**基名 host 配置自己写着归属** ✓ ——
+         *   与 boot.js 的 currentHostFingerprint 第 (c) 步**同一口径** ✓
+         *   （老用户 / 宿主目录还没建时，旧键自己就是归属的定义 ✓）。
+         * ★ 顺序不能反 ✗：**manifest 优先** ✓ —— 它是这台宿主**现报**的指纹 ✓；
+         *   基名自证只在这条路走不通时才用 ✓（否则基名会盖过带指纹那份 ✗）。
+         */
+        var legacyOwner = configFingerprint(readLocal(STORE_KEY))
+        if (legacyOwner !== undefined) return legacyOwner
+        return null
+      }
+
+      /**
+       * 基名那份的**归属**可证吗 ✓ —— 与 boot.js 的 legacyKeyBelongsToLocal **同一口径** ✓。
+       *
+       *   · 基名 dsh-mobile.host 配置里的 pinnedHostFingerprint == 这台宿主的指纹 ⇒ 认 ✓；
+       *   · 本机没有基名 host 键、但有带指纹的 dsh-mobile.host:<指纹> ⇒ 也认 ✓（同源兄弟键 ✓）；
+       *   · 其余一律**不认** ✗ —— 否则 B 电脑的页面上会拿 A 电脑留下的基名身份冒充 B ✗
+       *     （"按指纹分账"这件事的底线 ✓）。
+       */
+      function baseBelongsToHost(fingerprint) {
+        if (!validHostFingerprint(fingerprint)) return false
+        var owner = configFingerprint(readLocal(STORE_KEY))
+        if (owner !== undefined) return owner === fingerprint
+        var scopedHost = readLocal(scopedKey(STORE_KEY, fingerprint))
+        return scopedHost !== null && configFingerprint(scopedHost) === fingerprint
+      }
+
+      /**
+       * ★★ 读一份身份：**带指纹优先、基名兜底** ✓ —— 与 boot.js 的 readIdentityKeyValue
+       * **同一口径** ✓（宿主侧页面与网页侧读取器不许有两套 ✓）。
+       *
+       * 为什么这是本轮的真凶 ✗：P1a 把身份键按宿主指纹命名空间化之后，宿主侧这页
+       * **还在读基名** ✗ ⇒ 两台已配对的实例，/mobile 都说"尚未配对"✗（§4.1ai ✓）。
+       * 这类改动必须"**全仓 grep 键名**"✓ —— 读者不在你改的文件里 ✓。
+       *
+       * ★ 顺序一步都不能省：
+       *   1. 先读 dsh-mobile.<名>:<指纹> ✓；
+       *   2. **没有那份**才退回基名 ✓（基名**绝不能盖过**带指纹那份 ✗）；
+       *   3. 基名那份还要**归属可证**才敢用 ✗（见 baseBelongsToHost ✓）。
+       */
+      async function readIdentityRaw(base) {
+        var fingerprint = await currentFingerprint()
+        if (validHostFingerprint(fingerprint)) {
+          var scoped = readLocal(base + ':' + fingerprint)
+          if (scoped !== null) return scoped
+        }
+        var legacy = readLocal(base)
+        if (legacy === null) return null
+        return baseBelongsToHost(fingerprint) ? legacy : null
+      }
+
+      /**
+       * 写一份身份：**带指纹形态**（P1a 之后的新读者只认它 ✓）
+       * + **基名形态**兜底 ✓ —— 旧 App / 旧 boot.js 只认基名 ✓，不许把它们弄丢 ✗。
+       */
+      function writeIdentityValue(base, value, fingerprint) {
+        if (validHostFingerprint(fingerprint)) writeLocal(base + ':' + fingerprint, value)
+        writeLocal(base, value)
+      }
+
+      /**
+       * 手机侧读到的配对配置 ✓。
+       * 基名 / 带指纹两条路**都走 readIdentityRaw** ✓ —— 读取实现只有这一份 ✓
+       * （phone-hosts / openGui / connectTunnel / 启动那段全用它 ✓）。
+       */
+      async function readStored() {
+        var raw = await readIdentityRaw(STORE_KEY)
+        if (raw === null) return null
+        try { return JSON.parse(raw) } catch (e) { return null }
+      }
+
+      /**
+       * 「解除」= 把这台宿主的身份**真的**删干净 ✓。
+       *
+       * ★ 只删基名是**假删** ✗：P1a 之后身份在 dsh-mobile.host:<指纹> 里 ✓，
+       *   点了"解除"却什么都没变 ✗（§4.1ai ③ 第三行 ✓）。所以**两种形态都删** ✓。
+       * ★ 别的宿主的带指纹键**不许动** ✗（按本页指纹逐条删 ✓，绝不做前缀匹配 ✗ ——
+       *   那会在 A 上被撤销时连带清掉 B 的身份 ✗）。
+       * ★★ 壳（App）里那份**不在这个页面能管的范围** ✗ —— 本页只碰得到 localStorage ✓，
+       *   要清壳里那份得用 App 设置里的「忘记这台电脑」✓（页面上也写着这一句 ✓）。
+       */
+      async function forgetThisHost() {
+        var fingerprint = await currentFingerprint()
+        for (var i = 0; i < IDENTITY_BASE_KEYS.length; i++) {
+          var base = IDENTITY_BASE_KEYS[i]
+          if (validHostFingerprint(fingerprint)) removeLocal(scopedKey(base, fingerprint))
+          removeLocal(base)
+        }
       }
 
       /** 解析配对链接，取出宿主指纹、票据与候选地址。 */
@@ -493,15 +647,22 @@
           // readStoredHost() 直接把它当配置用，票据能省掉一次 URL 解析；
           // 而 pinnedHostFingerprint 是防中间人的关键——丢了它 boot.js 会接受
           // 任何自签的宿主身份。
-          localStorage.setItem(STORE_KEY, JSON.stringify({
+          //
+          // ★ P1a：写**两种形态** ✗ —— 带指纹那份是新读者唯一认的 ✓，
+          //   基名那份是**旧 App / 旧 boot.js 的兜底** ✓（不许把它们弄丢 ✗）。
+          //   指纹取**本次票据**自带的那一个 ✓（配对当次最可信 ✓，与 boot.js 的口径一致 ✓）。
+          var config = JSON.stringify({
             baseUrl: location.origin,
             tunnelUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/mobile/ws',
             pairingTicket: ticket.ticket,
             pairingCode: ticket.code,
             pinnedHostFingerprint: ticket.hostFingerprint,
-          }))
+          })
+          writeIdentityValue(STORE_KEY, config, ticket.hostFingerprint)
+          // 这一页在配的就是这台宿主 ⇒ 顺手把指纹记下（省一次 manifest 往返，且更可信）
+          if (validHostFingerprint(ticket.hostFingerprint)) manifestFingerprint = ticket.hostFingerprint
           text('phone-ok', '已提交。请在电脑上核对指纹并点「允许此设备」——允许后本页会自动进入 DSH 界面。')
-          renderPhoneHosts()
+          await renderPhoneHosts()
           // 给电脑端一点确认时间后进入界面（界面会自行重连直到成功）。
           //
           // 形状约定：?pair= 必须是**整个 ticket 对象**的 base64url(UTF-8 JSON)，
@@ -520,10 +681,16 @@
         return (match && match[1] ? match[1].trim() : '手机浏览器').slice(0, 40)
       }
 
-      /** 生成并保存设备签名密钥（P-256，浏览器本地）。 */
+      /**
+       * 生成并保存设备签名密钥（P-256，浏览器本地）。
+       *
+       * ★ P1a：读也**带指纹优先** ✓（readIdentityRaw ✓ —— 与 boot.js 的
+       *   ensureDeviceKey 同一口径 ✓）。只读基名会在"这台设备已有带指纹私钥"时
+       *   **另生成一把新密钥** ✗ ⇒ 对面认的设备凭空换了一台 ✗（比"连不上"难查 ✓）。
+       * ★ 写也**两种形态都写** ✓：新读者认带指纹那份 ✓，旧 App 只认基名那份 ✓。
+       */
       async function ensureDeviceKey() {
-        var KEY = 'dsh-mobile.device-key'
-        var stored = localStorage.getItem(KEY)
+        var stored = await readIdentityRaw(DEVICE_KEY)
         if (stored) {
           try {
             var parsed = JSON.parse(stored)
@@ -537,7 +704,7 @@
         var jwk = await crypto.subtle.exportKey('jwk', pair.privateKey)
         var publicKey = b64u(pub)
         var deviceId = 'web-' + b64u(crypto.getRandomValues(new Uint8Array(9)))
-        localStorage.setItem(KEY, JSON.stringify({ deviceId: deviceId, publicKey: publicKey, privateKeyJwk: jwk }))
+        writeIdentityValue(DEVICE_KEY, JSON.stringify({ deviceId: deviceId, publicKey: publicKey, privateKeyJwk: jwk }), await currentFingerprint())
         var d = new Uint8Array(await crypto.subtle.digest('SHA-256', pub))
         return { deviceId: deviceId, publicKey: publicKey, fingerprint: hex(d.subarray(0, 16)) }
       }
@@ -575,43 +742,59 @@
 
       /** 建立加密隧道（与 boot.js 同一套协议，这里只用于展示连接状态）。 */
       async function connectTunnel() {
-        var stored = readStored()
-        if (!stored) throw new Error('尚未配对')
+        var stored = await readStored()
+        // ★ 读不到**不等于**"没配对" ✗（身份可能只在壳里 ✓）—— 这句是**读的结论**，
+        //   不是配对状态的结论 ✓。见 §4.1ai：这类"拿不到就编"的说法是本项目明文禁止的。
+        if (!stored) throw new Error('本浏览器里没有读到这台电脑的身份（这不等于没配对：身份可能只在 App 壳里）')
         var boot = window.__DSH_MOBILE_BOOT__
         if (!boot || !boot.tunnel) {
           // boot.js 只在电脑端注入的页面里存在；本页是独立页面，因此这里只做可达性检查
           var manifest = await api('/mobile/manifest')
           text('conn-state', '已配对')
           text('conn-detail', '主机指纹 ' + formatFingerprint(manifest.hostFingerprint) + '；打开 DSH 界面即会自动建立加密隧道。')
-          renderPhoneHosts()
+          await renderPhoneHosts()
           return
         }
         await boot.tunnel.connect()
         text('conn-state', '已连接')
       }
 
-      function renderPhoneHosts() {
-        var stored = readStored()
+      /**
+       * 「已配对的电脑」那一格 ✓ —— 显示的是**本浏览器**保存的身份 ✓。
+       *
+       * ★ 文案必须如实（§4.1ai ⑤ 的同类错误 ✗）：找到就说"本浏览器已保存"✓；
+       *   读不到就说"本浏览器里没读到"✓，**不许**写成断言式的"尚未配对"✗。
+       */
+      async function renderPhoneHosts() {
+        var stored = await readStored()
         var host = $('phone-hosts')
-        if (!stored) { host.textContent = '（无）'; return }
+        if (!stored) {
+          host.textContent = '（本浏览器里没读到这台电脑的身份记录——这不等于没配对：App 壳自己库里那份不在这里显示）'
+          return
+        }
         host.innerHTML = ''
         var div = document.createElement('div')
         div.className = 'dev'
         var left = document.createElement('div')
         var name = document.createElement('div')
         name.innerHTML = '<strong>' + escapeHtml(location.host) + '</strong>'
+        var note = document.createElement('div')
+        note.className = 'muted'
+        note.style.fontSize = '12px'
+        note.textContent = '已配对（本浏览器已保存这台电脑的身份）'
         var fp = document.createElement('div')
         fp.className = 'mono muted'
         fp.style.fontSize = '12px'
-        fp.textContent = formatFingerprint(stored.pinnedHostFingerprint)
-        left.appendChild(name); left.appendChild(fp)
+        var fpText = formatFingerprint(stored.pinnedHostFingerprint)
+        fp.textContent = fpText ? '主机指纹 ' + fpText : '（这份配置里没有指纹——旧版本写下的）'
+        left.appendChild(name); left.appendChild(note); left.appendChild(fp)
         var button = document.createElement('button')
         button.className = 'danger'
         button.textContent = '解除'
+        // ★ 真删：这台宿主的**全部**身份键、**两种形态都删** ✓（见 forgetThisHost ✓）。
+        //   旧实现只删基名 ⇒ P1a 之后等于什么都没删 ✗（"假删" ✓，§4.1ai ③）。
         button.onclick = function () {
-          localStorage.removeItem(STORE_KEY)
-          localStorage.removeItem('dsh-mobile.device-key')
-          location.reload()
+          forgetThisHost().then(function () { location.reload() })
         }
         div.appendChild(left); div.appendChild(button)
         host.appendChild(div)
@@ -623,9 +806,13 @@
         })
       }
 
-      function openGui() {
-        var stored = readStored()
-        if (!stored) { text('conn-detail', '请先完成配对'); return }
+      async function openGui() {
+        var stored = await readStored()
+        if (!stored) {
+          // ★ 同样是"读不到"而不是"没配对" ✗（诚实措辞，见 §4.1ai ✓）
+          text('conn-detail', '本浏览器里没读到这台电脑的身份——这不等于没配对（身份可能只在 App 壳里）。要在这里进入，请先按上面的步骤配对；已在 App 里配对过的，请用 App 自己保存的地址进入。')
+          return
+        }
         // 走插件自己的 /mobile/app 外壳。**绝不能走根路径**：那是 DSH 的 token/cookie
         // 认证入口（唯一的一条），插件曾用 path:'/' 抢占它，导致 token 兑换永不执行、
         // 任何浏览器打开都是 401 死循环。详见 packages/host/src/cordis.ts 的事故注释。
@@ -1092,7 +1279,12 @@
           state.caFingerprint = manifestForPhoneUrl.tls && manifestForPhoneUrl.tls.caFingerprint
             ? manifestForPhoneUrl.tls.caFingerprint
             : null
+          // ★ P1a：顺手记下这台宿主的指纹 ✓ —— 下面所有身份读取都用它做"带指纹优先"✓
+          //   （这样也不会为同一件事再问一次 manifest ✓）。
+          if (validHostFingerprint(manifestForPhoneUrl.hostFingerprint)) manifestFingerprint = manifestForPhoneUrl.hostFingerprint
         } catch (error) {
+          // ★ 拿不到 manifest ⇒ 指纹就是"拿不到" ✓：读取会走**基名兜底** ✓，
+          //   页面上也只会说"本浏览器里没读到" ✓ —— 绝不编成"尚未配对"✗。
           state.phoneBaseUrl = null
           state.caFingerprint = null
         }
@@ -1123,7 +1315,7 @@
           $('do-pair').onclick = doPair
           $('scan-qr').onclick = scanQr
           $('open-gui').onclick = openGui
-          renderPhoneHosts()
+          await renderPhoneHosts()
           probeDesktopUrl().then(function (desktopUrl) {
             if (desktopUrl !== undefined) {
               text('desktop-url', desktopUrl)
@@ -1133,10 +1325,18 @@
               text('desktop-url-note', '请在电脑上用它自己的本机地址打开配对页（形如 http://127.0.0.1:3080/mobile）。')
             }
           })
-          var stored = readStored()
+          var stored = await readStored()
           if (stored) {
+            // ★ 找到了就说"本浏览器已保存" ✓ —— 这是**读的结论**，不是"配对状态"的结论 ✓
+            //   （身份也可能同时在壳里 ✓，本页看不到也不该否认 ✓）。
+            var storedFp = formatFingerprint(stored.pinnedHostFingerprint)
             text('conn-state', '已配对')
-            text('conn-detail', '主机指纹 ' + formatFingerprint(stored.pinnedHostFingerprint))
+            text('conn-detail', '已配对（本浏览器已保存这台电脑的身份' + (storedFp ? '，主机指纹 ' + storedFp : '') + '）。打开 DSH 界面即会建立加密隧道。')
+          } else {
+            // ★★ 读不到**只**说明本浏览器里没有 ✗ —— 绝不许写成断言式的"尚未配对"✗。
+            //   "拿不到就编结论"是本项目明文禁止的（见 §4.1ai ③ 第四行 / §五 坑 27 ✓）。
+            text('conn-state', '本浏览器无记录')
+            text('conn-detail', '本浏览器里没读到这台电脑的身份——这不等于没配对（身份可能只在 App 壳里）。若你已在 App 里配对，请用 App 保存的地址进入；否则请按上面的步骤配对。')
           }
           // ★ C2：把"这台电脑的 CA"与"壳记住了哪一台"摆在一起（见 renderCaTrust ✓）
           renderCaTrust()

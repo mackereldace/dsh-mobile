@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { runInNewContext } from 'node:vm'
 
 import { DEFAULT_CAPABILITIES, fingerprint, generateP256KeyPair } from '@dsh-mobile/protocol'
 
@@ -89,7 +90,7 @@ interface Env {
   cleanup(): void
 }
 
-function makeHost(options: { trustedHosts?: readonly string[]; distIndex?: string; phoneBaseUrl?: string; relay?: boolean } = {}): Env {
+function makeHost(options: { trustedHosts?: readonly string[]; distIndex?: string; phoneBaseUrl?: string; relay?: boolean; hostname?: () => string } = {}): Env {
   const root = mkdtempSync(join(tmpdir(), 'dshm-admin-'))
   const dir = join(root, 'storages', 'dsh-mobile')
   const store = new DeviceStore({ directory: dir })
@@ -119,7 +120,8 @@ function makeHost(options: { trustedHosts?: readonly string[]; distIndex?: strin
     // 探针语料指向**夹具**而不是本机真实 DSH（测试不该依赖机器上装了什么）
     distIndex: () => options.distIndex,
     tls,
-    hostname: () => 'Mac-mini-2024.local',
+    // ★ 机器名也从这里注入：manifest.machineName 与信任推导必须读**同一个口** ✓
+    hostname: options.hostname ?? (() => 'Mac-mini-2024.local'),
     networkInterfaces: () => {
       if (broken) throw new Error('simulated os.networkInterfaces failure')
       return { en0: addresses.map((address) => ({ address, family: 'IPv4', internal: false })) }
@@ -526,5 +528,386 @@ test('B1 证书生成失败会在 manifest 里明说（不是静默）', async (
     )
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ───────── P1a 漏网读者：宿主自带脚本的页面（配对页 / 诊断页 + manifest 机器名）─────────
+//
+// ## 为什么这一节要"把页面脚本真跑起来"再断言
+//
+// §4.1ai 的根因一句话：**改了键名，把读者甩在了后面** —— P1a 把身份键按宿主指纹
+// 命名空间化（`dsh-mobile.host` ⇒ `dsh-mobile.host:<指纹>`）时，只盘点了
+// `boot.js` + 壳 + 验收脚本，**漏掉了宿主侧自带脚本的页面**：
+//   · 配对页永远说"尚未配对"；它的「解除」**假删**（只删基名 ⇒ 身份还在）；
+//   · 诊断页把"读不到"直接**编**成「（空 —— 尚未配对）」。
+//
+// ⇒ 判据只能打在**这两段内联脚本真跑出来的 DOM 文本**上，绝不能是"源码里有某个字符串"
+//   （那种判据在"脚本被改成永远走兜底分支"时照样全绿 —— 本项目对它零容忍）；
+//   拿不到 ⇒ 只许写"未知/没读到"，**不许编结论**。
+//
+// 页面脚本是宿主生成的 HTML 里的 `<script>`：这里从**真的 HTTP 产物**里把它切出来，
+// 喂一个最小假 DOM + 假 fetch（`localStorage` 用 Map），再用 `node:vm` 跑。
+
+/** 一个形状合法的假指纹（32 位小写十六进制 —— 与真实指纹同形）。 */
+const OTHER_FP = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+/**
+ * 假 DOM 元素。
+ *
+ * `appendChild` 顺手往 `rows` / `cells` 里也塞一份：诊断页是表格
+ * （`cli.rows[3].cells[1]` ✓），而两个页面都只用到"挂上去 / 读文本"这几件事 ✓。
+ * 刻意**不实现** `innerHTML` 的解析 ✗：假 DOM 不解析 HTML 标记 ✓
+ * ⇒ 静态标记（例如"壳里那份不归本页管"那句）只能在**产物 HTML** 上断言 ✓（见对应用例 ✓）。
+ */
+class FakeElement {
+  readonly tagName: string
+  readonly children: FakeElement[] = []
+  readonly rows: FakeElement[] = []
+  readonly cells: FakeElement[] = []
+  readonly style: Record<string, string> = {}
+  readonly classList = {
+    toggle: (): void => {},
+    add: (): void => {},
+    remove: (): void => {},
+    contains: (): boolean => false,
+  }
+  className = ''
+  id = ''
+  innerHTML = ''
+  value = ''
+  textContent = ''
+  onclick: (() => unknown) | null = null
+  constructor(tag = 'div') {
+    this.tagName = tag
+  }
+  appendChild(child: FakeElement): FakeElement {
+    this.children.push(child)
+    this.rows.push(child)
+    this.cells.push(child)
+    return child
+  }
+  setAttribute(): void {}
+  removeAttribute(): void {}
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  remove(): void {}
+}
+
+interface FakeDom {
+  byId(id: string): FakeElement
+  readonly document: { getElementById(id: string): FakeElement; createElement(tag: string): FakeElement; addEventListener(): void }
+}
+
+function makeFakeDom(): FakeDom {
+  const elements = new Map<string, FakeElement>()
+  const byId = (id: string): FakeElement => {
+    let element = elements.get(id)
+    if (element === undefined) {
+      element = new FakeElement(id === 'qr' ? 'canvas' : 'div')
+      element.id = id
+      elements.set(id, element)
+    }
+    return element
+  }
+  return { byId, document: { getElementById: byId, createElement: (tag) => new FakeElement(tag), addEventListener: () => {} } }
+}
+
+/** 把一棵假 DOM 子树里的文本全拼起来（渲染结果就是"用户看到的那几行"）。 */
+function collectText(element: FakeElement | undefined): string {
+  if (element === undefined) return ''
+  return [element.textContent, ...element.children.map((child) => collectText(child))].filter((text) => text !== '').join(' ')
+}
+
+/** 按**恰好等于**的文本找元素（用于找到「解除」那颗按钮）。 */
+function findByText(element: FakeElement | undefined, needle: string): FakeElement | undefined {
+  if (element === undefined) return undefined
+  if (element.textContent === needle) return element
+  for (const child of element.children) {
+    const hit = findByText(child, needle)
+    if (hit !== undefined) return hit
+  }
+  return undefined
+}
+
+/** 从**真的 HTTP 产物**里切出最后一段内联脚本（页面自己的那段）。 */
+function lastInlineScript(html: string): string {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1] ?? '')
+  assert.ok(scripts.length > 0, '页面产物里应当有内联脚本')
+  const script = scripts[scripts.length - 1]
+  assert.ok(script !== undefined && script.length > 0, '最后一段内联脚本不应为空')
+  return script
+}
+
+interface PageRun {
+  byId(id: string): FakeElement
+  readonly store: Map<string, string>
+  readonly fetched: string[]
+  reloads(): number
+}
+
+/**
+ * 把一段页面内联脚本跑起来。
+ *
+ * `manifest` 为 `null` ⇒ `/mobile/manifest` 不可用（演"拿不到指纹"那条路 ✓）；
+ * 其余端点一律 403 —— 手机角色本来就是这样（管理端点只允许电脑本机 ✓）。
+ */
+async function runPageScript(options: {
+  script: string
+  seed: Record<string, string>
+  origin: string
+  manifest: Record<string, unknown> | null
+  /** 判定"页面已经渲染完"的谓词（脚本坏掉时永远不会真 ⇒ 用例红，而不是静默全绿） */
+  ready: (byId: (id: string) => FakeElement) => boolean
+}): Promise<PageRun> {
+  const dom = makeFakeDom()
+  const store = new Map<string, string>(Object.entries(options.seed))
+  const fetched: string[] = []
+  const url = new URL(options.origin)
+  let reloadCount = 0
+
+  const fetchImpl = async (input: string): Promise<unknown> => {
+    fetched.push(String(input))
+    if (options.manifest !== null && String(input).startsWith('/mobile/manifest')) {
+      return { ok: true, status: 200, json: async () => options.manifest }
+    }
+    return { ok: false, status: 403, json: async () => null }
+  }
+
+  const sandbox: Record<string, unknown> = {
+    document: dom.document,
+    localStorage: {
+      getItem: (key: string): string | null => (store.has(key) ? (store.get(key) ?? null) : null),
+      setItem: (key: string, value: string): void => void store.set(key, String(value)),
+      removeItem: (key: string): void => void store.delete(key),
+    },
+    fetch: fetchImpl,
+    location: {
+      href: options.origin,
+      origin: url.origin,
+      host: url.host,
+      hostname: url.hostname,
+      port: url.port,
+      protocol: url.protocol,
+      reload: (): void => void (reloadCount += 1),
+    },
+    navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 17; Pixel 8)' },
+    window: {
+      addEventListener: (): void => {},
+      isSecureContext: true,
+      crypto: { subtle: { generateKey: async (): Promise<unknown> => ({}) } },
+    },
+    crypto: { subtle: {} },
+    // 页面里的 setTimeout 一律**不真的等**（doPair 的 2.5 秒跳转、3 秒兜底提示都不参与判据）
+    setTimeout: (): number => 0,
+    clearTimeout: (): void => {},
+    setInterval: (): number => 0,
+    clearInterval: (): void => {},
+    console,
+    URL,
+    URLSearchParams,
+    TextDecoder,
+    TextEncoder,
+    atob,
+    btoa,
+    encodeURIComponent,
+    decodeURIComponent,
+  }
+
+  runInNewContext(options.script, sandbox, { filename: 'inline-page.js' })
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline && !options.ready(dom.byId)) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  assert.equal(options.ready(dom.byId), true, '页面脚本没有跑到可判定的状态（没解析 / 没渲染）')
+
+  return { byId: dom.byId, store, fetched, reloads: () => reloadCount }
+}
+
+/** 配对页产物（局域网手机视角；`/mobile` 对受信 authority 开放）。 */
+async function pairingPageHtml(env: Env): Promise<string> {
+  const page = await httpCall(env.host, 'GET', '/mobile', { host: '10.9.9.9:3081', remoteAddress: '10.0.0.7' })
+  assert.equal(page.status, 200, '配对页应当能取到')
+  return page.body
+}
+
+test('P1a 配对页：身份按「带指纹优先、基名兜底」读（键名改了，读者必须跟着改）', async () => {
+  const env = makeHost()
+  try {
+    const script = lastInlineScript(await pairingPageHtml(env))
+    const fp = env.host.manifest().hostFingerprint
+    assert.match(fp, /^[0-9a-f]{32}$/, '夹具指纹形状应与真实指纹一致')
+    const config = JSON.stringify({ baseUrl: 'https://10.9.9.9:3443', pinnedHostFingerprint: fp })
+    const otherConfig = JSON.stringify({ baseUrl: 'https://10.9.9.9:3443', pinnedHostFingerprint: OTHER_FP })
+    const manifest = { hostFingerprint: fp, phoneBaseUrl: 'https://10.9.9.9:3443', tls: { ok: true } }
+
+    /** 跑一页、把两个关键格子的文本读出来（判据全部在**渲染出来的字**上）。 */
+    const render = async (seed: Record<string, string>): Promise<{ state: string; detail: string; hosts: string }> => {
+      const run = await runPageScript({
+        script,
+        seed,
+        origin: 'https://10.9.9.9:3443/mobile',
+        manifest,
+        ready: (byId) => byId('conn-state').textContent !== '',
+      })
+      return {
+        state: run.byId('conn-state').textContent,
+        detail: run.byId('conn-detail').textContent,
+        hosts: collectText(run.byId('phone-hosts')),
+      }
+    }
+
+    // ① 只有**带指纹**那份（P1a 之后的常态）⇒ 必须认出来
+    const scoped = await render({ [`dsh-mobile.host:${fp}`]: config })
+    assert.equal(scoped.state, '已配对', '带指纹那份必须被读到（这正是 P1a 漏掉的那类读者）')
+    assert.match(scoped.hosts, /本浏览器已保存/, '找到了就要如实说"本浏览器已保存这台电脑的身份"')
+    assert.match(scoped.detail, /本浏览器已保存/)
+
+    // ② 只有**基名**那份（旧 App / 旧 boot.js 写下的）⇒ 兜底也要认，且归属可证
+    const legacy = await render({ 'dsh-mobile.host': config })
+    assert.equal(legacy.state, '已配对', '基名那份要能兜底')
+    assert.match(legacy.hosts, /本浏览器已保存/)
+
+    // ③ 两份都没有 ⇒ 如实说"本浏览器里没读到"，**绝不**写成断言式的"尚未配对"
+    const empty = await render({ [`dsh-mobile.host:${OTHER_FP}`]: otherConfig })
+    assert.equal(empty.state, '本浏览器无记录', '读不到就写"本浏览器无记录"')
+    assert.equal(empty.state.includes('尚未配对'), false, '读不到**不等于**没配对，不许写断言式结论')
+    assert.equal(empty.hosts.includes('已配对'), false, '没有身份时不许说已配对')
+    assert.match(empty.hosts, /没读到/)
+    assert.match(empty.detail, /没读到/)
+
+    // ④ 基名那份若是**另一台电脑**的 ⇒ **不许**冒充（按指纹分账的底线）
+    const foreign = await render({ 'dsh-mobile.host': otherConfig })
+    assert.equal(foreign.state, '本浏览器无记录', '别的电脑留下的基名身份不许认成本机的')
+
+    // ⑤ manifest 拿不到 ⇒ 走"基名自证"那条老路（与 boot.js 的 currentHostFingerprint 同一口径）
+    const noManifest = await runPageScript({
+      script,
+      seed: { 'dsh-mobile.host': config },
+      origin: 'https://10.9.9.9:3443/mobile',
+      manifest: null,
+      ready: (byId) => byId('conn-state').textContent !== '',
+    })
+    assert.equal(noManifest.byId('conn-state').textContent, '已配对', '拿不到 manifest 时基名要能自证')
+    assert.equal(noManifest.fetched.some((url) => url.startsWith('/mobile/manifest')), true, '这条兜底的前提是"真的去问过 manifest 而没问到"')
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('P1a 配对页「解除」：这台宿主的四条身份键、两种形态都真删，且不动别的宿主', async () => {
+  const env = makeHost()
+  try {
+    const html = await pairingPageHtml(env)
+    const script = lastInlineScript(html)
+    const fp = env.host.manifest().hostFingerprint
+    const config = JSON.stringify({ baseUrl: 'https://10.9.9.9:3443', pinnedHostFingerprint: fp })
+
+    // 四条身份键 ×（带指纹 / 基名）两种形态全种上；另外再种一份**别的宿主**的带指纹身份
+    const baseKeys = ['dsh-mobile.host', 'dsh-mobile.device-key', 'dsh-mobile.claimed-ticket', 'dsh-mobile.lastGoodEndpoint']
+    const seed: Record<string, string> = {}
+    for (const base of baseKeys) {
+      seed[`${base}:${fp}`] = base === 'dsh-mobile.host' ? config : `${base}-scoped-value`
+      seed[base] = base === 'dsh-mobile.host' ? config : `${base}-legacy-value`
+    }
+    seed[`dsh-mobile.host:${OTHER_FP}`] = JSON.stringify({ pinnedHostFingerprint: OTHER_FP })
+
+    const run = await runPageScript({
+      script,
+      seed,
+      origin: 'https://10.9.9.9:3443/mobile',
+      manifest: { hostFingerprint: fp },
+      ready: (byId) => collectText(byId('phone-hosts')).includes('解除'),
+    })
+
+    const button = findByText(run.byId('phone-hosts'), '解除')
+    assert.notEqual(button, undefined, '已配对时应当有「解除」按钮')
+    button?.onclick?.()
+
+    const deadline = Date.now() + 1000
+    while (Date.now() < deadline && run.reloads() === 0) await new Promise((resolve) => setTimeout(resolve, 2))
+    assert.equal(run.reloads(), 1, '删完应当重载一次页面')
+
+    for (const base of baseKeys) {
+      assert.equal(run.store.has(base), false, `「解除」必须删掉基名形态：${base}`)
+      assert.equal(run.store.has(`${base}:${fp}`), false, `「解除」必须删掉带指纹形态：${base}:${fp}`)
+    }
+    // ★ 别的宿主那份**不许动**（按本页指纹逐条删，绝不做前缀匹配）
+    assert.equal(run.store.has(`dsh-mobile.host:${OTHER_FP}`), true, '别的宿主的身份不许被连带清掉')
+
+    // ★ 静态文案：App（壳）里那份不在本页能管的范围（假 DOM 不解析标记 ⇒ 在产物 HTML 上核对）
+    const note = /<p class="note" id="identity-scope-note">([\s\S]*?)<\/p>/.exec(html)
+    assert.notEqual(note, null, '页面上必须有"壳里那份不归本页管"这句说明')
+    const noteText = (note?.[1] ?? '').replace(/<[^>]+>/g, '')
+    assert.match(noteText, /不在这个页面能管的范围/)
+    assert.match(noteText, /忘记这台电脑/)
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('P1a 诊断页：有带指纹身份就显示它；一个身份都没有时写「未知」，不写「尚未配对」', async () => {
+  const env = makeHost()
+  try {
+    const page = await httpCall(env.host, 'GET', '/mobile/debug?html=1')
+    assert.equal(page.status, 200)
+    const script = lastInlineScript(page.body)
+
+    /**
+     * ★ 先钉"这段脚本能解析"：模板字符串里的反斜杠转义漏过一次
+     *   （`join('\n')` 在生成的 HTML 里变成**真的换行** ⇒ 整段内联脚本 SyntaxError ⇒
+     *   诊断页除了静态标题什么都不显示 ✗）。脚本一坏，下面所有判据都会变成
+     *   "永远读初始值" ✓ —— 所以这条必须在最前面。
+     */
+    assert.doesNotThrow(() => {
+      new Function(script)
+    }, '诊断页内联脚本必须能解析（转义漏了会让整段脚本死掉）')
+
+    const fp = env.host.manifest().hostFingerprint
+    const config = JSON.stringify({ baseUrl: 'https://10.9.9.9:3443', pinnedHostFingerprint: fp })
+    const readStore = async (seed: Record<string, string>, manifest: Record<string, unknown> | null): Promise<string> => {
+      const run = await runPageScript({
+        script,
+        seed,
+        origin: 'https://10.9.9.9:3443/mobile/debug?html=1',
+        manifest,
+        ready: (byId) => byId('store').textContent !== '（读取中…）',
+      })
+      return run.byId('store').textContent
+    }
+
+    // ① 带指纹那份在 ⇒ 显示的就是它（并标出来源，便于排障时一眼看出读的是哪个键）
+    const scoped = await readStore({ [`dsh-mobile.host:${fp}`]: config }, { hostFingerprint: fp })
+    assert.equal(scoped.includes(`dsh-mobile.host:${fp}`), true, '诊断页要显示带指纹那份并标出来源')
+    assert.equal(scoped.includes(config), true, '显示的必须是那份身份本身')
+
+    // ② 一个身份都没有 ⇒ **未知**（绝不再写成「（空 —— 尚未配对）」）
+    const empty = await readStore({}, { hostFingerprint: fp })
+    assert.match(empty, /未知/)
+    assert.equal(empty.includes('尚未配对'), false, '拿不到就写未知，不许编结论')
+
+    // ③ 只有基名那份 ⇒ 归属可证才认（与配对页 / boot.js 同一口径）
+    const legacy = await readStore({ 'dsh-mobile.host': config }, { hostFingerprint: fp })
+    assert.equal(legacy.includes(config), true, '基名那份在指纹对得上时要能兜底显示')
+    assert.match(legacy, /基名兜底/)
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('P1a manifest 机器名是**可选**字段：拿得到就带，拿不到这个键**不出现**', async () => {
+  // ★ 只喂"带点的形态"与"空"：裸名该不该补 `.local` 取决于平台 ✓，
+  //   那条判据在 `lan-trust.test.ts` 里用**显式平台**钉 ✓（断言不许随开发机变 ✗）。
+  const withName = makeHost({ hostname: () => 'Mac-mini-2024.local' })
+  const noName = makeHost({ hostname: () => '' })
+  try {
+    const read = async (env: Env): Promise<Record<string, unknown>> =>
+      JSON.parse((await httpCall(env.host, 'GET', '/mobile/manifest')).body) as Record<string, unknown>
+
+    assert.equal((await read(withName)).machineName, 'Mac-mini-2024.local', '机器名要原样带出来')
+    const missing = await read(noName)
+    assert.equal('machineName' in missing, false, '拿不到机器名时这个键必须**不出现**（不是 undefined、也不是空串）')
+  } finally {
+    withName.cleanup()
+    noName.cleanup()
   }
 })

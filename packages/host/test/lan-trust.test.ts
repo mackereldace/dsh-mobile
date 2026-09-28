@@ -11,7 +11,9 @@
  *   ② **伪造域名一律拒绝**——包括"名字里含本机 IP"这种看起来很像的写法（绝不解析名字）；
  *   ③ 本机 hostname 只认**精确匹配**（裸名与 `<裸名>.local`），子域/后缀不放行；
  *   ④ **网卡变化后立刻生效**（同一个宿主对象，两次推导得到不同结论）；
- *   ⑤ 推导失败（拿不到网卡）**退回静态列表**，不把闸门放开。
+ *   ⑤ 推导失败（拿不到网卡）**退回静态列表**，不把闸门放开；
+ *   ⑥ `localMachineName`（manifest.machineName 用的那个）**只认"真的会被解析"的形态**：
+ *      Windows/Linux 的裸名原样返回，只有 macOS 的裸名才补 `.local`（补错了就是给人看假名字）。
  */
 
 import assert from 'node:assert/strict'
@@ -21,6 +23,7 @@ import {
   deriveLanTrust,
   isIpLiteralHostname,
   localHostNames,
+  localMachineName,
   matchesDerivedTrust,
   type NetworkInterfaceEntry,
   type NetworkInterfacesReader,
@@ -81,6 +84,51 @@ describe('localHostNames：本机名字的两种写法（与证书 SAN 共用同
     assert.deepEqual(localHostNames('Mac-mini-2024'), ['mac-mini-2024', 'mac-mini-2024.local'])
     assert.deepEqual(localHostNames(''), [])
     assert.deepEqual(localHostNames('  '), [])
+  })
+
+  it('★ Windows 形态（`DESKTOP-ABC1234`，大写、无点）仍**同时**给出裸名与 .local（判据集合多一条无害）', () => {
+    // 这里给的是**判据**（哪些 Host 算本机）⇒ 大小写归一只发生在这一侧；
+    // 多一条不解析的 `.local` 不会放行任何东西（没人能用那个名字打到本机）。
+    assert.deepEqual(localHostNames('DESKTOP-ABC1234'), ['desktop-abc1234', 'desktop-abc1234.local'])
+  })
+})
+
+/**
+ * ★ `manifest.machineName` 用的就是它 —— 这是**给人看的行名** ✓，
+ *   所以判据与信任集合相反：**只有真的会被广播/解析的形态才补 `.local`** ✓。
+ * Windows 的裸名补出来根本不解析 ✗ ⇒ 必须原样返回 ✗（否则面板上是一个假机器名 ✓）。
+ *
+ * 平台**显式传入**：断言不许随开发机的平台变 ✗（本项目对"依赖开发机"零容忍 ✓）。
+ */
+describe('localMachineName：面板行名用哪一个机器名（Windows 形态不许补 .local）', () => {
+  it('① Windows 形态（`DESKTOP-ABC1234`）⇒ 原样返回，不补 .local', () => {
+    assert.equal(localMachineName('DESKTOP-ABC1234', 'win32'), 'DESKTOP-ABC1234')
+  })
+
+  it('② Linux 形态（`my-box`）同样原样返回（裸名不是 mDNS 名字）', () => {
+    assert.equal(localMachineName('my-box', 'linux'), 'my-box')
+  })
+
+  it('③ macOS 形态：`Mac-mini-2024.local` 原样返回（不许变成 .local.local）', () => {
+    assert.equal(localMachineName('Mac-mini-2024.local', 'darwin'), 'Mac-mini-2024.local')
+    // 同一份串在别的平台上也不该被改写（它本来就带点）
+    assert.equal(localMachineName('Mac-mini-2024.local', 'win32'), 'Mac-mini-2024.local')
+  })
+
+  it('④ macOS 上的**裸名**才补 .local（Bonjour 广播的就是它；证书 SAN 同一约定）', () => {
+    assert.equal(localMachineName('Mac-mini-2024', 'darwin'), 'Mac-mini-2024.local')
+    // 而 Windows 上同一份裸名**不许**补
+    assert.equal(localMachineName('Mac-mini-2024', 'win32'), 'Mac-mini-2024')
+  })
+
+  it('⑤ 完整域名原样返回（不硬拼成 foo.example.com.local）', () => {
+    assert.equal(localMachineName('foo.example.com', 'darwin'), 'foo.example.com')
+  })
+
+  it('⑥ 拿不到（空串 / 只有点）⇒ 空串（调用方据此**省略这个键**，不写空值）', () => {
+    assert.equal(localMachineName('', 'darwin'), '')
+    assert.equal(localMachineName('   ', 'win32'), '')
+    assert.equal(localMachineName('.', 'darwin'), '')
   })
 })
 
