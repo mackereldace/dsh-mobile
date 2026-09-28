@@ -3,6 +3,8 @@
     <string name="app_name">DSH Mobile</string>
     <string name="address_title">电脑地址</string>
     <string name="address_hint">https://192.168.1.5:3443/mobile/app</string>
+    <!-- round 174：归一化之后，「空串 / 别的协议头」这类**认不出**的输入不再加载（老代码会去加载必然失败的 https://，绕一圈再弹回这个框）。★ 认不出也必须**当场说一句** ✗ —— 不许"点了没反应"（本项目零容忍 ✓）。 -->
+    <string name="address_unreadable">这个地址认不出，没有打开。填成 主机:端口 就行（例如 192.168.1.5:3443）—— 路径可以省略，会自动走 /mobile/app。</string>
     <string name="first_run_hint">第一次运行：填一次电脑的地址即可。地址从哪来？在电脑上跑 scripts/restart-lan.sh --check，它会打印「手机入口」那一行；或者扫电脑配对页上的二维码。</string>
     <string name="change_hint">改地址：把新的电脑地址填进来（换网络、IP 变了都只改这里）。</string>
     <string name="load_failed_hint">打不开这个地址。常见原因：电脑 IP 变了、代理没启动、或者手机不在同一个网络里。改成新地址再试。</string>

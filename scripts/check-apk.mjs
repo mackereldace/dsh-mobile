@@ -104,8 +104,12 @@ let failed = 0
  *           ⇒ **每次**首次连接都退化成人工确认 ✗ —— 不崩不报错，**只在手机上现形** ✗）；
  *      ⑤b **可执行交叉验证**：宿主那串值按壳的规则归一化后，必须 == 独立算的 CA DER SHA-256 ✓
  *          （这是"两侧算法一致"的**唯一**证明 ✓ —— 之前只有"两边各自的代码都在"✗，没有"两边相等"✗）。
+ *    ★★ round 174（2026-09-28）从 40 抬到 **41** ✓ —— 补的是**地址归一化 + P1b 切换桥**：
+ *      真机报"改地址填裸域名打不开"（实测那条是 `/` 的 401 ✓ —— 壳此前"输什么加载什么"✗）
+ *      ⇒ 归一化抽成零依赖纯类 `MobileUrl` ✓、两个入口共用 `loadHostUrl` ✓、新增 `switchHost` 桥 ✓。
+ *      三者任一不在包里，症状都是**静默失败**（地址打不开 ✗ / 面板那颗按钮永远不出现 ✗）⇒ 只能靠 dex 判 ✓。
  */
-const EXPECTED_MIN_CHECKS = 40
+const EXPECTED_MIN_CHECKS = 41
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -435,6 +439,27 @@ if (existsSync(aapt2)) {
     hasAll(backHandling),
     '系统返回已接管（OnBackInvokedCallback + registerOnBackInvokedCallback + setBackAvailable ✓ —— 少了它，侧滑返回会**直接退出 App** ✗，而且手机上完全没有报错 ✗）',
     missing(backHandling).length === 0 ? backHandling.join('、') : `缺 ${missing(backHandling).join('、')}`,
+  )
+  /**
+   * ★ 地址归一化 + P1b 切换桥（round 174，**用户真机验收报回来的** ✓）。
+   *
+   * 起因：用户往「改地址」里输 `https://10.34.255.229:3443`（**裸域名** ✓）打不开 ✗ ——
+   * 实测那条返回 **401** ✓（`dsh web authentication required; …` ✓）：壳此前是
+   * **你输什么就加载什么** ✗（只补 scheme ✓、不补路径 ✗）⇒ 落到 DSH 的**电脑版**根路径 ✓。
+   * 修法是把归一化抽成零依赖纯类 `MobileUrl` ✓（`normalize()` ✓：空路径或单个 `/` ⇒ 补
+   * `/mobile/app` ✓；明确路径原样尊重 ✗），两个入口（地址框 / `switchHost` 桥）**共用**
+   * `loadHostUrl` ✓。
+   *
+   * 这一条同样是**静默失败** ✗：`MobileUrl` 不在包里 ⇒ 地址框与切换按钮**当场抛**
+   * （`NoClassDefFoundError` ✓，用户只看到"打不开"✗）；`switchHost` 不在包里 ⇒
+   * 网页侧探不到那条桥 ✓ ⇒ 面板**刻意不画按钮** ✓（这是设计 ✓，但也意味着
+   * "新的 APK 装上去却什么都没有" ✗）—— 两种都只能在 dex 里判 ✓。
+   */
+  const hostUrlFix = ['MobileUrl', 'switchHost', 'loadHostUrl']
+  check(
+    hasAll(hostUrlFix),
+    '地址归一化与切换桥都在 dex 里（`MobileUrl` + `switchHost` + `loadHostUrl` ✓ —— 少了归一化，改地址填裸域名仍会落到 `/` 的 401 ✗；少了 `switchHost`，面板那颗「切到这台」永远不出现 ✗）',
+    missing(hostUrlFix).length === 0 ? hostUrlFix.join('、') : `缺 ${missing(hostUrlFix).join('、')}`,
   )
   /**
    * ★ **保存文件到「下载」的桥**（round 128）✓ —— 用户真机反馈：

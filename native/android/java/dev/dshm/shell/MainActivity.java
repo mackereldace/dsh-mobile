@@ -117,6 +117,13 @@ import org.json.JSONObject;
  *    现在三条入口（网页 ✓ 两个 + 「电脑地址」框 ✓ 一个）最终都落到 {@link #startScan} ✓
  *    ⇒ {@link #onScanResult} ⇒ {@link #handlePairText} ✓，**仍然只有一份实现** ✓。
  *    这条桥**不动权限白名单** ✓（复用的还是 round 143 加的那条 `CAMERA` ✓）。
+ * 9. ★★ P1b：**地址归一化 + 「点一台直接切过去」**（{@link MobileUrl} ✓ +
+ *    {@link ShellBridge#switchHost} ✓）—— 起因是用户报的"往壳的「改地址」里输入
+ *    **裸域名**打不开"✗（实测那个地址返回 **401** ✓）：那个框此前**输什么就加载什么** ✗，
+ *    **不补路径** ⇒ 照面板提示填**必然**落到 `/` 的 401 页 ✗。
+ *    现在"空路径 / `/` ⇒ 补 `/mobile/app`"这条规则**只有一份**
+ *    （{@link MobileUrl#normalize} ✓），「改地址」框与网页那条切换桥**共用**它 ✗
+ *    （见 {@link #loadHostUrl} ✓ —— 两份实现迟早漂成"一个地址两条路进得去、进不去"✗）。
  *
  * ## 复用而不是重写
  *
@@ -375,6 +382,18 @@ public class MainActivity extends android.app.Activity {
      * 「电脑地址」框上那颗按钮是同一份实现 ✓，只是它不走这个判据 ✓。
      */
     private boolean scanActivityOpen = false;
+    /**
+     * ★★ P1b：**网页侧刚点过一次"切换宿主"、那次加载还没落地** ✓
+     * （与 {@link #addressDialogOpen} / {@link #scanActivityOpen} 同一个道理 ✓：
+     *  {@link ShellBridge#switchHost} 是网页**连点两下**就可能进来的入口 ✗ ——
+     *  受理两次 = 两次 `loadUrl` 互相取消 ✓，用户看到的是"点了切换、页面自己跳回去"✗）。
+     *
+     * 置位：{@link ShellBridge#switchHost} 同步置位 ✓ + {@link #loadHostUrl}（地址框那条路 ✓）；
+     * 复位：{@link WebViewClient#onPageFinished} ✓ 与主文档失败（{@link WebViewClient#onReceivedError} ✓）——
+     * ★ **每条路都要复位** ✗：少一条，切过一次之后那颗按钮**永远**收到 `busy` ✓
+     * （手机上只表现为"再点没反应"✗，没有任何报错可查 ✓）。
+     */
+    private boolean hostSwitchPending = false;
 
     // ── ★★ C2：TOFU（第一次连某台电脑时确认它的 CA ✓）─────────────────────
     //
@@ -809,6 +828,64 @@ public class MainActivity extends android.app.Activity {
                 });
             } catch (Throwable t) {
                 Log.w(TAG, "扫码请求没能排进主线程 ✗", t);
+                return "error";
+            }
+            return "ok";
+        }
+
+        /**
+         * ★★ P1b：**网页侧"点一台、直接切过去"** ✓ —— 设置页「连接与设备 → 电脑」里
+         *   非当前那一台点一下就调它 ✓：`DshmShell.switchHost('https://主机:端口')` ✓。
+         *
+         * ## 起因（用户报的"非当前那台只有一句提示" ✓）
+         *
+         * P1a 的面板把每台电脑都列出来了 ✓，但非当前那台**一颗按钮都没有** ✗
+         * （改成一句"切过去：用「改地址」填上面这个地址"✓）—— 因为壳里当时**没有**
+         * "接受一个地址参数"的桥 ✗（{@link #changeAddress} 只能弹框让人手打 ✓）。
+         * 这条桥就是缺的那一环 ✓。
+         *
+         * ## 契约（与 {@link #scanPair} **同一个形状** ✓：**同步**返回一个字符串 ✓）
+         *
+         * 为什么必须同步 ✗：网页要靠它决定"接下来在页面上写什么"✓ ——
+         * `runOnUiThread` 是**异步**的 ✓，等它回来就只能"点了没反应"✗
+         * （这正是本桥要消灭的那个现象 ✓）。
+         *
+         * @return `ok`（已受理，正在切 ✓）/ `busy`（已经开着一个地址框 ✓，或上一次切换
+         *         还在加载 ✓ —— 再受理一次就是两次 `loadUrl` 互相取消 ✗）/
+         *         `untrusted`（不是我们那台电脑的页面 ✗）/
+         *         `error`（抛了 ✓，或给的地址归一化后**根本不可加载** ✗ —— 例如传了个深链 ✓）。
+         *         旧 APK 没有这条桥时网页**原样降级** ✓（照旧显示那句"用「改地址」填"✓）。
+         *
+         * ★ 与地址框**共用同一份**实现 ✗（{@link #loadHostUrl} ✓：归一化 + 落盘 + 加载 ✓）——
+         *   两份的话早晚出现"裸域名在地址框里进得去、在这颗按钮上进不去"✗。
+         * ★ 切之前先 {@code stopAutoConnect} ✓（在共用那份里做 ✓）：不收掉的话，
+         *   旧槽的计时器会跟这一次抢着 `loadUrl` ✗ ⇒ 用户点了切换、界面却自己跳回原来那台 ✗。
+         * ★★ 「忘记这台电脑」**不**在这里做 ✗：切到另一台是"换一台连"✓，不是"把 pin 清掉"✗
+         *   （清 pin 只能走地址框那个勾选框 ✓ —— 安全相关的开关必须由用户**明确勾选** ✓）。
+         */
+        @JavascriptInterface
+        public String switchHost(String url) {
+            if (!isTrustedPage()) return "untrusted";
+            if (addressDialogOpen || hostSwitchPending) return "busy";
+            // ★ 归一化在**同步**这一段做完 ✓ ⇒ 认不出可以当场回 `error` ✓，不用等主线程
+            final String target = MobileUrl.normalize(url);
+            if (target == null) {
+                Log.w(TAG, "switchHost 收到一个认不出的地址 ✗（不加载）");
+                return "error";
+            }
+            // ★ 也在同步这一段置位 ✓：网页连点两下时，第二下必须在这里就被判掉 ✗
+            hostSwitchPending = true;
+            try {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) {
+                        hostSwitchPending = false;
+                        return;
+                    }
+                    applyHostUrl(target, "用户点了切换宿主");
+                });
+            } catch (Throwable t) {
+                hostSwitchPending = false;
+                Log.w(TAG, "switchHost 没能排进主线程 ✗", t);
                 return "error";
             }
             return "ok";
@@ -1567,6 +1644,12 @@ public class MainActivity extends android.app.Activity {
                 return;
             }
             Log.w(TAG, "主文档加载失败：" + reason + "（" + failedUrl + "）");
+            /**
+             * ★★ P1b：这一次切换**也落地了**（落到"失败"这一支 ✓）⇒ 放开那道闸 ✓。
+             *   只在成功那条路复位的话，"切到一个打不开的地址"会让切换按钮**永远** `busy` ✗
+             *   （而用户看到的只是"点了没反应"✗ —— 与上一条同一个坑 ✓）。
+             */
+            hostSwitchPending = false;
             if (autoSwitching) {
                 if (!isCurrentAttempt(failedUrl)) {
                     Log.i(TAG, "忽略不属于当前槽的主文档错误（当前=" + attemptingUrl + " ✓）");
@@ -1629,6 +1712,12 @@ public class MainActivity extends android.app.Activity {
 
         @Override
         public void onPageFinished(WebView view, String url) {
+            /**
+             * ★★ P1b：这一次加载**落地了**（不管成没成 ✓）⇒ 放开"切换中"那道闸 ✓。
+             *   少了这一行，切过一次之后网页那颗「切过去」**永远**收到 `busy` ✗
+             *   （而手机上只表现为"再点没反应"✗ —— 见 {@link #hostSwitchPending} ✓）。
+             */
+            hostSwitchPending = false;
             // 页面加载完再补一次安全区 ✓（首帧时 insets 回调可能还没来 ✓）
             if (view != null) {
                 view.post(() -> {
@@ -2862,6 +2951,47 @@ public class MainActivity extends android.app.Activity {
     // ───────────────────────────── 地址 / 生命周期 ─────────────────────────────
 
     /**
+     * ★★ P1b：**唯一一份**"归一化 → 落盘 → 加载" ✓
+     * （「电脑地址」框的「打开」✓ 与 {@link ShellBridge#switchHost} ✓ **共用这一份** ✗）。
+     *
+     * 为什么必须共用一个方法 ✗：两处各写一遍的话，早晚会出现
+     * "地址框补了路径、网页那颗切换按钮没补"（或者反过来 ✓）——
+     * 症状是"**同一个地址，一条路进得去、另一条路进不去**"✗，
+     * 而这两条路用户都会走 ✓（今天手打、明天点面板 ✓）。
+     *
+     * @param raw 用户手输 / 网页递过来的一串地址 ✓（可以没有协议头 ✓、可以是裸域名 ✓）
+     * @param why 收掉自动换槽时写进日志的理由 ✓（措辞由**调用方**给 ✓ —— 两条路的因果不同 ✓）
+     * @return true = 已经受理并开始加载 ✓；false = 这串认不出（**什么都没做** ✗，调用方自己决定怎么提示 ✓）
+     */
+    private boolean loadHostUrl(String raw, String why) {
+        String url = MobileUrl.normalize(raw);
+        if (url == null) return false;
+        applyHostUrl(url, why);
+        return true;
+    }
+
+    /**
+     * 归一化**之后**那一步 ✓：收掉自动换槽 → 落盘 → 加载 ✓。
+     *
+     * ★ 调用它之前那串地址**必须**已经过 {@link MobileUrl#normalize} ✗
+     *   （本方法只管"加载"，不管"补路径"✓ —— 所以它是 private ✓，
+     *   两个入口都只从 {@link #loadHostUrl} 或 `switchHost` 里走 ✓）。
+     *
+     * 落盘的是**归一化之后**的地址 ✓：下次冷启动（{@link #startInitialLoad} 读 `KEY_URL` ✓）
+     * 直接就是带 `/mobile/app` 的那条 ✓ —— 老用户那条路一个字不变 ✓
+     * （★ 网页侧「当前地址」显示的是 `location.host` ✓、宿主面板读的是配置里的槽 ✓，
+     *  **都不读 `KEY_URL`** ✓ ⇒ 存的形状变了也不会让显示变形 ✓，见交单报告 ✓）。
+     */
+    private void applyHostUrl(String url, String why) {
+        // 用户**明确指定**了地址 ⇒ 自动换槽到此为止 ✓（否则计时器还会再切走 ✗）
+        stopAutoConnect(why);
+        hostSwitchPending = true;
+        currentUrl = url;
+        prefs.edit().putString(KEY_URL, url).apply();
+        webView.loadUrl(url);
+    }
+
+    /**
      * 弹一个输入框改地址 ✓（首次运行、加载失败、网页里主动调用，三种情况都用它 ✓）。
      *
      * ★★ round 129 加了**防重入** ✓ —— 起因是它在**四个**地方被调用
@@ -2960,14 +3090,27 @@ public class MainActivity extends android.app.Activity {
                             }
                             return;
                         }
-                        if (!url.startsWith("http")) {
-                            url = "https://" + url;
+                        /**
+                         * ★★ P1b：**归一化**（裸域名 / 空路径 / 单个 `/` ⇒ 补 `/mobile/app` ✓）
+                         *   + 落盘 + 加载 —— 与 {@link ShellBridge#switchHost} **共用同一份** ✗
+                         *   （{@link #loadHostUrl} ✓）。
+                         *
+                         * 为什么这里不再自己拼 ✗：老代码是 `if (!url.startsWith("http")) url = "https://" + url;`
+                         * —— 它**不补路径** ✗，于是用户照面板提示填 `https://10.34.255.229:3443`
+                         * 必然落到 `/` 的 **401** 页 ✓（用户真机报的就是这个 ✓）。
+                         * 现在这段逻辑只存在于 {@link MobileUrl#normalize} ✓。
+                         *
+                         * 认不出（空串 / 别的协议头 ✓）⇒ **不加载** ✓；老代码那时会去加载
+                         * `https://` 这种必然失败的地址 ✗，最后绕一圈弹回同一个框 ✓。
+                         * ★ 但**不许"点了没反应"** ✗✗（本项目零容忍 ✓）：这里当场弹一句
+                         * `address_unreadable` ✓ —— 用户至少知道"是这串字不认，不是 App 卡了"✓。
+                         * （round 174 主线补的字幕资源 ✓：归一化本身由子代理交单 ✓，
+                         *   而 `res/` 不在它的写入范围里 ✓ —— 它如实报告了这一点 ✓。）
+                         */
+                        if (!loadHostUrl(url, "用户手动指定了地址")) {
+                            Log.w(TAG, "地址框里这串认不出（不加载 ✓）：" + url);
+                            Toast.makeText(MainActivity.this, R.string.address_unreadable, Toast.LENGTH_LONG).show();
                         }
-                        // 用户**明确指定**了地址 ⇒ 自动换槽到此为止 ✓（否则计时器还会再切走 ✗）
-                        stopAutoConnect("用户手动指定了地址");
-                        currentUrl = url;
-                        prefs.edit().putString(KEY_URL, url).apply();
-                        webView.loadUrl(url);
                     })
                     /**
                      * ★ round 143：**壳内扫码**的入口 ✓（"扫码配对"✓）。
