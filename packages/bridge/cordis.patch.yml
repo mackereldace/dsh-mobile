@@ -1,0 +1,26 @@
+# DSH Mobile · 预览桥自带的插件层
+#
+# ## 为什么桥要**自己**是一个 bundle ✗（本轮实测逼出来的结构 ✓）
+#
+# 官方插件管理从 git 装包时，DSH 给 profile 开着 **`blockExoticSubdeps`** ✓ ——
+# 插件**不许**在子依赖里出现 git 这类"外来"来源 ✗。原本桥是 `@dsh-mobile/host` 的
+# 一个依赖 ✓（只在 host 的 patch 里按名字引用 ✓），实测报：
+#
+#   [ERR_PNPM_EXOTIC_SUBDEP] Exotic dependency "@dsh-mobile/bridge" (resolved via git-repository)
+#   is not allowed in subdependencies when blockExoticSubdeps is enabled
+#
+# ⇒ 桥**不能**再挂在 host 下面 ✓。而桥是**客户端插件**（不是库 ✗），
+#   也没法当"顶层依赖"随便装 ✓ —— 能装的顶层东西**必须是一个 bundle** ✓。
+# ⇒ 所以桥**自己声明成一个 bundle** ✓（见 `package.json` 的 `dsh.bundle` ✓），
+#   用户装两次、各装一个顶层包 ✓ —— 两个包**都没有任何依赖** ✓ ⇒
+#   那条策略无从触发 ✓（这是本轮唯一不用账号、也不改包名的走法 ✓）。
+#
+# ★ 代价（如实 ✓）：官方那条路要**两条命令** ✓（host 一条、bridge 一条 ✓）。
+#   自研安装器那条路不受影响 ✓（它本来就把两个包一起拷 ✓）。
+#
+# ★ 为什么桥**必须**在这里被声明成一行 ✗：DSH 的客户端 bundle 注册要求
+#   "**与 graph 行匹配**" ✓ —— 只在页面里 `load` 是无效的 ✗
+#   （见 `lib/client.js` 的说明 ✓）。
+- insert:
+    - id: mobile-preview-bridge
+      name: '@dsh-mobile/bridge'

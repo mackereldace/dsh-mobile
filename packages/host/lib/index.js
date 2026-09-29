@@ -17,7 +17,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from '@dsh-mobile/protocol';
+import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
 import { DeviceCallQueue, DEVICE_CAPABILITIES } from "./device-calls.js";
 import { deriveLanTrust, isIpLiteralHostname, localMachineName, matchesDerivedTrust, } from "./lan-trust.js";

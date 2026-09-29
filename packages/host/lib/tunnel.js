@@ -13,9 +13,9 @@
  * 此时两端的会话密钥已派生完成，客户端也已经用 serverNonceBase 建好接收窗口。
  * 这样"会话密钥的第一个使用"就是 ServerAuthOk，客户端一旦解开它即证明密钥一致。
  */
-import { DEFAULT_CAPABILITIES, ErrorCode, FrameFlags, FrameType, wireError, } from '@dsh-mobile/protocol';
-import { openFrame, parseFrame, ReplayWindow, sealFrame, sealPlaintextFrame, } from '@dsh-mobile/protocol';
-import { HostHandshake } from '@dsh-mobile/protocol';
+import { DEFAULT_CAPABILITIES, ErrorCode, FrameFlags, FrameType, wireError, } from './protocol/index.js';
+import { openFrame, parseFrame, ReplayWindow, sealFrame, sealPlaintextFrame, } from './protocol/index.js';
+import { HostHandshake } from './protocol/index.js';
 /** 握手帧的固定 nonce 前缀（与协议文档一致）。 */
 const HANDSHAKE_NONCE_BASE = Buffer.from([0x00, 0x00, 0x00, 0x01]);
 /**

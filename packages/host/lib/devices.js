@@ -10,7 +10,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { DEFAULT_CAPABILITIES, } from '@dsh-mobile/protocol';
+import { DEFAULT_CAPABILITIES, } from './protocol/index.js';
 /**
  * 设备注册表。
  *

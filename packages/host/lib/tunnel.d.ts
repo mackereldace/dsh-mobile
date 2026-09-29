@@ -13,9 +13,9 @@
  * 此时两端的会话密钥已派生完成，客户端也已经用 serverNonceBase 建好接收窗口。
  * 这样"会话密钥的第一个使用"就是 ServerAuthOk，客户端一旦解开它即证明密钥一致。
  */
-import { type ClientHelloPayload, type WireError } from '@dsh-mobile/protocol';
-import { type EstablishedSession, type HostDeviceCredentials } from '@dsh-mobile/protocol';
-import type { RawKeyPair } from '@dsh-mobile/protocol';
+import { type ClientHelloPayload, type WireError } from './protocol/index.js';
+import { type EstablishedSession, type HostDeviceCredentials } from './protocol/index.js';
+import type { RawKeyPair } from './protocol/index.js';
 /** 会话在生命周期中对外暴露的状态。 */
 export type TunnelState = 'awaiting-hello' | 'handshaking' | 'established' | 'closed';
 /** 隧道向宿主上层暴露的回调。 */

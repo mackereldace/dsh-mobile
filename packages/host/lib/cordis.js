@@ -24,7 +24,7 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateP256KeyPair } from '@dsh-mobile/protocol';
+import { generateP256KeyPair } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
 import { resolveDshRuntimeVersion } from "./dsh-version.js";
 import { detectLanIp, isAddressPresent, listLanCandidates } from "./lan.js";

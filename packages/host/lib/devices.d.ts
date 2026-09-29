@@ -8,7 +8,7 @@
  *  - 审计日志单独文件并做条数上限，避免无限增长。
  *  - 绝不存储设备私钥或会话密钥：宿主只保存设备**公钥**，私钥永远在手机上。
  */
-import { type AuthorizationMode, type DeviceCapabilities, type DeviceRecord } from '@dsh-mobile/protocol';
+import { type AuthorizationMode, type DeviceCapabilities, type DeviceRecord } from './protocol/index.js';
 /** 一条审计记录。 */
 export interface AuditEntry {
     /** 事件时间（ISO 8601）。 */

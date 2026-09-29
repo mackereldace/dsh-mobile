@@ -63,6 +63,59 @@ try {
     console.log(`[build-lib] ${pkg}: 已写入 ${files.length} 个文件 → packages/${pkg}/lib/`)
   }
 
+  /**
+   * ★★ 把 `@dsh-mobile/protocol` **内联进 host 的 lib** ✓（2026-09-29）。
+   *
+   * ## 为什么非内联不可 ✗（实测撞出来的，不是设计洁癖 ✓）
+   *
+   * 官方插件管理从 git 装包时，DSH 给 profile 开着 **`blockExoticSubdeps`** ✓ ——
+   * 一条**供应链安全策略**：插件**不许**在自己的子依赖里出现 git 这类"外来"来源 ✗
+   *（顶层那个 `github:…` 是允许的 ✓，因为那是用户显式要求的 ✓）。
+   * 而我们的 monorepo 里 host 依赖 protocol ✓（本地是 workspace 软链 ✓）⇒ 消费端**两条路都堵** ✗：
+   *   · 写 `workspace:*` ⇒ `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND` ✗（消费端没有 workspace 上下文 ✓）；
+   *   · 写 `github:…#path:/packages/protocol` ⇒ `ERR_PNPM_EXOTIC_SUBDEP` ✗。
+   * ★ 两种错**都真跑出来过** ✓（见 `24-0.17官方插件管理-调研与接入方案.md` 与本轮交单 ✓）。
+   *
+   * ⇒ 不需要任何账号、也不用改包名的唯一办法：**让 host 自包含** ✓ ——
+   *   把 protocol 的编译产物拷进 `host/lib/protocol/` ✓，
+   *   再把 host 产物里那几处裸引用改写成相对路径 ✓。
+   *
+   * ★ 为什么这样改写是安全的 ✓（改之前实测过 ✓）：
+   *   · host 的产物是**平铺**的 ✓（`lib/` 下没有子目录 ✓）⇒ `./protocol/index.js` 一定解析得到 ✓；
+   *   · 引用**全是裸名** `'@dsh-mobile/protocol'` ✓（**没有**子路径写法 ✗）⇒ 一次 `replaceAll` 足够 ✓；
+   *   · `protocol/lib` 自身**零外部依赖** ✓（它 package.json 的 dependencies 是空的 ✓）⇒ 拷过去就完事 ✓。
+   * ★ 与 boot.js 同一个套路 ✓（源码在别处、构建时拷进 lib ✓），
+   *   且**只在构建这一处实现** ✓ —— 别再搞出第二条上线路径 ✗（boot.js 当年就是两条路径不一致，
+   *   手机拿到的那份没有内联副本、而验收全绿 ✗，教训见本文件下面那段 ✓）。
+   */
+  if (!checkOnly) {
+    const protoLib = join(repo, 'packages', 'protocol', 'lib')
+    const protoTarget = join(repo, 'packages', 'host', 'lib', 'protocol')
+    if (!existsSync(protoLib)) throw new Error(`内联源缺失：${protoLib}`)
+    rmSync(protoTarget, { recursive: true, force: true })
+    mkdirSync(protoTarget, { recursive: true })
+    let copied = 0
+    for (const file of readdirSync(protoLib)) {
+      copyFileSync(join(protoLib, file), join(protoTarget, file))
+      copied += 1
+    }
+    let rewrote = 0
+    const hostLib = join(repo, 'packages', 'host', 'lib')
+    for (const file of readdirSync(hostLib)) {
+      if (!file.endsWith('.js') && !file.endsWith('.d.ts')) continue
+      const target = join(hostLib, file)
+      const before = readFileSync(target, 'utf8')
+      const after = before.replaceAll("'@dsh-mobile/protocol'", "'./protocol/index.js'")
+      if (after === before) continue
+      backups.push({ to: target, data: Buffer.from(before) })
+      writeFileSync(target, after)
+      rewrote += 1
+    }
+    console.log(
+      `[build-lib] 已内联 protocol → packages/host/lib/protocol/（${copied} 个文件 ✓，改写 ${rewrote} 个文件的引用 ✓）`,
+    )
+  }
+
   if (!checkOnly) {
     // 加载校验：产物必须真的能 import
     for (const pkg of PACKAGES) {

@@ -26,6 +26,7 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-api-gateway": "0.1.5-rc.1",
     "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@dsh-mobile/protocol": "link:packages/protocol",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.2",
     "js-yaml": "^5.4.2",

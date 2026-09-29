@@ -28,14 +28,12 @@
 #     `24-0.17官方插件管理-调研与接入方案.md` §5.3 与 §9 ✓（**尚未定稿** ✗：要在临时 profile 上
 #     真装一次、看它到底报什么错再定 ✓，别照文档猜 ✗）。
 #
-# ## 两条行分别是什么
+# ## 只有一条行了（★ 桥搬走了 ✗ —— 2026-09-29 实测逼出来的 ✓）
 #
-#   · `mobile-host` —— 宿主插件本体 ✓：监听、配对、设备登记、TLS、注入、隧道 ✓；
-#   · `mobile-preview-bridge` —— 预览桥 ✓（把 DSH 自带的文档预览 KaTeX/PDF/图片 暴露给手机 ✓）。
-#     ★ 它**必须**在这里被声明 ✓：DSH 的客户端 bundle 注册要求"与 graph 行匹配" ✓，
-#       只在页面里 `load` 是无效的 ✗（见 `packages/bridge/lib/client.js` 的说明 ✓）。
+# 原先这里还有第二条 `mobile-preview-bridge` ✓。现在它搬去 `@dsh-mobile/bridge`
+# **自己的** `cordis.patch.yml` ✓ —— 原因见那份文件的开头（`blockExoticSubdeps` ✗：
+# 桥不能再当 host 的子依赖 ✓，而能装的顶层东西必须自己是 bundle ✓）。
+# ⇒ 官方那条路要**装两次**（host 一次、bridge 一次 ✓）；自研安装器不受影响 ✓。
 - insert:
     - id: mobile-host
       name: '@dsh-mobile/host'
-    - id: mobile-preview-bridge
-      name: '@dsh-mobile/bridge'

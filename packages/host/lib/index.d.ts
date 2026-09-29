@@ -17,7 +17,7 @@
 import type { KeyObject } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { type DeviceCapabilities, type DeviceRecord, type MobileManifest, type PairingTicket } from '@dsh-mobile/protocol';
+import { type DeviceCapabilities, type DeviceRecord, type MobileManifest, type PairingTicket } from './protocol/index.js';
 import { DeviceStore, type AuditEntry } from './devices.ts';
 import { type NetworkInterfacesReader } from './lan-trust.ts';
 import { type DshFrontendProbe } from './dsh-probe.ts';

@@ -1,13 +1,16 @@
 packages:
   - 'packages/*'
 
-# ★ 2026-09-29：`packages/host` 对两个内部包改用 `github:` 依赖（见 24 号文档）——
-#   官方插件管理从 git 装包时**没有 workspace 上下文**，`workspace:*` 解析不了
-#   （实测报 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND ✓）。
-#   而**本地开发**必须仍用 workspace 里**活的那一份** ✗ —— 否则改 protocol 的 src
-#   不会影响 host 的构建，症状是"改了没生效"✗（本项目在别处栽过好几次）。
-#   ⇒ 用 overrides 把这两个名字在**本地**钉回仓库里的目录 ✓。
-#   ★ pnpm 11 只认这里，写在根 package.json 的 `pnpm.overrides` **不生效** ✗（本轮实测 ✓）。
-overrides:
-  '@dsh-mobile/bridge': 'link:packages/bridge'
-  '@dsh-mobile/protocol': 'link:packages/protocol'
+# ★ 2026-09-29 记一笔（免得后人重走）✗：
+# 为了"官方插件管理能装得上"，`packages/host` 一度把两个内部包写成
+# `github:mackereldace/dsh-mobile#path:/packages/…` ✓ —— 那时**必须**在这里加 overrides
+# 把这两个名字钉回仓库里的目录 ✓，否则本地会去 codeload 拉一份**快照** ✗，
+# 症状是"改了 protocol 的 src、却不影响 host 的构建"✗（本项目在别处栽过好几次 ✓）。
+# 顺带实测到一条：**pnpm 11 只认本文件里的 `overrides`** ✓ ——
+# 写在根 `package.json` 的 `pnpm.overrides` **不生效** ✗（写了以后链接照样指向 codeload 快照 ✓）。
+#
+# ⇒ 现在**不需要**了 ✓：
+#   · host 的 `dependencies` 已清空 ✓（protocol 由构建**内联进 `host/lib/protocol/`** ✓，
+#     见 `scripts/build-lib.mjs` 里那段说明 ✓；bridge 自己成了一个 bundle ✓，由用户顶层安装 ✓）；
+#   · `packages/client` 对 protocol 用的仍是 `workspace:*` ✓ —— 那条在 workspace 里本来就能解析 ✓。
+# ⇒ **别再把 overrides 加回来** ✗（除非又有人把内部包写成 git 依赖 ✓）。

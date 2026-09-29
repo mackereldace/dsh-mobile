@@ -25,10 +25,7 @@
     "@deepseek-ai/dsh-api-gateway": "^0.1.5-rc.1 || ^0.1.7-rc.1",
     "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1 || ^0.1.7-rc.1"
   },
-  "dependencies": {
-    "@dsh-mobile/bridge": "github:mackereldace/dsh-mobile#path:/packages/bridge",
-    "@dsh-mobile/protocol": "github:mackereldace/dsh-mobile#path:/packages/protocol"
-  },
+  "dependencies": {},
   "types": "lib/cordis.d.ts",
   "files": [
     "lib"
