@@ -34,6 +34,11 @@ interface Surface {
   intervals: Array<() => void>
   /** 未捕获的顶层异常。 */
   thrown: unknown[]
+  /** `__DSH_MOBILE_INTERNALS__`（生产函数直通口 ✓ —— 断言打在它上面，不打在复制品上 ✓）。 */
+  internals: {
+    parseFrame: (bytes: Uint8Array, hasTag: boolean) => unknown
+    frameDesyncAt: () => number
+  }
 }
 
 /** 用最小假 DOM 把 boot.js 跑起来，重点覆盖"手机表面"这一支。 */
@@ -176,7 +181,12 @@ function bootOnSurface(options: { pathname: string; innerWidth: number; consent:
   } catch (error) {
     thrown.push(error)
   }
-  return { boxText: () => boxText.join('\n'), intervals, thrown }
+  return {
+    boxText: () => boxText.join('\n'),
+    intervals,
+    thrown,
+    internals: sandbox['__DSH_MOBILE_INTERNALS__'] as Surface['internals'],
+  }
 }
 
 test('手机表面（/mobile/app）会注册轮询定时器', () => {
@@ -214,4 +224,33 @@ test('定时器回调真的走到轮询逻辑（调试框里能看到轮询痕�
 test('非手机表面不注册轮询定时器（避免在电脑浏览器上白跑）', () => {
   const surface = bootOnSurface({ pathname: '/', innerWidth: 1440, consent: [] })
   assert.equal(surface.intervals.length, 0, '宽屏且非 /mobile/app 时不应注册轮询')
+})
+
+/**
+ * ★★ round 184：**帧长不匹配必须被记下来** ✓ —— 用户 2026-09-29 真机报的那条 ✓。
+ *
+ * 症状（用户原话）："我在**小退再进**以后，发消息提示**帧长不同步**，确实我的消息没有上手机的
+ * 聊天界面，但电脑上可以看到我已经发了消息" ✓。
+ *
+ * 为什么这条测试值得单独写 ✗：那种时候**隧道一直报 `connected`** ✓（socket 活着、RPC 也通 ✓），
+ * 坏的只有**帧长解析器** ⇒ 既有的前台自愈（判据是 `state() !== 'connected'` ✗）**永远不触发** ✗
+ * ⇒ 页面卡在"看着像好的、其实再也不更新"✓，用户只能"退出重进"自救 ✗。
+ * ⇒ 修法就是**记下这个时刻** ✓，让自愈据它重载页面 ✓（`selfHealDecision` 里排在那条之前 ✓）。
+ *
+ * ★ 这里断言的是**生产函数**（`__DSH_MOBILE_INTERNALS__.parseFrame` ✓）而不是复制品 ✓。
+ * ★ 本条覆盖"**记没记住**"这一半 ✓；"记住之后自愈会不会重载"那一半在本沙箱里**测不了** ✗
+ *   —— 本沙箱没有壳桥（`DshmShell` ✗），`selfHealDecision` 会在第一道守卫就 `skip:no-shell` ✓。
+ *   那一半靠**真机探针**：`scripts/check-keepalive-device.mjs --eval "…healVerdict(…)"` ✓。
+ */
+test('★ 帧长不匹配会被记下来（前台自愈据此重载页面，修"小退再进消息上不了屏"）', () => {
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [] })
+  const internals = surface.internals
+  assert.ok(internals !== undefined, 'boot.js 应装上 __DSH_MOBILE_INTERNALS__ ✓')
+  assert.equal(internals.frameDesyncAt(), 0, '刚起来时不该有"帧长不匹配"的记录 ✓')
+  // 30 字节、头部声称 payload=0 ⇒ 14+0 ≠ 30 ⇒ 必然走到"帧长不匹配"那一支 ✓
+  assert.throws(() => internals.parseFrame(new Uint8Array(30), true), /帧长不匹配/)
+  assert.ok(
+    internals.frameDesyncAt() > 0,
+    '出错后必须记下时刻 —— 前台自愈就是靠它决定"整页重载"的（新开 socket 修不好错位的解析器 ✗）',
+  )
 })

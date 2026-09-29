@@ -2768,6 +2768,31 @@
   }
 
   /**
+   * ★★ 本页**见过帧长不匹配**吗 ✓（0 = 没见过 ✓）—— round 184 加，用户真机报的那条 ✓。
+   *
+   * ## 为什么必须单独记一笔 ✗（这是"退出 App 就断联"那轮改动带出来的新状态 ✓）
+   *
+   * 用户原话（2026-09-29）："我在**小退再进**以后，发消息提示**帧长不同步**，
+   * 确实我的消息没有上手机的聊天界面，但电脑上可以看到我已经发了消息" ✗。
+   *
+   * 真因不是"连接断了" ✗ —— **隧道一直报 `connected`** ✓（socket 活着、RPC 也通 ✓），
+   * 坏掉的是**帧长解析器**：它读错了字节数，于是后面每一帧都错位 ✗ ⇒
+   * 宿主来的会话事件再也解不出来 ⇒ **聊天界面不再更新** ✓（而发出去的消息照样到电脑 ✓，两边症状不对称 ✓）。
+   *
+   * ★★ 为什么这一笔非有不可 ✗✗：既有的**前台自愈**（`selfHealDecision` ✓）唯一的判据是
+   *   `state() !== 'connected'` ✓ —— 而这正是本病的特征：**它一直说 connected** ✗
+   *   ⇒ 自愈**永远不触发** ✗ ⇒ 页面卡在"看着像好的、其实再也不更新"的状态里 ✓。
+   *
+   * ★ 为什么"重载"仍是唯一解 ✓：新开一条 socket **不会**重建这个解析器 ✗
+   *   （它不知道自己错在哪一帧 ✓）—— 这一条是既有注释里早就写明的结论 ✓
+   *   （见 `installForegroundSelfHeal` 的类注释 ✓），这里只是把**触发条件**补上 ✓。
+   *
+   * ★ 它是**内存态** ✓ ⇒ 重载即清零 ✓（不会"一次出错、以后每次回前台都重载"✗）；
+   *   而 `localStorage` 里那条 `dsh-mobile.lastFrameError` ✓（下面那句 ✓）继续留着给人查 ✓。
+   */
+  var frameDesyncAt = 0
+
+  /**
    * 解析帧头。标签长度固定 16 字节（与 Node 端一致）。
    */
   function parseFrame(bytes, hasTag) {
@@ -2786,6 +2811,8 @@
       for (var i = 0; i < Math.min(8, buffer.length); i++) head.push(buffer[i].toString(16).padStart(2, '0'))
       var detail = 'dsh-mobile: 帧长不匹配（声称=' + (FRAME_HEADER_BYTES + payloadLen) +
         ' 实际=' + buffer.length + ' 首字节=' + head.join(' ') + ' 标签=' + (hasTag === false ? '无' : '有') + '）'
+      // ★ 记一笔给**前台自愈**看 ✓（它据此重载页面 ✓ —— 见 `frameDesyncAt` 的说明 ✓）
+      frameDesyncAt = Date.now()
       try { localStorage.setItem('dsh-mobile.lastFrameError', detail + ' @' + new Date().toISOString()) } catch (e) { void e }
       throw new Error(detail)
     }
@@ -17860,6 +17887,15 @@
     sealFrame: sealFrame,
     openFrame: openFrame,
     parseFrame: parseFrame,
+    /**
+     * ★ round 184：本页最近一次"帧长不匹配"的时刻（0 = 没见过 ✓）。
+     *
+     * ★ 写成**函数**而不是属性 ✗：属性会在定义这一刻把 0 快照下来 ✓，之后永远读 0 ✗
+     *   （测试就再也打不红了 ✓）。它是 `selfHealDecision` 据以判定"该重载"的那个量 ✓。
+     */
+    frameDesyncAt: function () {
+      return frameDesyncAt
+    },
     ReplayWindow: ReplayWindow,
     transcriptHash: transcriptHash,
     fingerprintOf: fingerprintOf,
@@ -19292,6 +19328,21 @@
       if (document.visibilityState !== 'visible') return 'skip:not-visible'
       var api = globalThis.__DSH_MOBILE_BOOT__
       var state = api !== undefined && typeof api.state === 'function' ? String(api.state()) : 'unknown'
+      /**
+       * ★★ round 184：**帧长解析器错过位**也要重载 ✓ —— 这一条必须排在 `skip:connected` **前面** ✗✗。
+       *
+       * 为什么 ✗：用户 2026-09-29 报"小退再进以后发消息提示帧长不同步、消息上不了手机界面"✓，
+       * 而那种时候 `state` **恰恰是一直是 `connected`** ✓（socket 活着、RPC 也通 ✓，
+       * 坏的只有解析器 ✗）⇒ 下面那条 `skip:connected` 会把自愈**永远挡掉** ✗，
+       * 页面就卡在"看着像好的、其实再也不更新"✓ —— 用户只能靠"退出重进"自救 ✗
+       * （**而这正是保活轮之前的默认行为** ✓：以前按返回就是退出 ⇒ 重进必然整页重载 ✓
+       *   ⇒ 这一类故障被**顺带治好了 20 个月** ✓；改成"退到后台"之后它才露出来 ✓）。
+       *
+       * ★ 为什么重载仍是唯一解 ✓：新开一条 socket **不会**重建解析器 ✗（见类注释 ✓）。
+       * ★ 为什么不会变成"刷新循环" ✗：`frameDesyncAt` 是内存态 ✓ ⇒ 重载即清零 ✓；
+       *   且这里只在**回到前台**那两个触发点被问到 ✓，外加 15 秒节流 ✓（下一行 ✓）。
+       */
+      if (frameDesyncAt !== 0) return 'reload'
       if (state === 'connected') return 'skip:connected'
       /**
        * ★★ 身份已作废（宿主明确拒绝 ✓）⇒ **绝不重载** ✗：
@@ -19321,7 +19372,8 @@
         if (selfHealDecision(reason) !== 'reload') return
         lastSelfHealAt = Date.now()
         try {
-          debugBoxLine('[heal] 回到前台，隧道已断且本页连上过（' + reason + '）→ 自动重载页面 ✓')
+          debugBoxLine('[heal] 回到前台 → 自动重载页面 ✓（' + reason +
+            (frameDesyncAt !== 0 ? ' · 起因：本页见过帧长不匹配 ⇒ 解析器错过位，只有整页重载能修 ✓' : ' · 起因：隧道不在 connected') + '）')
         } catch (ignored) {
           void ignored
         }
