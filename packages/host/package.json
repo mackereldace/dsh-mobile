@@ -28,7 +28,8 @@
   "dependencies": {},
   "types": "lib/cordis.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-boot.mjs",
