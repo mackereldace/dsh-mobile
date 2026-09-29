@@ -29,8 +29,9 @@ import { DeviceStore } from "./devices.js";
 import { resolveDshRuntimeVersion } from "./dsh-version.js";
 import { detectLanIp, isAddressPresent, listLanCandidates } from "./lan.js";
 import { createLanListener } from "./lan-listener.js";
+import { handleSetupRequest, resolveProfilePatchPath, SETUP_PATH } from "./setup-config.js";
 import { createTlsManager } from "./tls-cert.js";
-import { createMobileHost, DEFAULT_CONFIG, } from "./index.js";
+import { createMobileHost, DEFAULT_CONFIG, isLoopbackRequest, } from "./index.js";
 /** Cordis 插件名（与包名一致，便于排障）。 */
 export const name = 'mobile-host';
 /** 依赖的宿主服务。缺失时 Cordis 不会激活本插件，而不是让它在半可用状态下报错。 */
@@ -575,11 +576,71 @@ export function apply(ctx, config = {}) {
             res.end(req.method === 'HEAD' ? undefined : shellCache.body);
         },
     });
+    /**
+     * 5) ★★ 本机接入配置：`GET /mobile/setup`（读）/ `POST /mobile/setup`（写）。
+     *
+     * ## 为什么需要它（官方插件管理那条路的最后一块拼图）
+     *
+     * `dsh plugin --profile web add 'github:…#path:/packages/host'` 只给**插件行**，
+     * 不给**机器专属配置** ✓（局域网 IP、端口、`phoneBaseUrl` 每台机器都不一样 ✓）——
+     * 于是装完 `listener.enabled=false`（默认 ✓）⇒ **手机连不上** ✗。
+     * 自研安装器 `scripts/install-host-plugin.mjs` 能自动推导并写入，但**它在仓库里** ✗：
+     * 一个纯走官方安装的用户（电脑上没有仓库）跑不了它 ✗。
+     *
+     * ⇒ 界面放在**电脑上的 DSH 页面**里 ✓，不是手机 ✓ ——
+     *   手机在配对之前**根本连不上** ✗（监听默认关着 ⇒ 手机没有入口 ✗，是鸡生蛋问题 ✓），
+     *   而电脑上的 DSH 页面是**本地**的 ✓ ⇒ 不需要监听 ✓，那条路本来就是通的 ✓。
+     *
+     * ## 闸门（★ 安全，别省）
+     *
+     * 这条路由**能改宿主配置** ✗ ⇒ 只允许**本机**访问 ✓：
+     * 判据就是 `index.ts` 里 `POST /mobile/device/call` 那道闸用的**同一个**
+     * `isLoopbackRequest`（看 socket 与 `x-forwarded-for` ✓）—— 这里只是把它传进去，
+     * **不自创第二套** ✗（处理器在 `setup-config.ts`，见那里的注释）。
+     *
+     * ## 路由归属
+     *
+     * `dsh-host-webserver` 的分发是「exact 命中 → 最长前缀胜出 → 命中即 return」，
+     * 所以这条 `/mobile/setup` 比本插件那条 `/mobile` 前缀更长 ⇒ 只有这一条路径会被它接走 ✓，
+     * 其余 `/mobile/*` 一字不动 ✓。
+     */
+    const setupPatchFile = resolveProfilePatchPath({ dshHome, profile: config.profile, moduleUrl: import.meta.url });
+    const disposeSetup = ctx.webServer.register({
+        kind: 'prefix',
+        path: SETUP_PATH,
+        handler: (req, res) => {
+            /**
+             * ★ 先过插件自己那道**信任栅栏**（Host / Origin / `sec-fetch-site`）——
+             *   与 `/mobile/*` 其它路由**同一道**（`index.ts` 的 `handleHttp` 里那句
+             *   "栅栏必须在任何路由分发之前"）✓。`/mobile/setup` 不是它认识的路由 ⇒
+             *   栅栏放行后它返回 `false`，控制权落到下面 ✓；不放行时它已经替我们把 403 发了 ✓。
+             *
+             * ⚠️ 为什么这道栅栏在这条路由上**必须有** ✗：我们的本机闸门看的是 **socket**
+             *   （`isLoopbackRequest` ✓），而**任何一个网页**都能让浏览器去请求
+             *   `http://127.0.0.1:3080/mobile/setup` —— 那时 socket 就是回环 ✓。
+             *   拦住它的是栅栏里的 "Origin 必须与 Host 同源" 那条 ✓
+             *   （恶意页面的 Origin 是它自己的域名 ⇒ 403 ✓），以及 Host 判据对 DNS rebinding 的拦截 ✓。
+             *   少了它，随便一个网站就能改这台机器的宿主配置 ✗。
+             */
+            if (mobileHost.handleHttp(req, res))
+                return;
+            handleSetupRequest(req, res, {
+                patchFile: setupPatchFile,
+                // ★ 仅本机：全项目只有这一个判据（index.ts 的 isLoopbackRequest）
+                isLocalRequest: isLoopbackRequest,
+                io: {
+                    log: (message) => console.log(`[mobile-host] ${message}`),
+                    warn: (message) => console.warn(`[mobile-host] 警告：${message}`),
+                },
+            });
+        },
+    });
     ctx.effect(() => () => {
         disposeHttp();
         disposeUpgrade();
         disposeInject?.();
         disposeShell();
+        disposeSetup();
         /**
          * ★ 监听器与插件同生命周期（C1-2 的落点）：DSH 停 ⇒ 手机入口停，
          * 不会再像外置 `lan-proxy.mjs` 那样留下占着端口的孤儿进程。
@@ -588,6 +649,7 @@ export function apply(ctx, config = {}) {
         listener?.dispose();
     });
     ctx.logger?.info?.(`[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
+        `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ${setupPatchFile}），` +
         `隧道 ${'/mobile/ws'}，身份指纹见 /mobile/manifest（协议版本 1）`);
 }
 //# sourceMappingURL=cordis.js.map

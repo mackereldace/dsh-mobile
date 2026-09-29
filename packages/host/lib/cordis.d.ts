@@ -33,6 +33,14 @@ export interface Config extends Partial<MobileHostConfig> {
     };
     /** 是否往 index.html 注入 shim（默认开启）。 */
     injectShim?: boolean;
+    /**
+     * 要读写的 profile 名（默认**从插件自身的位置推断**，见 `setup-config.ts`）。
+     *
+     * ★ 一般不用配：插件装在 `<DSH_HOME>/profiles/<profile>/node_modules/` 下，
+     *   位置本身就说明了 profile ✓（写死 `web` 会让 `--profile headless` 那类部署被写到别的 profile ✗）。
+     *   这里只是"布局不认识"时的显式覆盖 ✓。
+     */
+    profile?: string;
     /** 客户端 boot 脚本路径；省略时尝试从插件包内的 lib/boot.js 读取。 */
     bootScriptPath?: string;
     /**

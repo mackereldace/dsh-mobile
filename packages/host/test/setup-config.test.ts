@@ -1,0 +1,748 @@
+/**
+ * 宿主侧接入配置（`setup-config.ts`）的回归测试。
+ *
+ * ## 这里守的是什么
+ *
+ * 新增的 `GET/POST /mobile/setup` 让用户**不用终端、不用仓库**就能把这台机器配好 ✓
+ * （官方插件管理只装插件、不给配置 ✗ ⇒ 装完 `listener.enabled=false` ⇒ 手机连不上 ✗）。
+ * 而它**能改宿主配置** ✗ ⇒ 三件事必须钉死：
+ *
+ *   1. **仅本机**（闸门）：判据是 `index.ts` 的 `isLoopbackRequest` ✓ ——
+ *      与 `POST /mobile/device/call` 同一把尺子 ✓（不是自创的第二套 ✗）；
+ *   2. **写入是覆盖式的**：别人的条目一条都不能丢 ✗、写两次仍只有一块 ✓；
+ *   3. **推导只有一处实现** ✓：同一个函数既服务安装脚本、也服务页面路由 ✓ ——
+ *      本文件里有一条用例直接拿脚本的真实输出与共用模块的输出**逐字节**比对 ✓
+ *      （"两条上线路径各写一份"这亏本项目吃过：`boot.js` 那次手机拿到的那份没内联
+ *      公式渲染器，而验收脚本全绿 ✗✓）。
+ *
+ * ## 每条断言怎么打红（变异提示）
+ *
+ * 每条用例的注释里都写了"把它改成什么就会红"，便于将来有人动这块时**恰好**红一条 ✓。
+ */
+
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { after, describe, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { load } from 'js-yaml'
+
+import { isLoopbackRequest } from '../src/index.ts'
+import { apply } from '../src/cordis.ts'
+import {
+  MARKER_END,
+  MARKER_START,
+  type MobileSetupConfig,
+  type PreservedConfig,
+  type SetupHandlerOptions,
+  type SetupIo,
+  configFromRequestBody,
+  derivePhoneEntry,
+  deriveSuggestedConfig,
+  handleSetupRequest,
+  profileNameFromModuleUrl,
+  readCurrentConfig,
+  renderInsertPatch,
+  resolvePatchConfig,
+  resolveProfilePatchPath,
+  resolveListener,
+  toWireConfig,
+  writeConfigOnlyPatch,
+} from '../src/setup-config.ts'
+
+const repoRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
+const installer = join(repoRoot, 'scripts', 'install-host-plugin.mjs')
+
+// ─────────────────────────────── 脚手架 ───────────────────────────────
+
+const tempDirs: string[] = []
+
+/** 每个用例自带的临时目录（用例之间不靠"上一个留下的文件"过日子）。 */
+function tempDir(prefix = 'dshm-setup-'): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
+}
+
+after(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
+})
+
+/** 空 profile 的 patch 路径（`profiles/web/cordis.patch.yml`）。 */
+function patchPathIn(root: string, profile = 'web'): string {
+  const dir = join(root, 'profiles', profile)
+  mkdirSync(dir, { recursive: true })
+  return join(dir, 'cordis.patch.yml')
+}
+
+/** 记录日志的 io（用来断言"不是静默失败" ✓）。 */
+function recordingIo(): SetupIo & { logs: string[]; warns: string[] } {
+  const logs: string[] = []
+  const warns: string[] = []
+  return { logs, warns, log: (message) => logs.push(message), warn: (message) => warns.push(message) }
+}
+
+const emptyPreserved = (): PreservedConfig => ({ extraEndpoints: [], trustedHosts: [] })
+
+/** 直接驱动路由处理器（与 admin-routes.test.ts 同一思路：伪造 req/res）。 */
+async function callSetup(
+  options: SetupHandlerOptions,
+  method: string,
+  path: string,
+  call: { remoteAddress?: string; forwardedFor?: string; host?: string; body?: unknown; rawBody?: string } = {},
+): Promise<{ status: number; body: string }> {
+  const chunks =
+    call.body === undefined && call.rawBody === undefined
+      ? []
+      : [Buffer.from(call.rawBody ?? JSON.stringify(call.body), 'utf8')]
+  const headers: Record<string, string> = { host: call.host ?? '127.0.0.1:3080' }
+  if (call.forwardedFor !== undefined) headers['x-forwarded-for'] = call.forwardedFor
+  const req = {
+    method,
+    url: path,
+    headers,
+    socket: { remoteAddress: call.remoteAddress ?? '127.0.0.1' },
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
+  } as unknown as IncomingMessage
+
+  let status = 0
+  let body = ''
+  let headersSent = false
+  let finish: (() => void) | undefined
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  const res = {
+    get headersSent() {
+      return headersSent
+    },
+    writeHead(code: number) {
+      status = code
+      headersSent = true
+    },
+    end(data?: Buffer | string) {
+      body = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+      headersSent = true
+      finish?.()
+    },
+  } as unknown as ServerResponse
+
+  handleSetupRequest(req, res, options)
+  // 处理器对 POST 是异步的（读请求体）；这里给一个上限，**卡住就直接失败**而不是挂死测试
+  await Promise.race([
+    finished,
+    new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.()),
+  ])
+  assert.notEqual(status, 0, `${method} ${path} 未产生响应（处理器卡住了）`)
+  return { status, body }
+}
+
+/** 标准处理器选项：闸门用**真的** `isLoopbackRequest`（与 cordis.ts 的注册处一致 ✓）。 */
+function handlerOptions(patchFile: string, extra: Partial<SetupHandlerOptions> = {}): SetupHandlerOptions {
+  return { patchFile, isLocalRequest: isLoopbackRequest, ...extra }
+}
+
+/** 统计一个子串出现次数（幂等断言用）。 */
+function countOf(text: string, needle: string): number {
+  return text.split(needle).length - 1
+}
+
+// ─────────────────────────── A. 推导 ───────────────────────────
+
+describe('setup-config：推导（局域网 IP + 端口 ⇒ 手机入口）', () => {
+  test('★ 显式给地址 ⇒ trustedHosts 两条（明文+TLS），phoneBaseUrl 是 https，HTTPS 那条同时进 extraEndpoints', () => {
+    // 打红：把 tlsAuthority 写成明文端口、或者把 endpoint 去掉（票据里就没有可用的 HTTPS 了 ✗）
+    const derived = derivePhoneEntry(
+      emptyPreserved(),
+      { lanIp: '10.9.8.7', listener: true, listenerPlain: '0.0.0.0:3901', listenerTls: '0.0.0.0:3902' },
+    )
+    assert.notEqual(derived, undefined)
+    assert.deepEqual(derived?.hosts, ['10.9.8.7:3901', '10.9.8.7:3902'], '手机入口的两条 authority 不对（顺序即契约：第一条推导 publicBaseUrl）')
+    assert.equal(derived?.phoneBaseUrl, 'https://10.9.8.7:3902', 'phoneBaseUrl 必须是 https://<lan>:<TLS端口>')
+    assert.equal(derived?.endpoint, 'https://10.9.8.7:3902', 'HTTPS 那条必须同时进 extraEndpoints（手机壳会跳过明文端点）')
+    assert.equal(derived?.lanIp, '10.9.8.7')
+  })
+
+  test('★ 端口没给 ⇒ 用默认 3081/3443（不另算一遍）', () => {
+    // 打红：把 DEFAULT_LISTENER_TLS 改成别的端口，或让 derivePhoneEntry 自己硬编码 3443
+    const derived = derivePhoneEntry(emptyPreserved(), { lanIp: '10.9.8.7', listener: true })
+    assert.deepEqual(derived?.hosts, ['10.9.8.7:3081', '10.9.8.7:3443'])
+    assert.equal(derived?.phoneBaseUrl, 'https://10.9.8.7:3443')
+  })
+
+  test('★★ 探测不到局域网地址 ⇒ **不抛**，lanIp: null，且"该开监听 + 默认端口"照样给出来', () => {
+    const io = recordingIo()
+    // 打红：把 deriveSuggestedConfig 改成"探测不到就 throw"，或让它不返回 listener 段
+    const suggested = deriveSuggestedConfig({ detectLanIp: () => undefined }, io)
+    assert.equal(suggested.lanIp, null, '探测不到时 lanIp 必须是 null（不许抛 ✗）')
+    assert.deepEqual(suggested.config.trustedHosts, [], '探测不到地址时不该凭空写 authority')
+    assert.equal(suggested.config.phoneBaseUrl, undefined)
+    assert.deepEqual(
+      suggested.config.listener,
+      { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+      '建议值必须在没有地址时也把"该开监听 + 默认端口"给出来',
+    )
+    assert.ok(io.warns.some((line) => line.includes('探测')), '探测失败必须打警告（不许静默 ✗）')
+  })
+
+  test('★ 探测函数**抛错**也当成"探测不到"（没网/多网卡不许把宿主路由弄成 500）', () => {
+    // 打红：去掉 derivePhoneEntry 里那句 try/catch —— 本用例会变成抛错
+    const io = recordingIo()
+    const suggested = deriveSuggestedConfig(
+      {
+        detectLanIp: () => {
+          throw new Error('networkInterfaces 炸了')
+        },
+      },
+      io,
+    )
+    assert.equal(suggested.lanIp, null)
+    assert.ok(io.warns.some((line) => line.includes('探测')), '抛错也要留下可读的警告')
+  })
+
+  test('★ 探测得到地址 ⇒ 建议值就是这台机器该写的那一份（含 publicBaseUrl）', () => {
+    // 打红：让 suggested 不推导 publicBaseUrl（配对码里就没有可用地址了）
+    const suggested = deriveSuggestedConfig({ detectLanIp: () => '10.0.0.5' })
+    assert.equal(suggested.lanIp, '10.0.0.5')
+    const wire = toWireConfig(suggested.config)
+    assert.deepEqual(wire.trustedHosts, ['10.0.0.5:3081', '10.0.0.5:3443'])
+    assert.equal(wire.publicBaseUrl, 'http://10.0.0.5:3081', 'publicBaseUrl 必须按 trustedHosts[0] 推导')
+    assert.equal(wire.phoneBaseUrl, 'https://10.0.0.5:3443')
+    assert.deepEqual(wire.extraEndpoints, ['https://10.0.0.5:3443'])
+    assert.deepEqual(wire.listener, { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+  })
+
+  test('★ 建议值**强制**开监听（本次意图是关也不许关掉：一个关着监听的"建议值"没有意义）', () => {
+    // 打红：把 deriveSuggestedConfig 里的 `{...input, listener: true}` 改成直接透传 input
+    const suggested = deriveSuggestedConfig({ listener: false, detectLanIp: () => '10.0.0.5' })
+    assert.equal(suggested.config.listener?.enabled, true, '建议值必须把插件内监听打开（手机入口的落点）')
+  })
+
+  test('★ resolveListener 的优先级：输入 > 现有配置 > 默认', () => {
+    // 打红：把输入与现有配置的位置调换 —— 立刻变成"跑一次重启就把上次的端口换掉"
+    const preserved: PreservedConfig = { ...emptyPreserved(), listenerEnabled: true, listenerPlain: '0.0.0.0:9999', listenerTls: '0.0.0.0:9998' }
+    assert.deepEqual(resolveListener(preserved, {}), { enabled: true, plain: '0.0.0.0:9999', tls: '0.0.0.0:9998' }, '没给参数时必须沿用现有配置')
+    assert.deepEqual(
+      resolveListener(preserved, { listener: false, listenerPlain: '0.0.0.0:3901' }),
+      { enabled: false, plain: '0.0.0.0:3901', tls: '0.0.0.0:9998' },
+      '显式给了的键必须以输入为准',
+    )
+    assert.deepEqual(resolveListener(undefined, { listener: true }), { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+  })
+
+  test('★ 被广告出去的端点必须同时在 trustedHosts 里（追加、去重、wss 不派生）', () => {
+    // 打红：去掉 withEndpointAuthorities 调用（手机按候选取到端点 → 403 → "一直重连中"）
+    const { config } = resolvePatchConfig(
+      ['10.0.0.5:3081'],
+      emptyPreserved(),
+      undefined,
+      { extraEndpoints: ['https://100.64.1.2:3443', 'https://100.64.1.2:3443', 'wss://relay.example.com/attach'] },
+    )
+    assert.deepEqual(config.trustedHosts, ['10.0.0.5:3081', '100.64.1.2:3443'], '派生的 authority 只能**追加**在显式列表之后（顺序即契约）')
+    assert.deepEqual(config.extraEndpoints, ['https://100.64.1.2:3443', 'wss://relay.example.com/attach'])
+    assert.equal(config.publicBaseUrl, 'http://10.0.0.5:3081', 'publicBaseUrl 必须仍按第一条推导')
+  })
+})
+
+// ─────────────────────────── B. 读写 patch ───────────────────────────
+
+describe('setup-config：把配置写进 profile 的 cordis.patch.yml', () => {
+  test('★ 空 profile（文件都不存在）⇒ 写入后能原样读回', () => {
+    // 打红：writeConfigOnlyPatch 不建目录、或 readCurrentConfig 只认已有文件
+    const patchFile = patchPathIn(tempDir())
+    assert.equal(existsSync(patchFile), false, '前置：起点必须是"没有这个文件"')
+    const config: MobileSetupConfig = {
+      trustedHosts: ['10.9.8.7:3081', '10.9.8.7:3443'],
+      publicBaseUrl: 'http://10.9.8.7:3081',
+      phoneBaseUrl: 'https://10.9.8.7:3443',
+      extraEndpoints: ['https://10.9.8.7:3443'],
+      listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+    }
+    writeConfigOnlyPatch(patchFile, config)
+    assert.deepEqual(readCurrentConfig(patchFile), config, '写进去再读回来必须一致')
+  })
+
+  test('★★ 写两次仍是 1 条（幂等：先删本块再追加）', () => {
+    // 打红：writeConfigOnlyPatch 里去掉 removeConfigOnlyBlocks —— 第二次会写出第二块
+    const patchFile = patchPathIn(tempDir())
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    const text = readFileSync(patchFile, 'utf8')
+    assert.equal(countOf(text, '- id: mobile-host'), 1, '写两次写出了两块（配置会变成两行覆盖，后一块才算数）')
+    assert.equal(countOf(text, MARKER_START), 1)
+    assert.equal(countOf(text, MARKER_END), 1)
+    const parsed = load(text) as Array<Record<string, unknown>>
+    assert.equal(Array.isArray(parsed) && parsed.length, 1, '整份文件必须仍是一个只有一项的列表')
+  })
+
+  test('★ 形状：不带 name、不是 insert（行由 bundle 自带，我们只覆盖 config）', () => {
+    // 打红：把 renderConfigOnlyPatch 换成 renderInsertPatch / 顺手写上 name: '@dsh-mobile/host'
+    const patchFile = patchPathIn(tempDir())
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443', listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' } })
+    const text = readFileSync(patchFile, 'utf8')
+    assert.doesNotMatch(text, /^\s*name:/m, '不许写 name（行已经由 bundle 插入了 ✗，写了就是第二行）')
+    assert.doesNotMatch(text, /insert:/, '不许用 insert（那样会插出第二行插件）')
+    const parsed = load(text) as Array<Record<string, unknown>>
+    assert.equal(parsed.length, 1)
+    assert.equal(parsed[0]?.['id'], 'mobile-host')
+    assert.equal(parsed[0]?.['name'], undefined)
+    assert.equal(parsed[0]?.['insert'], undefined)
+    assert.deepEqual((parsed[0]?.['config'] as Record<string, unknown>)['listener'], {
+      enabled: true,
+      plain: '0.0.0.0:3081',
+      tls: '0.0.0.0:3443',
+    }, 'listener 块的缩进/形状不对（插件读的是 config.listener）')
+  })
+
+  test('★★★ profile 里**别人的**条目一条都不许丢（覆盖式重写最容易吃掉它们）', () => {
+    // 打红：把 removeConfigOnlyBlocks 换成"整份重写"，或让 normalizeBase 丢掉非空列表的内容
+    const patchFile = patchPathIn(tempDir())
+    const others = [
+      '# 我自己的注释：这一行也必须留着',
+      '- insert:',
+      '    - id: time-context',
+      "      name: '@deepseek-ai/dsh-time-context'",
+      '      config:',
+      '        timeZone: Asia/Shanghai',
+      '',
+      '- id: ui-schedule',
+      '  disabled: false',
+      '',
+      '- id: mobile-host',
+      '  config:',
+      "    phoneBaseUrl: 'https://手工写的旧值:3443'",
+      '',
+      '# 结尾注释',
+    ].join('\n')
+    writeFileSync(patchFile, `${others}\n`)
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    const after = readFileSync(patchFile, 'utf8')
+    assert.ok(after.startsWith(others), '用户的原有内容必须逐字节留在原位（我们的块只能追加在后面）')
+    assert.equal(after.split('\n').filter((line) => line.startsWith("# 我自己的注释")).length, 1)
+    const parsed = load(after) as Array<Record<string, unknown>>
+    const ids = parsed.map((row) => row?.['id'] ?? (Array.isArray(row?.['insert']) ? 'insert' : '(无)'))
+    assert.deepEqual(ids, ['insert', 'ui-schedule', 'mobile-host', 'mobile-host'], '别的条目必须还在，只在末尾追加我们那一项')
+    // 末尾那一项才是我们写的（前面那条手工写的不动它 —— "只写来的那几个"）
+    assert.equal((parsed[3]?.['config'] as Record<string, unknown>)['phoneBaseUrl'], 'https://10.9.8.7:3443')
+  })
+
+  test('★ 只写来的那几个：请求里没有的键，一个都不许冒出来（整块替换 config）', () => {
+    // 打红：让 configFromRequestBody / writeConfigOnlyPatch 顺手补默认值（那就不是"只写来的"了）
+    const patchFile = patchPathIn(tempDir())
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    const text = readFileSync(patchFile, 'utf8')
+    assert.match(text, /phoneBaseUrl: 'https:\/\/10\.9\.8\.7:3443'/)
+    assert.doesNotMatch(text, /trustedHosts:/, '没来 trustedHosts 就不许写（否则回写会静默改掉手机入口）')
+    assert.doesNotMatch(text, /listener:/, '没来 listener 就不许写')
+    assert.doesNotMatch(text, /publicBaseUrl:/)
+  })
+
+  test('★★ 与安装器的 insert 块并存时：插件行不许被删，覆盖块也不许越写越多', () => {
+    // 打红：把 removeConfigOnlyBlocks 换回 removeBlock（删第一个块）—— 它会删掉插件行 ✗
+    const patchFile = patchPathIn(tempDir())
+    const installerBlock = renderInsertPatch({ trustedHosts: ['10.9.8.7:3081'], listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' } })
+    writeFileSync(patchFile, `${installerBlock}`)
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    writeConfigOnlyPatch(patchFile, { phoneBaseUrl: 'https://10.9.8.7:3443' })
+    const text = readFileSync(patchFile, 'utf8')
+    assert.match(text, /name: '@dsh-mobile\/host'/, '安装器插的插件行被删掉了（插件从此不会被加载 ✗）')
+    assert.match(text, /insert:/)
+    assert.equal(countOf(text, MARKER_END), 2, '只该有两块：安装器那块 + 我们的覆盖块（覆盖块写两次仍是一块）')
+    assert.equal(countOf(text, '- id: mobile-host\n  config:'), 1, '覆盖块写两次写出了两块')
+    // 生效的是最后写入的那一块 ⇒ current 读回来必须是覆盖块的值
+    assert.equal(readCurrentConfig(patchFile)?.phoneBaseUrl, 'https://10.9.8.7:3443')
+  })
+
+  test('★ 安装器写的 insert 形态也能被读成 current（脚本装机的机器，页面要看得见现状）', () => {
+    // 打红：readCurrentConfig 只看包含 name: 的块 / 只认顶层 id
+    const patchFile = patchPathIn(tempDir())
+    writeFileSync(
+      patchFile,
+      renderInsertPatch({
+        trustedHosts: ['10.34.255.229:3081', '10.34.255.229:3443'],
+        publicBaseUrl: 'http://10.34.255.229:3081',
+        phoneBaseUrl: 'https://10.34.255.229:3443',
+        extraEndpoints: ['https://10.34.255.229:3443'],
+        relayUrl: 'wss://relay.example.com/attach',
+        listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+      }),
+    )
+    const current = readCurrentConfig(patchFile)
+    assert.deepEqual(current?.trustedHosts, ['10.34.255.229:3081', '10.34.255.229:3443'])
+    assert.equal(current?.publicBaseUrl, 'http://10.34.255.229:3081')
+    assert.equal(current?.phoneBaseUrl, 'https://10.34.255.229:3443')
+    assert.deepEqual(current?.listener, { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+    // 中继键也要带出来：POST 是"整块替换"，页面拿不到它们就会**静默抹掉**（本项目三次事故那一类）
+    assert.equal(current?.relayUrl, 'wss://relay.example.com/attach')
+  })
+
+  test('★ 没有我们的配置 ⇒ current 就是 null（契约：没有就是 null）', () => {
+    // 打红：readCurrentConfig 在文件不存在时返回 {} 而不是 null
+    const patchFile = patchPathIn(tempDir())
+    assert.equal(readCurrentConfig(patchFile), null)
+    writeFileSync(patchFile, '# 只有别人的东西\n- id: ui-schedule\n  disabled: false\n')
+    assert.equal(readCurrentConfig(patchFile), null, '别人的同名键不算我们的配置')
+  })
+})
+
+// ─────────────────────── C. 路由：闸门与契约 ───────────────────────
+
+describe('setup-config：GET/POST /mobile/setup 的 HTTP 契约', () => {
+  test('★★ 非本机一律 403（GET 与 POST 都拒），而且 POST **一个字节都不写**', async () => {
+    // 打红：把 isLocalRequest 去掉或改成 () => true —— 同局域网的人就能改这台机器的宿主配置 ✗
+    const patchFile = patchPathIn(tempDir())
+    const options = handlerOptions(patchFile, { detectLanIp: () => '10.0.0.5' })
+    const before = existsSync(patchFile)
+
+    const get = await callSetup(options, 'GET', '/mobile/setup', { remoteAddress: '10.0.0.7' })
+    assert.equal(get.status, 403, '非本机的 GET 必须被拒')
+    assert.match(JSON.parse(get.body).message as string, /只能在这台电脑上/, '403 必须带一句能念的话')
+
+    const post = await callSetup(options, 'POST', '/mobile/setup', {
+      remoteAddress: '10.0.0.7',
+      body: { phoneBaseUrl: 'https://evil.example.com:3443' },
+    })
+    assert.equal(post.status, 403, '非本机的 POST 必须被拒（这条路由能改宿主配置 ✗）')
+    assert.equal(existsSync(patchFile), before, '被拒的请求不许留下任何写入')
+
+    // ★ 伪造 x-forwarded-for 也不行：socket 是不是回环是第一判据（与 isLoopbackRequest 同语义）
+    const spoof = await callSetup(options, 'POST', '/mobile/setup', {
+      remoteAddress: '10.0.0.7',
+      forwardedFor: '127.0.0.1',
+      body: { phoneBaseUrl: 'https://evil.example.com:3443' },
+    })
+    assert.equal(spoof.status, 403, '非回环 socket 伪造 x-forwarded-for 也必须被拒')
+  })
+
+  test('★ 本机 ⇒ GET 200，六个字段齐全（没有配置时 current 为 null、configured 为 false）', async () => {
+    // 打红：少发一个契约字段、或把 current 的"没有"写成 {}（客户端就分不清"没配"和"配了空"）
+    const patchFile = patchPathIn(tempDir())
+    const response = await callSetup(
+      handlerOptions(patchFile, { detectLanIp: () => '10.0.0.5', machineName: () => 'Mac-mini-2024.local' }),
+      'GET',
+      '/mobile/setup',
+    )
+    assert.equal(response.status, 200)
+    const payload = JSON.parse(response.body) as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(payload).sort(),
+      ['configured', 'current', 'lanIp', 'machineName', 'profilePath', 'suggested'].sort(),
+      '响应字段就是契约本身（名字一个字母都不许改）',
+    )
+    assert.equal(payload['configured'], false)
+    assert.equal(payload['profilePath'], patchFile)
+    assert.equal(payload['current'], null)
+    assert.equal(payload['lanIp'], '10.0.0.5')
+    assert.equal(payload['machineName'], 'Mac-mini-2024.local')
+    const suggested = payload['suggested'] as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(suggested).sort(),
+      ['extraEndpoints', 'listener', 'phoneBaseUrl', 'publicBaseUrl', 'trustedHosts'].sort(),
+      'suggested 的五个键必须始终在（没有也是 []/null）',
+    )
+    assert.deepEqual(suggested['trustedHosts'], ['10.0.0.5:3081', '10.0.0.5:3443'])
+    assert.deepEqual(suggested['listener'], { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+  })
+
+  test('★ 探测不到 ⇒ GET 仍是 200、lanIp 为 null、不抛（没网/多网卡都要能打开这个页面）', async () => {
+    // 打红：让 buildSetupStatus 在探测失败时抛错（页面直接打不开，用户无从下手）
+    const patchFile = patchPathIn(tempDir())
+    const response = await callSetup(handlerOptions(patchFile, { detectLanIp: () => undefined }), 'GET', '/mobile/setup')
+    assert.equal(response.status, 200)
+    const payload = JSON.parse(response.body) as Record<string, unknown>
+    assert.equal(payload['lanIp'], null)
+    assert.deepEqual((payload['suggested'] as Record<string, unknown>)['trustedHosts'], [])
+  })
+
+  test('★ 本机 ⇒ POST 200，返回 {ok, restartRequired, wrote}，且文件里确实写进去了', async () => {
+    // 打红：少发 got/restartRequired/wrote 任一字段；或写完不落盘
+    const patchFile = patchPathIn(tempDir())
+    const response = await callSetup(handlerOptions(patchFile), 'POST', '/mobile/setup', {
+      body: {
+        trustedHosts: ['10.0.0.5:3081', '10.0.0.5:3443'],
+        phoneBaseUrl: 'https://10.0.0.5:3443',
+        listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(JSON.parse(response.body), {
+      ok: true,
+      restartRequired: true,
+      wrote: ['trustedHosts', 'phoneBaseUrl', 'listener'],
+    })
+    const current = readCurrentConfig(patchFile)
+    assert.deepEqual(current?.trustedHosts, ['10.0.0.5:3081', '10.0.0.5:3443'])
+    assert.equal(current?.phoneBaseUrl, 'https://10.0.0.5:3443')
+    assert.equal(current?.listener?.enabled, true)
+  })
+
+  test('★ 本机 POST 两次（含前面已有安装器的块）⇒ 文件里我们的覆盖块始终只有一块', async () => {
+    const patchFile = patchPathIn(tempDir())
+    writeFileSync(patchFile, renderInsertPatch({ trustedHosts: ['10.9.8.7:3081'] }))
+    const options = handlerOptions(patchFile)
+    for (let i = 0; i < 2; i++) {
+      const response = await callSetup(options, 'POST', '/mobile/setup', { body: { phoneBaseUrl: 'https://10.9.8.7:3443' } })
+      assert.equal(response.status, 200)
+    }
+    const text = readFileSync(patchFile, 'utf8')
+    assert.equal(countOf(text, '- id: mobile-host\n  config:'), 1)
+    assert.match(text, /name: '@dsh-mobile\/host'/)
+  })
+
+  test('★ POST 认不出的字段 ⇒ 400 且**不写文件**（写错一个字母必须响亮地失败）', async () => {
+    // 打红：把未知字段改成"静默忽略" —— 用户把 trustedHosts 拼错时页面照样报成功，手机却连不上 ✗
+    const patchFile = patchPathIn(tempDir())
+    const response = await callSetup(handlerOptions(patchFile), 'POST', '/mobile/setup', {
+      body: { trustedHost: ['10.0.0.5:3081'] },
+    })
+    assert.equal(response.status, 400)
+    assert.match(JSON.parse(response.body).message as string, /认不出的字段/)
+    assert.equal(existsSync(patchFile), false, '400 时不许写盘')
+  })
+
+  test('★ POST 空对象 / 非法 body ⇒ 400（不许写出一个空 config 把生效配置清掉）', async () => {
+    const patchFile = patchPathIn(tempDir())
+    const options = handlerOptions(patchFile)
+    assert.equal((await callSetup(options, 'POST', '/mobile/setup', { body: {} })).status, 400, '空对象必须被拒')
+    assert.equal((await callSetup(options, 'POST', '/mobile/setup', { rawBody: '{不是 JSON' })).status, 400, '非法 JSON 必须被拒')
+    assert.equal(existsSync(patchFile), false)
+  })
+
+  test('★ 方法不对 ⇒ 405（并带上 allow），路径不对 ⇒ 404', async () => {
+    const patchFile = patchPathIn(tempDir())
+    const options = handlerOptions(patchFile)
+    assert.equal((await callSetup(options, 'PUT', '/mobile/setup')).status, 405)
+    assert.equal((await callSetup(options, 'GET', '/mobile/setup/other')).status, 404)
+    // 前缀注册的语义：/mobile/setup 与 /mobile/setup/ 都归我们
+    assert.equal((await callSetup(options, 'GET', '/mobile/setup/')).status, 200)
+  })
+
+  test('★ configFromRequestBody 的校验：类型不对就 400（不猜、不吞）', () => {
+    assert.deepEqual(configFromRequestBody({ trustedHosts: ['a:1'], listener: { enabled: true } }), {
+      config: { trustedHosts: ['a:1'], listener: { enabled: true } },
+      wrote: ['trustedHosts', 'listener'],
+    })
+    for (const bad of [
+      { trustedHosts: 'a:1' },
+      { trustedHosts: [''] },
+      { phoneBaseUrl: 42 },
+      { listener: { enabled: 'yes' } },
+      { listener: { nope: true } },
+      { relayPoolSize: {} },
+      [],
+    ]) {
+      const parsed = configFromRequestBody(bad)
+      assert.ok('error' in parsed, `${JSON.stringify(bad)} 应当被拒绝`)
+    }
+    // relayPoolSize 允许数字（写出来仍是 `relayPoolSize: 2`，与脚本一致）
+    const pooled = configFromRequestBody({ relayPoolSize: 2 })
+    assert.ok(!('error' in pooled) && pooled.config.relayPoolSize === '2')
+  })
+
+  test('★ GET 的 current 会把现有配置整份给出来（含中继键 —— 页面回写时不许把它们弄丢）', async () => {
+    const patchFile = patchPathIn(tempDir())
+    writeConfigOnlyPatch(patchFile, {
+      trustedHosts: ['10.0.0.5:3081'],
+      phoneBaseUrl: 'https://10.0.0.5:3443',
+      relayUrl: 'wss://relay.example.com/attach',
+      relayToken: 'tok-123',
+      listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+    })
+    const response = await callSetup(handlerOptions(patchFile, { detectLanIp: () => '10.0.0.5' }), 'GET', '/mobile/setup')
+    const payload = JSON.parse(response.body) as { configured: boolean; current: Record<string, unknown> }
+    assert.equal(payload.configured, true)
+    assert.deepEqual(payload.current['trustedHosts'], ['10.0.0.5:3081'])
+    assert.equal(payload.current['relayUrl'], 'wss://relay.example.com/attach')
+    assert.deepEqual(payload.current['listener'], { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+  })
+
+  test('★ profilePath：从插件自身位置推断 profile，推断不出来才退回 web', () => {
+    // 打红：写死 'web'（用 --profile headless 部署的机器就会被写到别的 profile）
+    const home = tempDir()
+    const moduleUrl = `file://${home}/profiles/headless/node_modules/@dsh-mobile/host/lib/cordis.js`
+    assert.equal(profileNameFromModuleUrl(moduleUrl, home), 'headless')
+    assert.equal(resolveProfilePatchPath({ dshHome: home, moduleUrl }), join(home, 'profiles', 'headless', 'cordis.patch.yml'))
+    // 显式配置优先
+    assert.equal(
+      resolveProfilePatchPath({ dshHome: home, profile: 'web', moduleUrl }),
+      join(home, 'profiles', 'web', 'cordis.patch.yml'),
+    )
+    // fallback 镜像（profiles/node_modules）不算某个 profile
+    assert.equal(profileNameFromModuleUrl(`file://${home}/profiles/node_modules/@dsh-mobile/host/lib/cordis.js`, home), undefined)
+    assert.equal(resolveProfilePatchPath({ dshHome: home, moduleUrl: 'file:///nowhere/x.js' }), join(home, 'profiles', 'web', 'cordis.patch.yml'))
+    // 路径穿越：profile 名带 '/' 一律不认（否则一个请求就能写到 profile 之外 ✗）
+    assert.equal(
+      resolveProfilePatchPath({ dshHome: home, profile: '../../etc', moduleUrl: 'file:///nowhere/x.js' }),
+      join(home, 'profiles', 'web', 'cordis.patch.yml'),
+    )
+  })
+})
+
+// ──────────────── D. 与安装脚本共用一处实现（防漂移） ────────────────
+describe('setup-config：脚本与页面写出的 config 必须逐字节相同', () => {
+  test('★★ install-host-plugin.mjs --config-only 的输出 == 共用模块 writeConfigOnlyPatch 的输出', () => {
+    /**
+     * 打红：在共用模块里改一处缩进/键序，或让脚本再自己拼一份 patch ——
+     * 那样"脚本写的"与"页面写的"就会漂移，而这正是本模块存在的理由 ✓。
+     */
+    const root = tempDir('dshm-setup-parity-')
+    const scripted = patchPathIn(join(root, 'scripted'))
+    execFileSync(
+      process.execPath,
+      [
+        installer,
+        '--dsh-home', join(root, 'scripted'),
+        '--profile', 'web',
+        '--config-only',
+        '--listener',
+        '--lan-ip', '10.9.8.7',
+        '--listener-plain', '0.0.0.0:3901',
+        '--listener-tls', '0.0.0.0:3902',
+      ],
+      { stdio: 'ignore' },
+    )
+
+    // 同一份输入，走共用模块自己算一遍（推导 + 展开 + 写入）
+    const patchFile = patchPathIn(join(root, 'direct'))
+    const input = { lanIp: '10.9.8.7', listener: true as const, listenerPlain: '0.0.0.0:3901', listenerTls: '0.0.0.0:3902' }
+    const derived = derivePhoneEntry(emptyPreserved(), input)
+    assert.notEqual(derived, undefined)
+    const { config } = resolvePatchConfig(derived?.hosts ?? [], emptyPreserved(), derived, input)
+    writeConfigOnlyPatch(patchFile, config)
+
+    assert.equal(
+      readFileSync(patchFile, 'utf8'),
+      readFileSync(scripted, 'utf8'),
+      '脚本与共用模块写出的文件必须逐字节相同（含注释、缩进、marker）',
+    )
+  })
+})
+
+// ──────────── E. 接线：真插件 apply() + 假 ctx（闸门是两道，不是一道） ────────────
+
+describe('setup-config：cordis.ts 里的注册与两道防护', () => {
+  /**
+   * 这里跑的是**真的** `apply()`（只是把 `ctx.webServer` 换成记录用的假对象），
+   * 因此它同时验到"路由注册在哪条路径上"与"栅栏在不在闸门前面"——
+   * 而这两件事在只测 `setup-config.ts` 的用例里都看不见。
+   */
+  async function applyWithStubContext(): Promise<{
+    home: string
+    patchFile: string
+    call: (method: string, headers: Record<string, string>, remoteAddress: string, body?: unknown) => Promise<{ status: number; body: string }>
+  }> {
+    const home = tempDir('dshm-setup-apply-')
+    mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
+    interface Route {
+      kind: string
+      path: string
+      handler: (req: IncomingMessage, res: ServerResponse) => void
+    }
+    const routes: Route[] = []
+    const ctx = {
+      webServer: {
+        register: (route: Route) => {
+          routes.push(route)
+          return () => {}
+        },
+        registerUpgrade: () => () => {},
+        tapIndex: () => () => {},
+      },
+      effect: (fn: () => () => void) => {
+        fn()
+      },
+      logger: { info: () => {} },
+      get: () => undefined,
+      on: () => {},
+    } as unknown as Parameters<typeof apply>[0]
+    apply(ctx, { dshHome: home, injectShim: false, profile: 'web' })
+
+    const route = routes.find((item) => item.path === '/mobile/setup')
+    assert.notEqual(route, undefined, '插件没有注册 /mobile/setup（页面就没有入口了）')
+
+    const call = async (
+      method: string,
+      headers: Record<string, string>,
+      remoteAddress: string,
+      body?: unknown,
+    ): Promise<{ status: number; body: string }> => {
+      const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
+      const req = {
+        method,
+        url: '/mobile/setup',
+        headers,
+        socket: { remoteAddress },
+        async *[Symbol.asyncIterator]() {
+          for (const chunk of chunks) yield chunk
+        },
+      } as unknown as IncomingMessage
+      let status = 0
+      let text = ''
+      let headersSent = false
+      let finish: (() => void) | undefined
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      const res = {
+        get headersSent() {
+          return headersSent
+        },
+        writeHead(code: number) {
+          status = code
+          headersSent = true
+        },
+        end(data?: Buffer | string) {
+          text = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+          finish?.()
+        },
+      } as unknown as ServerResponse
+      route?.handler(req, res)
+      await Promise.race([finished, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
+      return { status, body: text }
+    }
+
+    return { home, patchFile: join(home, 'profiles', 'web', 'cordis.patch.yml'), call }
+  }
+
+  test('★★ 注册在 /mobile/setup 上，且两道防护都在：跨源/DNS rebinding 被**栅栏**拦、非回环被**闸门**拦', async () => {
+    // 打红：去掉 cordis.ts 里那句 `if (mobileHost.handleHttp(req, res)) return`
+    //       ⇒ "恶意页面从本机浏览器发起的跨源 POST" 会被放行（socket 就是回环 ✗）
+    const env = await applyWithStubContext()
+    const local = { host: '127.0.0.1:3080' }
+
+    // ① 闸门（socket 不是回环）——与 POST /mobile/device/call 同一把尺子
+    const remote = await env.call('GET', local, '10.0.0.7')
+    assert.equal(remote.status, 403)
+    assert.match(remote.body, /只能在这台电脑上/, '非回环请求必须被本机闸门拒掉，并给一句能念的话')
+
+    // ② 栅栏（Host / Origin / sec-fetch-site）——socket 是回环也不够 ✗
+    const crossOrigin = await env.call('POST', { ...local, origin: 'http://evil.example.com' }, '127.0.0.1', {
+      phoneBaseUrl: 'https://evil.example.com:3443',
+    })
+    assert.equal(crossOrigin.status, 403, '本机浏览器里的恶意页面能改宿主配置 —— 栅栏没生效')
+    assert.match(crossOrigin.body, /Origin does not match Host/)
+    assert.equal(
+      (await env.call('GET', { ...local, 'sec-fetch-site': 'cross-site' }, '127.0.0.1')).status,
+      403,
+      'cross-site 请求必须被拒',
+    )
+    assert.equal((await env.call('GET', { host: 'evil.example.com' }, '127.0.0.1')).status, 403, 'DNS rebinding 的 Host 必须被拒')
+    // 两次被拒都不许留下写入
+    assert.equal(existsSync(env.patchFile), false, '被拒的请求不许写盘')
+
+    // ③ 正常的本机请求 ⇒ 200，并且真的写到**这个 profile** 的 cordis.patch.yml 上
+    const ok = await env.call('POST', local, '127.0.0.1', {
+      phoneBaseUrl: 'https://10.0.0.5:3443',
+      listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+    })
+    assert.equal(ok.status, 200, ok.body)
+    assert.deepEqual(JSON.parse(ok.body), { ok: true, restartRequired: true, wrote: ['phoneBaseUrl', 'listener'] })
+    assert.equal(env.patchFile, join(env.home, 'profiles', 'web', 'cordis.patch.yml'))
+    assert.equal(readCurrentConfig(env.patchFile)?.phoneBaseUrl, 'https://10.0.0.5:3443')
+  })
+})
