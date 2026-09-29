@@ -74,4 +74,29 @@
     <string name="address_pinned">手机已固定这台电脑的证书，指纹前 16 位：%1$s</string>
     <!-- ★ C3：同上 —— "任何电脑"改成"这台电脑"（现在每台电脑各存一份 ✓，说"任何"就是假话 ✗） -->
     <string name="address_no_pin">手机还没有固定这台电脑的证书：连上时会先让你核对一次指纹。</string>
+
+    <!-- ── ★★ round 183：保活前台服务的**常驻通知**（用户报的"退出 App 就断联"✗）──────────
+         因果：根返回原来是 finish() ⇒ WebView 连同整条隧道一起被销毁 ✗；现在根返回改成
+         "退到后台" ✓，进程靠一个 specialUse 前台服务不被冻结 ✓（见 KeepAliveService ✓），
+         它替页面打拍子 ✓、并把"隧道现在怎么样"显示在这条常驻通知上 ✓。
+         文案口径（**都不是随手写的** ✗）：
+           ① 渠道名与渠道说明照上面 notify_channel / notify_channel_desc 的文体 ✓
+              —— 一句话说清它是干什么的 ✓；
+           ② 「保持连接」四个字**故意**在渠道名与通知标题上一样 ✓：同一个东西在两处出现，
+              字面一致才不会让人以为是两回事 ✓（而它们**不是**同一个字符串 ✗ ——
+              渠道名归系统设置页 ✓、标题归通知栏 ✓，将来改一处不必被迫改另一处 ✓）；
+           ③ 正文只有**三态**（已连接 ✓ / 正在连接 ✓ / 正在重连 ✓）—— 用户瞟一眼通知栏
+              就知道隧道还在不在 ✓，绝不写只有我们能看懂的内部状态 ✗；
+              重连那条**带次数** ✓：次数在涨 = 它真的在重试 ✓，不动 = 卡住了 ✓
+              （%1$d 由 KeepAlivePolicy.keepAliveText 填 ✓ —— 纯逻辑 ✓，电脑上验过 ✓）；
+           ④ 「退出并断开」那颗 action 必须**说清它会真的断** ✓ —— 写成「关闭」会被当成
+              "关掉这条通知"✗，而它会把 App 一起结束掉 ✓（见 KeepAliveService.ACTION_EXIT ✓）。
+    -->
+    <string name="keepalive_channel">保持连接</string>
+    <string name="keepalive_channel_desc">退出到后台后，靠它保持手机与电脑的连接，任务与提醒不会断。</string>
+    <string name="keepalive_title">保持连接</string>
+    <string name="keepalive_state_connected">已连接电脑，隧道保持中</string>
+    <string name="keepalive_state_connecting">正在连接电脑…</string>
+    <string name="keepalive_state_reconnecting">正在重连（第 %1$d 次）</string>
+    <string name="keepalive_exit">退出并断开</string>
 </resources>

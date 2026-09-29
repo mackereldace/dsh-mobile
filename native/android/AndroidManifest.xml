@@ -15,7 +15,7 @@
      于是**不用**在系统里装 CA、**没有**"网络可能受到监控"的常驻提示；
   3. **地址可编辑** ✓ —— 地址变了在 APP 里改一下即可，不必重装、不必重新配对。
 
-  ## 权限:三个,每一个都写清了为什么（★ round 143 起是三个 ✗ —— 见下）
+  ## 权限:五个,每一个都写清了为什么（★ round 183 起是五个 ✗ —— 见下）
 
   1. `INTERNET` ✓ 唯一的联网权限;
   2. `POST_NOTIFICATIONS` ✓ —— 安卓 13 起"发系统通知"要**运行时**授权,
@@ -25,8 +25,13 @@
      完整理由、有没有不加的替代、以及被拒绝时怎么降级,逐条写在下面
      `<uses-permission android:name="android.permission.CAMERA" />` 上方那一段注释里 ✓ ——
      **改权限之前先读那一段** ✓。
+  4. `FOREGROUND_SERVICE` ✓ 与 5. `FOREGROUND_SERVICE_SPECIAL_USE` ✓ ——
+     ★★ **round 183 新加的两条** ✗（"保活":让进程在后台不被冻结 ✓）。
+     ★ 与 `CAMERA` 那次**不一样** ✗:那次有 `dshmobile://pair` 深链兜底 ✓(不加也能配对 ✓);
+     这次**没有不加的替代** ✗ —— 完整理由逐条写在下面那两条权限上方的那一段注释里 ✓,
+     改之前同样先读那一段 ✓。
 
-  除了这三条,**一个都不申请** ✓(没有存储/定位/通讯录/后台定位)。
+  除了这五条,**一个都不申请** ✓(没有存储/定位/通讯录/后台定位)。
   而且**禁止明文流量**（`usesCleartextTraffic="false"` ✓）——
   我们的手机入口本来就是 HTTPS，明文一律拒绝，少一个被降级的可能。
 -->
@@ -95,18 +100,91 @@
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!--
+      ★★ round 183：`FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE`（"保活"✓）
+      ——★ 这是**权限白名单的第二次改动** ✗（上一次是 round 143 的 `CAMERA` ✓）
+
+      ## 改之前是什么、现在是什么
+
+      round 143 之后白名单是**三条**（`INTERNET` ✓ + `POST_NOTIFICATIONS` ✓ + `CAMERA` ✓），
+      而"只有三条"这句话同样写在三处：本文件的注释 ✓、`MainActivity` 里与权限有关的注释 ✓、
+      `scripts/check-apk.mjs` 的白名单断言 ✓。**本轮把它变成五条** ✗ ——
+      所以这里同样必须把"为什么非加不可"讲透 ✓（不能只改数字 ✗）。
+
+      ## 为什么必须加（一条链，中间断一环就解释不通 ✗）
+
+      用户报的是"**退出 App 就断联**"✗。读代码定死的那条链是：
+
+        ① 根层返回走 `finish()` ✓ ⇒ `onDestroy` 里 `webView.destroy()` ✓ ⇒
+           而**隧道整个活在 WebView 里** ✓（加密与身份故意不在原生手里 ✓）⇒ 连接随之消失 ✗；
+        ② 就算不退出、只按 Home ✓：页面转入后台 ⇒ **网页自己的定时器被安卓限流甚至冻结** ✗
+           ⇒ 心跳停 ✓、重连停 ✓、"电脑上有事要确认"也冒不出来 ✗；
+        ③ 要让这个进程在后台**不被冻结**，安卓上**只有前台服务这一条路** ✓（没有第二种机制 ✗）；
+        ④ 前台服务**必须**在清单里声明 `FOREGROUND_SERVICE` ✓ ——
+           少了它 `startForeground()` 直接抛 `SecurityException` ✗；
+        ⑤ Android 14+ 起前台服务还**必须**有类型 ✓，而类型要与其权限成对出现 ✓
+           ⇒ `specialUse` 对应 `FOREGROUND_SERVICE_SPECIAL_USE` ✓ ——
+           少了它 `startForeground()` 抛 `MissingForegroundServiceTypeException` ✗。
+
+      ⇒ 结论：这两条是"进程在后台还能活着"的**前置条件**，不是可选优化 ✓。
+
+      ## 为什么是 `specialUse`（另外两条岔路都试过 ✗）
+
+        · `dataSync` ✗ —— Android 15+ 有 **6 小时每 24 小时**的上限 ✓：到点不 `stopSelf()`
+          会抛 `RemoteServiceException` ✗（隧道在半夜被系统掐掉 ✓，而用户第二天看到的
+          只是"又断了"✗，连日志都难对 ✓）；
+        · `connectedDevice` ✗ —— 它要求额外声明 `CHANGE_NETWORK_STATE` 等权限 ✓
+          ⇒ 白名单要再涨 ✗，破坏最小权限纪律 ✓；
+        · `specialUse` ✓ —— **无时限** ✓、**运行时前提 = 无** ✓，正是为"我这个用途不在
+          任何一类里"准备的 ✓（用途写在下面那个 `<property>` 里 ✓：
+          `lan-tunnel-keepalive` ✓）。
+
+      ## 有没有不加的替代（★★ 如实说：**没有** ✗）
+
+      **没有** ✗。这一条与 `CAMERA` 那次**不一样** ✗（那次不加也能靠 `dshmobile://pair`
+      深链配对 ✓）；这次**每一条**能让进程在后台不被冻结的路都要求前台服务 ✓：
+
+        · 网页侧做不到 ✗ —— "页面在后台被冻结"正是要解决的那个问题本身 ✓；
+        · `JobScheduler` 与 `WorkManager` 做不到 ✗ —— 周期任务最短 15 分钟 ✓，
+          而且它们**不阻止进程被冻结** ✗：4 秒一次的拍子根本发不出来 ✓；
+        · "只挂一条常驻通知、不起前台服务"做不到 ✗ ——
+          通知是"服务已在前台"的**结果** ✓，不是原因 ✓（顺序反了 ✓）。
+
+      ⇒ 所以这里**不编**一个假的替代 ✓：没有这两条权限，就没有任何办法让进程在后台
+        不被冻结 ⇒ "退出 App 就断联"这个缺陷**修不了** ✓。
+
+      ## 被拒绝时怎么降级（★ 这两条**没有**运行时弹窗 ✓）
+
+      两条都是**普通权限** ✓（安装即授予 ✓，没有运行时对话框 ✗）⇒ "用户点了拒绝"这条
+      路根本不存在 ✓。真正会发生的只有下面两种 ✓：
+
+        1. 系统策略或定制 ROM 不给（极罕见 ✓）⇒ `startForeground()` 抛
+           `SecurityException` ✓ ⇒ `KeepAliveService.startForegroundCompat` **catch 住** ✓
+           并 `stopSelf()` ✓（**不崩** ✓、也不留一条点不动的通知 ✓）；
+        2. 安卓 12+ 的**后台启动前台服务限制** ✓ ⇒ 抛
+           `ForegroundServiceStartNotAllowedException` ✓ ⇒ 同上 catch ✓
+           （`MainActivity.startKeepAliveService` 外面还有一层兜底 ✓）。
+
+      ★ 两条降级路的**用户可见结果完全一样** ✓：App 的行为与 round 175 **一字不差** ✓
+        （根返回照旧"退到后台"✓、页面照旧自己维持连接 ✓、只是后台可能被冻结 ✓），
+        并且日志里有一行说得清的 `Log.w` ✓ —— 不会出现"点了没反应、还不知道为什么"✗。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!--
       ★ 这台机器**没有相机**也照样能装 ✓（`required="false"` ✓）。
       为什么单列这一条 ✗：`CAMERA` 权限会让 Google Play（以及部分系统的安装器 ✓）
       **隐式**推断"本应用需要相机硬件"✗ ⇒ 一台没相机的设备会被判"不兼容"✓。
       写 `required="false"` 把这层隐式推断**显式否掉** ✓。
       ★ 它不是权限 ✓（`uses-feature` 不产生任何授权 ✓）——
-        权限白名单仍然只有上面那三条 ✓。
+        权限白名单仍然只有上面那五条 ✓。
     -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <!-- 只在这台手机自己用：除了下面那条扫码用的相机权限，不申请存储/定位/通讯录等 ✓
-         （★ round 143 之前这里写的是"不申请存储/相机等权限"✗ —— 现在多了一条相机 ✓，
-           理由见上面那段 ✓。**存 储仍然一个都不申请** ✓：写"下载"目录走 MediaStore 系统代写 ✓。） -->
+    <!-- 只在这台手机自己用：除了那条扫码用的相机权限与两条保活权限，不申请存储/定位/通讯录等 ✓
+         （★ round 143 之前这里写的是"不申请存储/相机等权限"✗ —— 现在多了相机 ✓；
+           ★ round 183 又多了两条前台服务权限 ✓（保活 ✓）。理由都在上面那两段注释里 ✓。
+           **存 储仍然一个都不申请** ✓：写"下载"目录走 MediaStore 系统代写 ✓。） -->
     <!--
       ★ android:enableOnBackInvokedCallback="true"（round 121，用户报"侧滑直接退出 App"✗）
 
@@ -193,5 +271,46 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!--
+          ★★ round 183：**保活前台服务** ✓（用户报的"退出 App 就断联"✗ 的原生那一半 ✓）
+
+          它做的事只有三件 ✓（一行密码学都不写 ✗、协议零重写 ✓）：
+            ① 每 4 秒注入一次 `poll` ✓、每 15 秒注入一次 `ping` ✓ ——
+               页面在后台被限流/冻结时，由原生替它打拍子 ✓（表达式见 KeepAlivePolicy ✓）；
+            ② 把网页报上来的状态（`DshmShell.setKeepAliveState` ✓）变成常驻通知上的字 ✓；
+            ③ 常驻通知上那颗「真的退出」✓ —— 根返回改成"退到后台"之后，
+               这是**唯一**一条真的退出的路 ✓（点它会停服务 + `finishAndRemoveTask()` ✓）。
+
+          四个属性，每一个都有理由 ✓：
+
+            · `android:name=".KeepAliveService"` ✓ —— 完整类名是
+              `dev.dshm.shell.KeepAliveService` ✓（简写取自 `<manifest package="dev.dshm.shell">` ✓，
+              与两个 `<activity>` 同一个写法 ✓）；
+            · `android:exported="false"` ✓ —— 只有我们自己能拉起它 ✓（它不是外部入口 ✗：
+              一跑就挂一条常驻通知 ✓ ⇒ 更不能让任何应用随便启动它 ✗）；
+            · `android:foregroundServiceType="specialUse"` ✓ —— 与上面那条
+              `FOREGROUND_SERVICE_SPECIAL_USE` **成对** ✓；为什么不是
+              `dataSync` / `connectedDevice` ✗，逐条写在上面那两条权限的注释里 ✓；
+            · `<property ... PROPERTY_SPECIAL_USE_FGS_SUBTYPE>` ✓ —— "到底用来干什么"的
+              说明 ✓，值 `lan-tunnel-keepalive` ✓（局域网隧道保活 ✓）。
+              它是清单里的一条**元数据** ✓，不产生任何授权 ✓（白名单不受它影响 ✓）。
+
+          ★ 它**刻意不写** `android:stopWithTask` ✗：任务被用户从最近任务里划掉时，
+            由服务自己在 `onTaskRemoved` 里停 ✓（那一刻 WebView 随任务一起销毁 ✓
+            ⇒ 隧道已经没了 ✓，还挂一条"已连接"就是骗用户 ✗）。
+            默认值本就是"不随任务自动停" ✓，这里刻意不写 ✗（写了反而要看两处才懂 ✓）。
+          ★ 它**没有** `intent-filter` ✗、也没有 `android:permission` ✗ ——
+            它只被两个地方拉起：`MainActivity.onResume`（前台时 ✓，幂等 ✓）
+            与常驻通知那颗「退出」✓。
+        -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="lan-tunnel-keepalive" />
+        </service>
     </application>
 </manifest>

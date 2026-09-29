@@ -1,0 +1,60 @@
+真机实验：退到后台后，页面 JS 与原生注入的 JS 还执不执行？
+设备：Xiaomi 2509FPN0BC（Android，targetSdk 35）・APK 0.1.0+BUILD-0928144042
+页面：https://10.34.255.229:3443/mobile/app（生产）
+方法：scripts/check-keepalive-device.mjs（只在该页内存里挂计数器，不部署任何东西）
+      把 __DSH_MOBILE_BOOT__.tick 换成记账函数 ⇒ 原生每次注入都变成可读的数
+
+时刻(UTC)   标签                 页面自己的定时器    原生注入(ping/poll)   距上次注入
+06:00:02   基线（前台）              22                8 (2/6)            3654ms
+06:00:23   后台 +20s                41               14 (3/11)           3728ms
+06:00:43   后台 +40s                61               21 (5/16)           2735ms
+06:01:03   后台 +60s                66               27 (6/21)           3731ms
+06:01:23   后台 +80s                67               33 (7/26)           3728ms
+06:01:43   后台 +100s               67               40 (9/31)           2747ms
+
+判读
+  · 原生注入：+20s→+100s 涨 26 次 / 80 秒 ≈ 19.5 次每分钟
+    = poll 每 4s + ping 每 15s ⇒ 期望 (60/4 + 60/15) = 19 次每分钟 ✓ **满节拍，一点没掉** ✓
+  · 页面自己的定时器：+20s→+60s 涨 25 次（≈1/s ✓），+60s→+100s 只涨 1 次 ✗
+    ⇒ 后台被降频到约 **1 次每分钟**（Chrome 的后台定时器节流）✓
+  · CDP 读取：6 次全部读得动（渲染进程没被整个冻住 ✓）
+
+结论
+  ✓✓ **原生 evaluateJavascript 在后台照样执行（满节拍）** ⇒ B′（前台服务 + 原生时钟驱动网页）
+     成立，加密/协议零重写这条路走得通 ✓
+  ✓ **而页面自己的定时器确实被降频到 1/60** ⇒ 老设计（全靠网页层定时器）保不住 15s 心跳，
+     连接被回收正是这么来的 ✓ —— 问题真实存在，且正是本方案解决的那一个 ✓
+
+────────────────────────────────────────────────────────────────────
+第二轮：真机端到端（App 退到后台时，电脑发起的通知能不能到？）
+────────────────────────────────────────────────────────────────────
+环境：生产 3443（boot.js 已是新的 ✓，BUILD-0929055813）+ 手机装了新 APK ✓
+      手机页面：https://10.34.255.229:3443/mobile/app
+
+1) 根层按返回（用户拍板的改动）
+   之前 top = dev.dshm.shell/.MainActivity
+   之后 top = com.miui.home/.launcher    ⇒ **退到后台，没有退出** ✓
+   进程仍在（ps 里 dshm.shell 计数 = 1）✓
+   原生日志：`根层返回 ⇒ 退到后台（隧道与保活服务都留着 ✓）` ✓
+
+2) 退到后台之后的隧道（页面自己的保活读数）
+   `原生驱动 ✓ 本页收到 29 次 tick（ping 6 / poll 23）｜隧道 connected｜催重拨 0 次`
+   ⇒ 后台里**隧道保持 connected** ✓，心跳由**原生时钟**按满节拍驱动 ✓
+
+3) ★★ 后台收通知（这是用户第 ② 条目标的判据）
+   · 先把 App 按 Home 退到后台（dumpsys 确认 top = launcher ✓）
+   · 电脑侧 phone_notify 发一条 ⇒ 宿主回 {"ok":true,"id":"dc-1-mum9ub2h"} ✓
+   · 18 秒后手机侧：
+       adb logcat: `14:04:27.214 I DshmShell: 已发系统通知：来自电脑` ✓
+       dumpsys notification: NotificationRecord pkg=dev.dshm.shell id=1001
+                              channel=dshm-device importance=4 ✓
+   ⇒ **App 在后台时，电脑发起的通知真的进了手机通知栏** ✓✓
+
+4) 常驻通知与前台服务
+   NotificationRecord: id=1002 channel=dshm-keepalive importance=2
+       flags=ONGOING_EVENT|ONLY_ALERT_ONCE|NO_CLEAR|FOREGROUND_SERVICE actions=1 ✓
+   ServiceRecord dev.dshm.shell/.KeepAliveService
+       **isForeground=true** foregroundId=1002 **types=0x40000000** ✓
+   ⇒ 0x40000000 正是 FOREGROUND_SERVICE_TYPE_SPECIAL_USE ✓（与设计一致 ✓）
+
+结论：方案 B′ 在真机上**三段全通** ✓ —— 返回不再拆隧道 ✓、后台隧道不断 ✓、后台通知能到 ✓。

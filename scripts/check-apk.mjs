@@ -10,8 +10,10 @@
  *
  * 检查五件事 ✓：
  *   1. **能装**：包名、版本、`targetSdk`、launcher activity、**权限白名单**
- *      （`INTERNET` + `POST_NOTIFICATIONS` + **`CAMERA`** ✓ —— 第三条是 round 143 加的，
- *      见下面 `allowedPermissions` 的说明 ✓）；
+ *      （`INTERNET` + `POST_NOTIFICATIONS` + **`CAMERA`** ✓ —— 第三条是 round 143 加的；
+ *      ★ **保活轮**又加了 **`FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE`** ✗
+ *      —— 现在白名单是**五条** ✓，逐项列在下面 `allowedPermissions` 里 ✓，
+ *      为什么非加不可 / 有没有替代，也都写在那一格里 ✓）；
  *   2. **该有的东西在**：`classes.dex` ✓、两张图标 ✓、**扫码界面的文案** ✓、
  *      ★ **没有** `assets/dshm_ca.pem` ✓（C2 起 —— 见下面那条断言的说明 ✓）；
  *   2b. **壳的代码真的在里面** ✓：三个尺寸变量 / insets 事件 / 显式 edge-to-edge /
@@ -21,6 +23,8 @@
  *      **扫码配对（深链 + 壳内扫码 + 相机 + ZXing 解码器 ✓ round 143 ✓）** /
  *      **画面比例修复（`PreviewFit` 纯数学 + `applyPreviewLayout` ✓ round 153 ✓ ——
  *      修的是用户报的"调用的相机是纵向拉伸的"✗，见下面 `previewFit` 那段 ✓）** /
+ *      ★ **壳侧保活（保活轮 ✓：`KeepAliveService` 前台服务 / 根返回改 `moveTaskToBack(true)` /
+ *      原生时钟的注入入口 / 网页→原生状态桥 ✓）** /
  *      ★ **TOFU 三件套（C2 ✓：取 CA + 与带外票据比对 / pin 落盘 + assets 回退 /
  *      忘记这台电脑 + 已固定指纹可核验 ✓）**
  *      —— 这几件事在手机上失败了没有任何画面差异 ✗，只能靠 dex 里的符号判 ✓；
@@ -74,7 +78,11 @@ let failed = 0
  *   缺 SDK / 缺证书时本脚本本来就会**跳过**若干条 ✓（打印 `·` ✓），
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
- * ★★ 40 = 包信息 9 ✓ + APK 内容 4 ✓ + 资源文案 2 ✓ + dex 符号 22 ✓ + TOFU/链 3 ✓
+ * ★★ **现在的构成（保活轮之后 ✓）：包信息 13 + APK 内容 4 + 资源文案 3 + dex 符号 26 +
+ *   TOFU/链 3 = 49** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
+ *   ⚠️ 这一行此前写的是"40 = …dex 符号 22…"✗ —— 那个数**与代码从来就对不上** ✓：
+ *      round 174 时 dex 实际已经是 **23** 组 ✓（下面历史段落里的"22"是漏算了一组 ✓）。
+ *      以本行为准 ✓（数错不会让任何断言变红 ✗，只会让下一个人以为"删几条也没事"✗ —— 正是防呆要防的东西 ✓）。
  *   （round 143 从 24 抬到 32 ✓ —— 加的 8 条全是"扫码配对"那条链上的 ✓：
  *    权限 1 ✓ + 清单里的深链 filter 1 ✓ + ScanActivity 1 ✓ + 扫码文案 1 ✓ +
  *    dex 里四个分组（深链 / 入口 / 相机 / 解码器 ✓）✓。
@@ -108,8 +116,31 @@ let failed = 0
  *      真机报"改地址填裸域名打不开"（实测那条是 `/` 的 401 ✓ —— 壳此前"输什么加载什么"✗）
  *      ⇒ 归一化抽成零依赖纯类 `MobileUrl` ✓、两个入口共用 `loadHostUrl` ✓、新增 `switchHost` 桥 ✓。
  *      三者任一不在包里，症状都是**静默失败**（地址打不开 ✗ / 面板那颗按钮永远不出现 ✗）⇒ 只能靠 dex 判 ✓。
+ *    ★★ **保活轮**（2026-09-28）从 41 抬到 **49** ✓ —— 补的是用户报的**"退出 App 就断联"**✗
+ *      （方案见 `25-壳侧保活与通知-勘察与方案.md` §4.2 B′ ✓）：**前台服务（`specialUse` ✓）**
+ *      + **根返回改成 `moveTaskToBack(true)`** ✓ + **原生时钟用 `evaluateJavascript` 驱动网页心跳** ✓。
+ *      八条新的（每一条都能被打红 ✓，逐条写在各段注释里 ✓）：
+ *        · 权限白名单 +2 ✓（两条 **一起**断言在不在 ✓ —— 少了任一条 `startForeground()` 直接抛
+ *          `SecurityException` ⇒ 服务当场死 ✓，而**没有任何界面差异** ✗）；
+ *        · `KeepAliveService` 在清单里且 `exported=false` ✓；
+ *        · `foregroundServiceType` **恰好**是 `specialUse` 的位掩码 `0x40000000` ✓
+ *          （targetSdk 34+ 缺它 ⇒ `MissingForegroundServiceTypeException` ✗）；
+ *        · `specialUse` 的 `<property …PROPERTY_SPECIAL_USE_FGS_SUBTYPE…>` 子元素 ✓；
+ *        · dex：服务本体（`KeepAliveService` + `startForeground` + `NotificationChannel` + 渠道 id ✓）；
+ *        · dex：★ **`moveTaskToBack`** ✓ —— **本轮最值钱的一条** ✗（少了它按返回仍然销毁 WebView
+ *          ⇒ "退出 App 就断联"原样存在 ✓，而且**没有任何报错** ✗）；
+ *        · dex：原生时钟的注入入口 `__DSH_MOBILE_BOOT__` + 网页→原生状态桥 `setKeepAliveState` ✓
+ *          + 纯逻辑类 `KeepAlivePolicy` ✓（"它算得对不对"归 `scripts/check-keepalive.mjs` **真跑** ✓）；
+ *        · 常驻通知的四条文案资源 ✓（`keepalive_*` ✓ —— 那是用户**唯一**能看见保活的地方 ✓）。
+ *      ⚠️⚠️ 这里**故意不写** `FOREGROUND_SERVICE_TYPE_SPECIAL_USE` 这个 dex 判据 ✗（虽然它看起来很该有 ✓）：
+ *        它是 `static final int` **编译期常量** ⇒ javac 直接内联成字面量 `1073741824` ✓
+ *        （本机实证：`javap -c` 出来是 `ldc // int 1073741824` ✓，无 `getstatic` ✓；
+ *          再用 d8 打成 dex 后 `strings classes.dex | grep FOREGROUND_SERVICE` **零命中** ✓）
+ *        ⇒ dex 的字符串表里**根本没有这个名字** ✗ ⇒ 拿它当判据只会得到一条
+ *        "实现完全正确也**永远红**"的假断言 ✗（比没有断言更糟 ✓）。
+ *        ★ 类型的判据在**清单**那边 ✓（`foregroundServiceType=0x40000000` ✓）—— 那也正是安卓自己读的地方 ✓。
  */
-const EXPECTED_MIN_CHECKS = 41
+const EXPECTED_MIN_CHECKS = 49
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -154,11 +185,22 @@ if (existsSync(aapt2)) {
     'android.permission.INTERNET',
     'android.permission.POST_NOTIFICATIONS',
     'android.permission.CAMERA',
+    // ★★ 保活轮新加的**两条** ✗ —— 与上面 CAMERA 那段同一个口径 ✓（"为什么非加不可"写在
+    //   `native/android/AndroidManifest.xml` 里那两条权限上方的注释里 ✓，改之前先读那一段 ✓）：
+    //   · `FOREGROUND_SERVICE` —— API 28 起，**任何**前台服务都要它 ✓
+    //     （★ 它是最容易被漏掉的一条 ✗：讲安卓 14 的文章只讲"类型权限"✓，
+    //      而少了它 `startForeground()` 直接抛 `SecurityException` ✗ ⇒ 服务当场死 ✓）；
+    //   · `FOREGROUND_SERVICE_SPECIAL_USE` —— `specialUse` 这个类型自己的权限 ✓
+    //     （API 34 起，类型权限与清单里的 `foregroundServiceType` **必须成对** ✓）。
+    //   两条都是**普通权限**（安装即授予 ✓、不弹框 ✓）⇒ 不改变"用户要授权什么"这件事 ✓；
+    //   它们**不是**可选的增强 ✗ —— 前台服务在安卓上没有别的写法 ✓（本地取证见 doc 25 §7.1 ✓）。
+    'android.permission.FOREGROUND_SERVICE',
+    'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
   ]
   const unexpected = permissions.filter((name) => !allowedPermissions.includes(name))
   check(
     unexpected.length === 0 && permissions.includes('android.permission.INTERNET'),
-    '权限只有 INTERNET + POST_NOTIFICATIONS + CAMERA（没有存储/定位/通讯录等 ✗）',
+    '权限只有 INTERNET + POST_NOTIFICATIONS + CAMERA + FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE（没有存储/定位/通讯录等 ✗）',
     permissions.join('、') || '(无)',
   )
   check(
@@ -181,6 +223,30 @@ if (existsSync(aapt2)) {
     permissions.includes('android.permission.CAMERA'),
     '带 CAMERA（壳内扫码要自己开相机取帧 ✗ 少了它 Camera.open() 直接抛 ✓；不加的替代是 dshmobile://pair 深链 ✓）',
     `permissions=${permissions.length}`,
+  )
+  /**
+   * ★★ 保活轮：**前台服务那两条权限必须真的在清单里** ✗（与上面那条 CAMERA 同一个理由 ✓）。
+   *
+   * 上面那条白名单管的是"**没有多出别的**"✓，这一条管的是"**这两条必须在**"✗ ——
+   * 两条方向相反 ✓，缺一条都会漏：
+   *   · 少了白名单那条 ⇒ 有人偷偷加权限没人管 ✗；
+   *   · 少了这一条 ⇒ 有人**把前台服务权限删掉**（比如嫌它破坏"只有三条"的旧约定 ✓），
+   *     `aapt2` 那边一声不响 ✓，装到手机上表现为：`FOREGROUND_SERVICE` 少了 ⇒
+   *     `startForeground()` 抛 `SecurityException` ✓；类型权限少了 ⇒ 抛
+   *     `SecurityException: Starting FGS with type specialUse … requires permissions` ✓
+   *     —— 两种都是**服务当场就死、一点保活都没有** ✗，
+   *     而界面上与"后台保活这件事完全没做"**一模一样** ✗（不崩、不弹、只是照旧断联 ✓）。
+   * ★ 两条**一起**断言 ✓（它们是一对 ✓：一条是 API 28+ 的硬要求 ✓、一条是 API 34+ 的 ✓，
+   *   在 targetSdk=35 上只写一条照样起不来 ✗）。
+   */
+  const keepAlivePermissions = ['android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE']
+  const missingKeepAlivePermissions = keepAlivePermissions.filter((name) => !permissions.includes(name))
+  check(
+    missingKeepAlivePermissions.length === 0,
+    '带 FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE（★ 前台服务的**两条**硬要求 ✓ —— 少了任何一条，startForeground() 直接抛 SecurityException ⇒ 服务当场死、一点保活都没有 ✗，而手机上只表现为"照旧断联"✗、完全没有报错 ✓）',
+    missingKeepAlivePermissions.length === 0
+      ? keepAlivePermissions.map((name) => name.replace('android.permission.', '')).join(' + ')
+      : `缺 ${missingKeepAlivePermissions.join('、')}`,
   )
   check(/targetSdkVersion:'(\d+)'/.test(badging), '有 targetSdkVersion ✓', /targetSdkVersion:'(\d+)'/.exec(badging)?.[1])
   /**
@@ -257,6 +323,85 @@ if (existsSync(aapt2)) {
       block === '' ? '清单树里没有 .ScanActivity ✗' : (/android:name\([^)]*\)="[^"]*"/.exec(block)?.[0] ?? '').trim(),
     )
   }
+  /**
+   * ★★ 保活轮：**前台服务真的在清单里、而且声明对了** ✗（用户报的"退出 App 就断联"✓ 的第一半 ✓）。
+   *
+   * 三件事在同一个 `E: service` 块里**逐一**断言 ✓（照上面 ScanActivity 那段的取法 ✓ ——
+   * 先把名字定位到，再回溯到最近的 `E: service` ✓，**不用整份清单做子串匹配** ✗：
+   * 那样别处出现同名字符串也算过 ✓）。缺哪一件都是**静默失败** ✗：
+   *
+   *   ① **注册了 + `exported=false`** ✓：没注册 ⇒ `startForegroundService()` 抛
+   *      `IllegalArgumentException` ✗（用户那边只是"保活没生效"✗，没有画面差异 ✓）；
+   *      `exported` 不为 false ⇒ 任何应用都能拉起我们的保活服务 ✗
+   *      （它不是外部入口 ✓ —— 外面没有任何入口 ✓）；
+   *
+   *   ② **`foregroundServiceType` 恰好是 `specialUse`** ✓：targetSdk 34 起（本包 35 ✓）
+   *      不声明类型 ⇒ `startForeground()` 抛 `MissingForegroundServiceTypeException` ✗；
+   *      声明成别的类型则是**另一套前置条件** ✗（`dataSync` 还有"后台累计 6 小时"的时限 ✓、
+   *      `connectedDevice` 会连带要求网络状态类权限 ✓ ⇒ 破坏"最小权限"纪律 ✗ ——
+   *      见 doc 25 §7.1 的官方取证 ✓）。
+   *      ★ 这里刻意**不**比对字符串 `specialUse` ✗ —— 清单里存的是**位掩码** ✓
+   *      （aapt2 在 link 期就把这个 flag 编译成整数了 ✓，产物里的渲染形态与
+   *        `configChanges=0x00000fa0` 同形 ✓）；`0x40000000 = 1073741824` 由
+   *        `javap -constants ~/Library/Android/sdk/platforms/android-35/android.jar` 实证 ✓
+   *        （`FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 1073741824` ✓，同处还有
+   *         `…_DATA_SYNC = 1` ✓ `…_CONNECTED_DEVICE = 16` ✓ —— 拿来当反例 ✓）；
+   *
+   *   ③ **`<property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" …>` 子元素** ✓：
+   *      这是官方对 `specialUse` 的**规范要求** ✓（少了它类型声明不完整 ✓）。
+   *      判据取 `E: property` + 那个长名字 + 值 ✓，三个都必须在**服务块内** ✓。
+   */
+  {
+    const at = manifestTree.indexOf('.KeepAliveService')
+    const start = at < 0 ? -1 : manifestTree.lastIndexOf('E: service', at)
+    const after = at < 0 ? -1 : manifestTree.indexOf('E: service', at)
+    const block = start < 0 ? '' : manifestTree.slice(start, after < 0 ? manifestTree.length : after)
+    check(
+      block !== '' && /exported\([^)]*\)=false/.test(block),
+      '清单里注册了 KeepAliveService 且 exported=false（前台服务本体 ✓ —— 没注册就是 startForegroundService() 抛 IllegalArgumentException ✗；exported 不为 false 则任何应用都能拉起它 ✗；两种在手机上都没有画面差异 ✗）',
+      block === '' ? '清单树里没有 .KeepAliveService ✗' : (/android:name\([^)]*\)="[^"]*"/.exec(block)?.[0] ?? '').trim(),
+    )
+    /**
+     * ★ `aapt2 dump xmltree` 把整数属性渲染成 `=0x…` ✓（与产物里 `configChanges=0x00000fa0` 同形 ✓），
+     *   但**没有**任何文档保证它永远是十六进制 ✗ ⇒ 这里两种写法都认 ✓（`0x…` / 十进制 ✓）。
+     *   判据仍然落在**一个确定的整数**上 ✓ —— 不是"含 `0x40000000` 这几个字符"✗
+     *   （那种子串判据会被 `0x400000000`、或者别的属性里的同形数字喂饱 ✓）。
+     */
+    const SPECIAL_USE_MASK = 1073741824 // = 0x40000000 = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE ✓（javap 实证 ✓）
+    const parseManifestInt = (raw) => {
+      const token = String(raw ?? '').replace(/^\(type 0x[0-9a-fA-F]+\)/, '').trim()
+      if (/^0x[0-9a-fA-F]+$/.test(token)) return Number.parseInt(token.slice(2), 16)
+      if (/^-?\d+$/.test(token)) return Number.parseInt(token, 10)
+      return Number.NaN
+    }
+    const typeMask = parseManifestInt(/foregroundServiceType\([^)]*\)=(\S+)/.exec(block)?.[1])
+    check(
+      typeMask === SPECIAL_USE_MASK,
+      '★ 清单里 KeepAliveService 的 foregroundServiceType 是 specialUse（位掩码 0x40000000 ✓ —— targetSdk 34+ 缺它 ⇒ startForeground() 抛 MissingForegroundServiceTypeException ✗，服务起不来、一点保活都没有 ✓，而手机上不崩不报 ✗）',
+      block === ''
+        ? '清单树里没有 .KeepAliveService ✗'
+        : Number.isNaN(typeMask)
+          ? '没有 foregroundServiceType 这一项 ✗'
+          : `0x${(typeMask >>> 0).toString(16)}${typeMask === SPECIAL_USE_MASK ? '（specialUse ✓）' : '（不是 specialUse ✗ —— specialUse 是 0x40000000 ✓）'}`,
+    )
+    const hasPropertyElement = /E: property/.test(block)
+    const hasPropertyName = block.includes('PROPERTY_SPECIAL_USE_FGS_SUBTYPE')
+    const hasPropertyValue = block.includes('lan-tunnel-keepalive')
+    const missingProperty = [
+      hasPropertyElement ? null : 'E: property 子元素',
+      hasPropertyName ? null : 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE',
+      hasPropertyValue ? null : 'android:value="lan-tunnel-keepalive"',
+    ].filter(Boolean)
+    check(
+      block !== '' && missingProperty.length === 0,
+      '★ 服务里有 specialUse 的子类型声明（`<property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="lan-tunnel-keepalive" />` ✓ —— 官方对 specialUse 的规范要求 ✓，少了它类型声明不完整 ✗）',
+      block === ''
+        ? '清单树里没有 .KeepAliveService ✗'
+        : missingProperty.length === 0
+          ? 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE = lan-tunnel-keepalive ✓'
+          : `缺 ${missingProperty.join('、')}`,
+    )
+  }
 } else {
   console.log(`  · （跳过包信息检查：找不到 aapt2 —— ${aapt2} ✓）`)
 }
@@ -328,6 +473,37 @@ if (existsSync(aapt2)) {
     missingTofu.length === 0,
     'TOFU 的文案资源在包里（`tofu_title` 确认框 + `tofu_mismatch` 指纹不一致的警告 + `address_forget`「忘记这台电脑」✓ —— 少了任何一条，手机上就没有"确认身份 / 说清为什么拒 / 换电脑"这三步 ✓）',
     resources === '' ? '读不出资源表 ✗' : (missingTofu.length === 0 ? wantedTofu.join('、') : `缺 ${missingTofu.join('、')}`),
+  )
+  /**
+   * ★★ 保活轮：**常驻通知的四条文案资源也在包里** ✓。
+   *
+   * 与上面两条同一个理由 ✓（少一个 `R.string.*` 编译期就红 ✓ —— 所以这条防的是
+   * "资源被 aapt2 的拆分/裁剪弄丢"✓：那时 `classes.dex` 一个字节不变 ✗、图标也都在 ✓，
+   * 只有界面上显示成一串资源 id ✗）。
+   * ★ 为什么这里比上面两条更要紧 ✗：**常驻通知是用户唯一能看见"保活到底有没有在跑"的地方** ✓
+   * （App 退到后台之后，界面上什么都没了 ✓）—— 它变成一串 `2131…` 的话，
+   * 用户看到的就是一条**看不懂的通知** ✓，而"保活到底生效没有"也就无从判断了 ✗。
+   * 四条各管一件事 ✓：
+   *   · `keepalive_channel` / `keepalive_channel_desc` —— 通知渠道的名字与说明 ✓
+   *     （安卓 8+ 的通知必须挂在渠道上 ✓；渠道文案就是系统设置里用户能翻到的那一行 ✓）；
+   *   · `keepalive_title` —— 常驻通知的**标题** ✓（"保持连接" ✓）。
+   *     ★ 订正（2026-09-28 主线对着实现核过 ✓）：这里原先写的是"常驻通知的**正文**"✗ ——
+   *     实现里**正文**是那三条状态文案 `keepalive_state_connected` /
+   *     `keepalive_state_connecting` / `keepalive_state_reconnecting` ✓
+   *     （`KeepAliveService` 按 `setKeepAliveState` 报上来的状态切 ✓），
+   *     `keepalive_title` 只当标题 ✓。★ 那三条状态文案**故意不列进下面这张名单** ✗：
+   *     它们的条数会随状态机长（现在 3 条 ✓），钉死条数就会变成"实现加一态、验收就红"的假断言 ✗ ——
+   *     名单只管"**少了就一定出问题**"的那几条 ✓。
+   *   · `keepalive_exit` —— ★ **通知上那个「真的退出」动作** ✓：保活轮把根返回改成了
+   *     `moveTaskToBack(true)` ✓ ⇒ "真的退出"**必须另给出口** ✗，就是通知上这颗按钮 ✓
+   *     （少了它的文案，那个动作在手机上就是一颗没有字的按钮 ✗）。
+   */
+  const wantedKeepAlive = ['string/keepalive_channel', 'string/keepalive_channel_desc', 'string/keepalive_title', 'string/keepalive_exit']
+  const missingKeepAlive = wantedKeepAlive.filter((name) => !resources.includes(name))
+  check(
+    missingKeepAlive.length === 0,
+    '保活的文案资源在包里（`keepalive_channel` 渠道名 + `keepalive_channel_desc` 渠道说明 + `keepalive_title` 常驻通知**标题** + `keepalive_exit` 通知上那颗「真的退出」✓ —— 少了任何一条，手机上就是"通知里显示一串资源 id"✗，而常驻通知正是用户唯一能看见保活的地方 ✓）',
+    resources === '' ? '读不出资源表 ✗' : (missingKeepAlive.length === 0 ? wantedKeepAlive.join('、') : `缺 ${missingKeepAlive.join('、')}`),
   )
 } else {
   console.log(`  · （跳过扫码文案检查：找不到 aapt2 —— ${aapt2} ✓）`)
@@ -712,6 +888,99 @@ if (existsSync(aapt2)) {
     hasAll(fpNormalize),
     '★★ 指纹的归一化流水线在 dex 里（`normalizeFingerprint` 去冒号+大写 ✓ + `caFingerprintOf` 手写 64 位十六进制 ✓ + `formatFingerprintGroups` 人眼分组 ✓ —— 少了归一化，宿主那串带冒号的指纹会被当成"旧宿主" ⇒ 首次连接**每次都退化成人工确认** ✗，而手机上只表现为"怎么老问我"，电脑上完全看不出来 ✗）',
     missing(fpNormalize).length === 0 ? fpNormalize.join('、') : `缺 ${missing(fpNormalize).join('、')}`,
+  )
+
+  /**
+   * ★★ 保活轮 第 ① 组：**前台服务本体真的进了包** ✓（用户报的"退出 App 就断联"✗）。
+   *
+   * 为什么只能靠 dex 符号判 ✗：与本文件其它几组同病 ✓ —— 服务没起来**不崩不报** ✗
+   * （没有常驻通知、没有保活 ✓），而"源码改了、装出去的还是旧 APK"✗ 在手机上
+   * 与"这段代码压根没写"**长得一模一样** ✗（本项目反复吃过这一类事故 ✓，见 `05` §73 ✓）。
+   *
+   * 四个符号各管一件事 ✓：
+   *   · `KeepAliveService` —— 服务类真的进了 dex ✓（少了它 `startForegroundService()`
+   *     抛 `ClassNotFoundException`/`IllegalArgumentException` ✗）；
+   *   · `startForeground` —— ★ 它才是"前台服务"这个身份的来源 ✗：只 `startService()`
+   *     不算常驻 ✓（进程照样被回收 ✗）；
+   *   · `NotificationChannel` —— 安卓 8+ 的通知必须挂在渠道上 ✓（本包 minSdk 29 ✓）：
+   *     不建渠道 ⇒ 那条通知**根本不会显示** ✓ ⇒ 用户看不到"保活在跑"、也**没有出口** ✗；
+   *   · `dshm-keepalive` —— 渠道 id ✓（契约里钉死的名字 ✓）。
+   *     ★ 它是**字符串字面量** ✓（渠道 id 只能是 Java 常量 ✓ 没有资源化的写法 ✓）。
+   *
+   * ⚠️⚠️ **别把 `FOREGROUND_SERVICE_TYPE_SPECIAL_USE` 写成 dex 判据** ✗ ——
+   *   它是 `static final int` **编译期常量** ✓ ⇒ javac **直接内联**成字面量 `1073741824` ✓
+   *   （本机实证：`javap -c` 得到 `ldc // int 1073741824` ✓、**没有** `getstatic` ✓；
+   *    再用 `d8 --release --min-api 29` 打成 dex 后 `strings classes.dex | grep FOREGROUND_SERVICE`
+   *    **零命中** ✓，而同一份 dex 里 `Landroid/app/NotificationChannel;` 与 `dshm-keepalive` 都在 ✓）
+   *   ⇒ dex 的字符串表里**根本没有这个名字** ✗ ⇒ 拿它当判据只会得到一条
+   *   "实现完全正确也**永远红**"的假断言 ✗（比没有断言更糟 ✓：下一个人会去改实现 ✗）。
+   *   ★ 类型的判据在**清单**那边 ✓（`foregroundServiceType=0x40000000` ✓）——
+   *     那也正是安卓自己读的地方 ✓。
+   *
+   * ★★ 这是**一类**坑，不是一条 ✗ —— 判据里凡是"`static final` 的基本类型常量"，
+   *   都要先问一句"它会不会被 javac 内联掉"✓。本轮实测同一份 dex 里：
+   *     · `FOREGROUND_SERVICE_TYPE_SPECIAL_USE` ✗ 不在（`static final int` ⇒ 内联 ✓）；
+   *     · `IMPORTANCE_LOW` ✗ 不在（**同上** ✓ —— `NotificationManager.IMPORTANCE_LOW` 也是常量 ✓）；
+   *     · `1002`（通知 id ✗）不在（整数常量编在 **code item** 里 ✓，字符串表根本不收 ✓）。
+   *   ⇒ 反过来说，**能**当判据的是这三类 ✓：类/方法名 ✓（`KeepAliveService` ✓ `startForeground` ✓
+   *     `NotificationChannel` ✓ `moveTaskToBack` ✓）、**字符串字面量** ✓（`dshm-keepalive` ✓
+   *     `__DSH_MOBILE_BOOT__` ✓）、以及本文件其它组用的那些字符串常量 ✓。
+   *   ★ 验证办法（30 秒 ✓、不用装手机 ✓）：对**产物**跑一遍
+   *     `strings classes.dex | grep -F '<你要加的符号>'` ✓ —— 不在就先怀疑内联 ✓，别急着改实现 ✗。
+   */
+  const keepAliveForeground = ['KeepAliveService', 'startForeground', 'NotificationChannel', 'dshm-keepalive']
+  check(
+    hasAll(keepAliveForeground),
+    '★★ 前台服务本体在 dex 里（`KeepAliveService` ✓ + `startForeground` ✓ + `NotificationChannel` ✓ + 渠道 id `dshm-keepalive` ✓ —— 少了它就没有常驻、没有保活 ✗，而手机上**不崩不报**、只是"退出 App 就断联"原样存在 ✗）',
+    missing(keepAliveForeground).length === 0 ? keepAliveForeground.join('、') : `缺 ${missing(keepAliveForeground).join('、')}`,
+  )
+  /**
+   * ★★ 保活轮 第 ② 组：**根返回改成了 `moveTaskToBack(true)`** ✓
+   *   —— **本轮最值钱的一条断言** ✗（它守的是那条最难查的失败 ✓）。
+   *
+   * 因果链（一个字都不许省 ✓）：用户报的是**"退出 App 就断联"**✗ —— 而"退出"在他那里
+   * 就是**按一下返回** ✓。壳此前在"没有可返回的东西"时**直接 `finish()`** ✗
+   * ⇒ Activity 销毁 ⇒ **WebView 连同隧道一起拆掉** ✗ ⇒ 断联 ✓
+   * （前台服务还活着 ✓、通知还挂着 ✓，但**页面已经没了** ✗ —— 这正是"假活"✓）。
+   * 改成 `moveTaskToBack(true)` 之后，返回只把**任务**移进后台 ✓，
+   * Activity 与 WebView **都还在** ✓ ⇒ 隧道不断 ✓。
+   *
+   * 为什么这一条是静默失败里最难查的 ✗：少了它**没有任何报错** ✗（不崩、不弹、不写日志 ✓），
+   * 用户看到的就是"怎么又断了"✓，而我们会先去怀疑 Doze / 网络 / 宿主 ✗ ——
+   * 只有**真机 + 复现步骤**才抓得住 ✓。而在电脑上，唯一抓得住它的就是这一个符号 ✓。
+   * ★ 判据刻意只有**一个**符号 ✓（不掺 `onBackPressed` / `handleBackPressed` 之类 ✗ ——
+   *   壳里那两处调用方改不改名都能满足判据 ✓，多写只会制造假红 ✓）。
+   */
+  const keepAliveBack = ['moveTaskToBack']
+  check(
+    hasAll(keepAliveBack),
+    '★★ 根返回已改成 moveTaskToBack（`Activity.moveTaskToBack(true)` ✓ —— 少了它，按返回仍然 **finish() ⇒ 销毁 WebView ⇒ 拆掉隧道** ✗，"退出 App 就断联"原样存在 ✓，而且全程**没有任何报错** ✗，是本轮最难查的一类 ✓）',
+    missing(keepAliveBack).length === 0 ? keepAliveBack.join('、') : `缺 ${missing(keepAliveBack).join('、')}`,
+  )
+  /**
+   * ★★ 保活轮 第 ③ 组：**原生时钟的两端 + 那段纯逻辑** ✓。
+   *
+   * 前台服务保住的是"**进程还活着**"✓；页面里的心跳与轮询要接着跑，
+   * 还得有人**按节拍推它** ✗（WebView 退到后台后 `setInterval` 会被限流 ✓ ⇒ 假活 ✓）。
+   * 这一组就是那条链在产物里的三个落点 ✓：
+   *   · `KeepAlivePolicy` —— 零 android 依赖的纯逻辑类 ✓（节拍 ✓ / `tickExpression(String)` ✓ /
+   *     `parseState(String)` ✓）。"它**算得对不对**"归 `scripts/check-keepalive.mjs` **真跑** ✓，
+   *     "它**在不在包里**"归这一条 ✓ —— 两者都在才叫"这段验过了"✓（分工口径见文件头 :38-40 ✓）。
+   *     少了它 ⇒ `KeepAliveService` 当场 `NoClassDefFoundError` ✗ ⇒ 服务起不来 ✓；
+   *   · `__DSH_MOBILE_BOOT__` —— ★ 原生注入网页的**唯一**约定入口 ✓
+   *     （`window.__DSH_MOBILE_BOOT__.tick(kind)` ✓）。少了它（或者写成别的名字 ✗）
+   *     ⇒ 原生时钟**空转** ✓：它照样每 15s/4s 调一次 `evaluateJavascript` ✓，
+   *     但页面那边一个函数都没被调到 ✗ ⇒ **页面照旧被限流、照旧假活** ✗，
+   *     而且**两侧都不报错** ✗（原生认为推过了 ✓、网页以为没人推 ✓）；
+   *   · `setKeepAliveState` —— 网页 → 原生的状态回传桥 ✓（`DshmShell.setKeepAliveState(json)` ✓）。
+   *     少了它 ⇒ 常驻通知永远显示同一个状态 ✗ ⇒ 用户没法一眼看出"到底还连着没有"✓
+   *     （那正是本轮要解决的那件事 ✓），而**没有任何报错** ✗。
+   */
+  const keepAliveClock = ['KeepAlivePolicy', '__DSH_MOBILE_BOOT__', 'setKeepAliveState']
+  check(
+    hasAll(keepAliveClock),
+    '★★ 原生时钟与状态桥在 dex 里（`KeepAlivePolicy` 纯逻辑 ✓ + 注入入口 `__DSH_MOBILE_BOOT__` ✓ + 状态回传 `setKeepAliveState` ✓ —— 少了入口，原生时钟**空转**、页面照旧被限流 ⇒ 假活 ✗；少了状态桥，常驻通知永远不反映"连没连上"✗；两种都不报错 ✓）',
+    missing(keepAliveClock).length === 0 ? keepAliveClock.join('、') : `缺 ${missing(keepAliveClock).join('、')}`,
   )
 }
 

@@ -3269,6 +3269,88 @@
   }
 
   /**
+   * ★★ **原生时钟的"重连那一半"** ✓ —— 页面被冻结时，把**既有那套重连**重新点着 ✓。
+   *
+   * ## 为什么必须有它 ✗✗（否则 B′ 只做成了半件事）
+   *
+   * 页面自己的重连**全靠 `setTimeout` 退避** ✓（`scheduleReconnect` ✓）——
+   * 而 App 退到后台、页面被冻结时，**`setTimeout` 同样不响** ✗ ⇒
+   * 一旦在后台断线，**原生戳一万次也接不回来** ✗✗：
+   * `scheduleReconnect()` 会被"已有一个定时器排在队里"那句（本文件 `:3783` ✓）直接挡掉 ✓，
+   * 而那个定时器永远不会到点 ✗。⇒ 那 B′ 就只做成"维持一条**没断**的连接"✗，
+   * 没做成"**断了能自己回来**"✗ —— 而后者才是"后台不断联"的本体 ✓。
+   * 原生那 4 秒 / 15 秒一次的 tick **就是那个不会被冻的时钟** ✓：
+   * 它到场一次，就等于替页面把"这一发该拨了"**在它自己那一轮 JS 里**执行掉 ✓。
+   *
+   * ## ★★ 只复用，不新建（一条都不绕过 ✓）
+   *
+   * 它自己**没有任何重连逻辑** ✗，只按既有那几道判据依次问一遍，然后调**既有的**拨号入口：
+   *   ① `hasLiveSocket()` —— 链路活着 ⇒ 不拨 ✓；
+   *   ② `dialing` —— 已经有拨号在飞 ⇒ **绝不并发拨第二次** ✓（既有那句"搭上它" ✓）；
+   *   ③ `config.autoReconnect === false` —— 明确说了别自动重连（设备被撤销那条路 ✓）⇒ 不拨 ✓；
+   *   ④ `autoPaused` —— ★★ **自动那一路已经放弃** ✓（用户 2026-09-27 拍板：**5 轮 / 20 秒**上限 ✓）
+   *      ⇒ **原生戳也不许把它变成无限重试** ✗✗（那等于偷偷推翻用户的决定 ✗）⇒ 不拨 ✓；
+   *   ⑤ `autoBudgetExhausted()` —— 20 秒总预算已到 ⇒ 走**同一条**放弃路径
+   *      （`giveUpAutoReconnect` ✓：判据与出口都与退避定时器体里那句**逐字一致** ✓），不拨 ✓；
+   *   ⑥ 全过了才 `dialNow(false)` ✓ —— 这是**既有**的"按需重拨"入口 ✓
+   *      （页面自己**每一条业务请求** `rpc` 走的就是它 ✓，见 `Tunnel.prototype.rpc` 开头那句
+   *      `await this.dialNow(false)` ✓）⇒ 会话复位等一整套都在 `openEndpoint` 里照旧发生 ✓
+   *      （round 157 那份"所有拨号路径共用一份复位"因此原样成立 ✓）。
+   *
+   * ★ **计数器是共用的** ✓：这一发拨号与页面自己那一发走的是**同一个**
+   *   `noteDialFailure` / `failStreak` / `autoReconnectDeadline` ✓ ——
+   *   原生戳出来的失败**照样吃预算** ✓，5 轮 / 20 秒一到就 `autoPaused` ✓，
+   *   此后本函数只回 `'paused'`、**一次都不再拨** ✓（下面那条断言就是钉它的 ✓）。
+   *
+   * ★ **退避的"等 1/2/3/4/5 秒"这一层有意不照搬** ✗ —— 它本来就是用 `setTimeout` 实现的 ✓，
+   *   而后台里正是不响的那个东西 ✗；替代它的是**原生 tick 自己的节拍** ✓
+   *   （poll 4 秒 / ping 15 秒 ✓，与退避的 1–5 秒同一量级、只会更疏不会更密 ✓），
+   *   而**上限那两条（5 轮 / 20 秒）一个字没动** ✓ —— 那才是用户拍板要保住的东西 ✓。
+   *   也不会"狂拨" ✗：②挡住并发 ✓、④⑤挡住无限 ✓、预算由既有那本账记 ✓。
+   *
+   * ★ **页面自己那一套该重排的，仍由既有那些触发点负责** ✗（断线时的 `socket.onclose`
+   *   → `scheduleReconnect` ✓、回到前台的自愈重载 ✓、DSH 自己那个连接控制器 ✓）——
+   *   这里**不另立调度** ✗，只负责"把该拨的那一发提前到现在" ✓。
+   *
+   * @returns 一个**给人念**的串 ✓（`keepAliveRedialText` 把它拼进 `tick` 的返回串 ✓）：
+   *   `'redial'`（真的催了一发 ✓）/ `'live'`（链路活着 ✓）/ `'dialing'`（已经在拨 ✓）/
+   *   `'off'`（明确关掉了自动重连 ✓）/ `'paused'`（★ 已放弃，在等用户手动 ✓）/
+   *   `'budget'`（总预算刚到，顺手走了既有那条放弃路径 ✓）。**绝不抛** ✗。
+   */
+  Tunnel.prototype.nativeClockRedial = function () {
+    var verdict
+    if (this.hasLiveSocket()) verdict = 'live'
+    else if (this.dialing === true) verdict = 'dialing'
+    else if (this.config.autoReconnect === false) verdict = 'off'
+    else if (this.autoPaused === true) verdict = 'paused'
+    else if (this.autoBudgetExhausted()) verdict = 'budget'
+    else verdict = 'redial'
+    keepAliveStats.lastRedialVerdict = verdict
+    if (verdict === 'budget') {
+      // ★ 与退避定时器体里那句**同一个判据、同一个出口** ✓（`giveUpAutoReconnect` ✓）——
+      //   不然"20 秒上限"在后台里就是一句空话 ✗（那条定时器永远不响 ⇒ 永远不会放弃 ✗）。
+      this.giveUpAutoReconnect(
+        '自动重连总预算已到（' + Math.round(this.autoReconnectBudgetMs() / 1000) + ' 秒）',
+      )
+      return verdict
+    }
+    if (verdict !== 'redial') return verdict
+    keepAliveStats.redials += 1
+    keepAliveStats.lastRedialAt = Date.now()
+    /**
+     * ★ 失败的结算**一律交给既有那套** ✗：`connect()` 自己会走 `noteDialFailure`
+     *   （数 `failStreak` / 判 5 轮与 20 秒 / 到点 `giveUpAutoReconnect` ✓）——
+     *   在这里再处理一遍就是第二份实现 ✗，也正是"双份维护"最容易出事的地方 ✓。
+     *   这里只做一件事：把拒绝吞掉并留一行（否则就是一条没人接的 unhandled rejection ✗，
+     *   而"拒绝"在这一支里是**预期**的 ✓ —— 拨号失败本来就会拒绝 ✓）。
+     */
+    this.dialNow(false).catch(function (error) {
+      console.warn('[dsh-mobile] 原生时钟催重拨失败（已计入既有预算）：', error)
+    })
+    return verdict
+  }
+
+  /**
    * 一次拨号**失败** ✓（机器自动那一轮 / 用户手动那一下 —— 由 `manual` 区分 ✓）。
    *
    * 两条路**刻意不同** ✗：
@@ -3710,14 +3792,54 @@
     if (typeof setInterval !== 'function') return
     try {
       this.pingTimer = setInterval(function () {
-        if (self.socket === undefined || self.socket.readyState !== 1) return
-        self.sendFrame(FrameType.Ping, FrameFlags.None, new Uint8Array(0)).catch(function (error) {
-          console.warn('[dsh-mobile] 保活 Ping 发送失败：', error)
-        })
+        /**
+         * ★★ 每一发都问一次"这一发该不该由页面自己发" ✓（原生时钟在驱动时**让位** ✓）。
+         *
+         * 为什么判据落在**每一发**上、而不是"启动时判一次就停表" ✗：原生时钟是**会死的**
+         * （服务被系统杀掉 / 用户装的还是老 APK ✓）—— 启动时判一次 = 永久让位 ✗，
+         * 那种情况下页面自己的定时器**再也不跑** ✓，而屏幕上什么都不会说 ✗✗。
+         * 判据与租约长度见 `keepAliveShouldRun` / `NATIVE_CLOCK_LEASE_MS` ✓。
+         */
+        if (!keepAliveShouldRun('ping')) return
+        // ★ 那一发 Ping 的**唯一实现** ✓ —— 原生 `tick('ping')` 走的是**同一个函数** ✓
+        //   （两个触发源共用一份 ✓，绝不抄第二份 ✗）。
+        self.sendKeepalivePing()
       }, 15000)
     } catch (error) {
       console.warn('[dsh-mobile] 保活定时器不可用（不影响连接）：', error)
     }
+  }
+
+  /**
+   * ★★ 那一发保活 Ping 的**唯一实现** ✓（两个触发源共用这一份 ✓）。
+   *
+   * ## 两个触发源
+   *   ① 页面自己的 15 秒定时器 ✓（`startKeepalive` 里那个 `setInterval` ✓）；
+   *   ② **原生时钟**注入的 `tick('ping')` ✓（前台服务的 `Handler` ✓）——
+   *      App 退到后台、页面定时器被冻结时，靠的就是它 ✓
+   *      （见本文件"原生时钟驱动网页"那一段的说明 ✓）。
+   *   ★ 抽出来的**唯一**目的就是"两个源共用一份" ✗ —— 不是"顺手重构" ✓：
+   *     抄第二份的话，以后改前置判断只会改到其中一份 ✓，而症状是"有一路在偷偷用旧口径"✗
+   *     （这个项目为双份维护吃过大亏 ✓）。
+   *
+   * ## 前置判断**原样保留** ✗（不许因为多了一个调用源就放宽 ✓）
+   *   · socket 不在 OPEN ⇒ **直接不发** ✓（否则 `sendFrame` 会抛 ✓，控制台刷屏 ✗）；
+   *   · 会话密钥没建立 ⇒ `sendFrame` 自己抛"会话尚未建立" ✓ —— 它是 `async` 的 ✓，
+   *     同步 `try/catch` **抓不到** ✗，所以原来那处 `.catch(...)` 原样留着 ✓（它就是为这条写的 ✓）。
+   *   ⇒ "有没有隧道 / 隧道是不是 connected / 有没有会话密钥"三道判断一道都没少 ✓。
+   *
+   * @returns true = 确实把那一帧交出去了 ✓；false = 前置条件不满足，**什么都没做** ✓
+   *          （`tick` 据此回一个能念的串 ✓，绝不抛 ✗）。
+   */
+  Tunnel.prototype.sendKeepalivePing = function () {
+    if (this.socket === undefined || this.socket.readyState !== 1) return false
+    // 记账放在"确实要发"这一支 ✓（诊断行的"最近一次 ping"= 真的发了 ✓，
+    // 而不是"定时器跑了但被前置判断挡住"✗ —— 那两个数在排障时意思完全不同 ✓）。
+    keepAliveStats.lastPingAt = Date.now()
+    this.sendFrame(FrameType.Ping, FrameFlags.None, new Uint8Array(0)).catch(function (error) {
+      console.warn('[dsh-mobile] 保活 Ping 发送失败：', error)
+    })
+    return true
   }
 
   /** 停止保活（连接关闭或重连时调用）。 */
@@ -12744,6 +12866,28 @@
       ),
     )
     /**
+     * ★★ 「后台保活」那一行 ✓ —— **前台服务的原生时钟到底有没有在驱动网页** ✓。
+     *
+     * ## 为什么必须有它（用户报的核心问题就落在这一行上 ✓）
+     *   用户报的是"**退出 App 就断联**"✗，而方案 B′ 的命门是一个**未验证假设** ✓：
+     *   "原生注入的 JS 在后台到底还执不执行"✓（`25-壳侧保活与通知-勘察与方案.md` §4.5 ✓）。
+     *   这一行就是那个假设的读数 ✓：收到过几次 tick ✓ + 最近一次 ping / poll 是什么时候 ✓。
+     *   没有它，真机上这件事**只能靠猜** ✗（而"靠猜"在这个项目里已经付过学费 ✓）。
+     *
+     * ## ★ 为什么**不受 `?debug=1` 门控** ✗（与它下面那几行**不一样** ✓）
+     *   下面「视口 / 安全区 / 键盘让位」是**纯排障读数** ✓ ⇒ 门控起来 ✓（用户第 5 点要求 ✓）；
+     *   而这一行回答的是**用户自己会问的那句话**（"退到后台还连着没有 / 通知为什么不来"✓）——
+     *   让用户先去开调试模式再看，等于在最需要它的时刻多设一道门 ✗。
+     *   口径与同组的「外壳版本」「通知权限」一致 ✓（那两条也不门控 ✓，理由见紧接着的注释 ✓）。
+     *   ★ 代价只有一行字 ✓，换来的是这一整轮在真机上**唯一**能自证的入口 ✓。
+     *
+     * ## 读数什么时候刷新 ✓
+     *   本行的数在**每次点进这一页时取当下** ✓（`mountConnBody(panel, true)` ✓，
+     *   与「隧道」「通知权限」那几行同一个口径 ✓）—— 计数是**本页累计** ✓
+     *   （从页面加载算起 ✓），所以"进来看了两次、数在涨"本身就说明原生时钟在跑 ✓。
+     */
+    diagnostics.appendChild(settingsRow('后台保活', keepAliveDiagnosticText(), keepAliveDiagnosticTone()))
+    /**
      * ★ round 137：下面这几行是**纯排障读数** ✓ ⇒ 只在 `?debug=1` 时渲染 ✓
      *   （用户第 5 点："目前右边的设置有很多我们临时 debug 用的，等到最后要删掉"✓）。
      *
@@ -17140,6 +17284,21 @@
       },
       probeLayout: probeLayout,
       /**
+       * ★★ **原生时钟驱动网页的入口** ✓ —— 前台服务的 `Handler` 每 15s / 4s 注入一次 ✓。
+       *
+       * 契约（跨单约定 ✓，名字一个字母都不许改 ✗）：
+       *   · `tick('ping')` / `tick('poll')` ✓；其它（含不传 ✓）**一律当 `'ping'`** ✓；
+       *   · **返回一个字符串** ✓（`'ping'` / `'poll'` / `'no'` 之类，给人念的 ✓）；
+       *   · **永不抛** ✗（原生那段注入是裸 IIFE ✓，抛出去在手机上没有任何痕迹 ✗）。
+       *
+       * 实现在 `mobileTick` ✓ —— 它只负责认 kind / 记账 / 分派 ✓，
+       * 真正干活的仍然是页面原有的那两份实现 ✓（`sendKeepalivePing` ✓ / `devicePollTick` ✓）。
+       * ★ 挂在这里而不是新开一个全局 ✗：`__DSH_MOBILE_BOOT__` 是网页与原生之间**既有**的那条
+       *   通道 ✓（`.shell` ✓、`.state()` ✓ 早就在上面 ✓）—— 第二个全局 = 第二个事实来源 ✗
+       *   （"名字撞车/两套入口"这个坑本项目踩过 ✓，见 §五 第 14 条 ✓）。
+       */
+      tick: mobileTick,
+      /**
        * ★ 原生壳（APK）这条线的自证入口（round 115）✓。
        *
        * 为什么要把内部函数露出来：安全区那件事是**两半配合**的 ✓ —— 壳报尺寸、
@@ -17177,6 +17336,37 @@
         },
         requestPermission: function () {
           return requestNotifyPermission()
+        },
+        /**
+         * ★ 保活时钟的读数（验收 / 排障 ✓）—— 与设置页「后台保活」那一行**同源** ✓
+         *   （两边都读 `keepAliveStats` 与同一对文本函数 ✓，不另算一份 ✗）。
+         *
+         * 为什么需要它：`tick` 本身在**纯浏览器**里也能被调用 ✓（注入那段 IIFE 就是那么写的 ✓），
+         * 但"它到底认了哪个 kind / 有没有真的驱动 / 前置判断挡没挡住"从返回值里只看得见一半 ✓
+         * —— 这里一次把账本与那一行文本都给出来 ✓（返回值是可序列化的纯数据 ✓，
+         * 验收里 `Runtime.evaluate` 直接读 ✓）。
+         */
+        keepAlive: function () {
+          return {
+            pingTicks: keepAliveStats.pingTicks,
+            pollTicks: keepAliveStats.pollTicks,
+            lastPingAt: keepAliveStats.lastPingAt,
+            lastPollAt: keepAliveStats.lastPollAt,
+            /**
+             * ★ 最近一次**收到**原生 tick 的时刻 ✓（与上面那两个"真的干了活"分开 ✓）。
+             *   验收判据就靠这一对 ✓：让原生戳若干次 ⇒ 这两个数**必须往前走** ✓
+             *   （而 `lastPingAt` / `lastPollAt` 要隧道真连上才会动 ✓ ——
+             *    两个方向合起来才说明"原生时钟活着"且"活真的干了"✓）。
+             */
+            lastPingTickAt: keepAliveStats.lastPingTickAt,
+            lastPollTickAt: keepAliveStats.lastPollTickAt,
+            /** ★ 原生时钟催过几次重拨 ✓ + 最近时刻 / 最近一次为什么没催 ✓（真机实验要分的那四种情形 ✓）。 */
+            redials: keepAliveStats.redials,
+            lastRedialAt: keepAliveStats.lastRedialAt,
+            lastRedialVerdict: keepAliveStats.lastRedialVerdict,
+            lastTickResult: keepAliveStats.lastTickResult,
+            text: keepAliveDiagnosticText(),
+          }
         },
         /** 预览的入场动画 / 收起键（验收用 ✓ —— 这两件事在无头浏览器里没法"等它自己发生"✓）。 */
         previewEnter: function () {
@@ -17497,6 +17687,18 @@
     })
     tunnel.onState(function (state) {
       tunnel.lastState = state
+      /**
+       * ★★ 状态回传（网页 → 原生 ✓）：**只在状态真的变化时**发一次 ✓。
+       *
+       * 为什么**不**每次 tick 都发 ✗：tick 是 4 秒 / 15 秒一次 ✓，次次都发就是刷屏 ✓
+       *   （壳那边每收到一条都要贴着常驻通知改文案 ✓，纯属白干 ✓）。
+       * 为什么放在**这里**而不是 tick 里 ✗：`onState` 是"状态变了"的**唯一**触发点 ✓
+       *   （`emitState` 由连接/断开/待确认那几处调 ✓），语义正好对上 ✓。
+       * 这里**无条件调** ✓、不看返回值 ✓ —— "要不要真的发"由 `reportKeepAliveState`
+       *   自己按 JSON 串去重 ✓（同一个状态重复 emit ⇒ 它自己会挡住 ✓）。
+       *   ⇒ "什么时候该发"**只有一个判据** ✓，不会出现两处各判一半 ✗。
+       */
+      reportKeepAliveState()
       // ★ 本页"曾经连上过"的唯一置位点 ✓（前台自愈的前置条件，见 selfHealDecision ✓）
       if (state === 'connected') pageEverConnected = true
 
@@ -18022,6 +18224,406 @@
     void error
   }
 
+  /**
+   * ──────────── ★★ 原生时钟驱动网页：登记处 + 让位判据（方案 B′ 的网页侧一半）────────────
+   *
+   * ## 这一块治的是哪件事（用户报的"退出 App 就断联" ✓）
+   *
+   * 网页层的保活与轮询**全部**是页面自己的定时器 ✓（15s Ping ✓、4s 端侧轮询 ✓）——
+   * 而 App 退到后台之后**页面被冻结** ✗ ⇒ 定时器不跑 ✗ ⇒ 空闲隧道被中间设备回收 ✗、
+   * 就算连接还在，回调也跑不了 ⇒ **通知发不出去** ✗（真机确认，见 `10-交接文档.md` §六 ✓）。
+   *
+   * 已定方案 B′ ✓（用户拍板 ✓）：**前台服务提供"活着的进程"、`moveTaskToBack` 提供
+   * "活着的 WebView"、原生 `Handler` 提供"活着的时钟"** ✓ ——
+   * **加密与业务仍然是网页层这一份** ✓：协议 / 密钥 / 证书 / TOFU / 审计**一行都不重写** ✓，
+   * 宿主侧**零改动** ✓。原生只多做一件事：**定时来"戳"网页** ✓，让网页用**它自己已有的
+   * 那套实现**干活 ✓。这里就是那个"被戳"的落点 ✓。
+   *
+   * ## 跨单契约（名字一个字母都不许改 ✗）
+   *
+   *   · 原生 → 网页：`globalThis.__DSH_MOBILE_BOOT__.tick('ping' | 'poll')` ✓
+   *     原生 `KeepAliveService` 注入的就是这一条 ✓（每 15s 一次 ping ✓、每 4s 一次 poll ✓）：
+   *       (function(){try{var b=window.__DSH_MOBILE_BOOT__;if(b&&typeof b.tick==='function')return b.tick('ping')}catch(e){}return 'no'})()
+   *     `kind` 只认 `'ping'` / `'poll'` ✓，其它（含不传 ✓）**一律当 `'ping'`** ✓；
+   *     **返回一个字符串** ✓（给人念的 ✓）；**永远不许抛** ✗（注入是一段裸 IIFE ✓，
+   *     抛出去只会静默消失在 logcat 里 ✗）。实现在 `mobileTick` ✓。
+   *   · 网页 → 原生：`window.DshmShell.setKeepAliveState(String json)` ✓
+   *     形如 `{"connected":true,"endpoint":"10.34.255.229:3443","retry":0}` ✓
+   *     （实现在 `reportKeepAliveState` ✓；**没壳时静默 no-op** ✓）。
+   *
+   * ## 三条不许松的口径（每一条都写在各自的函数里 ✓）
+   *   ① 两个触发源（页面定时器 ✓ / 原生 tick ✓）**共用同一份实现** ✗ 绝不抄第二份 ✓
+   *      —— 这个项目为"双份维护"吃过大亏 ✓（`07-…:251/285`："双份维护时我自己删掉了两行"✗）；
+   *   ② 不 connected 时**绝不取待办** ✓（`takePending` 是"取走即标记为已投递" ✓、
+   *      TTL 只有 120 秒 ✓ ⇒ 取回来的待办**弹不出来就永久丢** ✗✗，而且两端都不报错 ✓）；
+   *      ★ 但同一时刻**要驱动既有那套重连** ✓（后台里页面自己的退避定时器被冻结 ✗ ⇒
+   *      不接上这一半的话，"断在后台"就永远回不来 ✗）—— 见 `nativeClockRedial` ✓；
+   *   ③ 状态回传**只在状态真的变化时**发 ✓（每次 tick 都发就是刷屏 ✗）。
+   */
+
+  /**
+   * 让位租约（毫秒）= "**原生时钟还活着**"的判据 ✓。
+   *
+   * ## 为什么是"租约"而不是"收到一次 tick 就永久让位" ✗✗
+   *   原生那一侧**可能根本没在跑** ✓：老 APK 没有前台服务 ✓、服务被系统/厂商 ROM 杀掉 ✓、
+   *   用户还没装新 APK ✓ —— 都是真实可能 ✓（当前就处在"网页层先落地、APK 后装"的中间态 ✓）。
+   *   永久让位的话，页面自己的定时器就**再也不跑** ✗ ⇒ 端侧通知彻底停摆 ✓，
+   *   而屏幕上**什么都不会说** ✗（"静默失效"本项目零容忍 ✓）。
+   *   ⇒ 所以是租约：原生在驱动 ⇒ 页面这一路让位 ✓；原生停摆 ⇒ 页面**自动接手** ✓。
+   *
+   * ## 为什么是 30 秒
+   *   最慢那一路是 15s 的 ping ✓ ⇒ 30 秒 = **两个周期** ✓：
+   *   原生正常时页面这一路**永远不会**在这个窗口里插一脚 ✓（不双跑 ✓）；
+   *   原生一停，最多 30 秒后页面自己接回来 ✓（端侧通道不会出现"没人轮询"✗）。
+   *
+   * ★ 租约的基准是"**真的干了活**"的时刻 ✓（`lastPingDrivenAt` / `lastPollDrivenAt` ✓），
+   *   **不是**"收到 tick"的时刻 ✗ —— 见 `mobileTick` 里那段说明 ✓
+   *   （否则"原生每 4 秒戳一次、但每次都因为没连上而不干活"会把页面自己那一路也一起冻住 ✗）。
+   */
+  var NATIVE_CLOCK_LEASE_MS = 30000
+
+  /**
+   * ★★ 保活时钟的**唯一一本账** ✓（设置页「后台保活」那一行 ✓、验收读数 ✓ 都读它 ✓）。
+   *
+   * 为什么要记账 ✗：真机上"**原生注入的 JS 在后台到底还执不执行**"是方案 B′ 的**命门** ✓
+   * （`25-壳侧保活与通知-勘察与方案.md` §4.5 就是先做这个实测 ✓），
+   * 而手机上既没有控制台、也没有 logcat ✓ ⇒ 没有这几个数就只能靠猜 ✗
+   * （本项目"看不到界面就盲改 CSS、连引 4 次回归"就是这么来的 ✓）。
+   */
+  var keepAliveStats = {
+    /** 收到过几次原生 tick ✓ —— ★ **计数 > 0 就是"原生时钟真的在驱动"的直接证据** ✓。 */
+    pingTicks: 0,
+    pollTicks: 0,
+    /** 最近一次**收到**原生 tick 的时刻 ✓（两种各记一份 ✓ —— 见 `mobileTick` ✓）。 */
+    lastPingTickAt: 0,
+    lastPollTickAt: 0,
+    /** 最近一次**真的干了活**的时刻 ✓（ping 真发出去了 ✓ / poll 真跑了一轮 ✓）—— 诊断行读它 ✓。 */
+    lastPingAt: 0,
+    lastPollAt: 0,
+    /**
+     * ★ 最近一次原生 tick 的**驱动时刻** ✓（= 让位租约的基准 ✓，与"收到"分开记 ✗）。
+     *   只有 `mobileTick` 会写它 ✓ —— 页面自己那一路**绝不写** ✗：
+     *   写了自己就会把自己压住 ✓（15s 的 ping 撞上 30s 的租约 ⇒ 变成 30s 才发一发 ✗）。
+     */
+    lastPingDrivenAt: 0,
+    lastPollDrivenAt: 0,
+    /** 最近一次 tick 的返回串 ✓（与 `tick` 的返回值同源 ✓ —— 真机排障时念这一行 ✓）。 */
+    lastTickResult: '（还没收到过原生 tick）',
+    /**
+     * ★★ 原生时钟**催过几次重拨** ✓ + 最近一次的时刻与"这一发为什么没催" ✓。
+     *
+     * 为什么必须记 ✗：真机实验要能分开**三种情形** ✓ ——
+     *   · 原生**没戳**（tick 计数 0 ✓）；
+     *   · 戳了但**连不上**（tick 涨 + `redials` 涨 + 隧道仍不是 connected ✓）；
+     *   · **连上了**（隧道状态 ✓）；
+     * 再加第四种：戳了、但既有机制说"**已放弃**"✓（`paused` ✓ —— 那是在等用户手动 ✓，
+     * 不是"原生没干活"✗）。没有这几个数，这四种在屏幕上一模一样 ✗。
+     */
+    redials: 0,
+    lastRedialAt: 0,
+    lastRedialVerdict: '（还没催过）',
+  }
+
+  /** "多久以前"的人话 ✓（诊断行专用 ✓：`从未` / `刚刚` / `12 秒前` / `3 分前` ✓）。 */
+  function keepAliveAgoText(at) {
+    if (!at) return '从未'
+    var ms = Date.now() - at
+    if (ms < 0) ms = 0
+    if (ms < 1000) return '刚刚'
+    if (ms < 60000) return Math.round(ms / 1000) + ' 秒前'
+    return Math.round(ms / 60000) + ' 分前'
+  }
+
+  /**
+   * ★★ 「后台保活」那一行的读数 ✓ —— 设置页「端侧诊断」那一组里 ✓，
+   * 也是**真机排障唯一**的抓手 ✓（手机上既没有控制台、也没有 logcat ✓）。
+   *
+   * 它要回答两个问题（**按重要性排** ✓，别把顺序搞反 ✗）：
+   *   ① **原生时钟到底有没有在驱动** ✓ —— 判据 = 本页收到过几次原生 tick ✓。
+   *      "注入的 JS 在后台到底还执不执行"是方案 B′ 的**命门** ✓
+   *      （`25-壳侧保活与通知-勘察与方案.md` §4.5 第一步就是实测它 ✓），
+   *      这个计数是它的**直接证据** ✓（不是推断 ✓）。
+   *   ② **活到底干了没有** ✓ —— 最近一次 ping / poll 的时刻 ✓。
+   *      ★ 必须与"收到 tick"**分开看** ✓：原生可能每 4 秒戳一次、而每次都因为
+   *      没连上而**不干活** ✓（`poll:offline` ✓）—— 只看 tick 数会误判成"一切正常"✗。
+   * 末尾那个"最近一次 tick"就是 `tick` 的**返回串本身** ✓（与原生 logcat 里那行同源 ✓，
+   * 用户念出来即可对齐两端 ✓）。
+   */
+  function keepAliveDiagnosticText() {
+    var total = keepAliveStats.pingTicks + keepAliveStats.pollTicks
+    var head
+    if (total > 0) {
+      head =
+        '原生驱动 ✓ 本页收到 ' + String(total) + ' 次 tick（ping ' + String(keepAliveStats.pingTicks) +
+        ' / poll ' + String(keepAliveStats.pollTicks) + '）'
+    } else if (shellBridge() !== undefined) {
+      // ★ 有壳却一次都没收到 ⇒ 这就是"原生那一半还没到位"✓（老 APK / 服务没起来 ✓）。
+      //   括号里那句是给用户看的**安抚 + 事实**：页面自己那一路还在跑 ✓，功能没停 ✓。
+      head = '未见原生 tick（页面自身定时器在跑）'
+    } else {
+      head = '无壳（纯浏览器：没有原生时钟这回事）'
+    }
+    return (
+      head +
+      '｜隧道 ' + keepAliveTunnelState() +
+      /**
+       * ★★ 催重拨那一截 ✓ —— 真机实验靠它把**四种情形**分开 ✓（见 `keepAliveStats` 那段 ✓）：
+       *   原生没戳（tick 数 0）/ 戳了连不上（tick+催重拨都涨、隧道仍不是 connected）/
+       *   连上了（隧道 connected）/ 已放弃（`paused` ✓ —— 在等用户手动，不是原生没干活 ✗）。
+       */
+      '｜催重拨 ' + String(keepAliveStats.redials) + ' 次（最近 ' +
+        keepAliveAgoText(keepAliveStats.lastRedialAt) + ' · ' + keepAliveStats.lastRedialVerdict + '）' +
+      '｜最近 ping ' + keepAliveAgoText(keepAliveStats.lastPingAt) +
+      '｜最近 poll ' + keepAliveAgoText(keepAliveStats.lastPollAt) +
+      '｜最近一次 tick：' + keepAliveStats.lastTickResult
+    )
+  }
+
+  /**
+   * 上面那一行的语气 ✓：原生真驱动过 ⇒ `ok` ✓；有壳却一次 tick 都没收到 ⇒ `warn` ✓
+   * （**那正是要看的那个状态** ✓，不该藏起来 ✗）；没有壳 ⇒ 不表态 ✓
+   * （纯浏览器里"后台保活"这件事根本不存在 ✓，标个黄点只会误导 ✓）。
+   */
+  function keepAliveDiagnosticTone() {
+    if (keepAliveStats.pingTicks + keepAliveStats.pollTicks > 0) return 'ok'
+    return shellBridge() !== undefined ? 'warn' : undefined
+  }
+
+  /** 现在这条隧道是什么状态 ✓（读**既有**的 `__DSH_MOBILE_BOOT__.state()` ✓ —— 不新造第二个事实来源 ✗）。 */
+  function keepAliveTunnelState() {
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var state = api !== undefined && typeof api.state === 'function' ? api.state() : undefined
+      return typeof state === 'string' && state.length > 0 ? state : 'idle'
+    } catch (error) {
+      return 'unknown'
+    }
+  }
+
+  /**
+   * **页面自己那一路定时器**这一发该不该跑 ✓（原生在驱动 ⇒ 让位 ✓）。
+   *
+   * 判据只有一个：这一类活儿**最近一次真的由原生驱动**是在多久以前 ✓
+   * （`lastPollDrivenAt` / `lastPingDrivenAt` ✓，两种**分开记账** ✗ 不许合成一个时间戳 ✓
+   * —— 原生可能只驱动其中一路 ✓：设计上"隧道没连上就不驱动 poll"✓，
+   * 那时若两路共用一个时间戳，15 秒一次的 ping 会把 4 秒一次的轮询**永远压住** ✗✗）。
+   *
+   * @returns true = 页面这一发照跑 ✓；false = 原生正在驱动，这一发**直接让开** ✓。
+   */
+  function keepAliveShouldRun(kind) {
+    var drivenAt = kind === 'poll' ? keepAliveStats.lastPollDrivenAt : keepAliveStats.lastPingDrivenAt
+    if (!drivenAt) return true
+    return Date.now() - drivenAt >= NATIVE_CLOCK_LEASE_MS
+  }
+
+  /**
+   * 把"这一发没连上"接到**既有那套重连**上 ✓，并给出一个**给人念**的串 ✓。
+   *
+   * 为什么要有这个包装 ✗：`mobileTick` 的 ping / poll **两条分支**都要做同一件事——
+   * "没连上 ⇒ 催一次既有重拨 ✓，并把结论写进返回串 ✓"。两处各写一遍就是双份实现 ✗
+   * （本项目为零容忍 ✓），所以规则只在这里写一次 ✓。
+   *
+   * 返回串的口径（四档 ✓，真机排障时**一眼分得开** ✓）：
+   *   · `<kind>:redial` —— ★ 真的催了一发既有重拨 ✓（`nativeClockRedial` 回了 `'redial'` ✓）；
+   *   · `<kind>:paused` —— ★ 自动重连**已放弃**（5 轮 / 20 秒用完 ✓）⇒ 在等用户手动 ✓
+   *     （原生戳**也不许**推翻这个决定 ✗，所以这一发什么都不做 ✓）；
+   *   · `<kind>:budget` —— 总预算刚到时**触发了既有那条放弃路径** ✓（与退避定时器体同一个出口 ✓）；
+   *   · `<kind>:offline` —— 别的"没连上" ✓（链路活着 / 已经有拨号在飞 / 明确关掉了自动重连 ✓）
+   *     —— 这一档**照旧**是原来那句串 ✓（`'poll:offline'` 一个字母没改 ✓）。
+   */
+  function keepAliveRedialText(kind, tunnel) {
+    var none = kind + ':offline'
+    if (tunnel === undefined || tunnel === null || typeof tunnel.nativeClockRedial !== 'function') return none
+    var verdict
+    try {
+      verdict = String(tunnel.nativeClockRedial())
+    } catch (error) {
+      // ★ 这一层也绝不抛 ✗（`tick` 的最外层虽然也兜着 ✓，但这里离得近、写清楚更好查 ✓）
+      return kind + ':error'
+    }
+    if (verdict === 'redial') return kind + ':redial'
+    if (verdict === 'paused' || verdict === 'budget') return kind + ':' + verdict
+    return none
+  }
+
+  /** 上一次报给壳的状态串 ✓（"只在变化时发"的去重键 ✓，见 `reportKeepAliveState` ✓）。 */
+  var lastKeepAliveReport = null
+
+  /**
+   * 当前端点写成 **`host:port`** ✓（契约里的例子就是 `10.34.255.229:3443` ✓）。
+   *
+   * 为什么不直接把 `tunnel.activeEndpoint` 原样发出去 ✗：它是一条**完整 URL** ✓
+   * （`wss://10.34.255.229:3443/mobile/ws` ✓，见 `openEndpoint` 之后那一处赋值 ✓），
+   * 而壳那一侧是把它**写进常驻通知给人念的** ✓ —— 协议前缀与路径对用户是噪音 ✓，
+   * 契约例子给的也正是 authority ✓。取不到 / 不是合法 URL ⇒ 原样兜底 ✓（**绝不编**✗）。
+   */
+  function keepAliveEndpointText(tunnel) {
+    if (tunnel === undefined || tunnel === null || typeof tunnel.activeEndpoint !== 'string') return null
+    var raw = tunnel.activeEndpoint
+    try {
+      var parsed = new URL(raw)
+      return parsed.host !== '' ? parsed.host : raw
+    } catch (error) {
+      return raw
+    }
+  }
+
+  /**
+   * ★★ 状态回传：网页 → 原生（`DshmShell.setKeepAliveState(json)` ✓）。
+   *
+   * 谁在等它：常驻通知的文案要在"**已连接 / 正在重连**"之间切换 ✓
+   * （用户要能一眼看到"到底还连着没有" ✓，也避免"假活"✗ —— 通知一直在、其实早断了 ✗）。
+   *
+   * ## 三条口径
+   *   ① **只在状态真的变化时发** ✓：去重键就是那个 JSON 串本身 ✓
+   *      ⇒ 调用方（隧道 `onState` ✓）**无条件调**即可 ✓，不需要各自再判一次 ✓
+   *      （"什么时候该发"只有一个判据 ✓，本项目对"两处各判一半"零容忍 ✗）；
+   *   ② **没壳 ⇒ 静默 no-op** ✓：没有桥就没有"壳那边"这回事 ✓，绝不因此抛错 ✗
+   *      （这条路的验收脚本就是用**纯浏览器**跑的 ✓）；
+   *   ③ 键**就这三个** ✓（`connected` / `endpoint` / `retry` ✓）—— 契约怎么写的就怎么发 ✓，
+   *      多塞一个键等于把解析风险推给原生那一单 ✗（那边是 Java 侧 `JSONObject` ✓）。
+   *
+   * @returns 真发出去的那个 JSON 串 ✓；没壳 / 没变化 / 桥抛错 ⇒ `null` ✓（**绝不抛** ✗）。
+   */
+  function reportKeepAliveState() {
+    var bridge = shellBridge()
+    // ★ 照抄 `shellNotify` 那条既有桥的写法 ✓（判"有没有壳" + `typeof` 判方法 ✓ + try/catch ✓）
+    //   —— 全文件只有这一种"怎么调壳"的写法 ✗，不许在这里发明第二套 ✓。
+    if (bridge === undefined || typeof bridge.setKeepAliveState !== 'function') return null
+    var json
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var tunnel = api !== undefined ? api.tunnel : undefined
+      var live = tunnel !== undefined && tunnel !== null
+      json = JSON.stringify({
+        connected: keepAliveTunnelState() === 'connected',
+        // 壳侧只用来写文案 ✓ ⇒ 地址取"当前真的走通的那条" ✓，写成 host:port ✓
+        // （`activeEndpoint` 是完整 URL ✓，转换与理由见 `keepAliveEndpointText` ✓）
+        endpoint: keepAliveEndpointText(tunnel),
+        // `retry` = 自动重连已经试了几轮 ✓（`Tunnel.attempt` ✓：连上即清零 ✓，见 `noteDialSuccess` ✓）
+        retry: live && typeof tunnel.attempt === 'number' ? tunnel.attempt : 0,
+      })
+    } catch (error) {
+      return null
+    }
+    if (json === lastKeepAliveReport) return null
+    lastKeepAliveReport = json
+    try {
+      bridge.setKeepAliveState(json)
+      return json
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * ★★ **原生时钟的入口** ✓ —— `tick('ping')` / `tick('poll')` ✓（跨单契约见上 ✓）。
+   *
+   * 它自己**不干活** ✗，只做三件事：
+   *   ① 认 `kind`（只认 `'poll'` ✓，其它一律当 `'ping'` ✓）；
+   *   ② 记账（收到几次 ✓、最近一次是什么时候 ✓、返回串是什么 ✓ —— 见 `keepAliveStats` ✓）；
+   *   ③ **分派给页面原有的那一份实现** ✓（ping ⇒ `Tunnel.sendKeepalivePing` ✓；
+   *      poll ⇒ `devicePollEntry` ✓ = `installDeviceChannel` 里那个 `devicePollTick` ✓）。
+   *
+   * ## ★★ poll 的前置判断（这一条会**静默丢通知** ✗，所以写在最显眼处 ✓）
+   *
+   * `takePending` 是"**取走即标记为已投递**"✓（`packages/host/src/device-calls.ts:174` ✓），
+   * 而 TTL 只有 120 秒 ✓ ⇒ 待办一旦被取走、却没能在屏幕上弹出来，就是**永久丢** ✗✗——
+   * **两端都不报错** ✓，事后连痕迹都没有 ✓（本项目吃过这一类亏 ✓）。
+   * ⇒ 所以这里**先判一次连接状态** ✓：不是 `connected` 就**绝不进 `poll()`** ✓
+   *   （取待办那半一个字都不动 ✗）。判据用页面自己的 `state()` ✓
+   *   （与前台自愈 `selfHealDecision` 里读的是**同一个** `state()` ✓，不新造判据 ✗）。
+   *
+   * ## ★★ 但"不取待办"≠"什么都不做" —— 重连那半要接上 ✓
+   *
+   * 后台里页面自己的重连也靠 `setTimeout` 退避 ✓，而它**同样被冻结** ✗ ⇒
+   * 只判连接状态就返回的话，**断在后台的连接永远回不来** ✗✗
+   * （"后台不断联"的本体恰恰是"断了能自己回来"✓）。所以两条分支在"没连上"时
+   * 都调一次 `keepAliveRedialText` ✓ ⇒ `tunnel.nativeClockRedial()` ✓ ——
+   * **判据、预算、计数全部复用既有那套** ✓（见那个函数的长注释 ✓），
+   * 它说"还没到点 / 正在连 / 已放弃"就**什么都不做** ✓。
+   *
+   * ## ★ 为什么"收到 tick"与"真的驱动"要分开记账 ✗
+   *   原生**可能每 4 秒都戳一下、但每次都不是 `connected`** ✓（它那边的健康检查与网页的状态
+   *   不一定同拍 ✓）⇒ 若把"收到 tick"当作让位租约的基准 ✓，页面自己那一路轮询就会被
+   *   **永久压住** ✗ —— 而页面那一路还兼着"按需重拨"的作用 ✓（`rpc` → `dialNow(false)` ✓，
+   *   `Tunnel.prototype.rpc` 开头那句 `await this.dialNow(false)` ✓：
+   *   4 秒一轮的轮询本来就是端侧的重连驱动之一 ✓）。
+   *   ⇒ 只有真驱动了才刷新租约 ✓（`lastPollDrivenAt` / `lastPingDrivenAt` ✓）。
+   *
+   * @returns 一个**给人念**的串 ✓（原生把它写进 logcat / 通知 ✓）：
+   *   `'ping'`（发了 ✓）/ `'ping:offline'`（没连上、也没催重拨 ✓）/ `'ping:redial'`（没连上 ⇒ **催了一发既有重拨** ✓）/
+   *   `'ping:paused'` / `'ping:budget'`（自动重连已放弃 / 刚到预算 ✓ —— 原生戳不再拨 ✓）/
+   *   `'poll'`（驱动了一轮 ✓）/ `'poll:offline'` / `'poll:redial'` / `'poll:paused'` / `'poll:budget'`（同上 ✓）/
+   *   `'poll:busy'`（上一轮还没完 ✓）/ `'poll:unsupported'`（宿主没有那条端点 ✓）/
+   *   `'no'`（没有隧道 / 通道没装 / 出了任何意外 ✓）。**永不抛** ✗。
+   */
+  function mobileTick(kind) {
+    // ★ 只认 'poll' ✓，其它（含不传 / 传错 ✓）一律当 'ping' ✓ —— 契约原话 ✓。
+    var what = kind === 'poll' ? 'poll' : 'ping'
+    var result = 'no'
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var tunnel = api !== undefined ? api.tunnel : undefined
+      if (what === 'ping') {
+        // ★ 记账先做 ✓：**不管这一发能不能真干活** ✓ —— 这个计数就是"原生注入的 JS
+        //   在后台到底还执不执行"的证据 ✓，把它记在"发成功"后面就等于把证据丢了 ✗。
+        keepAliveStats.pingTicks += 1
+        keepAliveStats.lastPingTickAt = Date.now()
+        if (tunnel === undefined || tunnel === null || typeof tunnel.sendKeepalivePing !== 'function') {
+          result = 'no'
+        } else if (tunnel.sendKeepalivePing() === true) {
+          keepAliveStats.lastPingDrivenAt = Date.now()
+          result = 'ping'
+        } else {
+          // 没连上（socket 不在 OPEN ✓）⇒ 前置判断把它挡住了 ✓，**这一帧一个字都没发** ✓。
+          // ★★ 但"发不出去"不等于"没事干" ✗：后台里页面自己的重连也靠退避定时器 ✓，
+          //   而它**同样被冻结** ✗ ⇒ 这一发顺手把**既有那套重连**点一次 ✓
+          //   （判据与上限全在 `nativeClockRedial` 里 ✓，这里只是接上 ✓）。
+          result = keepAliveRedialText('ping', tunnel)
+        }
+      } else {
+        keepAliveStats.pollTicks += 1
+        keepAliveStats.lastPollTickAt = Date.now()
+        if (devicePollEntry === null) {
+          // 没装端侧通道（不是手机表面 ✓ / 没有 document ✓）⇒ 真的没什么可做 ✓
+          result = 'no'
+        } else if (keepAliveTunnelState() !== 'connected') {
+          /**
+           * ★★ 取待办那半**一个字都不动** ✗：不 connected ⇒ **绝不** `poll()` ✓
+           *   （`takePending` 取走即投递 + TTL 120s ⇒ 取回来弹不出去就**永久丢** ✓ —— 见上 ✓）。
+           * ★★ 重连那半**接上** ✓：后台里页面自己的退避定时器被冻结 ✗ ⇒
+           *   靠这一发把**既有那套重连**点着 ✓（`nativeClockRedial` ✓）——
+           *   这正是 B′ 的另一半价值 ✓："断了能自己回来"✓，而不只是"维持没断的连接"✓。
+           */
+          result = keepAliveRedialText('poll', tunnel)
+        } else {
+          var driven = devicePollEntry()
+          result = driven === 'poll' ? 'poll' : 'poll:' + String(driven)
+          if (driven === 'poll') keepAliveStats.lastPollDrivenAt = Date.now()
+        }
+      }
+    } catch (error) {
+      // ★★ **永不抛** ✗：注入是裸 IIFE ✓，抛出去在手机上没有任何痕迹 ✗
+      //   （最坏的一种失败 ✓）⇒ 一律降级成串 'no' ✓，细节留在 `lastTickResult` ✓。
+      result = 'no'
+    }
+    // 认不出来的串（`devicePollEntry` 以后回了什么新东西 ✓）也照样回给原生 ✓ —— 只记不拦 ✓
+    keepAliveStats.lastTickResult = String(result)
+    return String(result)
+  }
+
+  /**
+   * 端侧轮询的**入口登记** ✓（`tick('poll')` 读它 ✓）。
+   *
+   * 为什么用"登记"而不是让 `mobileTick` 直接调 `poll` ✗：`poll` 只活在
+   * `installDeviceChannel` 的作用域里 ✓（它要用那个函数里的 `log` / `drawBar` /
+   * `ASK_ORDER` / `answerKey` ✓），而 `mobileTick` 在模块作用域 ✓ ——
+   * 登记是**唯一**能把它们接起来、又**不抄第二份实现**的办法 ✓。
+   * 没装（纯浏览器 / 不是手机表面 ✓）⇒ 保持 `null` ✓ ⇒ `tick('poll')` 回 `'no'` ✓。
+   */
+  var devicePollEntry = null
+
   function installDeviceChannel() {
     // ★ 入口与每个 guard 都留痕。用 debugBoxLine 而**不是**本函数内的 log()：
     //   “函数没进来”与“进来了但被 guard 挡掉”与“日志包装自己失效”是三件事，
@@ -18237,6 +18839,22 @@
      *   轮询**成功**一次就把键清掉 ✓（之后真的又坏了 ⇒ 值得再记一行 ✓）。
      */
     var lastPollErrorKey = null
+    /**
+     * ★★ 并发护栏：上一轮还没跑完 ⇒ 第二个触发源**直接让开** ✓（两个触发源共用它 ✓）。
+     *
+     * 存的是**起飞时刻**（0 = 没有在飞 ✓），不是布尔 ✗ —— 理由见 `devicePollTick` 里
+     * "超时兜底"那段 ✓：一次挂死绝不许变成"端侧通道永久停摆"✗。
+     * 它活在本函数的闭包里 ✓ —— `installDeviceChannel` 全文件只有一个调用点 ✓
+     * （`isMobileSurface()` 那一支 ✓），所以不存在"两份标志各管一半"✗。
+     */
+    var pollInFlightAt = 0
+    /**
+     * 一轮轮询最多算"在飞"多久 ✓（超过 ⇒ 认定挂死，放行新的 ✓，见 `devicePollTick` ✓）。
+     * 15 秒 = 4 秒周期的近四倍 ✓：正常的轮询（等隧道 3 秒上限 + 一次 RPC ✓）远在它之内 ✓，
+     * 只有**真的挂住**才会撞上 ✓ —— 那一支存在的意义是"不把通道永久锁死"✗，
+     * 不是"给轮询设超时"✓（给 RPC 设超时是另一件事 ✓，本轮不碰 ✓）。
+     */
+    var POLL_INFLIGHT_MAX_MS = 15000
     /**
      * 等隧道，但**绝不无限等**。
      *
@@ -18556,18 +19174,85 @@
       if (bar !== null) bar.remove()
     }
 
+    /**
+     * ★★ 端侧轮询**那一轮**的**唯一实现** ✓ —— 两个触发源共用 ✓：
+     *   ① 页面自己的 4 秒定时器 ✓；② **原生时钟**注入的 `tick('poll')` ✓
+     *   （App 退到后台、页面定时器被冻结时靠的就是它 ✓）。
+     *
+     * ## 为什么"一轮只能有一个在飞"✗✗（这不是洁癖 ✓）
+     *
+     * 宿主的 `takePending` 是"**取走即标记为已投递**"✓（`packages/host/src/device-calls.ts:174` ✓），
+     * 而它内部是**同步**遍历 ✓（Node 单线程 ⇒ 两条并发请求拿到的是**互不相交**的两半 ✓、
+     * **不会重复投递** ✓）。所以"两条并发 poll 里有一条拿到空集合"**本身不是问题** ✓
+     * —— 这一点先澄清 ✓，免得把力气花错地方 ✗。
+     *
+     * **真正的问题是另一半** ✗：每一条被取走的待办，都要等 `runCall` **跑完**才算
+     * "弹到用户眼前了" ✓（`drawBar` / `copyText` / `navigator.vibrate` 都是异步 ✓），
+     * 而"已取走、还没弹出来"的这段时间正是**唯一会永久丢**的窗口 ✓（TTL 120 秒 ✓，过期即清 ✓，
+     * 两端都不报错 ✗）。**并发的第二条** poll 会把落在窗口里的条数**翻倍** ✓ ——
+     * 而它买到的只是"某一轮早了几十毫秒"✗。⇒ 收益极小、风险翻倍 ⇒ **加护栏** ✓。
+     *
+     * ## 超时兜底（★ 不许省 ✗）
+     *   `poll()` 里 `await` 的是隧道的 RPC ✓（`rpc` 的 pending **没有超时**✓，
+     *   只靠链路关闭时的 `failPending` 结算 ✓）⇒ 万一它挂住不返回 ✓，
+     *   一个纯布尔的"在飞"标志就会**永久**挡住后面每一轮 ✓ ——
+     *   症状是"端侧通道静默停摆"✗（屏幕上什么都不说 ✗，正是本项目最恨的一类 ✗）。
+     *   ⇒ 超过 `POLL_INFLIGHT_MAX_MS` 就认定上一轮挂死 ✓、**放行新的** ✓：
+     *     最坏情形退化回改动前的行为（一轮一个 ✓），**绝不会更坏** ✓。
+     *
+     * @returns 一个给人念的串 ✓：`'poll'`（真驱动了一轮 ✓）/ `'busy'`（上一轮还没完 ✓）/
+     *          `'unsupported'`（宿主没有那条端点，通道已停 ✓）。
+     */
+    function devicePollTick() {
+      if (unsupported) return 'unsupported'
+      if (pollInFlightAt !== 0 && Date.now() - pollInFlightAt < POLL_INFLIGHT_MAX_MS) return 'busy'
+      var ticket = Date.now()
+      pollInFlightAt = ticket
+      // 记账：这是**真的跑了一轮**的时刻 ✓（诊断行读它 ✓）—— 与 `mobileTick` 的
+      // "收到几次原始 tick"分开 ✓，两个数一起看才能分清"原生在戳"与"活真的干了"✓。
+      keepAliveStats.lastPollAt = ticket
+      void poll().then(
+        function () {
+          // ★ 只清**自己那一张**票 ✓：超时兜底放行过新一轮时 ✗，
+          //   旧这一轮的收尾**绝不许**把新一轮的"在飞"标志抹掉 ✓。
+          if (pollInFlightAt === ticket) pollInFlightAt = 0
+        },
+        function (error) {
+          if (pollInFlightAt === ticket) pollInFlightAt = 0
+          /**
+           * ★★ round 153：**同类失败只记一行** ✓（见 `lastPollErrorKey` 那段 ✓）——
+           *   键是错误文本本身 ✓；同一句话再来就不再写 ✓（调试框不再被刷屏 ✓）。
+           */
+          var key = String(error && error.message ? error.message : error)
+          if (key === lastPollErrorKey) return
+          lastPollErrorKey = key
+          log('轮询失败', error)
+        },
+      )
+      return 'poll'
+    }
+    /**
+     * ★ 把这一轮的入口**登记**给原生时钟 ✓（`tick('poll')` 读的就是它 ✓）。
+     *
+     * 为什么是登记、而不是在 `mobileTick` 里另写一份轮询 ✗：`poll` 只活在这个函数的作用域里 ✓
+     * （它要用这里的 `log` / `drawBar` / `ASK_ORDER` / `answerKey` ✓），
+     * 而 `mobileTick` 在模块作用域 ✓ —— 登记是**唯一**既能接上、又不抄第二份实现的办法 ✓。
+     * 没装（纯浏览器 / 不是手机表面 ✓）⇒ `devicePollEntry` 保持 `null` ✓ ⇒ `tick('poll')` 回 `'no'` ✓。
+     */
+    devicePollEntry = devicePollTick
+
     var timer = setInterval(function () {
-      if (unsupported) return
-      void poll().catch(function (error) {
-        /**
-         * ★★ round 153：**同类失败只记一行** ✓（见 `lastPollErrorKey` 那段 ✓）——
-         *   键是错误文本本身 ✓；同一句话再来就不再写 ✓（调试框不再被刷屏 ✓）。
-         */
-        var key = String(error && error.message ? error.message : error)
-        if (key === lastPollErrorKey) return
-        lastPollErrorKey = key
-        log('轮询失败', error)
-      })
+      /**
+       * ★★ 原生在驱动 ⇒ 页面这一路**让位** ✓（判据见 `keepAliveShouldRun` ✓）。
+       *
+       * 为什么让位 ✗（而不是"两边都跑、反正幂等"✓）：
+       *   · 双跑会把上面那段说的"已取走、还没弹出来"的窗口**翻倍** ✓ ——
+       *     这是唯一会**永久丢通知**的窗口 ✓，幂等救不了它 ✗（`takePending` 取走就没了 ✓）；
+       *   · 租约到期（原生停摆 / 老 APK ✓）这里**自动接手** ✓ ⇒ 不会出现"两边都不轮询"✗。
+       * ★ 判据落在每一发上 ✓（不是"启动时停表"✗）—— 理由同 ping 那处 ✓。
+       */
+      if (!keepAliveShouldRun('poll')) return
+      devicePollTick()
     }, 4000)
   }
 

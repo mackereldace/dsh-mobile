@@ -50,6 +50,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.ref.WeakReference;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
@@ -115,9 +116,12 @@ import org.json.JSONObject;
  *    `dshmobile://pair?d=…` 的**深链** ✓ / 壳内扫码 ✓）汇到**同一份**实现 ✓，
  *    落点仍然是"一次普通的 `<电脑基地址>/mobile/app?pair=…` 加载"✓ ——
  *    也就是说**加载、换槽、票据解析一个字都没另写** ✓。
- *    ★ 这一条**动了权限白名单** ✗（加了 `CAMERA` ✓）—— 这是全项目**唯一**一处
- *      "白名单从两条变三条"，理由、替代方案与降级路径**逐条写在清单的注释里** ✓
+ *    ★ 这一条**动了权限白名单** ✗（加了 `CAMERA` ✓）—— 那是白名单的**第一次**改动
+ *      （"两条变三条" ✓，round 143 ✓），理由、替代方案与降级路径**逐条写在清单的注释里** ✓
  *      （`AndroidManifest.xml` §权限 ✓），改这一条前请先读那一段 ✓。
+ *      ★★ round 183（保活 ✓）又动了**第二次**（三条变五条 ✓：
+ *      `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` ✓）——
+ *      理由同样写在清单里那两条权限上方 ✓。
  * 8. ★★ round 152：**网页侧也能唤起壳内扫码**（{@link ShellBridge#scanPair} ✓）——
  *    起因是用户报的"手机端点击「扫码配对」**没有正常功能**"✗：配对页 `/mobile` 上
  *    那颗按钮此前**只写一句提示**✗（壳里明明有 {@link ScanActivity} ✓，却没有桥能调它 ✗）。
@@ -182,6 +186,27 @@ import org.json.JSONObject;
  * 网页上报"现在有没有可返回的东西" ✓）—— 为什么不在这里**问**网页 ✗：
  * `evaluateJavascript` 是**异步**的 ✓，而返回必须在**同一帧**决定"吃掉还是退出" ✓
  * （见 {@link #handleBackPressed} 与 {@link ShellBridge#setBackAvailable} ✓）。
+ *
+ * ## ★★ 保活：为什么根返回改成"退到后台"（round 183）
+ *
+ * 用户原话："**退出 App 就断联**" ✗。读代码定死的那条链：根层返回走 `finish()` ✗ ⇒
+ * `onDestroy` 里 `webView.destroy()` ✗ ⇒ **隧道整个活在 WebView 里** ✓ ⇒ 连接随之消失 ✓；
+ * 而只按 Home 时页面转入后台 ⇒ **网页自己的定时器被安卓限流/冻结** ✗ ⇒
+ * 心跳停、重连停、"电脑上有事要确认"也冒不出来 ✗。
+ *
+ * 两半修法（壳里改动的**全部**就是下面这些 ✓，别处一个字都没动 ✗）：
+ *   1. **根返回 = 退到后台** ✓（{@link #moveToBackground} ✓ —— 两条路都改了 ✓：
+ *      `OnBackInvokedCallback` ✓ 与老 API `onBackPressed` ✓）；
+ *      ★ 判据那一份（{@link #handleBackPressed} ✓）**一个字没动** ✗；
+ *   2. **前台服务保活** ✓（{@link KeepAliveService} ✓ + 纯逻辑 {@link KeepAlivePolicy} ✓）：
+ *      进程在后台不被冻结 ✓，由服务每 4 秒注入 `poll` ✓、每 15 秒注入 `ping` ✓
+ *      替页面打拍子 ✓；★ 一行密码学都不写 ✗（身份与加密仍在网页手里 ✓，协议零重写 ✓）;
+ *   3. **「真的退出」另给一个出口** ✓ —— 常驻通知上那颗 action ✓
+ *      （退到后台之后总得有一条真的关掉它的路 ✓）。
+ *
+ * ★ 权限白名单因此**从三条变五条** ✗（`FOREGROUND_SERVICE` +
+ *   `FOREGROUND_SERVICE_SPECIAL_USE` ✓）—— 理由、为什么是 `specialUse`、
+ *   以及"**没有不加的替代**"✗ 逐条写在清单里那一段注释里 ✓，改权限之前先读它 ✓。
  *
  * ## ★ 通知：为什么非得走原生
  *
@@ -481,6 +506,75 @@ public class MainActivity extends android.app.Activity {
      */
     private volatile boolean backAvailable = false;
 
+    // ── ★★ round 183：保活（前台服务 ✓）—— 用户报的"退出 App 就断联"✗ ──────────────
+    //
+    // 起因（读代码定死 ✓）：根层返回走 `finish()` ✗ ⇒ `onDestroy` 里 `webView.destroy()` ✗ ⇒
+    // **隧道整个活在 WebView 里** ✓ ⇒ 连接随它一起没 ✓；而只按 Home 时，页面转入后台
+    // ⇒ **网页自己的定时器被安卓限流/冻结** ✗ ⇒ 心跳停、"电脑上有事要确认"也冒不出来 ✗。
+    //
+    // 修法两半（都在本轮 ✓，契约见 KeepAliveService / KeepAlivePolicy ✓）：
+    //   ① 根返回**改成"退到后台"** ✓（{@link #moveToBackground} ✓）——
+    //      用户拍板的就是这一条 ✓，**不是**"双击才退出"✗（老的双击逻辑见 {@link #onKeyUp} ✓，
+    //      本轮**一个字都没动它** ✗）；
+    //   ② 「真的退出」另给一个出口 ✓ —— 常驻通知上那颗 action ✓
+    //      （{@link KeepAliveService} 的 `ACTION_EXIT` ✓），
+    //      它走 {@link #finishFromKeepAlive} 结束本界面 ✓。
+    //
+    // 本文件里关于保活的改动**只有五处** ✓（别的地方一个字都不许动 ✗）：
+    //   · 根返回那两条路（`OnBackInvokedCallback` ✓ + 老 API `onBackPressed` ✓）；
+    //   · {@link #onResume} 里**幂等地**拉起服务 ✓（每次回前台都拉一次 ✓
+    //     —— 比赌 `START_STICKY` 稳 ✓）；
+    //   · {@link ShellBridge#setKeepAliveState} ✓（网页 → 壳的状态回传 ✓）；
+    //   · 把 WebView 交给服务（**弱引用** ✓，见 {@link #liveShell} / `attachWebView` ✓）；
+    //   · {@link #onDestroy} 里"**真的退出**才停服务"✓。
+
+    /**
+     * ★ 本 Activity 的**弱**引用 ✓ —— 只给"真的退出"那个出口用 ✓
+     * （{@link #finishFromKeepAlive} ✓）。
+     *
+     * ★★ 为什么必须是弱引用 ✗：服务活得比 Activity 长 ✓（这正是保活 ✓）——
+     * 强引用就是**把 Activity 泄漏进 Service** ✗（用户退到后台一整天，这个界面连同
+     * 它的整棵 View 树都别想被回收 ✓）。弱引用被回收 ⇒ 那个出口什么都不做 ✓
+     * （没有可结束的界面了 ✓，服务那边已经自己停了 ✓）。
+     */
+    private static volatile WeakReference<MainActivity> liveShell = new WeakReference<>(null);
+
+    /**
+     * ★★ 「真的退出」✓ —— 常驻通知那颗 action 走到这里 ✓（{@link KeepAliveService#ACTION_EXIT} ✓）。
+     *
+     * 为什么要有它 ✗：根返回改成"退到后台"之后，用户**没有**别的办法真的关掉这个 App ✗
+     * （从最近任务里划掉不算 ✓ —— 那是"划掉"不是"退出"✓，而且那时隧道早随任务没了 ✓）。
+     * ⇒ 这是本轮**唯一**一条真的退出的路 ✓，必须真的退干净 ✓。
+     *
+     * ★ 声明成 `static` ✓：调用方是**服务**✓（它不持有、也不该持有 Activity ✓）。
+     * ★ 拿不到界面（已被回收 ✓）⇒ 什么都不做 ✓ —— 不是错误 ✓，那时确实没有东西可结束 ✓。
+     */
+    static void finishFromKeepAlive() {
+        final MainActivity activity = liveShell.get();
+        if (activity == null) {
+            Log.i(TAG, "「真的退出」：界面已经没了（只剩服务）⇒ 停服务即可 ✓");
+            return;
+        }
+        activity.runOnUiThread(() -> {
+            try {
+                /**
+                 * ★ `finishAndRemoveTask()` ✓（不是 `finish()` ✗）——
+                 * 它同时把任务从**最近任务**里拿掉 ✓；只 `finish()` 的话，
+                 * 用户再点开最近任务还会看到一张"死"卡片 ✓（点开是白屏 ✓）。
+                 */
+                Log.i(TAG, "「真的退出」：结束界面并把任务从最近任务里拿掉 ✓");
+                activity.finishAndRemoveTask();
+            } catch (Throwable t) {
+                Log.w(TAG, "finishAndRemoveTask 失败 ⇒ 退回 finish()", t);
+                try {
+                    activity.finish();
+                } catch (Throwable ignored) {
+                    // 到这一步已经没什么可做的了 ✓（服务那边早就停了 ✓）
+                }
+            }
+        });
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -546,12 +640,25 @@ public class MainActivity extends android.app.Activity {
          *
          * ★ 走 `params.createIntent()`（= 系统 SAF 选择器 ✓）：**不需要任何新权限** ✓ ——
          *   所以"存储类权限一个都不申请"这条契约不变 ✓。
-         *   （★ round 143 起白名单是**三条** ✗ —— 加的 `CAMERA` 是给"扫码配对"的 ✓，
-         *    与文件选择器无关 ✓；见 {@link #REQUEST_SCAN} 那一段与清单里的注释 ✓。）
+         *   （★ round 143 起白名单多了 `CAMERA` ✓（给"扫码配对"的 ✓）、
+         *    ★ round 183 起又多了两条前台服务权限 ✓（保活 ✓）—— 三条都与文件选择器无关 ✓；
+         *    见 {@link #REQUEST_SCAN} 那一段、类注释 §保活 与清单里的注释 ✓。）
          */
         webView.setWebChromeClient(new ShellChromeClient());
         // 让网页也能改地址 / 要权限 / 发通知 ✓（「连接与设备」里给一个入口即可 ✓）
         webView.addJavascriptInterface(new ShellBridge(), "DshmShell");
+        /**
+         * ★★ round 183：把**页面**与**本界面**交给保活那条路 ✓（两处都是**弱**引用 ✗）。
+         *
+         * · 页面（WebView ✓）交给 {@link KeepAliveService} ✓ —— 它要在后台替网页打拍子 ✓
+         *   （`evaluateJavascript` ✓）。**弱引用** ✗：服务活得比界面长 ✓，
+         *   强引用就是泄漏 ✓（见 {@link KeepAliveService} 里 `page` 的注释 ✓）；
+         * · 本 Activity 记进 {@link #liveShell} ✓ —— 「真的退出」那个出口要能结束它 ✓。
+         *
+         * ★ 时机：`onCreate` 里挂上 ✓，`onResume` 才拉服务 ✓ ⇒ 服务第一次注入时页面一定已经在了 ✓。
+         */
+        KeepAliveService.attachWebView(webView);
+        liveShell = new WeakReference<>(this);
         /**
          * ★ 接管系统返回 ✓（round 121，见类注释 §系统返回 ✓）——
          *   不注册的话，预测式返回会直接 finish 掉这个 Activity ✗。
@@ -1015,6 +1122,37 @@ public class MainActivity extends android.app.Activity {
         }
 
         /**
+         * ★★ round 183：网页把"隧道现在怎么样"报给壳 ✓ ——
+         * 常驻通知的正文据此在"已连接 / 正在连接 / 正在重连"之间切 ✓（契约见 {@link KeepAlivePolicy} ✓）。
+         *
+         * 形状（**网页侧定，壳只读** ✗ —— 壳不解释隧道里的任何东西 ✓）：
+         * `{"connected":true,"endpoint":"10.x.x.x:3443","retry":0}` ✓。
+         *
+         * ★ 与 `notify` 一样先过主机名白名单 ✓ —— 一个陌生页面不该有机会改我们常驻通知上的字 ✗。
+         * ★ 返回值（**同步** ✓，网页据此记一行即可 ✓）：
+         *   · `ok` ✓ 收到并已转交服务；
+         *   · `untrusted` ✓ 不是我们那台电脑的页面（与 `notify` 同一条 ✓）；
+         *   · `no-service` ✓ 保活服务没在跑（例如系统拦了前台服务 ✓）——
+         *     ★ 这**不是**错误 ✓：网页照常跑自己的那套 ✓，只是通知栏上没有那条常驻通知 ✓；
+         *   · `error` ✓ 转交时抛了（已记日志 ✓ —— 绝不把异常扔回网页 ✗）。
+         *
+         * ★ 解析与文案决策**全在纯逻辑里** ✓（{@link KeepAlivePolicy#parseState} ✓ ——
+         *   电脑上真跑过测试 ✓）；这里只做"过门禁 ✓ + 转交 ✓"两件事 ✓。
+         */
+        @JavascriptInterface
+        public String setKeepAliveState(String json) {
+            if (!isTrustedPage()) return "untrusted";
+            try {
+                if (!KeepAliveService.isRunning()) return "no-service";
+                KeepAliveService.pushState(json);
+                return "ok";
+            } catch (Throwable t) {
+                Log.w(TAG, "保活状态没能转交给服务（忽略这一条 ✓）", t);
+                return "error";
+            }
+        }
+
+        /**
          * ★ 网页告诉我们"现在有没有可返回的东西" ✓（round 121，返回手势专用 ✓）。
          *
          * 三个开关（文件面板 ✓ / 左抽屉 ✓ / DSH 预览 ✓）任一开着都算有 ✓；
@@ -1096,8 +1234,9 @@ public class MainActivity extends android.app.Activity {
          *
          * `MediaStore.Downloads` + `ContentResolver.insert` 是**由系统代写**的 ✓
          * （API 29+ 起分区存储就是这样 ✓）—— 壳这一侧一个存储权限都不引入 ✓，
-         * `check-apk.mjs` 里那条白名单断言**只多了 round 143 的 `CAMERA`** ✓
-         * （那是扫码的 ✓，与保存文件无关 ✓）。
+         * `check-apk.mjs` 里那条白名单断言里**一条存储权限都没有** ✓
+         * （它列的是 `INTERNET` ✓ / `POST_NOTIFICATIONS` ✓ / `CAMERA` ✓（扫码 ✓）
+         *  / 两条前台服务权限 ✓（round 183 的保活 ✓）—— 四条都与保存文件无关 ✓）。
          *
          * ## 四件必须处理的事（任务点名 ✓）
          *
@@ -3367,9 +3506,14 @@ public class MainActivity extends android.app.Activity {
      *   ① 网页说"有可返回的东西"（文件面板 / 左抽屉 / DSH 预览 ✓）
      *      → 让网页去关（`window.__dshmBack()` ✓），这一下**吃掉** ✓；
      *   ② 否则网页历史能回退 → `goBack()` ✓；
-     *   ③ 都没有 → 交给调用方（手势回调 `finish()` ✓ / 老 API 走 `super` ✓）= 退出 App ✓。
+     *   ③ 都没有 → 交给调用方 ⇒ ★ round 183 起两条路都是**退到后台** ✓
+     *      （{@link #moveToBackground} ✓ —— 本轮之前是 `finish()` ✗）。
      *
-     * @return true = 这一下已经被处理掉，**不要**再退出 ✓。
+     * ★ 本方法**只回答"这一下要不要吃掉"** ✗ —— 它**不**决定"没吃掉时干什么" ✓
+     *   （那是调用方的两行 ✓：`OnBackInvokedCallback` ✓ 与老 API `onBackPressed` ✓）。
+     *   本轮改的正是那两行 ✓，这里的三个分支**一个字都没动** ✗。
+     *
+     * @return true = 这一下已经被处理掉，**不要**再退到后台 / 退出 ✓。
      */
     private boolean handleBackPressed() {
         WebView view = webView;
@@ -3408,7 +3552,13 @@ public class MainActivity extends android.app.Activity {
             OnBackInvokedCallback callback = new OnBackInvokedCallback() {
                 @Override
                 public void onBackInvoked() {
-                    if (!handleBackPressed()) finish();
+                    /**
+                     * ★★ round 183：这里从 `finish()` 改成 **{@link #moveToBackground}** ✗ ——
+                     * 用户拍板"根返回 = 退到后台"✓（原话是"退出 App 就断联"✗）。
+                     * ★ {@link #handleBackPressed} 的判定**一个字都没动** ✗ ——
+                     * 只改了"它说没有可返回的东西之后，我们干什么"这一句 ✓。
+                     */
+                    if (!handleBackPressed()) moveToBackground();
                 }
             };
             getOnBackInvokedDispatcher()
@@ -3431,7 +3581,10 @@ public class MainActivity extends android.app.Activity {
          */
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (handleBackPressed()) return true;
-            // 都没得返回 → 交给 Activity 默认（→ onBackPressed → finish ✓）= 退出 App ✓
+            /**
+             * 都没得返回 → ★ round 183 起是**退到后台**（不再退出 ✓，
+             * 见 {@link #moveToBackground} ✓）—— 老 API 与手势回调两条路**同一条**行为 ✓。
+             */
             return super.onKeyDown(keyCode, event);
         }
         return super.onKeyDown(keyCode, event);
@@ -3441,12 +3594,52 @@ public class MainActivity extends android.app.Activity {
      * 老 API 上的返回入口 ✓（API 33+ 且预测式返回开启后，系统不再走这里 ✓）。
      * 与 {@link #onKeyDown} 共用同一个判定 ✓ —— 上面那句 `super.onKeyDown` 最终也会落到这里 ✓
      * （两次都是纯判断、没有副作用 ✓，所以重复调用无害 ✓）。
+     *
+     * ★★ round 183：根层那一句从 `super.onBackPressed()`（= `finish()` ✓）改成
+     * {@link #moveToBackground} ✓ —— ★ 两条路（手势回调 ✓ 与这条老 API ✓）**必须一起改** ✗：
+     * 只改一条 = 在另一类设备上"按返回还是直接退出"✗（而本机验收未必碰得到那类设备 ✗）。
      */
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         if (handleBackPressed()) return;
-        super.onBackPressed();
+        moveToBackground();
+    }
+
+    /**
+     * ★★ round 183：「根层返回」= **退到后台** ✓（不再 `finish()` ✗）。
+     *
+     * 为什么是这一条 ✗：用户报的是"**退出 App 就断联**"✓，而根层返回原来走 `finish()` ✓
+     * ⇒ `onDestroy` 里 `webView.destroy()` ⇒ **隧道随 WebView 一起被销毁** ✓。
+     * 退到后台则**不销毁任何东西** ✓（界面只是 stop ✓、WebView 还在 ✓），
+     * 再叠上保活服务 ✓ ⇒ 隧道继续 ✓（见类注释 §保活 ✓）。
+     *
+     * ★ 退到后台**不是**退出 ✗：任务还在最近任务里 ✓、`onDestroy` 不会被调到 ✓、
+     *   服务**继续跑** ✓（那正是本轮要的 ✓）。想真的退出只有一个出口 ✓：
+     *   常驻通知上那颗「退出」✓（{@link KeepAliveService#ACTION_EXIT} ✓）。
+     *
+     * ★ 失败兜底 ✗：`moveTaskToBack` 返回 false（理论上只在本 Activity 不是任务根时发生 ✓ ——
+     *   而清单里它是 `singleTask` 的启动入口 ✓，就是我们自己的任务根 ✓）⇒ 退回 `finish()` ✓。
+     *   理由：本项目对"**按了没反应**"零容忍 ✗ —— 宁可这一下退出去 ✓，
+     *   也不留一枚按下去什么都不发生的返回键 ✓（真发生时日志里有一行 ✓）。
+     * ★ 之所以不担心"一次返回被处理两遍"（第二遍多半就返回 false 了 ✓）：框架对一次返回
+     *   只会调**一次** `onBackPressed` ✓ —— `onKeyDown` 那条路只 `startTracking()`✓，
+     *   真正回调发生在 key-up ✓（我们自己的 `onKeyDown` 也只是把事件交回 `super` ✓）；
+     *   API 33+ 上则是 dispatcher 回调那一次 ✓。两条路互斥，见 {@link #onKeyDown} 的注释 ✓。
+     */
+    private void moveToBackground() {
+        boolean moved = false;
+        try {
+            moved = moveTaskToBack(true);
+        } catch (Throwable t) {
+            Log.w(TAG, "退到后台失败", t);
+        }
+        if (moved) {
+            Log.i(TAG, "根层返回 ⇒ 退到后台（隧道与保活服务都留着 ✓）");
+            return;
+        }
+        Log.w(TAG, "退到后台没成功 ⇒ 兜底结束界面（不许\"按了没反应\"✗）");
+        finish();
     }
 
     /**
@@ -3455,12 +3648,44 @@ public class MainActivity extends android.app.Activity {
      * 起因：这两种情况下系统栏尺寸会变 ✓（分屏、折叠、转屏后导航方式变了 ✓），
      * 而只靠 onCreate 那一次测量会一直用旧值 ✗ —— 表现是"转屏之后顶栏又钻到状态栏下面" ✗。
      * （转屏不会重建 Activity ✓，见清单里的 `configChanges` ✓，所以必须自己补这一下 ✓。）
+     *
+     * ★★ round 183：这里同时**幂等地**把保活前台服务拉一次 ✓（见
+     * {@link #startKeepAliveService} ✓）——"每次回前台都拉一次"比赌 `START_STICKY` 稳 ✓。
      */
     @Override
     protected void onResume() {
         super.onResume();
         if (root != null) root.requestApplyInsets();
         applyInsetsToPage();
+        startKeepAliveService();
+    }
+
+    /**
+     * ★★ round 183：把保活前台服务拉起来 ✓ —— **幂等** ✓（已经在跑就只是又收一次
+     * `onStartCommand` ✓，`KeepAliveService.onStartCommand` 那边会把通知按**当前**状态重挂一次 ✓）。
+     *
+     * ★ 为什么放在 `onResume` ✗：安卓 12+ **禁止从后台启动前台服务** ✓ ——
+     *   `onResume` 是"用户正看着这个界面"的确切时刻 ✓（前台 ✓ ⇒ 一定允许 ✓）。
+     *   本 Activity 是 `singleTask` 的启动入口 ✓ ⇒ 从最近任务点回来也一定走到这里 ✓。
+     *
+     * ★ 为什么**不只**靠 `START_STICKY` ✗：进程被系统回收后，粘性重启**同样**受
+     *   后台启动限制 ✓（真被拦住时是 `ForegroundServiceStartNotAllowedException` ✓）——
+     *   所以"每次回前台再拉一次"才是主力 ✓，粘性重启只是补充 ✓。
+     *
+     * ★ 拉不起来**不许崩** ✗，也**不许**影响页面 ✓：catch 住记一行 ✓ ⇒
+     *   壳的行为与 round 175 **一字不差** ✓（页面自己那套连接照旧 ✓，只是后台可能被冻结 ✓）。
+     *
+     * ★ 不需要按版本分支 ✗：`startForegroundService` 是 API 26 起的 ✓，而 minSdk 是 29 ✓。
+     */
+    private void startKeepAliveService() {
+        try {
+            Intent intent = new Intent(this, KeepAliveService.class);
+            intent.setAction(KeepAliveService.ACTION_START);
+            startForegroundService(intent);
+            Log.i(TAG, "保活前台服务已拉起（每次回前台都拉一次 ✓ 幂等 ✓）");
+        } catch (Throwable t) {
+            Log.w(TAG, "保活前台服务没拉起来（页面照旧自己维持连接 ✓）", t);
+        }
     }
 
     @Override
@@ -3479,6 +3704,32 @@ public class MainActivity extends android.app.Activity {
         autoSwitching = false;
         cancelSlotTimeout();
         slotHandler.removeCallbacksAndMessages(null);
+        /**
+         * ★★ round 183：**只有"真的退出"才停保活服务** ✗ —— 判据是 `isFinishing()` ✓。
+         *
+         * 为什么是它 ✗（把三条路摊开看 ✓，这也是"想清楚判据"的全部内容 ✓）：
+         *   · 用户按常驻通知上的「退出」✓ ⇒ `finishAndRemoveTask()` ✓ ⇒ **finishing** ✓
+         *     ⇒ 停服务 ✓（该退就退干净 ✓）；
+         *   · **系统为回收内存销毁本界面** ✓（用户只是退到后台 ✓）⇒ `isFinishing()` 为 **false** ✓
+         *     ⇒ **绝不许停服务** ✗ —— 这一条正是保活存在的意义 ✓
+         *     （停了就等于"放着放着又断联了"✗，而且没有任何界面能告诉他 ✗）；
+         *   · 根层返回 ⇒ `moveTaskToBack(true)` ✓ ⇒ 界面只是 stop ✓，
+         *     `onDestroy` **根本不会被调到** ✓（所以不需要为它单独记一个标志位 ✓ ——
+         *     这也是本轮**没有**新增"退到后台过"这类字段的原因 ✗）。
+         * ★ 任务被用户从最近任务里划掉那条路不在这里 ✗：那时 `onDestroy` 未必被调到 ✓，
+         *   由服务自己的 `onTaskRemoved` 收尾 ✓（见 KeepAliveService ✓）。
+         */
+        if (isFinishing()) {
+            Log.i(TAG, "界面真的结束了 ⇒ 顺手停掉保活服务（幂等 ✓）");
+            try {
+                stopService(new Intent(this, KeepAliveService.class));
+            } catch (Throwable t) {
+                Log.w(TAG, "停保活服务失败（服务那边自己也会收尾 ✓）", t);
+            }
+        }
+        // ★ 先把页面从服务那边摘掉 ✗（再 destroy ✓）—— 否则服务可能往一个正在拆的 WebView 上注入 ✓
+        KeepAliveService.attachWebView(null);
+        liveShell = new WeakReference<>(null);
         if (webView != null) {
             webView.destroy();
             webView = null;
@@ -3487,7 +3738,17 @@ public class MainActivity extends android.app.Activity {
         super.onDestroy();
     }
 
-    /** 双击返回 = 改地址（单次返回仍走 onKeyDown 的网页回退 ✓）。 */
+    /**
+     * 双击返回 = 改地址（单次返回仍走 onKeyDown 的网页回退 ✓）。
+     *
+     * ★★ round 183：读之前先看这一段 ✗ —— 根层返回改成"退到后台"之后，
+     * 这条路**只在"第一下被网页吃掉"时**还能凑齐两下 ✓（`onKeyUp` 只在返回
+     * **没有**被 dispatcher 截走时才收得到 ✓）。
+     * ★ 本轮**刻意不动它** ✗（用户选的是"根返回退到后台"✓，不是"双击才退出"✗）——
+     *   它的老语义（双击 = 改地址 ✓）在这条路上还是原样 ✓；
+     *   ★ 但"在根层连按两下返回"现在第二下多半落到启动器上 ✗ ⇒ 这条捷径在**根层**基本用不上了 ✓
+     *   （改地址的正式入口本来就在网页里 ✓，见 `changeAddress` 那条桥 ✓）。
+     */
     private long lastBackAt = 0L;
 
     @Override
