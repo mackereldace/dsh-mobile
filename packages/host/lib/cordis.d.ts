@@ -99,6 +99,33 @@ export declare function loadOrCreateHostIdentity(options: {
     directory: string;
     hostName?: string;
 }): HostIdentity;
+/**
+ * 读 DSH **实际**的监听端口。
+ *
+ * ## 从哪读（别猜 ✗）
+ *
+ * `@deepseek-ai/dsh-host-webserver` 的 `WebServer` 类型上就有两个 getter
+ * （`lib/types/index.d.ts`）：`get port(): number`（**实际**监听值 —— `config.port` 为 0 时
+ * 是系统分配的那个 ✓）与 `get host(): '127.0.0.1' | '0.0.0.0'`。
+ * 这里只读 `port` ✓：URL 里一律写 `127.0.0.1` ✓ ——
+ * 本机配置页的闸门看的是 **socket 是不是回环** ✓，所以链接必须是回环地址才能打开 ✓，
+ * 而 `host` 是 `0.0.0.0` 时用它拼出来的地址反而不保证这一点 ✗。
+ *
+ * ## 读不到就返回 undefined（**绝不猜 3080** ✗）
+ *
+ * 3080 只是生产部署的习惯端口 ✓（`--port 0` / 换端口都合法 ✓）。
+ * 猜错的代价是"启动日志给了一条打不开的链接"✗ ⇒ 宁可退化成只打路径 ✓。
+ */
+export declare function readWebServerPort(webServer: unknown): number | undefined;
+/**
+ * "还没配置手机接入"那行启动提示（★ 只在真的没配置时才打，别刷屏 ✗）。
+ *
+ * 两副面孔：
+ *   · 读得到端口 ⇒ 给出**完整可点**的链接 ✓（终端会把 URL 变成可点链接 ✓）；
+ *   · 读不到端口 ⇒ 只给路径 ✓，并**如实说明**为什么 ✓
+ *     （"读不到 DSH 的监听端口"），让用户自己在 DSH 页面地址后面接上 ✓。
+ */
+export declare function setupStartupHint(port: number | undefined): string;
 /** 插件主体。 */
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=cordis.d.ts.map

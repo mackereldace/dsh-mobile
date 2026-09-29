@@ -29,7 +29,13 @@ import { DeviceStore } from './devices.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
 import { createLanListener, type LanListener } from './lan-listener.ts'
-import { handleSetupRequest, resolveProfilePatchPath, SETUP_PATH } from './setup-config.ts'
+import {
+  handleSetupRequest,
+  readCurrentConfig,
+  resolveProfilePatchPath,
+  SETUP_PAGE_PATH,
+  SETUP_PATH,
+} from './setup-config.ts'
 import { createTlsManager } from './tls-cert.ts'
 import {
   createMobileHost,
@@ -248,6 +254,45 @@ function resolveDistIndex(): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 读 DSH **实际**的监听端口。
+ *
+ * ## 从哪读（别猜 ✗）
+ *
+ * `@deepseek-ai/dsh-host-webserver` 的 `WebServer` 类型上就有两个 getter
+ * （`lib/types/index.d.ts`）：`get port(): number`（**实际**监听值 —— `config.port` 为 0 时
+ * 是系统分配的那个 ✓）与 `get host(): '127.0.0.1' | '0.0.0.0'`。
+ * 这里只读 `port` ✓：URL 里一律写 `127.0.0.1` ✓ ——
+ * 本机配置页的闸门看的是 **socket 是不是回环** ✓，所以链接必须是回环地址才能打开 ✓，
+ * 而 `host` 是 `0.0.0.0` 时用它拼出来的地址反而不保证这一点 ✗。
+ *
+ * ## 读不到就返回 undefined（**绝不猜 3080** ✗）
+ *
+ * 3080 只是生产部署的习惯端口 ✓（`--port 0` / 换端口都合法 ✓）。
+ * 猜错的代价是"启动日志给了一条打不开的链接"✗ ⇒ 宁可退化成只打路径 ✓。
+ */
+export function readWebServerPort(webServer: unknown): number | undefined {
+  const value = (webServer as { port?: unknown } | undefined)?.port
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * "还没配置手机接入"那行启动提示（★ 只在真的没配置时才打，别刷屏 ✗）。
+ *
+ * 两副面孔：
+ *   · 读得到端口 ⇒ 给出**完整可点**的链接 ✓（终端会把 URL 变成可点链接 ✓）；
+ *   · 读不到端口 ⇒ 只给路径 ✓，并**如实说明**为什么 ✓
+ *     （"读不到 DSH 的监听端口"），让用户自己在 DSH 页面地址后面接上 ✓。
+ */
+export function setupStartupHint(port: number | undefined): string {
+  const head = '[dsh-mobile] 还没配置手机接入 ⇒ '
+  const tail = ' 配一次（即时生效，不用重启 DSH）'
+  if (port === undefined) {
+    return `${head}读不到 DSH 的监听端口 ⇒ 在你打开 DSH 页面的地址后面加上 ${SETUP_PAGE_PATH}${tail}`
+  }
+  return `${head}在本机浏览器打开 http://127.0.0.1:${port}${SETUP_PAGE_PATH}${tail}`
 }
 
 /** 插件主体。 */
@@ -772,6 +817,26 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.logger?.info?.(
     `[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
       `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ${setupPatchFile}），` +
+      `配置页 GET ${SETUP_PAGE_PATH}，` +
       `隧道 ${'/mobile/ws'}，身份指纹见 /mobile/manifest（协议版本 1）`,
   )
+
+  /**
+   * 6) ★★ 启动日志里那一行"还没配置"的提示（用户点一下就能去配，不用敲 curl ✓）。
+   *
+   * ## 什么算"没配置"
+   *
+   * 就是 `readCurrentConfig(setupPatchFile) === null` ✓ —— 与 `GET /mobile/setup` 的
+   * `configured` **同一个判据** ✓（profile 里**没有**我们写的机器专属配置块 ✓）。
+   * ⚠️ 刻意**不**看 `listener.enabled` ✗：外置 `lan-proxy.mjs` 那类部署本来就是
+   *   `enabled=false` 而手机照样能用 ✓ ⇒ 那也算"配过了"，再提示就是刷屏 ✗。
+   *
+   * ## 为什么打 console.log 而不是 ctx.logger.info ✗
+   *
+   * 本文件里其它"给人看的下一步提示"（TLS 就绪 / agent 工具已注册 ✓）都走 console.log，
+   * 而终端会把 URL 变成**可点链接** ✓ —— 这正是这一行的用途 ✓。
+   */
+  if (readCurrentConfig(setupPatchFile) === null) {
+    console.log(setupStartupHint(readWebServerPort(ctx.webServer)))
+  }
 }

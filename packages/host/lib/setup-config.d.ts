@@ -35,6 +35,16 @@ export declare const DEFAULT_LISTENER_TLS = "0.0.0.0:3443";
 /** 契约里的路由路径（注册处与处理器共用一处，别各写一遍）。 */
 export declare const SETUP_PATH = "/mobile/setup";
 /**
+ * 本机配置页的路径（★ "给人用的那条路"：用户不该去敲 curl ✓）。
+ *
+ * ★ 它**落在 `SETUP_PATH` 这个前缀路由之内** ⇒ `cordis.ts` 不必再注册一条 ✓：
+ *   `dsh-host-webserver` 的 prefix 语义是「`p` 与 `p/<anything>` 都命中 + 最长前缀胜出」
+ *   （见 `WebRouteKind` 的声明 ✓），而 `/mobile/setup` 比本插件那条 `/mobile` 更长 ✓。
+ *   所以处理器里按 pathname 分派即可 ✓ —— 这样 `GET /mobile/setup` 的 JSON 契约
+ *   **一个字节都不用动** ✗（那是既有契约，有用例钉着 ✓）。
+ */
+export declare const SETUP_PAGE_PATH = "/mobile/setup/page";
+/**
  * listener 三件套。
  *
  * `plain` / `tls` 在**读回**时可能是 `undefined`（老配置里只写了 `enabled` ✓），
@@ -387,6 +397,43 @@ export declare function resolveProfilePatchPath(options: {
     profile?: string | undefined;
     moduleUrl: string;
 }): string;
+/**
+ * ★★ 手机接入配置页（**单文件 HTML**：内联 CSS/JS，一个外部资源都不引 ✗）。
+ *
+ * ## 为什么要有它
+ *
+ * `GET/POST /mobile/setup` 已经能用，但那是**给程序用的** ✓ —— 用户不该去敲 curl ✗。
+ * 这一页就是"给人用的那条路" ✓：启动日志给一行可点链接 ✓ ⇒ 打开就是表单 ✓
+ * （已经预填好这台机器的建议值 ✓）⇒ 改完点保存 ⇒ 页面说"已即时生效" ✓。
+ *
+ * ## 为什么不塞进 DSH 的设置面板 ✗
+ *
+ * 本项目有条纪律：**给手机加的东西不许碰电脑端 UI** ✓（历史事故 ✓）。
+ * 插件自带一个本机页面能**完全绕开**它 ✓ —— 只要一条我们自己的路由 ✓。
+ *
+ * ## 为什么不学配对页那样"源 HTML + 生成脚本 + 校验戳" ✗
+ *
+ * 配对页是给**手机**的大页面，值那条链路 ✓；这一页只有一屏表单 ✓，
+ * 再加一条"改了 HTML 记得重跑生成脚本"的链路，只会多一处会被忘记的地方 ✗。
+ *
+ * ## ★★ 页面必须守住的三条（写错了就是**静默事故** ✗）
+ *
+ * 1. **整块替换**：`POST /mobile/setup` 写的恰好是请求体里那几个键 ✓ ⇒
+ *    页面必须把**完整配置**整份回写 ✓ —— 含 `relay*`（用**隐藏字段**带 ✓：它们是密钥，
+ *    不该摆在界面上 ✓）与既有端点 ✓。漏一个键 ＝ 把用户的中继/端点**静默抹掉** ✗
+ *    （本项目在别处栽过三次同类事故 ✓）。
+ * 2. **只有 `current === null` 时才用 `suggested` 预填** ✓（`suggested` 是**纯推导**、
+ *    不含 `relay*` ✗ ⇒ 拿它去覆盖已有配置 ＝ 丢键 ✗）。
+ * 3. `current.listener.plain` / `tls` 可能是 `null`（= 配置里**没写**、用插件默认 ✓）⇒
+ *    表单留空 ✓、提交时**不发**这个键 ✓（**别**硬塞一个字符串 `'null'` ✗）。
+ *
+ * ## 自包含 ⇒ 断言可以下得很硬
+ *
+ * 页面里**一个 `http://` / `https://` 字面量都没有** ✓（连提示语里都不写，具体地址由
+ * 运行时从 `GET /mobile/setup` 的数据里填 ✓）⇒ 用例可以直接断言
+ * "整页不含任何绝对 URL" ✓，而不是去逐个属性判断 ✓。
+ */
+export declare function renderSetupPage(): string;
 /** 路由处理器的依赖。 */
 export interface SetupHandlerOptions {
     /** profile 的 `cordis.patch.yml`（由 `resolveProfilePatchPath` 求出 ✓）。 */

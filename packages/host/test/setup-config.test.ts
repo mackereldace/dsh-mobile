@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 import { load } from 'js-yaml'
 
 import { isLoopbackRequest } from '../src/index.ts'
@@ -52,6 +53,9 @@ import {
   toWireConfig,
   writeConfigOnlyPatch,
 } from '../src/setup-config.ts'
+// ★ 本页那一轮新增的三个入口（**另起一行** import：既有那行一个字符都不动 ✗）
+import { renderSetupPage, SETUP_PAGE_PATH, SETUP_PATH, withEndpointAuthorities } from '../src/setup-config.ts'
+import { readWebServerPort, setupStartupHint } from '../src/cordis.ts'
 
 const repoRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
 const installer = join(repoRoot, 'scripts', 'install-host-plugin.mjs')
@@ -744,5 +748,619 @@ describe('setup-config：cordis.ts 里的注册与两道防护', () => {
     assert.deepEqual(JSON.parse(ok.body), { ok: true, restartRequired: true, wrote: ['phoneBaseUrl', 'listener'] })
     assert.equal(env.patchFile, join(env.home, 'profiles', 'web', 'cordis.patch.yml'))
     assert.equal(readCurrentConfig(env.patchFile)?.phoneBaseUrl, 'https://10.0.0.5:3443')
+  })
+})
+
+// ────────── F. 本机配置页：GET /mobile/setup/page（自包含 HTML 表单） ──────────
+
+describe('setup-config：本机配置页 GET /mobile/setup/page', () => {
+  /**
+   * 这一组守的是"**给人用的**那条路" ✓：用户不该去敲 curl ✗。
+   *
+   * ★ 为什么页面逻辑要**真跑一遍**（而不是只断言 HTML 里有几个 id）✗：
+   *   这一页有两处"写错了就静默出事"的地方 ——
+   *     ① 提交时必须**整份回写**（漏 `relay*` ＝ 把用户的中继配置抹掉 ✗）；
+   *     ② `current` 里 `listener.plain/tls` 可能是 `null`（没写 ✓）⇒
+   *        不许变成字符串 `'null'` ✗。
+   *   只查 HTML 字符串的用例**看不见**这两条 ✓ —— 所以下面用假 DOM + 假 fetch
+   *   把内联脚本抽出来跑一遍，直接看它**发出去的请求体** ✓。
+   */
+
+  /** 记下响应头（本页要断言 content-type ✓）；其余与上面的 callSetup 同一思路。 */
+  async function callRaw(
+    options: SetupHandlerOptions,
+    method: string,
+    path: string,
+    call: { remoteAddress?: string; host?: string } = {},
+  ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+    const req = {
+      method,
+      url: path,
+      headers: { host: call.host ?? '127.0.0.1:3080' },
+      socket: { remoteAddress: call.remoteAddress ?? '127.0.0.1' },
+      async *[Symbol.asyncIterator]() {
+        /* GET/HEAD 没有请求体 */
+      },
+    } as unknown as IncomingMessage
+    let status = 0
+    let headers: Record<string, string> = {}
+    let body = ''
+    let headersSent = false
+    let finish: (() => void) | undefined
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const res = {
+      get headersSent() {
+        return headersSent
+      },
+      writeHead(code: number, extra?: Record<string, string>) {
+        status = code
+        headers = extra ?? {}
+        headersSent = true
+      },
+      end(data?: Buffer | string) {
+        body = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+        headersSent = true
+        finish?.()
+      },
+    } as unknown as ServerResponse
+    handleSetupRequest(req, res, options)
+    await Promise.race([finished, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())])
+    assert.notEqual(status, 0, `${method} ${path} 未产生响应（处理器卡住了）`)
+    return { status, headers, body }
+  }
+
+  interface FakeElement {
+    id: string
+    value: string
+    checked: boolean
+    textContent: string
+    placeholder: string
+    disabled: boolean
+    listeners: string[]
+    addEventListener(type: string, handler: (event?: unknown) => void): void
+  }
+
+  interface PageCall {
+    url: string
+    body: string | undefined
+  }
+
+  /**
+   * 把页面里的内联脚本抽出来，在一个**极小**的假 DOM 上真跑一遍。
+   *
+   * ★ 假 DOM 小到只有页面真正用到的那几个 API（`getElementById` / `value` / `checked` /
+   *   `textContent` / `addEventListener` / `window.addEventListener` ✓）——
+   *   页面一旦用了别的 DOM API，这里会**立刻**报错（而不是悄悄测不到 ✗）。
+   */
+  function runSetupPage(options: {
+    status: unknown
+    statusOk?: boolean
+    statusCode?: number
+    reply?: { ok: boolean; status: number; text: string }
+  }): {
+    el: (id: string) => FakeElement
+    fire: (id: string, type: string, event?: unknown) => void
+    calls: PageCall[]
+    settle: () => Promise<void>
+  } {
+    const html = renderSetupPage()
+    const script = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? ''
+    assert.ok(script.includes('withEndpointAuthorities'), '页面内联脚本没抽出来（这条用例自己也失效了）')
+
+    const elements = new Map<string, FakeElement>()
+    const handlers = new Map<string, (event?: unknown) => void>()
+    /**
+     * ★ 假 DOM **只提供 HTML 里真的存在的 id** ✓（与浏览器一致）：
+     *   页面少写一个字段（或 id 拼错）⇒ `getElementById` 返回空 ⇒ 页面当场报错 ✓，
+     *   而不是像"来者不拒"的假 DOM 那样**悄悄**给一个空元素、
+     *   让"少了一个隐藏字段"这种改动溜过去 ✗。
+     */
+    const idsInHtml = new Set([...html.matchAll(/id="([^"]+)"/g)].map((matched) => matched[1] ?? ''))
+    const elementOf = (id: string): FakeElement => {
+      const existing = elements.get(id)
+      if (existing !== undefined) return existing
+      if (!idsInHtml.has(id)) {
+        throw new Error(`页面里没有 id="${id}" 的元素（假 DOM 只提供 HTML 里真有的元素）`)
+      }
+      const created: FakeElement = {
+        id,
+        value: '',
+        checked: false,
+        textContent: '',
+        placeholder: '',
+        disabled: false,
+        listeners: [],
+        addEventListener(type, handler) {
+          handlers.set(`${id}:${type}`, handler)
+          this.listeners.push(type)
+        },
+      }
+      elements.set(id, created)
+      return created
+    }
+
+    const calls: PageCall[] = []
+    const reply = options.reply ?? {
+      ok: true,
+      status: 200,
+      text: JSON.stringify({ ok: true, restartRequired: true, wrote: ['listener'] }),
+    }
+    const fetchStub = (url: string, init?: { body?: string }): Promise<unknown> => {
+      const post = init?.body !== undefined
+      calls.push({ url, body: init?.body })
+      return Promise.resolve({
+        ok: post ? reply.ok : options.statusOk ?? true,
+        status: post ? reply.status : options.statusCode ?? 200,
+        json: () => Promise.resolve(options.status),
+        text: () => Promise.resolve(post ? reply.text : JSON.stringify(options.status)),
+      })
+    }
+
+    vm.runInNewContext(script, {
+      URL,
+      document: { getElementById: elementOf },
+      window: { addEventListener: () => {} },
+      fetch: fetchStub,
+    })
+
+    return {
+      el: elementOf,
+      fire: (id, type, event) => {
+        const handler = handlers.get(`${id}:${type}`)
+        assert.notEqual(handler, undefined, `页面没有给 ${id} 注册 ${type} 监听`)
+        handler?.(event ?? { preventDefault: () => {} })
+      },
+      calls,
+      settle: () => new Promise<void>((resolve) => setTimeout(resolve, 10)),
+    }
+  }
+
+  /** 一份典型的 GET 响应（已有配置、且带 relay* —— 正是最容易被页面抹掉的那种机器）。 */
+  function configuredStatus(): Record<string, unknown> {
+    return {
+      configured: true,
+      profilePath: '/tmp/x/profiles/web/cordis.patch.yml',
+      current: {
+        trustedHosts: ['10.0.0.5:3081', '10.0.0.5:3443'],
+        publicBaseUrl: 'http://10.0.0.5:3081',
+        phoneBaseUrl: 'https://10.0.0.5:3443',
+        extraEndpoints: ['https://10.0.0.5:3443'],
+        listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+        relayUrl: 'wss://relay.example.com/attach',
+        relayToken: 'tok-123',
+        relayHttpUrl: 'https://relay.example.com',
+        relayPoolSize: '2',
+      },
+      suggested: {
+        trustedHosts: ['10.9.9.9:3081', '10.9.9.9:3443'],
+        publicBaseUrl: 'http://10.9.9.9:3081',
+        phoneBaseUrl: 'https://10.9.9.9:3443',
+        extraEndpoints: ['https://10.9.9.9:3443'],
+        listener: { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' },
+      },
+      lanIp: '10.0.0.5',
+      machineName: 'Mac-mini.local',
+    }
+  }
+
+  test('★★ /mobile/setup/page 返回 HTML（content-type 含 text/html）且带表单元素', async () => {
+    // 打红：删掉 handleSetupRequest 里的 page 分支 ⇒ 它落到 GET 那条路 ⇒ content-type 变成
+    //       application/json、body 里也没有 <form（用户打开链接看到一坨 JSON ✗）
+    const patchFile = patchPathIn(tempDir())
+    const response = await callRaw(handlerOptions(patchFile), 'GET', '/mobile/setup/page')
+    assert.equal(response.status, 200)
+    assert.match(response.headers['content-type'] ?? '', /text\/html/, '配置页必须是 HTML')
+    assert.match(response.body, /<form id="setup-form"/, '页面里必须有表单（用户就是在这里改配置）')
+    for (const id of ['listener-enabled', 'listener-plain', 'listener-tls', 'phone-base-url', 'extra-endpoints', 'trusted-hosts', 'save']) {
+      assert.match(response.body, new RegExp(`id="${id}"`), `页面缺少 ${id}`)
+    }
+    // `/mobile/setup/page/` 也归它（前缀路由的语义）
+    assert.equal((await callRaw(handlerOptions(patchFile), 'GET', '/mobile/setup/page/')).status, 200)
+    // 页面只读：写走 POST /mobile/setup
+    assert.equal((await callRaw(handlerOptions(patchFile), 'POST', '/mobile/setup/page')).status, 405)
+    assert.equal((await callRaw(handlerOptions(patchFile), 'GET', '/mobile/setup/other')).status, 404)
+  })
+
+  test('★★ GET /mobile/setup 仍是 JSON、字段一个不多一个不少（防回归：那是既有契约）', async () => {
+    // 打红：让 page 分支把 `/mobile/setup` 也当成页面（或改 respondJson 的 content-type）
+    //       ⇒ 老客户端/脚本立刻解析不了（这条是"加页面别把旧接口带坏"的守门人 ✗）
+    const patchFile = patchPathIn(tempDir())
+    const response = await callRaw(handlerOptions(patchFile, { detectLanIp: () => '10.0.0.5' }), 'GET', '/mobile/setup')
+    assert.equal(response.status, 200)
+    assert.match(response.headers['content-type'] ?? '', /application\/json/)
+    const payload = JSON.parse(response.body) as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(payload).sort(),
+      ['configured', 'current', 'lanIp', 'machineName', 'profilePath', 'suggested'].sort(),
+      'GET /mobile/setup 的响应字段就是契约本身（一个字母都不许改）',
+    )
+    assert.equal(payload['configured'], false)
+    assert.equal(payload['current'], null)
+    assert.equal(payload['lanIp'], '10.0.0.5')
+    assert.deepEqual(
+      Object.keys(payload['suggested'] as Record<string, unknown>).sort(),
+      ['extraEndpoints', 'listener', 'phoneBaseUrl', 'publicBaseUrl', 'trustedHosts'].sort(),
+    )
+  })
+
+  test('★ 页面**自包含**：整页不含任何绝对 URL，也没有 src / link / @import（本机小页不该依赖网络）', () => {
+    // 打红：加一行 <link href="…https://cdn…"> 或 <script src="https://…"> ⇒ 立刻红。
+    //       为什么能下这么硬的断言：连提示语里的地址都是运行时从数据里填的，
+    //       所以"整页没有 https:// 字面量"本身就是"自包含"的充分证据 ✓
+    const html = renderSetupPage()
+    assert.equal((html.match(/https?:\/\//g) ?? []).length, 0, '页面里出现了绝对 URL（离线/内网就打不开了）')
+    assert.equal((html.match(/\ssrc\s*=/g) ?? []).length, 0, '页面里有 src=（外链脚本/图片）')
+    assert.equal((html.match(/<link\b/g) ?? []).length, 0, '页面里有 <link>（外链样式/图标）')
+    assert.equal((html.match(/@import|url\(/g) ?? []).length, 0, 'CSS 里引了外部资源')
+    assert.equal((html.match(/<script\b/g) ?? []).length, 1, '只允许一段**内联**脚本')
+  })
+
+  test('★ 保留键（relay* / publicBaseUrl）在页面上有落点：隐藏字段带着它们', () => {
+    // 打红：删掉任意一个 hidden input ⇒ 提交时那个键就没了 ⇒ 中继配置被**静默抹掉**
+    //       （本项目发生过三次的那类事故：远程访问突然不通，而配置看着像对的 ✗）
+    const html = renderSetupPage()
+    for (const id of ['public-base-url', 'relay-url', 'relay-token', 'relay-http-url', 'relay-pool-size']) {
+      assert.match(html, new RegExp(`<input type="hidden" id="${id}"`), `缺少隐藏字段 ${id}`)
+    }
+  })
+
+  test('★★ 有 current ⇒ 用它预填（含 relay*），提交时**整份**回写', async () => {
+    // 打红：① 把 baseline() 改成"永远用 suggested" ⇒ 预填变成 10.9.9.9、且 relay* 全空 ⇒ 红；
+    //       ② 把 RELAY_KEYS 去掉 ⇒ 提交体里没有 relayUrl/relayToken ⇒ 红（用户的远程访问被抹掉）
+    const page = runSetupPage({ status: configuredStatus() })
+    await page.settle()
+
+    assert.equal(page.el('phone-base-url').value, 'https://10.0.0.5:3443', '预填必须用 current（suggested 是纯推导、不含 relay*）')
+    assert.equal(page.el('listener-enabled').checked, true)
+    assert.equal(page.el('listener-tls').value, '0.0.0.0:3443')
+    assert.equal(page.el('relay-url').value, 'wss://relay.example.com/attach', 'relay 键必须被隐藏字段带着')
+    assert.equal(page.el('relay-token').value, 'tok-123')
+    assert.equal(page.el('relay-pool-size').value, '2')
+    assert.equal(page.el('lan-ip').textContent, '10.0.0.5')
+    assert.equal(page.el('machine-name').textContent, 'Mac-mini.local')
+
+    page.fire('setup-form', 'submit')
+    await page.settle()
+
+    const post = page.calls.find((call) => call.body !== undefined)
+    assert.notEqual(post, undefined, '页面没有发出 POST')
+    assert.equal(page.calls[0]?.url, '/mobile/setup', '先 GET 读、再 POST 写（同一个路径，方法不同）')
+    const body = JSON.parse(post?.body ?? '{}') as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      ['extraEndpoints', 'listener', 'phoneBaseUrl', 'publicBaseUrl', 'relayHttpUrl', 'relayPoolSize', 'relayToken', 'relayUrl', 'trustedHosts'].sort(),
+      '提交体必须是**完整**配置（POST 是整块替换：少一个键就等于把它删了 ✗）',
+    )
+    assert.equal(body['relayUrl'], 'wss://relay.example.com/attach')
+    assert.equal(body['relayToken'], 'tok-123')
+    assert.equal(body['relayHttpUrl'], 'https://relay.example.com')
+    assert.equal(body['relayPoolSize'], '2')
+    assert.deepEqual(body['extraEndpoints'], ['https://10.0.0.5:3443'])
+    assert.deepEqual(body['trustedHosts'], ['10.0.0.5:3081', '10.0.0.5:3443'])
+    assert.deepEqual(body['listener'], { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
+    assert.equal(page.el('saved').textContent, '已保存：写了 1 项 ✓ 已即时生效（不用重启 DSH），手机现在可以连了')
+  })
+
+  test('★★ 只有 current 为 null 时才用 suggested 预填（已有配置的机器不许被 suggested 覆盖）', async () => {
+    // 打红：把 baseline() 改成"永远用 suggested" ⇒ 已有配置的机器一打开页面就丢了 relay*/既有端点 ⇒ 红
+    const status = { ...configuredStatus(), configured: false, current: null }
+    const page = runSetupPage({ status })
+    await page.settle()
+
+    assert.equal(page.el('phone-base-url').value, 'https://10.9.9.9:3443', '没配过的机器要用 suggested（纯推导那份）')
+    assert.equal(page.el('relay-url').value, '', 'suggested 里没有 relay* ⇒ 隐藏字段就是空的（不许凭空造）')
+    assert.equal(page.el('extra-endpoints').value, 'https://10.9.9.9:3443')
+    assert.equal(page.el('trusted-hosts').value, '10.9.9.9:3081\n10.9.9.9:3443')
+
+    page.fire('setup-form', 'submit')
+    await page.settle()
+    const body = JSON.parse(page.calls.find((call) => call.body !== undefined)?.body ?? '{}') as Record<string, unknown>
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      ['extraEndpoints', 'listener', 'phoneBaseUrl', 'publicBaseUrl', 'trustedHosts'].sort(),
+      '没配过的机器：写的就该是 suggested 那五个键（没有 relay* 可写）',
+    )
+  })
+
+  test('★ current.listener.plain/tls 是 null（= 没写、用插件默认）⇒ 表单留空、提交时**不发**这个键', async () => {
+    // 打红：把 fill() 换成 String(value) ⇒ 字段变成字符串 'null'，提交体里多出 "plain":"null" ✗
+    //       （写进配置就是 `plain: 'null'` ⇒ 监听起不来，而页面看着一切正常 ✗）
+    const status = configuredStatus()
+    status['current'] = {
+      trustedHosts: ['10.0.0.5:3081'],
+      publicBaseUrl: 'http://10.0.0.5:3081',
+      phoneBaseUrl: null,
+      extraEndpoints: [],
+      listener: { enabled: true, plain: null, tls: null },
+    }
+    const page = runSetupPage({ status })
+    await page.settle()
+
+    assert.equal(page.el('listener-plain').value, '', 'null 要显示成**空**（"没写"），不是字符串 null')
+    assert.equal(page.el('listener-tls').value, '')
+    assert.equal(page.el('phone-base-url').value, '')
+
+    page.fire('setup-form', 'submit')
+    await page.settle()
+    const body = JSON.parse(page.calls.find((call) => call.body !== undefined)?.body ?? '{}') as Record<string, unknown>
+    assert.deepEqual(body['listener'], { enabled: true }, '留空 ⇒ 不写 plain/tls（退回插件默认），不许写成字符串 null')
+    assert.equal('phoneBaseUrl' in body, false, '空的 phoneBaseUrl 不许写成空串')
+  })
+
+  test('★ 保存成功 ⇒ 显示"已保存：写了 N 项 ✓ 已即时生效（不用重启 DSH），手机现在可以连了"', async () => {
+    // 打红：改掉那句文案、或把 wrote.length 写死 ⇒ 立刻红（这句是用户唯一的"成了"信号）
+    const page = runSetupPage({
+      status: configuredStatus(),
+      reply: {
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ ok: true, restartRequired: true, wrote: ['trustedHosts', 'phoneBaseUrl', 'listener'] }),
+      },
+    })
+    await page.settle()
+    page.fire('setup-form', 'submit')
+    await page.settle()
+    assert.equal(
+      page.el('saved').textContent,
+      '已保存：写了 3 项 ✓ 已即时生效（不用重启 DSH），手机现在可以连了',
+      '成功提示必须说清"已即时生效、不用重启"（否则用户会以为要重启 DSH）',
+    )
+    assert.equal(page.el('error').textContent, '')
+  })
+
+  test('★ 保存失败（400/403）⇒ **原样**显示服务端那句 message（别自己编）', async () => {
+    // 打红：把 show('error', payload.message) 换成自造文案 ⇒ 红
+    //       （"认不出的字段：trustedHost" 是用户唯一能自查的线索 ✗）
+    const message = '认不出的字段：trustedHost（只接受 trustedHosts、publicBaseUrl、phoneBaseUrl、extraEndpoints、relayUrl、relayToken、relayHttpUrl、relayPoolSize、listener）'
+    for (const status of [400, 403]) {
+      const page = runSetupPage({
+        status: configuredStatus(),
+        reply: { ok: false, status, text: JSON.stringify({ code: 'mobile/setup-invalid-body', message }) },
+      })
+      await page.settle()
+      page.fire('setup-form', 'submit')
+      await page.settle()
+      assert.equal(page.el('error').textContent, message, `HTTP ${status} 的 message 必须原样显示`)
+      assert.equal(page.el('saved').textContent, '', '失败时不许显示成功文案')
+    }
+  })
+
+  test('★ 读状态失败（页面自己打不开接口）⇒ 也把原因说出来，不许停在"正在读取…"', async () => {
+    // 打红：去掉 load() 的 catch ⇒ 页面永远停在"正在读取这台机器的配置…"（用户不知道发生了什么）
+    const failing = runSetupPage({ status: undefined, statusOk: false, statusCode: 500 })
+    await failing.settle()
+    assert.match(failing.el('error').textContent, /打不开配置接口/, '状态读不到时必须给一句人话')
+    assert.match(failing.el('subtitle').textContent, /读取配置失败/)
+  })
+
+  test('★ 页面里的「端点 ⇒ 受信列表」与宿主 withEndpointAuthorities **结论相同**（防两份实现漂移）', () => {
+    // 打红：把页面里那份改成"不去重"/"只认 https"/"插到最前面" ⇒ 本用例立刻红
+    //       （漂移的后果：页面写出去的端点没进 trustedHosts ⇒ 手机连上被 403 挡回去 ✗）
+    const html = renderSetupPage()
+    const region = /\/\* #region endpoint-authorities \*\/([\s\S]*?)\/\* #endregion endpoint-authorities \*\//.exec(html)?.[1] ?? ''
+    assert.ok(region.includes('withEndpointAuthorities'), '页面里没有 endpoint-authorities 区块（重构了就要同步这条用例）')
+    const page = vm.runInNewContext(
+      `${region}\n;({ withEndpointAuthorities: withEndpointAuthorities })`,
+      { URL },
+    ) as { withEndpointAuthorities: (hosts: string[], endpoints: string[]) => string[] }
+
+    const cases: Array<[string[], string[]]> = [
+      [[], ['https://10.0.0.5:3443']],
+      [['10.0.0.5:3081'], ['https://10.0.0.5:3443']],
+      [['10.0.0.5:3081', '10.0.0.5:3443'], ['https://10.0.0.5:3443']],
+      [['a:1'], ['http://a:1']],
+      [['a:1'], ['wss://relay.example.com/attach', 'ws://relay.example.com/attach']],
+      [['a:1'], ['不是 URL', 'https://[fd00::1]:3443', '']],
+      [['a:1', 'b:2'], ['https://c:3', 'https://c:3', 'https://d:4']],
+    ]
+    for (const [hosts, endpoints] of cases) {
+      assert.deepEqual(
+        page.withEndpointAuthorities(hosts, endpoints),
+        withEndpointAuthorities(hosts, endpoints).hosts,
+        `${JSON.stringify(hosts)} + ${JSON.stringify(endpoints)} 两边推导不一致`,
+      )
+    }
+  })
+
+  test('★ 非本机 ⇒ 页面也 403（闸门在**分派之前**：新路径不能开后门）', async () => {
+    // 打红：把 page 分支挪到 isLocalRequest 检查之前 ⇒ 同局域网的人也能拿到这张能改配置的表 ✗
+    const patchFile = patchPathIn(tempDir())
+    const remote = await callRaw(handlerOptions(patchFile), 'GET', '/mobile/setup/page', { remoteAddress: '10.0.0.7' })
+    assert.equal(remote.status, 403, '非本机的 GET /mobile/setup/page 必须被拒')
+    assert.match(remote.body, /只能在这台电脑上/)
+    assert.doesNotMatch(remote.body, /<form id="setup-form"/, '被拒的响应里不许带页面正文')
+  })
+
+  test('★★ 走**真插件**那条路：注册的 prefix 路由接得住 /mobile/setup/page，且栅栏与闸门都还在', async () => {
+    /**
+     * 打红：把 cordis.ts 里那条注册的 `kind: 'prefix'` 改成 `'exact'`
+     *   ⇒ `/mobile/setup/page` **根本进不了处理器**（真机上 404），
+     *     而只测 `handleSetupRequest` 的用例**全都还是绿的** ✗ ——
+     *     这正是"页面在本机跑得好好的、装到 DSH 里打不开"那类事故的形状 ✓。
+     */
+    const home = tempDir('dshm-setup-page-route-')
+    mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
+    interface Route {
+      kind: string
+      path: string
+      handler: (req: IncomingMessage, res: ServerResponse) => void
+    }
+    const routes: Route[] = []
+    const ctx = {
+      webServer: {
+        register: (route: Route) => {
+          routes.push(route)
+          return () => {}
+        },
+        registerUpgrade: () => () => {},
+        tapIndex: () => () => {},
+        port: 3711,
+      },
+      effect: (fn: () => () => void) => {
+        fn()
+      },
+      logger: { info: () => {} },
+      get: () => undefined,
+      on: () => {},
+    } as unknown as Parameters<typeof apply>[0]
+    apply(ctx, { dshHome: home, injectShim: false, profile: 'web' })
+
+    /** 复刻 `dsh-host-webserver` 的分发：先 exact、再**最长前缀胜出**。 */
+    const routeFor = (pathname: string): Route | undefined => {
+      const exact = routes.find((route) => route.kind === 'exact' && route.path === pathname)
+      if (exact !== undefined) return exact
+      return routes
+        .filter((route) => route.kind === 'prefix' && (pathname === route.path || pathname.startsWith(`${route.path}/`)))
+        .sort((a, b) => b.path.length - a.path.length)[0]
+    }
+    const route = routeFor('/mobile/setup/page')
+    assert.notEqual(route, undefined, '/mobile/setup/page 没有任何路由接得住（用户点开就是 404）')
+    assert.equal(route?.path, SETUP_PATH, '这条路径必须由我们那条注册接走（别的路由抢走就是 404 或 403）')
+    assert.equal(route?.kind, 'prefix', '必须是 prefix（改成 exact 就只有 /mobile/setup 一条能进）')
+
+    const callThroughRoute = async (
+      pathname: string,
+      headers: Record<string, string>,
+      remoteAddress: string,
+    ): Promise<{ status: number; headers: Record<string, string>; body: string }> => {
+      const req = {
+        method: 'GET',
+        url: pathname,
+        headers,
+        socket: { remoteAddress },
+        async *[Symbol.asyncIterator]() {},
+      } as unknown as IncomingMessage
+      let status = 0
+      let head: Record<string, string> = {}
+      let body = ''
+      let headersSent = false
+      let finish: (() => void) | undefined
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      const res = {
+        get headersSent() {
+          return headersSent
+        },
+        writeHead(code: number, extra?: Record<string, string>) {
+          status = code
+          head = extra ?? {}
+          headersSent = true
+        },
+        end(data?: Buffer | string) {
+          body = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+          headersSent = true
+          finish?.()
+        },
+      } as unknown as ServerResponse
+      route?.handler(req, res)
+      await Promise.race([finished, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())])
+      return { status, headers: head, body }
+    }
+
+    const local = { host: '127.0.0.1:3711' }
+    const page = await callThroughRoute(SETUP_PAGE_PATH, local, '127.0.0.1')
+    assert.equal(page.status, 200, page.body)
+    assert.match(page.headers['content-type'] ?? '', /text\/html/)
+    assert.match(page.body, /<form id="setup-form"/)
+
+    // 栅栏（Host / Origin）与闸门（回环）在这条新路径上**一个都不能少** ✗
+    assert.equal(
+      (await callThroughRoute(SETUP_PAGE_PATH, { ...local, origin: 'http://evil.example.com' }, '127.0.0.1')).status,
+      403,
+      '本机浏览器里的恶意页面能打开这张表 ⇒ 栅栏没生效',
+    )
+    assert.equal((await callThroughRoute(SETUP_PAGE_PATH, local, '10.0.0.7')).status, 403, '非回环请求必须被闸门拒掉')
+
+    // 同一条路由上，老的 JSON 接口一字不变
+    const status = await callThroughRoute(SETUP_PATH, local, '127.0.0.1')
+    assert.equal(status.status, 200)
+    assert.match(status.headers['content-type'] ?? '', /application\/json/)
+    assert.deepEqual(
+      Object.keys(JSON.parse(status.body) as Record<string, unknown>).sort(),
+      ['configured', 'current', 'lanIp', 'machineName', 'profilePath', 'suggested'].sort(),
+    )
+  })
+})
+
+// ────────────── G. 启动日志那一行（只在"没配置"时打） ──────────────
+
+describe('setup-config：启动时那行"还没配置"提示', () => {
+  /**
+   * 起一次**真的** `apply()`（假 ctx），把 `console.log` 收下来 ——
+   * 启动日志那一行就是它的产物 ✓。为什么用 console.log 而不是 logger ✗：
+   * 终端会把 URL 变成可点链接 ✓，这正是这一行的用途（用户点一下就能去配 ✓）。
+   */
+  function applyAndCapture(home: string, webServer: Record<string, unknown>): string[] {
+    const logs: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((value) => String(value)).join(' '))
+    }
+    try {
+      const ctx = {
+        webServer: {
+          register: () => () => {},
+          registerUpgrade: () => () => {},
+          tapIndex: () => () => {},
+          ...webServer,
+        },
+        effect: (fn: () => () => void) => {
+          fn()
+        },
+        logger: { info: () => {} },
+        get: () => undefined,
+        on: () => {},
+      } as unknown as Parameters<typeof apply>[0]
+      apply(ctx, { dshHome: home, injectShim: false, profile: 'web' })
+    } finally {
+      console.log = original
+    }
+    return logs
+  }
+
+  function freshHome(prefix: string): string {
+    const home = tempDir(prefix)
+    mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
+    return home
+  }
+
+  test('★★ 没配置 ⇒ 打一行带**完整 URL** 的提示；端口取自 ctx.webServer.port（不许硬编码 3080）', () => {
+    // 打红：把 readWebServerPort(ctx.webServer) 换成 `(ctx.webServer as any).port ?? 3080`
+    //       ⇒ URL 里变成 3080 ⇒ 本条立刻红（用户点开是打不开的链接 ✗）
+    const logs = applyAndCapture(freshHome('dshm-setup-log-'), { port: 3711 })
+    const line = logs.find((entry) => entry.includes('还没配置手机接入'))
+    assert.notEqual(line, undefined, `没打那行提示（实际日志：${logs.join(' ｜ ')}）`)
+    assert.ok(line?.includes(`http://127.0.0.1:3711${SETUP_PAGE_PATH}`), `URL 不对：${line ?? ''}`)
+    assert.ok(line?.includes('配一次（即时生效，不用重启 DSH）'), '提示语必须说清"即时生效、不用重启"')
+    assert.ok(!line?.includes('3080'), '端口是猜出来的（本机 3080 只是习惯，不是契约 ✗）')
+  })
+
+  test('★★ 已配置 ⇒ 不打那一行（别每次启动都刷屏）', () => {
+    // 打红：去掉 `readCurrentConfig(setupPatchFile) === null` 这个条件 ⇒ 配好的机器每次启动都挨一次提示
+    const home = freshHome('dshm-setup-log-')
+    writeConfigOnlyPatch(join(home, 'profiles', 'web', 'cordis.patch.yml'), { phoneBaseUrl: 'https://10.0.0.5:3443' })
+    const logs = applyAndCapture(home, { port: 3711 })
+    assert.equal(logs.find((entry) => entry.includes('还没配置手机接入')), undefined, '已经配过了还提示，就是刷屏')
+    // 但"已启用"那行照旧要打（别把既有启动日志弄丢了）
+    assert.ok(logs.length > 0)
+  })
+
+  test('★ 读不到端口 ⇒ 退化成**只打路径**并如实说明（不猜端口、也给不出打不开的链接）', () => {
+    // 打红：把 setupStartupHint 的 undefined 分支改成拼一个默认端口 ⇒ 立刻红
+    const logs = applyAndCapture(freshHome('dshm-setup-log-'), {})
+    const line = logs.find((entry) => entry.includes('还没配置手机接入'))
+    assert.notEqual(line, undefined, `读不到端口时也该提示（只是退化）`)
+    assert.ok(line?.includes(SETUP_PAGE_PATH), `退化时至少要给路径：${line ?? ''}`)
+    assert.ok(line?.includes('读不到'), '要**如实说明**为什么只给了路径')
+    assert.ok(!/127\.0\.0\.1:\d+/.test(line ?? ''), '读不到端口就不许编一个出来')
+    // 纯函数那一层也钉一下（两副面孔都得有）
+    assert.ok(setupStartupHint(4321).includes('http://127.0.0.1:4321/mobile/setup/page'))
+    assert.ok(setupStartupHint(undefined).includes('/mobile/setup/page'))
+    assert.equal(readWebServerPort({ port: 0 }), undefined, 'port=0 是"还没 listen 上"的写法，不能当端口用')
+    assert.equal(readWebServerPort({}), undefined)
+    assert.equal(readWebServerPort({ port: 3711 }), 3711)
   })
 })

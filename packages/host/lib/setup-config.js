@@ -46,6 +46,16 @@ export const DEFAULT_LISTENER_TLS = '0.0.0.0:3443';
 const PROFILE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 /** 契约里的路由路径（注册处与处理器共用一处，别各写一遍）。 */
 export const SETUP_PATH = '/mobile/setup';
+/**
+ * 本机配置页的路径（★ "给人用的那条路"：用户不该去敲 curl ✓）。
+ *
+ * ★ 它**落在 `SETUP_PATH` 这个前缀路由之内** ⇒ `cordis.ts` 不必再注册一条 ✓：
+ *   `dsh-host-webserver` 的 prefix 语义是「`p` 与 `p/<anything>` 都命中 + 最长前缀胜出」
+ *   （见 `WebRouteKind` 的声明 ✓），而 `/mobile/setup` 比本插件那条 `/mobile` 更长 ✓。
+ *   所以处理器里按 pathname 分派即可 ✓ —— 这样 `GET /mobile/setup` 的 JSON 契约
+ *   **一个字节都不用动** ✗（那是既有契约，有用例钉着 ✓）。
+ */
+export const SETUP_PAGE_PATH = '/mobile/setup/page';
 /** 静默出口：没有终端可打时用它（绝不往 stdout 里塞东西 ✗）。 */
 export const SILENT_IO = { log: () => { }, warn: () => { } };
 // ─────────────────────── 推导：listener 与手机入口 ───────────────────────
@@ -796,6 +806,345 @@ export function resolveProfilePatchPath(options) {
     const profile = explicit ?? profileNameFromModuleUrl(options.moduleUrl, options.dshHome) ?? 'web';
     return join(options.dshHome, 'profiles', profile, 'cordis.patch.yml');
 }
+// ─────────────────── 本机配置页（GET /mobile/setup/page） ───────────────────
+/**
+ * ★★ 手机接入配置页（**单文件 HTML**：内联 CSS/JS，一个外部资源都不引 ✗）。
+ *
+ * ## 为什么要有它
+ *
+ * `GET/POST /mobile/setup` 已经能用，但那是**给程序用的** ✓ —— 用户不该去敲 curl ✗。
+ * 这一页就是"给人用的那条路" ✓：启动日志给一行可点链接 ✓ ⇒ 打开就是表单 ✓
+ * （已经预填好这台机器的建议值 ✓）⇒ 改完点保存 ⇒ 页面说"已即时生效" ✓。
+ *
+ * ## 为什么不塞进 DSH 的设置面板 ✗
+ *
+ * 本项目有条纪律：**给手机加的东西不许碰电脑端 UI** ✓（历史事故 ✓）。
+ * 插件自带一个本机页面能**完全绕开**它 ✓ —— 只要一条我们自己的路由 ✓。
+ *
+ * ## 为什么不学配对页那样"源 HTML + 生成脚本 + 校验戳" ✗
+ *
+ * 配对页是给**手机**的大页面，值那条链路 ✓；这一页只有一屏表单 ✓，
+ * 再加一条"改了 HTML 记得重跑生成脚本"的链路，只会多一处会被忘记的地方 ✗。
+ *
+ * ## ★★ 页面必须守住的三条（写错了就是**静默事故** ✗）
+ *
+ * 1. **整块替换**：`POST /mobile/setup` 写的恰好是请求体里那几个键 ✓ ⇒
+ *    页面必须把**完整配置**整份回写 ✓ —— 含 `relay*`（用**隐藏字段**带 ✓：它们是密钥，
+ *    不该摆在界面上 ✓）与既有端点 ✓。漏一个键 ＝ 把用户的中继/端点**静默抹掉** ✗
+ *    （本项目在别处栽过三次同类事故 ✓）。
+ * 2. **只有 `current === null` 时才用 `suggested` 预填** ✓（`suggested` 是**纯推导**、
+ *    不含 `relay*` ✗ ⇒ 拿它去覆盖已有配置 ＝ 丢键 ✗）。
+ * 3. `current.listener.plain` / `tls` 可能是 `null`（= 配置里**没写**、用插件默认 ✓）⇒
+ *    表单留空 ✓、提交时**不发**这个键 ✓（**别**硬塞一个字符串 `'null'` ✗）。
+ *
+ * ## 自包含 ⇒ 断言可以下得很硬
+ *
+ * 页面里**一个 `http://` / `https://` 字面量都没有** ✓（连提示语里都不写，具体地址由
+ * 运行时从 `GET /mobile/setup` 的数据里填 ✓）⇒ 用例可以直接断言
+ * "整页不含任何绝对 URL" ✓，而不是去逐个属性判断 ✓。
+ */
+export function renderSetupPage() {
+    return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>DSH Mobile · 手机接入配置</title>
+    <style>
+      :root {
+        --bg: #ffffff; --fg: #16181d; --muted: #6b7280; --line: #e5e7eb;
+        --card: #f7f8fa; --accent: #4d6bfe; --accent-fg: #ffffff; --danger: #b91c1c; --ok: #047857;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115; --fg: #e8eaed; --muted: #9aa0aa; --line: #262a31;
+          --card: #171a20; --accent: #6b85ff; --accent-fg: #0b0d11; --danger: #f87171; --ok: #34d399;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      }
+      .wrap { max-width: 620px; margin: 0 auto; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 14px; margin: 0 0 6px; color: var(--muted); font-weight: 600; }
+      p { margin: 8px 0; }
+      .note, .muted { color: var(--muted); font-size: 13px; }
+      .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 12px 0; }
+      label.field { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
+      label.check { display: flex; gap: 8px; align-items: center; font-size: 14px; margin: 4px 0 10px; }
+      input[type=text], textarea {
+        width: 100%; margin-top: 4px; padding: 9px 10px; border-radius: 10px;
+        border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      textarea { min-height: 76px; }
+      button {
+        font: inherit; padding: 11px 16px; min-height: 44px; cursor: pointer;
+        border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+      }
+      button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 600; }
+      button:disabled { opacity: .5; cursor: default; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+      .err { color: var(--danger); font-size: 14px; white-space: pre-wrap; }
+      .ok { color: var(--ok); font-size: 14px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>手机接入配置</h1>
+      <p class="muted" id="subtitle">正在读取这台机器的配置…</p>
+
+      <div class="card">
+        <h2>这台机器</h2>
+        <p class="note">局域网地址：<span class="mono" id="lan-ip">…</span></p>
+        <p class="note">机器名：<span class="mono" id="machine-name">…</span></p>
+        <p class="note">配置写在：<span class="mono" id="profile-path">…</span></p>
+        <p class="note" id="state-note"></p>
+      </div>
+
+      <form id="setup-form">
+        <div class="card">
+          <h2>手机入口</h2>
+          <label class="check"><input type="checkbox" id="listener-enabled" /> 打开插件里的局域网监听（手机连的就是它）</label>
+          <label class="field">明文监听地址<input type="text" id="listener-plain" placeholder="0.0.0.0:3081" autocomplete="off" spellcheck="false" /></label>
+          <label class="field">TLS 监听地址<input type="text" id="listener-tls" placeholder="0.0.0.0:3443" autocomplete="off" spellcheck="false" /></label>
+          <label class="field">手机访问地址 phoneBaseUrl<input type="text" id="phone-base-url" autocomplete="off" spellcheck="false" /></label>
+          <p class="note">手机只能走 https（普通 http 页面拿不到加密能力），端口填 TLS 那个。留空 ＝ 这项不写、用默认。</p>
+        </div>
+
+        <div class="card">
+          <h2>额外端点</h2>
+          <label class="field">一行一条（中继 / 覆盖网地址写这里）<textarea id="extra-endpoints" spellcheck="false"></textarea></label>
+          <label class="field">受信地址 trustedHosts（由端点推导，只读）<textarea id="trusted-hosts" readonly spellcheck="false"></textarea></label>
+          <p class="note">每条端点都会自动进受信列表 —— 少了它，手机连上也会被 403 挡回去。</p>
+        </div>
+
+        <!--
+          ★★ 保留键：界面上不编辑，但**必须原样带回** ✗。
+          POST 是"整块替换 config" ⇒ 漏掉它们就等于把用户的中继配置删掉（本项目三次同类事故）。
+          relay* 是密钥 ⇒ 用隐藏字段，不摆在界面上。
+        -->
+        <input type="hidden" id="public-base-url" />
+        <input type="hidden" id="relay-url" />
+        <input type="hidden" id="relay-token" />
+        <input type="hidden" id="relay-http-url" />
+        <input type="hidden" id="relay-pool-size" />
+
+        <button class="primary" id="save" type="submit">保存并生效</button>
+      </form>
+
+      <p class="ok" id="saved"></p>
+      <p class="err" id="error"></p>
+      <p class="note">保存不用重启 DSH：配置是热加载的，存完监听就起来。</p>
+    </div>
+
+    <script>
+      (function () {
+        var $ = function (id) { return document.getElementById(id) }
+        var state = { current: null, suggested: null }
+
+        /**
+         * 端点 ⇒ 受信 authority。
+         * ★ 与宿主 setup-config.ts 的 withEndpointAuthorities **同一规则** ✓ ——
+         *   这条规则必须是"凡是被广告出去的端点，其 authority 同时在受信列表里" ✓，
+         *   否则手机会按候选取到它、再被 403 挡回去（表现为"一直重连中"✗）。
+         *   页面侧为什么也有一份 ✗：POST 是整块替换、服务端**不做**推导 ✓
+         *   ⇒ 提交前必须在页面里算好 ✓。两份不许漂移 ✗：
+         *   setup-config.test.ts 有一条用例把这段抽出来跟宿主实现逐组比对 ✓。
+         */
+        /* #region endpoint-authorities */
+        function authorityOfEndpoint(endpoint) {
+          var url
+          try { url = new URL(endpoint) } catch (error) { return '' }
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
+          return url.host
+        }
+        function withEndpointAuthorities(trustedHosts, extraEndpoints) {
+          var hosts = trustedHosts.slice()
+          var seen = {}
+          for (var i = 0; i < hosts.length; i++) seen[hosts[i]] = true
+          for (var j = 0; j < extraEndpoints.length; j++) {
+            var authority = authorityOfEndpoint(extraEndpoints[j])
+            if (authority === '' || seen[authority] === true) continue
+            seen[authority] = true
+            hosts.push(authority)
+          }
+          return hosts
+        }
+        /* #endregion endpoint-authorities */
+
+        /** 多行文本 ⇒ 非空行数组（去首尾空白、去空行）。 */
+        function linesOf(text) {
+          var out = []
+          var lines = String(text === undefined || text === null ? '' : text).split('\\n')
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].replace(/^\\s+|\\s+$/g, '')
+            if (line.length > 0) out.push(line)
+          }
+          return out
+        }
+
+        /** relay* 的界面 id ↔ 配置键（保留键清单只此一处）。 */
+        var RELAY_KEYS = [
+          ['relay-url', 'relayUrl'],
+          ['relay-token', 'relayToken'],
+          ['relay-http-url', 'relayHttpUrl'],
+          ['relay-pool-size', 'relayPoolSize']
+        ]
+
+        /** 预填的**唯一**来源：有 current 就用 current（它带着 relay* 等全部键），没有才用 suggested。 */
+        function baseline() {
+          if (state.current !== null) return state.current
+          return state.suggested === null ? {} : state.suggested
+        }
+
+        /** 受信列表 = 基线里的受信项 + 当前端点推导出来的（**只追加、绝不改顺序** ✓）。 */
+        function refreshTrustedHosts() {
+          var base = baseline()
+          var hosts = withEndpointAuthorities(base.trustedHosts || [], linesOf($('extra-endpoints').value))
+          $('trusted-hosts').value = hosts.join('\\n')
+        }
+
+        function fill(id, value) {
+          $(id).value = value === undefined || value === null ? '' : String(value)
+        }
+
+        function prefill() {
+          var source = baseline()
+          var listener = source.listener === undefined || source.listener === null ? {} : source.listener
+          $('listener-enabled').checked = listener.enabled === true
+          // ★ null（= 配置里没写、用插件默认）⇒ 留空 ✓，**不写**字符串 'null' ✗
+          fill('listener-plain', listener.plain)
+          fill('listener-tls', listener.tls)
+          fill('phone-base-url', source.phoneBaseUrl)
+          fill('public-base-url', source.publicBaseUrl)
+          fill('extra-endpoints', (source.extraEndpoints || []).join('\\n'))
+          for (var i = 0; i < RELAY_KEYS.length; i++) fill(RELAY_KEYS[i][0], source[RELAY_KEYS[i][1]])
+          refreshTrustedHosts()
+        }
+
+        /** 提交体：**完整**配置（含隐藏的保留键 ✓）。空 ⇒ 不发这个键 ✓（"没写"与"写空串"是两回事 ✗）。 */
+        function buildBody() {
+          var body = {}
+          var hosts = linesOf($('trusted-hosts').value)
+          if (hosts.length > 0) body.trustedHosts = hosts
+          var publicBaseUrl = $('public-base-url').value.replace(/^\\s+|\\s+$/g, '')
+          if (publicBaseUrl.length > 0) body.publicBaseUrl = publicBaseUrl
+          var phoneBaseUrl = $('phone-base-url').value.replace(/^\\s+|\\s+$/g, '')
+          if (phoneBaseUrl.length > 0) body.phoneBaseUrl = phoneBaseUrl
+          var endpoints = linesOf($('extra-endpoints').value)
+          if (endpoints.length > 0) body.extraEndpoints = endpoints
+          for (var i = 0; i < RELAY_KEYS.length; i++) {
+            var kept = $(RELAY_KEYS[i][0]).value.replace(/^\\s+|\\s+$/g, '')
+            if (kept.length > 0) body[RELAY_KEYS[i][1]] = kept
+          }
+          var listener = { enabled: $('listener-enabled').checked }
+          var plain = $('listener-plain').value.replace(/^\\s+|\\s+$/g, '')
+          if (plain.length > 0) listener.plain = plain
+          var tls = $('listener-tls').value.replace(/^\\s+|\\s+$/g, '')
+          if (tls.length > 0) listener.tls = tls
+          body.listener = listener
+          return body
+        }
+
+        function show(id, text) { $(id).textContent = text }
+
+        function onSubmit(event) {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+          show('error', '')
+          show('saved', '')
+          $('save').disabled = true
+          fetch('/mobile/setup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(buildBody())
+          })
+            .then(function (response) {
+              return response.text().then(function (text) {
+                var payload = null
+                try { payload = JSON.parse(text) } catch (error) { payload = null }
+                if (!response.ok) {
+                  // ★ 服务端那句 message **原样**显示 ✓（"认不出的字段"这类提示是唯一线索，别自己编 ✗）
+                  show('error', payload && payload.message ? payload.message : 'HTTP ' + response.status + '：' + text)
+                  return
+                }
+                var wrote = payload && payload.wrote ? payload.wrote : []
+                show('saved', '已保存：写了 ' + wrote.length + ' 项 ✓ 已即时生效（不用重启 DSH），手机现在可以连了')
+              })
+            })
+            .catch(function (error) {
+              show('error', '保存失败：' + (error && error.message ? error.message : String(error)))
+            })
+            .then(function () { $('save').disabled = false })
+        }
+
+        function load() {
+          fetch('/mobile/setup')
+            .then(function (response) {
+              if (!response.ok) throw new Error('HTTP ' + response.status)
+              return response.json()
+            })
+            .then(function (payload) {
+              state.current = payload.current === undefined ? null : payload.current
+              state.suggested = payload.suggested === undefined ? null : payload.suggested
+              prefill()
+              show('lan-ip', payload.lanIp ? payload.lanIp : '没探到局域网地址，请自己填')
+              show('machine-name', payload.machineName ? payload.machineName : '没读到机器名')
+              show('profile-path', payload.profilePath ? payload.profilePath : '')
+              $('subtitle').textContent = state.current === null
+                ? '这台机器还没配过，下面是替你推好的建议值。'
+                : '这台机器已经配过了，下面是可以改的地方。'
+              var notes = []
+              var suggested = state.suggested === null ? {} : state.suggested
+              if (state.current !== null) {
+                if (!state.current.phoneBaseUrl && suggested.phoneBaseUrl) {
+                  notes.push('这台机器还没写 phoneBaseUrl（手机访问地址）；建议 ' + suggested.phoneBaseUrl + '。')
+                }
+                if (state.current.listener === undefined || state.current.listener.enabled !== true) {
+                  notes.push('插件里的局域网监听当前是关的 —— 手机连不上，勾上上面的开关再保存。')
+                }
+              }
+              show('state-note', notes.join(' '))
+              var suggestedPhone = suggested.phoneBaseUrl ? suggested.phoneBaseUrl : ''
+              $('phone-base-url').placeholder = suggestedPhone
+            })
+            .catch(function (error) {
+              $('subtitle').textContent = '读取配置失败。'
+              show('error', '打不开配置接口：' + (error && error.message ? error.message : String(error)))
+            })
+        }
+
+        window.addEventListener('error', function (event) {
+          show('error', '页面脚本出错：' + (event && event.message ? event.message : '未知错误'))
+        })
+        $('extra-endpoints').addEventListener('input', refreshTrustedHosts)
+        $('setup-form').addEventListener('submit', onSubmit)
+        load()
+      })()
+    </script>
+  </body>
+</html>
+`;
+}
+/** 本机配置页的响应（自包含 HTML ✓）。 */
+function respondHtml(res, html, headOnly = false) {
+    if (res.headersSent === true)
+        return;
+    const payload = Buffer.from(html, 'utf8');
+    res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': String(payload.length),
+        // 本机小页、内容随配置变（而且它自己会去读 /mobile/setup）⇒ 一律不缓存
+        'cache-control': 'no-store',
+    });
+    res.end(headOnly ? undefined : payload);
+}
 /** 组装 `GET /mobile/setup` 的响应体。 */
 export function buildSetupStatus(options) {
     const io = options.io ?? SILENT_IO;
@@ -989,7 +1338,14 @@ async function handleSetupWrite(req, res, options) {
  */
 export function handleSetupRequest(req, res, options) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    if (url.pathname !== SETUP_PATH && url.pathname !== `${SETUP_PATH}/`) {
+    /**
+     * ★ 两条路径都归这个处理器 ✓：`/mobile/setup`（JSON 契约 ✗ 不许动）与
+     *   `/mobile/setup/page`（给人看的表单 ✓）。
+     *   ⚠️ **两条都要过下面那道闸门** ✗ —— 页面本身也要能改配置（它保存时打的就是 POST）✓，
+     *   所以"先分派、后过闸"是错的 ✗（那样非本机也能拿到这张表）。
+     */
+    const page = url.pathname === SETUP_PAGE_PATH || url.pathname === `${SETUP_PAGE_PATH}/`;
+    if (!page && url.pathname !== SETUP_PATH && url.pathname !== `${SETUP_PATH}/`) {
         respondJson(res, 404, { code: 'mobile/not-found', message: `unknown mobile path ${req.url ?? ''}` });
         return;
     }
@@ -999,6 +1355,15 @@ export function handleSetupRequest(req, res, options) {
             message: '接入配置只能在这台电脑上读写（手机在配对成功前也打不开这条路由）。' +
                 '请在电脑浏览器里打开 DSH 页面操作。',
         });
+        return;
+    }
+    if (page) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+            res.writeHead(405, { allow: 'GET, HEAD' });
+            res.end();
+            return;
+        }
+        respondHtml(res, renderSetupPage(), req.method === 'HEAD');
         return;
     }
     if (req.method === 'GET' || req.method === 'HEAD') {
