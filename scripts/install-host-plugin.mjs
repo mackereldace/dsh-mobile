@@ -72,10 +72,29 @@ function parseArgs(argv) {
     lanIp: undefined,
     // ★ 关掉自动推导，退回"什么都不写"的旧行为（给**已有配置**的机器用）。
     autoDetectLan: true,
+    /**
+     * ★★ `--config-only`：**只补机器专属配置，不装任何文件** ✓（2026-09-29 新增 ✓）。
+     *
+     * ## 为什么需要它 ✗（官方插件管理那条路的最后一块拼图 ✓）
+     *
+     * 走官方那条路时，**插件行由 bundle 自己插入** ✓（`@dsh-mobile/host` 自带的
+     * `cordis.patch.yml` ✓），我们**不该**再写一条 `insert` ✗ —— 那会插出第二行 ✗。
+     * 但 bundle **只给行、不给 config** ✓（config 属于"这台机器"：局域网 IP、端口、
+     * 有没有 Tailscale ✓，写死在包里就是错的 ✓，见 `24` 号 §3.2 ✓）⇒
+     * 官方装完 `listener.enabled=false`（默认 ✓）⇒ **手机连不上** ✗。
+     *
+     * ⇒ 这个模式就是补那一块 ✓：**同一份推导逻辑**（`patchBlock` ✓，命令行 > 现有配置 > 自动推导 ✓），
+     *   只换 patch 的**形状** —— 从"`insert:` 一行"换成"按 `id` 覆盖 `config`" ✓
+     *   （DSH 的合成器就是"后续层按 id 找到同一行、整块替换它的 config" ✓）。
+     *
+     * ★ 它**不装文件、不跑加载校验** ✗（那些事官方那条路已经做过了 ✓）。
+     */
+    configOnly: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--uninstall') out.uninstall = true
+    else if (arg === '--config-only') out.configOnly = true
     else if (arg === '--skip-verify') out.skipVerify = true
     else if (arg === '--trusted-host') out.trustedHosts.push(argv[++i])
     else if (arg === '--clear-trusted-hosts') out.trustedHosts = []
@@ -101,7 +120,7 @@ function parseArgs(argv) {
           '[--trusted-host <authority>]... [--phone-base-url https://<ip>:<tls端口>] ' +
           '[--listener | --no-listener] [--listener-plain <host:port>] [--listener-tls <host:port>] ' +
           '[--lan-ip <本机局域网IP> | --no-lan-autodetect] ' +
-          '[--uninstall] [--skip-verify]',
+          '[--config-only] [--uninstall] [--skip-verify]',
       )
       process.exit(0)
     }
@@ -559,6 +578,42 @@ function patchBlock(trustedHosts, preserved, derived) {
     if (listenerTls !== undefined && listenerTls.length > 0) lines.push(`          tls: '${listenerTls}'`)
   }
   const config = lines.length === 0 ? '' : `\n      config:\n${lines.join('\n')}`
+  /**
+   * ★★ 官方插件管理那条路：**只给 config、不 insert 行** ✓（2026-09-29 ✓）。
+   *
+   * ## 为什么形状不一样 ✗
+   *
+   * 走官方那条路时，**插件行由 bundle 自己插入** ✓（`packages/host/cordis.patch.yml` ✓）；
+   * 我们再写一条 `insert` 就会插出**第二行** ✗。但 bundle **只给行、不给 config** ✓
+   * （config 属于"这台机器" ✓），所以缺的就是这块 ✓。
+   *
+   * DSH 的配置是三层叠加（bundle 层 → profile 层 → home 层 ✓），合成器的规则是
+   * "**后续层按 `id` 找到同一行、整块替换它的 `config`**" ✓ ⇒ 这里写一条
+   * `- id: mobile-host` + `config:` 就正好补上 ✓（**不写 `name:`** ✗ —— 行已经在了 ✓）。
+   *
+   * ★ 展开逻辑（`lines` 那几十行）与上面那条 `insert` 版本**完全共用** ✓ ——
+   *   命令行 > 现有配置 > 自动推导这套优先级只有**一处**实现 ✓（本项目的头号纪律 ✓）。
+   *   唯一的差别是**缩进**：`insert` 版嵌在四级里（8 空格 ✓），这里在顶层（4 空格 ✓）。
+   */
+  if (args.configOnly) {
+    /**
+     * ★★ 注意第一条必须是 `- id: mobile-host` ✗ —— 漏了它写出来就不是一个**列表项**，
+     *    整份 YAML **非法** ✓（第一版就漏了 ✓，而且当时那条"自检"只验自己那块、没验整份文件，
+     *    所以它照样打了"配置自检通过"✗ ⇒ 下面补了一道**整份解析**的校验 ✓）。
+     */
+    const body =
+      lines.length === 0
+        ? ['- id: mobile-host', '  config: {}'].join('\n')
+        : ['- id: mobile-host', '  config:', ...lines.map((line) => line.replace(/^ {4}/, ''))].join('\n')
+    return `${MARKER_START}
+# 手机端接入的**机器专属配置**（★ 这条**只给 config、不 insert 行** ✗）。
+# 行本身由 bundle 自带（@dsh-mobile/host 的 cordis.patch.yml ✓）——
+# DSH 三层叠加、后续层按 id 整块替换 config ⇒ "bundle 给行、这里给 config" ✓。
+# 由 scripts/install-host-plugin.mjs --config-only 维护（幂等：先删本块再追加 ✓）。
+${body}
+${MARKER_END}
+`
+  }
   return `${MARKER_START}
 # 手机端接入：/mobile/ws 加密隧道、配对与设备管理端点，并往 index.html 注入 boot.js。
 # 这条 insert 位于所有 bundle 层之后，因此 webServer / typertGateway 均已就绪。
@@ -855,6 +910,39 @@ async function verify() {
 async function main() {
   if (args.uninstall) {
     uninstall()
+    return
+  }
+  if (args.configOnly) {
+    /**
+     * ★ 官方插件管理那条路专用 ✓：**只补机器专属 config** ✓ ——
+     *   不装文件（官方已经装过了 ✓）、不跑加载校验（那是安装那一步的事 ✓）。
+     *   用法见 `--config-only` 的注释 ✓；配套的用户步骤写在 `24` 号 §10.3 ✓。
+     */
+    updatePatch()
+    /**
+     * ★ **整份**再解析一遍 ✓ —— 上一版只验了"自己那块"的逻辑 ✓，
+     *   漏掉了"写出来的到底是不是合法 YAML、是不是一个列表项"✗（第一版真漏了 `- id:` 那一行 ✓，
+     *   结果整份文件非法、而自检照样打绿 ✗）。配置写坏了的症状是 **DSH 起不来** ✗，
+     *   而这里的代价只有一行 ✓ ⇒ 必须验 ✓。
+     */
+    try {
+      const { load: loadYaml } = await import('js-yaml')
+      const parsed = loadYaml(readFileSync(patchFile, 'utf8'))
+      if (!Array.isArray(parsed)) throw new Error('顶层不是数组')
+      const found = parsed.some((entry) => entry !== null && typeof entry === 'object' && entry.id === 'mobile-host')
+      if (!found) throw new Error('找不到 id: mobile-host 这一项')
+      const host = parsed.find((entry) => entry !== null && typeof entry === 'object' && entry.id === 'mobile-host')
+      if (host.config === undefined || typeof host.config !== 'object') throw new Error('mobile-host 那一项没有 config')
+      if (host.name !== undefined) throw new Error('不该带 name（行由 bundle 插入，这里只覆盖 config）')
+      log(`配置自检通过：整份 cordis.patch.yml 可解析 ✓，mobile-host 带 config（${Object.keys(host.config).length} 个键 ✓）且不带 name ✓`)
+    } catch (error) {
+      fail(`config-only 自检失败（写出来的配置有问题，别重启 DSH）：${error instanceof Error ? error.message : String(error)}`)
+    }
+    log('')
+    log('已写入机器专属配置（只补 config、没动任何文件）✓。下一步：')
+    log('  1. 重启 DSH web（配置在启动时读一次）')
+    log(`  2. 打开 http://127.0.0.1:<端口>/mobile/manifest 应返回 JSON（含 protocolVersion 与主机指纹）`)
+    log('  3. POST /mobile/pair/code 生成配对码，然后在手机上用 dsh-mobile 扫码')
     return
   }
   preflight()
