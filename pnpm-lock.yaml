@@ -4,6 +4,10 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@dsh-mobile/bridge': link:packages/bridge
+  '@dsh-mobile/protocol': link:packages/protocol
+
 importers:
 
   .:
@@ -30,10 +34,12 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  packages/bridge: {}
+
   packages/client:
     dependencies:
       '@dsh-mobile/protocol':
-        specifier: workspace:*
+        specifier: link:../protocol
         version: link:../protocol
     devDependencies:
       '@dsh-mobile/host':
@@ -46,13 +52,16 @@ importers:
         specifier: ^4.0.2
         version: 4.0.2
       '@deepseek-ai/dsh-api-gateway':
-        specifier: ^0.1.5-rc.1
+        specifier: ^0.1.5-rc.1 || ^0.1.7-rc.1
         version: 0.1.5-rc.1(@deepseek-ai/cordis@4.0.2)
       '@deepseek-ai/dsh-host-webserver':
-        specifier: ^0.1.5-rc.1
+        specifier: ^0.1.5-rc.1 || ^0.1.7-rc.1
         version: 0.1.5-rc.1(@deepseek-ai/cordis@4.0.2)
+      '@dsh-mobile/bridge':
+        specifier: link:../bridge
+        version: link:../bridge
       '@dsh-mobile/protocol':
-        specifier: workspace:*
+        specifier: link:../protocol
         version: link:../protocol
 
   packages/protocol: {}

@@ -1,2 +1,13 @@
 packages:
   - 'packages/*'
+
+# ★ 2026-09-29：`packages/host` 对两个内部包改用 `github:` 依赖（见 24 号文档）——
+#   官方插件管理从 git 装包时**没有 workspace 上下文**，`workspace:*` 解析不了
+#   （实测报 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND ✓）。
+#   而**本地开发**必须仍用 workspace 里**活的那一份** ✗ —— 否则改 protocol 的 src
+#   不会影响 host 的构建，症状是"改了没生效"✗（本项目在别处栽过好几次）。
+#   ⇒ 用 overrides 把这两个名字在**本地**钉回仓库里的目录 ✓。
+#   ★ pnpm 11 只认这里，写在根 package.json 的 `pnpm.overrides` **不生效** ✗（本轮实测 ✓）。
+overrides:
+  '@dsh-mobile/bridge': 'link:packages/bridge'
+  '@dsh-mobile/protocol': 'link:packages/protocol'
