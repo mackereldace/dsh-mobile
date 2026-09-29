@@ -1,0 +1,19602 @@
+/**
+ * dsh-mobile boot script —— 在 DSH 前端应用 bundle **之前**执行的最小引导层。
+ *
+ * 为什么必须是"经典脚本 + 由宿主 tapIndex 注入"：
+ *   DSH 的客户端连接层在 Cordis 插件启动时读取 `globalThis.__DSH_TRANSPORT__`。
+ *   Flutter 的 WebView 无法保证在任何页面脚本之前执行 JS，因此在 index.html 里
+ *   插入本脚本（先于 `<script type="module" src="./assets/index-*.js">`）是唯一可靠的做法。
+ *
+ * 本脚本做四件事：
+ *   1. 与宿主做端到端加密握手（X25519 ECDH → HKDF-SHA256 → AES-256-GCM 逐帧）；
+ *   2. 安装 `__DSH_TRANSPORT__`：把一元 RPC 与流式 RPC 全部接进加密隧道；
+ *   3. 安装 `__DSH_FILE_UPLOAD__`（可选：只有宿主提供分块上传时才启用）；
+ *   4. 注入移动端布局样式（窄屏下把三栏改成抽屉式单栏）。
+ *
+ * 全部使用 WebCrypto，零第三方依赖：X25519 / HKDF / AES-GCM 在 Chrome 129+ / Safari 17+ / Firefox 130+
+ * 均已原生支持；P-256 支持面更广（本文件只用它做**验签**，签名由宿主完成）。
+ */
+;(function () {
+  'use strict'
+
+  /**
+   * ★ 页面一加载就补 viewport（**无条件执行** ✓，不能放进调试框那种条件块里 ✗）。
+   *
+   * 为什么必须最早做：APK（targetSdk 35）被系统**强制 edge-to-edge** ✓，
+   * 缺了 `viewport-fit=cover` 时 `env(safe-area-inset-top)` 恒为 0 ✗ →
+   * DSH 自带预览那薄薄一行头部会顶到状态栏下面 ✓ → **全屏时点不到** ✓
+   * （用户反馈的第一条 ✗）。App 外壳的 HTML 由 DSH 的 renderIndex 产出 ✓，
+   * 我们改不到 ✗ —— 但 boot.js 在它的 <head> 里 ✓，跑得比布局早 ✓，所以在这里补 ✓。
+   * 只在缺的时候改 ✓（不覆盖 DSH 自己的其它设置 ✓）。
+   */
+  try {
+    var dshmViewportMeta = document.querySelector('meta[name="viewport"]')
+    if (dshmViewportMeta !== null) {
+      var dshmViewportContent = String(dshmViewportMeta.getAttribute('content') || '')
+      if (dshmViewportContent.indexOf('viewport-fit') < 0) {
+        dshmViewportMeta.setAttribute('content', dshmViewportContent + ',viewport-fit=cover')
+      }
+    }
+  } catch (error) {
+    /* 不是致命问题 ✓；但也别静默 ✗ —— 调试框稍后建好时会把这行记下来 ✓ */
+    try {
+      console.error('[dshm] viewport 补写失败', error)
+    } catch (ignored) {}
+  }
+
+  /**
+   * ───────────────────── 原生壳（APK）桥：安全区 / 通知 ─────────────────────
+   *
+   * ## 为什么这一段必须放在**最前面**（在 viewport 补写之后、其它一切之前）
+   *
+   * 用户报的那条"打开 DSH 原生预览时，最顶上那一行控件钻到状态栏下面、点不到"✗，
+   * 是**两半配合**的事：壳（`MainActivity`）量出状态栏高度 ✓ → 网页据此让位 ✓。
+   * 上一版壳只有**推**一条路：insets 回调里 `evaluateJavascript` 写 CSS 变量 ✓。
+   * 那条路有一个必然的时序缺口 ✗ —— 推送发生在"页面已经开始解析"之后，
+   * 于是**第一次布局时变量还是空的** ✓，顶栏会先画在状态栏下面再被推下来 ✓（闪一下 ✓）；
+   * 更糟的情况是那次推送落在旧文档上（导航/刷新竞态 ✓）→ 变量永远是空的 ✗。
+   *
+   * 所以这里补上**拉**这条：本脚本在 `<head>` 里、比任何布局都早执行 ✓，
+   * 此刻问一句 `DshmShell.insets()` 就能把值写进去 ✓ —— 首帧即正确 ✓。
+   * 壳那边两条路都保留 ✓（推：`dshm-shell-insets` 事件 ✓；拉：这个桥 ✓），
+   * 任何一条失效都还有另一条兜底 ✓。
+   *
+   * ## 谁赢
+   *
+   * 壳写的是 `documentElement.style.setProperty`（行内 ✓，优先级最高 ✓），
+   * 下面的 `applyShellInsets` 也走同一个口子 ✓ —— 于是"安全区是多少"只有一个事实来源 ✓，
+   * 不会出现"CSS 里是 env()、JS 里是实测值、两边打架"✗。
+   * 网页自己的样式一律写 `max(env(safe-area-inset-top,0px), var(--dshm-safe-top,0px))` ✓：
+   * 壳没装（纯浏览器/PWA）时 env() 兜底 ✓，壳装了就以实测值为准 ✓。
+   */
+
+  /** 拿到壳桥 ✓（浏览器里就是 undefined ✓ —— 一切相关逻辑都必须先问这一句 ✓）。 */
+  function shellBridge() {
+    try {
+      var bridge = globalThis.DshmShell
+      if (bridge === undefined || bridge === null) return undefined
+      return typeof bridge.version === 'function' ? bridge : undefined
+    } catch (error) {
+      return undefined
+    }
+  }
+
+  /** 问壳要一个 JSON（`insets` / `platform` ✓）；没有壳、桥抛错、返回不是 JSON → null ✓。 */
+  function shellJson(method) {
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge[method] !== 'function') return null
+    try {
+      var parsed = JSON.parse(String(bridge[method]()))
+      return parsed !== null && typeof parsed === 'object' ? parsed : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * 标记"我们在壳里" ✓ —— `html[data-dshm-shell="android"]` ✓（只在有壳时打 ✓，幂等 ✓）。
+   *
+   * 为什么要有这个函数（而不是在首帧那一处直接 `setAttribute` ✗）：桥**可能在页面加载
+   * 之后才出现** ✓ —— 验收就是那么做的（先导航到页面 ✓，再往 `window` 塞一个假
+   * `DshmShell` 并显式调 `installBackHook()` ✓）。只在首帧判一次的话，那条路上标记
+   * 永远缺席 ✗ ⇒ 所有"只在壳里生效"的 CSS 都不会生效 ✓，而它们在**真机**上是有壳的 ✓
+   * ⇒ "验收里看不到"与"真机上就是坏的"长得一模一样 ✗✗（这类假绿本项目吃过亏 ✓）。
+   * 所以凡是我们**确认了桥存在**的地方都补一次 ✓（`installBackHook()` ✓ 与首帧那一次 ✓）。
+   *
+   * @returns true = 标记已在位（或刚刚打上）✓；false = 没有壳，什么都没做 ✓。
+   */
+  function markShellRoot() {
+    try {
+      if (shellBridge() === undefined) return false
+      if (document.documentElement.getAttribute('data-dshm-shell') === 'android') return true
+      document.documentElement.setAttribute('data-dshm-shell', 'android')
+      return true
+    } catch (error) {
+      return false
+    }
+  }
+
+  /**
+   * ───────────────── 身份键必须**跨源存活**：与壳的 `SharedPreferences` 双向同步 ─────────────────
+   *
+   * ## 为什么必须这么做（这是"换地址"这条路的**前提** ✗）
+   *
+   * 用户要的是「两个默认链接（学校 / Tailscale），学校超时 2000ms 就切 Tailscale」✓ ——
+   * 而**切地址就是换源** ✓，`localStorage` 又**按源隔离** ✗ ⇒ 新源里：
+   *   · 没有设备私钥（`dsh-mobile.device-key`）✗
+   *   · 没有配对配置（`dsh-mobile.host`）✗
+   * 于是页面**能打开**、但**没有隧道** ⇒ 界面停在"重连中"、所有控件点不动 ✗
+   * （与当年"HTTP→HTTPS 之后拿着旧配置"那次故障**同一个症状** ✓，根因不同 ✓）。
+   *
+   * 壳那半把身份存进 `SharedPreferences`（**跨源** ✓），这边负责：
+   *   · **写**：任何一处写身份键 ⇒ 同时 `vaultSet`（**合并**语义 ✓）一份 ✓；
+   *   · **读**：启动时（**早于"是否已配对"的判断** ✗）localStorage 缺、而 vault 有 ⇒ 恢复 ✓。
+   * ★ 一律**没有轮询 / 定时器** ✗ —— 写入口就是同步点 ✓（本项目对"靠定时器兜底"零容忍 ✓）。
+   *
+   * ## 白名单：哪些键必须跨源存活
+   *
+   * 只有**身份 / 配对**这一类 ✗：
+   *   · `dsh-mobile.host`            —— 配对配置（`baseUrl` / `pinnedHostFingerprint` ✓）
+   *   · `dsh-mobile.device-key`      —— P-256 私钥 + `deviceId`（**丢了两边都不认这台设备** ✗）
+   *   · `dsh-mobile.claimed-ticket`  —— 这张票据的公钥**已经提交过**（避免换源后重复 claim ✓）
+   *   · `dsh-mobile.lastGoodEndpoint`—— 上次成功的隧道端点（见 `deriveTunnelUrls` ✓）
+   *
+   * ★ `lastGoodEndpoint` 也在名单里，但它**不是**无条件信任的：壳在**换槽**时会把
+   *   vault 里的它删掉（`vaultSet` 的"值为 `null` = 删除"约定 ✓）⇒ 换源之后不会把
+   *   **上一个源**的隧道端点当成首选、白等 8 秒 ✗（详见 `readStoredHost` 里丢 `tunnelUrl` 那段 ✓）。
+   *
+   * ## 明确**不**同步的键（都是"纯本机 / 纯调试 / UI 设置" ✗）
+   *
+   *   · `dsh-mobile.tunnelLog` / `dsh-mobile.lastTunnel` —— 本机诊断环形缓冲（换源后重来更好 ✓）
+   *   · `dsh-mobile.lastFrameError` / `dsh-mobile.debug`     —— 调试开关与抓错
+   *   · `dsh-mobile.deviceAsk.*` / `dsh-mobile.deviceEnabled.*` —— 端侧能力**授权**（设置类 ✓：
+   *     丢掉最多重新问一次 ✓，而且它们按能力名**动态生成**，本就不适合塞进固定白名单 ✓）
+   *   · `dsh-mobile.reloadedAfterPair` —— 配对后一次性重载的**当次流程**门闩
+   */
+  var IDENTITY_VAULT_KEYS = [
+    'dsh-mobile.host',
+    'dsh-mobile.device-key',
+    'dsh-mobile.claimed-ticket',
+    'dsh-mobile.lastGoodEndpoint',
+  ]
+
+  /**
+   * ★★ P1a：四条身份键**按宿主指纹命名空间化** ✓（§3.2 ✓）。
+   *
+   *   `dsh-mobile.device-key` ⇒ `dsh-mobile.device-key:<宿主公钥指纹>` ✓
+   *
+   * ## 为什么（一句话）
+   * 一台手机要管多台电脑 ✓ ⇒ 每台电脑必须**各有一份**身份 ✗ ——
+   * 否则第二台配对时会**覆盖**掉第一台的私钥 ✗（"隧道能建立、对面不认这台设备"✓）。
+   * 主键是**指纹**（不是 IP、不是名称 ✓ —— IP 会变、名称会撞 ✓）。
+   *
+   * ## 壳侧一行都不用改 ✓（推导 ✓，真机未验 ✗）
+   * 壳的 vault 是**哑存储** ✓（`MainActivity` 的 `vaultGet`/`vaultSet` 不解释键名 ✓、
+   * 按"整库 JSON 对象"合并写 ✓）⇒ 名字里多一段 `:<指纹>` 它一点也不关心 ✓。
+   *
+   * ## ★ 读取侧的三条硬规矩（本段代码的全部要点）
+   *   1. **先定"当前源对应的宿主指纹"** ✓（`currentHostFingerprint()` ✓），**再**取身份 ✗ ——
+   *      ★ 绝不许写成"vault 里有就恢复"✗✗：那样在 B 宿主的源上会把 **A 宿主的私钥**
+   *      恢复进来 ✓，症状是"隧道能建立、但对面不认这台设备"✗（比"连不上"难查得多 ✓）；
+   *   2. 取某一台的身份：**先查带指纹的键** ✓；没有 ⇒ **旧键回退** ✓，
+   *      但旧键**必须归属可证** ✓（旧 `dsh-mobile.host` 的 `pinnedHostFingerprint`
+   *      == 要取的那个指纹 ✓）—— 对不上就**当它不存在** ✗（这就是上面那条闸 ✓）；
+   *   3. 用了旧键就**顺手迁移** ✓（写新键 + 删旧键 ✓，幂等 ✓；旧真机不迁移会**丢配对** ✗）。
+   *
+   * ## 两个新键（宿主目录 ✓，跨源 ✓ —— §3.1）
+   *   · `dsh-mobile.hosts`        —— 宿主记录数组（JSON ✓，主键 = 指纹 ✓）
+   *   · `dsh-mobile.hosts.active` —— 当前这台宿主的指纹 ✓
+   * 它们也必须进白名单 ✓（否则写不进壳 ✓），且**写**永远只写带指纹的形态 ✗。
+   */
+  var HOSTS_KEY = 'dsh-mobile.hosts'
+  var HOSTS_ACTIVE_KEY = 'dsh-mobile.hosts.active'
+  /**
+   * 本页 URL 票据里带的宿主指纹 ✓（配对当次才有 ✓）。
+   * ★ 它必须在 `readStoredHost()` **之前**固化 ✓：配对那一页的 config 是全新的，
+   *   而"当前源属于谁"不能靠旧目录猜 ✗（见 `currentHostFingerprint` ✓）。
+   */
+  var pageTicketFingerprint
+
+  /** 指纹（或键名后缀）长这样：十六进制 / 分组短横 / 测试用的注入串 ✓。 */
+  function validHostFingerprint(value) {
+    return typeof value === 'string' && /^[A-Za-z0-9_.-]{8,}$/.test(value)
+  }
+
+  /** 读整个键值库 ✓（没有壳 / 桥抛错 ⇒ `null` ✓ —— 一切相关逻辑都先问这一句 ✓）。 */
+  function vaultRead() {
+    return shellJson('vaultGet')
+  }
+
+  /**
+   * 把一份补丁**合并**进壳的键值库 ✓（值 `null` = **删除**该键 ✓ —— Java 侧同一份约定 ✓）。
+   *
+   * 没有壳 ⇒ `false`（纯浏览器里这些键就只活在 localStorage 里 ✓ —— 不许因此报错 ✗）。
+   */
+  function vaultMerge(patch) {
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge.vaultSet !== 'function') return false
+    try {
+      bridge.vaultSet(JSON.stringify(patch))
+      return true
+    } catch (error) {
+      // 桥抛错绝不能影响页面 ✗（但也不静默 ✓）
+      console.warn('[dsh-mobile] 写壳的身份库失败（不影响页面）：', error)
+      return false
+    }
+  }
+
+  /** 这个键归不归"必须跨源存活"管 ✓ —— 旧名 ✓、`<旧名>:<指纹>` ✓、以及宿主目录那两个键 ✓。 */
+  function isIdentityKeyAllowed(key) {
+    if (typeof key !== 'string' || key.length === 0) return false
+    if (key === HOSTS_KEY || key === HOSTS_ACTIVE_KEY) return true
+    if (IDENTITY_VAULT_KEYS.indexOf(key) >= 0) return true
+    var colon = key.indexOf(':')
+    if (colon <= 0) return false
+    var base = key.slice(0, colon)
+    var suffix = key.slice(colon + 1)
+    return IDENTITY_VAULT_KEYS.indexOf(base) >= 0 && suffix.indexOf(':') < 0 && validHostFingerprint(suffix)
+  }
+
+  /** 这个键是不是那四条**基名**之一（不带指纹 ✓）。 */
+  function isBaseIdentityKey(key) {
+    return IDENTITY_VAULT_KEYS.indexOf(key) >= 0
+  }
+
+  /** localStorage 里的值 ✓（空串 / 取不到 ⇒ `null` ✓；localStorage 抛错 ⇒ `null` ✓）。 */
+  function localValue(key) {
+    try {
+      var value = localStorage.getItem(key)
+      return typeof value === 'string' && value.length > 0 ? value : null
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
+  /** 壳的身份库里的值 ✓（没有壳 / 缺键 ⇒ `null` ✓）。 */
+  function vaultValue(key) {
+    var vault = vaultRead()
+    if (vault === null) return null
+    var value = vault[key]
+    return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  /**
+   * 身份键的**唯一写入口** ✓：先落 localStorage ✓，再同步进壳的库 ✓（合并 ✓）。
+   *
+   * `value === null` ⇒ 两边都**删除** ✓ —— 注意必须往补丁里写**显式的 `null`** ✗：
+   * `JSON.stringify({a: undefined})` 会得到 `{}` ✗，那样壳里的旧值**原封不动**，
+   * 于是"本机已解除配对、壳里还留着私钥"✗（这个坑正是本函数存在的理由之一 ✓）。
+   *
+   * ## ★ 第三个参数 `fingerprint`（P1a 新增 ✓）
+   *   · **省略** ⇒ 按**当前源对应的宿主指纹**命名空间化 ✓（`currentHostFingerprint()` ✓）；
+   *   · **字符串** ⇒ 用这个指纹 ✓（配对当次用 config 自己带的那个 ✓ —— 最可信 ✓）；
+   *   · **`null`** ⇒ ★ **不命名空间化**：直接写/删**旧键**本身 ✓
+   *     （迁移时"删掉旧键"专用 ✗ —— 省略参数会把它映射到新键、旧键永远删不掉 ✗）。
+   *
+   * ★ 传入的键**已经带指纹**时原样使用 ✓（例如"按指纹恢复"那条路会显式点名一个键 ✓）。
+   * ★ 签名不可得（既没有指纹、也没显式给）时**退回旧键** ✓ —— 那是纯旧模式（单宿主 ✓）；
+   *   硬要写 `undefined:...` 反而会把配对当场弄丢 ✗（见交付说明里这一条偏差 ✓）。
+   */
+  function writeIdentityKey(key, value, fingerprint) {
+    var target = isBaseIdentityKey(key) ? identityKeyFor(key, fingerprint) : key
+    if (!isIdentityKeyAllowed(target)) {
+      console.warn('[dsh-mobile] 拒绝写白名单之外的身份键：' + target)
+      return false
+    }
+    try {
+      if (value === null || value === undefined) localStorage.removeItem(target)
+      else localStorage.setItem(target, String(value))
+    } catch (error) {
+      console.warn('[dsh-mobile] 写 localStorage 失败：' + target, error)
+    }
+    var patch = {}
+    patch[target] = value === undefined ? null : value
+    vaultMerge(patch)
+    return true
+  }
+
+  /** 删一个身份键 ✓（= 写 `null` ✓ —— 两边一起删 ✓；按当前指纹命名空间化 ✓）。 */
+  function removeIdentityKey(key) {
+    return writeIdentityKey(key, null)
+  }
+
+  /**
+   * 基名 + 指纹 ⇒ 真正的键名 ✓。
+   *   · `fingerprint === null` ⇒ 旧键本身（迁移删旧键专用 ✓）；
+   *   · 省略 ⇒ 当前源对应的指纹 ✓；
+   *   · 指纹不可得 ⇒ 旧键本身 ✓（纯旧模式 ✓ —— 那时没有第二个宿主可混 ✗）。
+   */
+  function identityKeyFor(base, fingerprint) {
+    if (!isBaseIdentityKey(base)) return base
+    if (fingerprint === null) return base
+    var resolved = fingerprint === undefined ? currentHostFingerprint() : fingerprint
+    if (!validHostFingerprint(resolved)) return base
+    return base + ':' + resolved
+  }
+
+  /** 从"配对配置"对象里取宿主指纹 ✓（`pinnedHostFingerprint` ✓）；取不到 ⇒ `undefined` ✓。 */
+  function fingerprintFromConfig(config) {
+    if (config === null || config === undefined || typeof config !== 'object') return undefined
+    var value = config.pinnedHostFingerprint
+    return validHostFingerprint(value) ? value : undefined
+  }
+
+  /** 从一段 JSON 文本里取宿主指纹 ✓（坏 JSON ⇒ `undefined` ✓，绝不抛 ✗）。 */
+  function fingerprintFromJson(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    try {
+      return fingerprintFromConfig(JSON.parse(raw))
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * 旧键的**归属** ✓ —— 旧 `dsh-mobile.host`（不带指纹的那条 ✓）里的 `pinnedHostFingerprint`。
+   *
+   * 先看本机 ✓，本机没有再看壳的库 ✓（"换源后从壳恢复"那条老路 ✓ —— 那时壳里有旧键、
+   * 本机是空的 ✓）。两边都取不到 ⇒ `undefined` ✓（**归属不可证** ✓）。
+   */
+  function legacyIdentityOwnerFingerprint() {
+    var local = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (local !== undefined) return local
+    return fingerprintFromJson(vaultValue(STORAGE_KEY))
+  }
+
+  /**
+   * ★★ **先定"当前源对应的宿主指纹"** ✓ —— 这一步必须在取身份**之前** ✓。
+   *
+   * 顺序（与派单里定死的一致 ✓）：
+   *   a) **本页票据**里的指纹 ✓（配对当次 ✓ —— 它定义的就是"这一页在配的那台" ✓）；
+   *   b) **宿主目录** `dsh-mobile.hosts`：哪条记录的 `slots[]` 里有地址的 **host**
+   *      等于 `location.host` ⇒ 取那条记录的指纹 ✓（这正是目录的用途 ✓）；
+   *   c) **旧键自己就是归属的定义** ✓（老用户 / 目录还没建 ✓）：
+   *      · 本机旧 `dsh-mobile.host` 的 `pinnedHostFingerprint` ✓；
+   *      · ★ 只有"整台手机**一个宿主目录都没有**"时，才允许再看**壳里**那份旧键 ✓ ——
+   *        否则会在 B 源上把 A 的旧身份当成本源身份 ✗（那正是要防的串台 ✓）。
+   *   d) 都得不出 ⇒ `undefined` ✓ = "这个源没有身份可取" ✓（走老路 ✓，绝不猜 ✗）。
+   *
+   * ★ `dsh-mobile.hosts.active` **不参与**这个解析 ✗：它是"面板标出当前"与切换用的
+   *   **标记** ✓，拿它当解析来源会在"另一台电脑的新源"上借到 active 那台的私钥 ✗。
+   */
+  function currentHostFingerprint() {
+    if (validHostFingerprint(pageTicketFingerprint)) return pageTicketFingerprint
+    var records = hostsRead()
+    var matched = hostFingerprintMatchingOrigin(records, location.host)
+    if (matched !== undefined) return matched
+    var fromLocalLegacy = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (fromLocalLegacy !== undefined) return fromLocalLegacy
+    if (records.length === 0) {
+      var fromVaultLegacy = fingerprintFromJson(vaultValue(STORAGE_KEY))
+      if (fromVaultLegacy !== undefined) return fromVaultLegacy
+    }
+    return undefined
+  }
+
+  /** 目录里"哪条记录的某个槽的 host == 当前源" ⇒ 那个指纹 ✓（找不到 ⇒ `undefined` ✓）。 */
+  function hostFingerprintMatchingOrigin(records, host) {
+    if (typeof host !== 'string' || host.length === 0) return undefined
+    for (var i = 0; i < records.length; i++) {
+      var slots = Array.isArray(records[i].slots) ? records[i].slots : []
+      for (var j = 0; j < slots.length; j++) {
+        var url = slots[j] !== null && typeof slots[j] === 'object' ? slots[j].url : slots[j]
+        if (typeof url !== 'string' || url.length === 0) continue
+        var slotHost = ''
+        try {
+          slotHost = new URL(url, location.href).host
+        } catch (error) {
+          void error
+        }
+        if (slotHost === host) return records[i].fingerprint
+      }
+    }
+    return undefined
+  }
+
+  // ─────────────────── 宿主目录 `dsh-mobile.hosts`（§3.1 ✓）───────────────────
+
+  /** 一段 JSON 文本 ⇒ 宿主记录数组 ✓（坏数据 / 非数组 ⇒ `null` ✓）。 */
+  function parseHostRecords(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return null
+    try {
+      var parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return null
+      var out = []
+      for (var i = 0; i < parsed.length; i++) {
+        var record = parsed[i]
+        if (record === null || typeof record !== 'object') continue
+        if (!validHostFingerprint(record.fingerprint)) continue
+        out.push(record)
+      }
+      return out
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
+  /**
+   * 读宿主目录 ✓ —— **本机与壳的库合并** ✓（按指纹取并 ✓，同一条以 `updatedAt` 较新者为准 ✓）。
+   *
+   * 为什么要合并 ✗：目录是**跨源**的 ✓ —— 另一台宿主的页面可能刚往里加过一条 ✓，
+   * 而本机的 localStorage 还是旧的 ✓；只看本机会漏掉刚加的那台 ✓。
+   */
+  function hostsRead() {
+    var fromVault = parseHostRecords(vaultValue(HOSTS_KEY))
+    var fromLocal = parseHostRecords(localValue(HOSTS_KEY))
+    if (fromVault === null && fromLocal === null) return []
+    if (fromVault === null) return fromLocal === null ? [] : fromLocal
+    if (fromLocal === null) return fromVault
+    var order = []
+    var byFingerprint = {}
+    var add = function (record) {
+      var fingerprint = record.fingerprint
+      if (byFingerprint[fingerprint] === undefined) {
+        order.push(fingerprint)
+        byFingerprint[fingerprint] = record
+        return
+      }
+      var previous = byFingerprint[fingerprint]
+      if (Number(record.updatedAt) > Number(previous.updatedAt)) byFingerprint[fingerprint] = record
+    }
+    for (var i = 0; i < fromVault.length; i++) add(fromVault[i])
+    for (var j = 0; j < fromLocal.length; j++) add(fromLocal[j])
+    var out = []
+    for (var k = 0; k < order.length; k++) out.push(byFingerprint[order[k]])
+    return out
+  }
+
+  /** 写宿主目录 ✓（走唯一写入口 ✓ ⇒ localStorage + 壳两边一起 ✓）。 */
+  function hostsWrite(records) {
+    return writeIdentityKey(HOSTS_KEY, JSON.stringify(records))
+  }
+
+  /** 当前宿主的**标记** ✓（`dsh-mobile.hosts.active` ✓）。 */
+  function setActiveHost(fingerprint) {
+    if (!validHostFingerprint(fingerprint)) return false
+    return writeIdentityKey(HOSTS_ACTIVE_KEY, fingerprint)
+  }
+
+  /** 当前宿主的标记值 ✓（没写过 ⇒ `undefined` ✓）。 */
+  function activeHostFingerprint() {
+    var value = localValue(HOSTS_ACTIVE_KEY)
+    if (value === null) value = vaultValue(HOSTS_ACTIVE_KEY)
+    return validHostFingerprint(value) ? value : undefined
+  }
+
+  /** 目录里那条记录的主显示名 ✓（人工填的 > 槽自己带的标签 > 当前地址 ✓）。 */
+  function hostRecordLabel(record) {
+    if (record !== null && typeof record.label === 'string' && record.label.length > 0) return record.label
+    var slots = record !== null && Array.isArray(record.slots) ? record.slots : []
+    for (var i = 0; i < slots.length; i++) {
+      var label = slots[i] !== null && typeof slots[i] === 'object' ? slots[i].label : undefined
+      if (typeof label === 'string' && label.length > 0) return label
+    }
+    return '（未命名）'
+  }
+
+  /**
+   * 把一条宿主记录**合并**进目录 ✓（主键 = 指纹 ✓ —— 有的字段不覆盖 ✓）。
+   *
+   * 语义：只更新**这次真的知道**的字段 ✗（`undefined` 的字段保持原值 ✓）——
+   * 于是"连接成功上报时间"不会把人工起的名字冲掉 ✓。
+   */
+  function hostRecordUpsert(record) {
+    if (record === null || typeof record !== 'object') return false
+    if (!validHostFingerprint(record.fingerprint)) return false
+    var fingerprint = record.fingerprint
+    var records = hostsRead()
+    var index = -1
+    for (var i = 0; i < records.length; i++) {
+      if (records[i].fingerprint === fingerprint) index = i
+    }
+    var previous = index >= 0 ? records[index] : {}
+    var next = {
+      fingerprint: fingerprint,
+      label: typeof record.label === 'string' && record.label.length > 0 ? record.label : previous.label,
+      slots: Array.isArray(record.slots) && record.slots.length > 0 ? record.slots : previous.slots,
+      lastState: record.lastState !== undefined ? record.lastState : previous.lastState,
+      lastSeenAt: record.lastSeenAt !== undefined ? record.lastSeenAt : previous.lastSeenAt,
+      updatedAt: Date.now(),
+    }
+    if (next.slots === undefined) next.slots = []
+    if (index >= 0) records[index] = next
+    else records.push(next)
+    return hostsWrite(records)
+  }
+
+  /**
+   * 一台宿主有哪些槽 ✓（`{label,url}` 数组 ✓）—— 来源与优先级：
+   *   ① 票据 / 配置里的 `endpoints`、`baseUrl`、`tunnelUrls` ✓；② 当前页面源 ✓；
+   *   ③ 壳里那两组默认链接**只用来补名字** ✓（见下面那段 ★ 修 ✓）。
+   * ★ 存的是**地址**不是隧道端点 ✓：匹配只比 `host` ✓（http/ws 与 https/wss 同机同槽 ✓）。
+   * ★ 槽集里**不**放配对票据 / baseUrl 之外的配置字段 ✗（宿主记录是**目录**，不是配对配置 ✓）。
+   */
+  function hostSlotsForConfig(config) {
+    var slots = []
+    var seen = {}
+    /** host → 在 `slots` 里的下标 ✓（补名字时要按 host 找回那一槽 ✓）。 */
+    var indexByHost = {}
+    var add = function (url, label) {
+      if (typeof url !== 'string' || url.length === 0) return
+      var host = ''
+      try {
+        host = new URL(url, location.href).host
+      } catch (error) {
+        void error
+      }
+      if (host === '' || seen[host] === true) return
+      seen[host] = true
+      indexByHost[host] = slots.length
+      slots.push({ label: typeof label === 'string' ? label : '', url: url })
+    }
+    if (config !== null && config !== undefined && typeof config === 'object') {
+      var endpoints = Array.isArray(config.endpoints) ? config.endpoints : []
+      for (var j = 0; j < endpoints.length; j++) add(endpoints[j])
+      add(config.baseUrl)
+      var tunnelUrls = Array.isArray(config.tunnelUrls) ? config.tunnelUrls : []
+      for (var k = 0; k < tunnelUrls.length; k++) add(tunnelUrls[k])
+    }
+    add(location.origin)
+    /**
+     * ★ 修（**真机验收抓到的** ✓）：`readDefaultLinks()` 返回的是 `{slots, timeoutMs}` **对象** ✓，
+     *   这里以前当**数组**用 ✗（`links.length` 恒为 `undefined` ⇒ 循环一次都不跑 ✗）——
+     *   于是壳里那两个**带名字**的槽（「学校」「Tailscale」✓）被静默丢掉 ✗，
+     *   本记录一个 label 都留不下 ⇒ 面板永远显示兜底「（未命名）」✗。
+     * ★ 但**只补名字、不新增槽** ✗：壳里那两条默认链接是**机器级**的（它只认自己那一套地址 ✓），
+     *   无条件 `add` 会在"第二台宿主"上把**第一台的地址**记到第二台名下 ✗ ——
+     *   而指纹归属正是**按槽认源**的（`hostFingerprintMatchingOrigin` ✓）⇒ 会张冠李戴 ✗。
+     *   所以只有"本来就已经属于本记录"的 host 才接受这个名字 ✓（错了也只是少个名字 ✓，不会认错机器 ✓）。
+     */
+    var shellSlots = readDefaultLinks().slots
+    for (var i = 0; i < shellSlots.length; i++) {
+      var shellSlot = shellSlots[i]
+      if (shellSlot === null || typeof shellSlot !== 'object') continue
+      var shellLabel = typeof shellSlot.label === 'string' ? shellSlot.label : ''
+      if (shellLabel.length === 0) continue
+      var shellHost = ''
+      try {
+        shellHost = new URL(shellSlot.url, location.href).host
+      } catch (error) {
+        void error
+      }
+      if (shellHost === '' || indexByHost[shellHost] === undefined) continue
+      var target = slots[indexByHost[shellHost]]
+      if (target.label.length === 0) target.label = shellLabel
+    }
+    return slots
+  }
+
+  /**
+   * 连接成功 ⇒ 把"这台宿主"记进目录并标成当前 ✓（`lastState` / `lastSeenAt` ✓）。
+   * 只是**追加信息** ✓：任何异常都不许影响连接 ✗（调用处另有 try/catch ✓）。
+   */
+  function noteHostConnected(config) {
+    var fingerprint = fingerprintFromConfig(config)
+    if (fingerprint === undefined) fingerprint = currentHostFingerprint()
+    if (fingerprint === undefined) return false
+    hostRecordUpsert({
+      fingerprint: fingerprint,
+      slots: hostSlotsForConfig(config),
+      label: manifestNameForRecord(),
+      lastState: 'connected',
+      lastSeenAt: Date.now(),
+    })
+    setActiveHost(fingerprint)
+    return true
+  }
+
+  /**
+   * 要写进**这台宿主**记录里的显示名 ✓（拿不到 ⇒ `undefined` ✓ —— `hostRecordUpsert` 只在前者非空时覆盖 ✓，
+   * 于是**旧名字不会被空值冲掉** ✓）。
+   *
+   * ★★ **取 manifest 的活儿不在这里** ✗✗（2026-09-28 血的教训 ✓）：这里曾经在
+   *   `noteHostConnected` / `storeHost` 里各"顺手取一次"✗ —— 看起来只是早几毫秒 ✓，
+   *   实际把那次同源 fetch **提前到验收夹具装桩之前** ✓ ⇒ 真 manifest 被缓存 ✓ ⇒
+   *   套件里"manifest 取不到时上报照常发生"那条**再也复现不出来** ✓（两条既有断言变红 ✗，
+   *   子代理交单时点名 ✓）。**唯一该发起它的地方是既有的上报路径**
+   *   （`prepareEndpointSlots` ✓，round 139 就是为它写的 ✓）——
+   *   名字在 fetch 的 `.then` 里当场落进记录 ✓ ⇒ **不依赖谁先谁后** ✓。
+   * ★ 只有"与页面同源的那台"才配用它 ✗✗：`manifestMachineName` 是**当前这个源**报的名字 ✓，
+   *   而这条记录必须是**当前这台宿主** ✓ —— 调用点都在"刚连上/刚配对这台"的路上 ✓，
+   *   指纹也是当场解析出来的 ✓（`fingerprintFromConfig` / `currentHostFingerprint` ✓）。
+   */
+  function manifestNameForRecord() {
+    return manifestMachineName !== null && manifestMachineName.length > 0 ? manifestMachineName : undefined
+  }
+
+  // ─────────────── 设置页「连接与设备」里的**宿主列表**（P1a 第 ③ 条 ✓）───────────────
+
+  /** 目录里那条记录的主地址 ✓（第一条槽 ✓；没有 ⇒ 一句人话 ✓，绝不显示 `undefined` ✗）。 */
+  function hostPrimaryAddress(record) {
+    var slots = record !== null && Array.isArray(record.slots) ? record.slots : []
+    for (var i = 0; i < slots.length; i++) {
+      var url = slots[i] !== null && typeof slots[i] === 'object' ? slots[i].url : slots[i]
+      if (typeof url === 'string' && url.length > 0) return url
+    }
+    return '（没有记录地址）'
+  }
+
+  /**
+   * 这个槽地址在**壳里真能用**的那条 URL ✓（面板的提示与 P1b 的切换按钮都用它 ✓）。
+   *
+   * ★ 为什么必须补 `/mobile/app` ✗✗（**用户 2026-09-28 真机踩到** ✓）：
+   *   壳的「改地址」框是**你输什么就加载什么** ✓（`MainActivity.promptForAddress` 只补 scheme ✓、
+   *   **不补路径** ✗），而槽里存的是**裸源**（`https://主机:端口` ✓）。照原样填 ⇒ 落到 DSH 的
+   *   **电脑版**根路径 ⇒ **401** ✗（实测正文：`dsh web authentication required; reopen the URL printed by dsh web.` ✓）。
+   *   面板原来那句提示写的就是"填上面这个地址" ✗ ⇒ 用户照做**必然**走进 401 ✓ —— **是我们的文案错** ✓。
+   * ★ 已经有路径的（如壳的默认链接 `…/mobile/app` ✓）**原样保留** ✓ —— 用户明确要别的页时不许拦 ✗。
+   */
+  function hostAppUrl(address) {
+    if (typeof address !== 'string' || address.length === 0) return address
+    var path = null
+    try {
+      path = new URL(address, location.href).pathname
+    } catch (error) {
+      void error
+      return address
+    }
+    if (path !== null && path !== '' && path !== '/') return address
+    var trimmed = address.charAt(address.length - 1) === '/' ? address.slice(0, -1) : address
+    return trimmed + '/mobile/app'
+  }
+
+  /**
+   * 壳里有没有**"点一台就切过去"**那条桥 ✓（P1b ✓）。
+   * ★★ 老 APK 没有它 ✗ ⇒ 那时**绝不画按钮** ✗（画出来就是"点了没反应"✓，本项目零容忍 ✓），
+   *   退回"用「改地址」填…"的**可操作提示** ✓ —— 用户今天照着做就能办成 ✓。
+   */
+  function shellSwitchHostBridge() {
+    var bridge = shellBridge()
+    if (bridge === undefined) return undefined
+    try {
+      return typeof bridge.switchHost === 'function' ? bridge : undefined
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * 面板一行叫什么 ✓ —— **只认记录里那个名字** ✓（`hostRecordLabel` ✓）。
+   *
+   * ★ 机器名从哪来 ✗✗（**别在这里再算一遍** ✗）：宿主在 `manifest.machineName` 里自报 ✓，
+   *   产品在**取到的那一刻**就把它写进**宿主自己那条记录** ✓
+   *   （见 `loadManifestBaseUrl` 与 `noteHostConnected` ✓）——记录是**唯一事实来源** ✓：
+   *   面板读它 ✓，从**别的**宿主那边看这一行也读得到 ✓（跨源读不到对方的 manifest ✓，
+   *   只能靠对方那次连接自己写下来 ✓）。
+   *   ★ 这里曾经还写过一层"当前那台就用 manifest 里的机器名"✗ —— **变异检查把它打不红** ✓
+   *   （记录里已经有了 ✓，那层永远不生效 ✓）⇒ 按"同一个概念不许两套来源"删掉 ✓。
+   *
+   * 为什么非要用机器名 ✗✗：壳里那两条默认链接的名字**永远是「学校」** ✓
+   * （`defaultLinkLabel` 只分 Tailscale / 其它 ✓）⇒ **两台电脑都叫「学校」** ✗，等于没名字 ✓
+   * （用户 2026-09-28 真机验收时看到的正是这个 ✓）。
+   * ★ 拿不到机器名（老宿主没这个字段 ✓）⇒ 退回既有兜底 ✓ —— **绝不编一个名字** ✗。
+   */
+  function hostsPanelRowLabel(record) {
+    return hostRecordLabel(record)
+  }
+
+  /**
+   * 宿主列表的**行模型** ✓（纯数据 ✓ —— 渲染与验收共用同一份 ✓，不另算一遍 ✗）。
+   *
+   * 一行 = 一台电脑 ✓：显示名 ✓ + 主地址（槽 ✓）+ **指纹短串** ✓ + 是不是当前那台 ✓。
+   * "当前"的判据：解析出来的当前指纹 ✓（拿不到时退回 `hosts.active` 那个标记 ✓ ——
+   * 那只是**显示**用 ✓，绝不参与身份解析 ✗）。
+   */
+  function hostsPanelRows() {
+    var records = hostsRead()
+    var current = currentHostFingerprint()
+    if (current === undefined) current = activeHostFingerprint()
+    var rows = []
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i]
+      var active = current !== undefined && record.fingerprint === current
+      var address = hostPrimaryAddress(record)
+      rows.push({
+        fingerprint: record.fingerprint,
+        label: hostsPanelRowLabel(record),
+        address: address,
+        /**
+         * ★ 这一行**在壳里真能用**的那条 URL ✓（补了 `/mobile/app` ✓，见 `hostAppUrl` ✓）——
+         * P1b 的按钮与降级提示都读它 ✓，两边不许各拼一次 ✗。
+         */
+        appUrl: hostAppUrl(address),
+        fingerprintShort: formatFingerprint(record.fingerprint).slice(0, 9) + '…',
+        active: active,
+        state: typeof record.lastState === 'string' && record.lastState.length > 0 ? record.lastState : '（未知）',
+      })
+    }
+    return rows
+  }
+
+  /**
+   * ★★ P1a 第 ③ 条：「连接与设备」里**列出所有电脑**并**标出当前那台** ✓。
+   *
+   * ## 规矩（用户明确要求，违反即是 bug ✗）
+   *   · **当前那台**：显示名 + 地址 + 指纹短串 ✓，并明写「当前」✓；
+   *   · **其它那几台**：★★ **壳里有那条桥就画真按钮** ✓（P1b：`switchHost` ✓，点一下就切过去 ✓）；
+   *     ★★ **没有那条桥（老 APK）就绝不画按钮** ✗✗ —— 画出来就是"点了没反应"✗
+   *     （本项目对死按钮**零容忍** ✓），退回一句**可操作的提示** ✓；
+   *     而且提示里这回给的是**真能用**的地址 ✓（补了 `/mobile/app` ✓）——
+   *     原来说"填上面这个地址"是**裸源** ✗ ⇒ 用户照做必然落到 401 ✗（**2026-09-28 真机踩到，是我们的文案错** ✓）。
+   *   · 一条都没登记 ⇒ 一句人话 ✓（不画空表格 ✗）。
+   *
+   * ★ 渲染只读**行模型** ✓（`hostsPanelRows()` ✓）—— 面板与验收不会各算一份 ✓。
+   */
+  function buildHostsGroup() {
+    var group = settingsGroup('电脑')
+    var rows = hostsPanelRows()
+    if (rows.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'dshm-set-hint'
+      empty.textContent = '还没有登记过电脑 —— 完成一次配对之后，这里会列出所有电脑，并标出当前这台。'
+      group.appendChild(empty)
+      return group
+    }
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      group.appendChild(
+        settingsRow(
+          row.label,
+          (row.active ? '当前 · ' : '') + row.address + ' · ' + row.fingerprintShort + (row.active ? '' : ' · ' + row.state),
+          row.active ? 'ok' : undefined,
+        ),
+      )
+      if (!row.active) {
+        if (shellSwitchHostBridge() !== undefined) {
+          group.appendChild(makeHostSwitchButton(row))
+        } else {
+          var hint = document.createElement('div')
+          hint.className = 'dshm-set-hint'
+          hint.dataset.dshmHostHint = row.fingerprint
+          hint.textContent =
+            '切过去：用「改地址」填 ' +
+            row.appUrl +
+            '（这个外壳版本还没有"点一下直接切"；装上新 APK 后这里会出现按钮）'
+          group.appendChild(hint)
+        }
+      }
+    }
+    return group
+  }
+
+  /**
+   * 一颗「切到这台」按钮 ✓（P1b ✓ —— 调壳的 `switchHost` ✓）。
+   *
+   * ★ 为什么单独成一个函数 ✗✗（不是洁癖 ✓）：直接在 `for` 循环里写 `function(){…}` 闭包，
+   *   会**捕获同一个 `row` 变量** ✓（`var` 是函数作用域 ✓）⇒ 每颗按钮都切向**最后那一台** ✗✗。
+   *   函数作用域一隔，每颗按钮各自拿到自己那一行 ✓。
+   *
+   * ★ 失败**不许静默** ✗：按钮下面按需长出一句可读提示 ✓（与「改地址」那颗同一个写法 ✓，
+   *   用既有类 `dshm-set-hint` ✓，不新造样式 ✗）。切成功的路径**不写提示** ✓ ——
+   *   壳会立刻 `loadUrl` 换页 ✓，写什么都会被冲掉 ✓。
+   */
+  function makeHostSwitchButton(row) {
+    var hint = null
+    var button = toolButton('切到 ' + row.label, function () {
+      var bridge = shellSwitchHostBridge()
+      if (bridge === undefined) {
+        showHostSwitchHint('这个外壳版本已经没有「点一下直接切」了（多半是刚换了外壳）')
+        return
+      }
+      var failure = null
+      try {
+        var result = bridge.switchHost(row.appUrl)
+        // 契约与 scanPair 同一形状 ✓（见 MainActivity.switchHost ✓）：ok / busy / untrusted / error
+        if (result === 'busy') failure = '已经有一个切换在进行，稍等'
+        else if (result === 'untrusted') failure = '这个外壳不认这台电脑的页面'
+        else if (typeof result === 'string' && result !== 'ok') failure = '切换失败：' + result
+      } catch (problem) {
+        failure = describeError(problem)
+      }
+      if (failure !== null) showHostSwitchHint(failure)
+    })
+    // ★ 给验收脚本一个**稳定的定位钩子** ✓（文案会改 ✓，这个属性不会 ✓）
+    button.dataset.dshmHostSwitch = row.fingerprint
+    button.title = '在壳里切到 ' + row.appUrl
+    function showHostSwitchHint(text) {
+      if (hint === null) {
+        hint = document.createElement('div')
+        hint.className = 'dshm-set-hint'
+        hint.dataset.dshmHostSwitchHint = row.fingerprint
+        if (button.parentNode !== null) {
+          button.parentNode.insertBefore(hint, button.nextSibling)
+        }
+      }
+      hint.textContent = text
+    }
+    return button
+  }
+
+  // ─────────────────── 旧键：归属校验回退 + 一次性迁移 ✗ ───────────────────
+
+  /**
+   * 旧键（不带指纹）**归属可证吗** ✓ → 这是"B 宿主绝不能拿到 A 的身份"那道闸 ✓。
+   *
+   *   · 旧 `dsh-mobile.host` 的 `pinnedHostFingerprint` **== 要取的指纹** ⇒ 认 ✓；
+   *   · 本机**没有**旧 host 键、但本机已经有一份**带指纹**的 `dsh-mobile.host:<指纹>`
+   *     ⇒ 也认 ✓（同一个源上的旧兄弟键 ✓ —— 例如验收脚本直接往本机种一个旧
+   *     `lastGoodEndpoint` ✓；★ 这条**只对 localStorage** 成立 ✗，
+   *     壳里那份是**跨源**的 ✗ ⇒ 那边一律只认"旧 host 的指纹过"✓）；
+   *   · 其余一律 **不认** ✗（当它不存在 ✓ —— 绝不猜 ✗）。
+   */
+  function legacyKeyBelongsToLocal(base, fingerprint) {
+    if (!validHostFingerprint(fingerprint)) return false
+    var owner = fingerprintFromJson(localValue(STORAGE_KEY))
+    if (owner !== undefined) return owner === fingerprint
+    var scopedHost = localValue(identityKeyFor(STORAGE_KEY, fingerprint))
+    return scopedHost !== null && fingerprintFromJson(scopedHost) === fingerprint
+  }
+
+  /** 壳里那份旧键的归属 ✓（**只**认"旧 host 的指纹 == 要取的指纹"✓ —— 见上面那条 ✗）。 */
+  function legacyValueFromVault(base, fingerprint, vault) {
+    if (!validHostFingerprint(fingerprint)) return null
+    var owner = fingerprintFromConfig(parseJsonOrUndefined(vault[STORAGE_KEY]))
+    if (owner === undefined || owner !== fingerprint) return null
+    var value = vault[base]
+    return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  function parseJsonOrUndefined(raw) {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    try {
+      return JSON.parse(raw)
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /**
+   * ★ 一条身份键的**读取** ✓（P1a：读也要命名空间化 ✓，但旧键仍要能用 ✓）。
+   *
+   * 顺序：**带指纹的键**（本机 → 壳 ✓）⇒ 没有再看**旧键**（本机 → 壳 ✓，**归属必须可证** ✓）。
+   * 用了旧键 ⇒ **顺手迁移** ✓（写新键 + 删旧键 ✓；幂等 ✓）。
+   */
+  function readIdentityKeyValue(base, fingerprint) {
+    var resolved = fingerprint === undefined ? currentHostFingerprint() : fingerprint
+    var scopedKey = identityKeyFor(base, resolved)
+    if (scopedKey !== base) {
+      var scoped = localValue(scopedKey)
+      if (scoped !== null) return scoped
+      var scopedFromVault = vaultValue(scopedKey)
+      if (scopedFromVault !== null) return scopedFromVault
+    }
+    var legacy = localValue(base)
+    if (legacy !== null) {
+      if (!legacyKeyBelongsToLocal(base, resolved)) return null
+      migrateLegacyIdentityKeys()
+      var migrated = scopedKey === base ? null : localValue(scopedKey)
+      return migrated !== null ? migrated : legacy
+    }
+    var vaultLegacy = legacyValueFromVault(base, resolved, vaultRead() || {})
+    if (vaultLegacy === null) return null
+    // 壳里那份旧键归属已证 ✓ ⇒ 迁到带指纹的键（不动壳里那份旧值 ✗ —— 见 backfillIdentityVault ✓）
+    if (scopedKey !== base && localValue(scopedKey) === null) {
+      try {
+        localStorage.setItem(scopedKey, vaultLegacy)
+      } catch (error) {
+        void error
+      }
+    }
+    return vaultLegacy
+  }
+
+  /**
+   * ★★ 旧键**一次性迁移** ✓ —— 严格按"旧 `dsh-mobile.host` 自带归属指纹"来判 ✓（不猜 ✗）。
+   *
+   * 语义：
+   *   1. 旧 `dsh-mobile.host` 在本机不存在 ⇒ **什么都不做** ✓（第二次跑就是这一条 ⇒ 幂等 ✓）；
+   *   2. 它存在但 `pinnedHostFingerprint` 取不到 ⇒ **什么都不做** ✓
+   *      （★ 绝不把 `device-key` 单独挂到某个猜出来的指纹上 ✗ —— 那正是
+   *       "隧道能建立、对面不认这台设备"那条坑 ✓）；
+   *   3. 指纹可得 ⇒ 四条旧键**逐条改名**到 `<名字>:<指纹>` ✓（值已在新键里 / 新键更权威 ⇒
+   *      只删旧键 ✓），并把这台宿主记进目录、标成当前 ✓。
+   *
+   * 返回迁移到的指纹 ✓（没做事 ⇒ `null` ✓ —— 验收要能看见"到底动没动" ✓）。
+   */
+  function migrateLegacyIdentityKeys() {
+    var raw = localValue(STORAGE_KEY)
+    if (raw === null) return null
+    var fingerprint = fingerprintFromJson(raw)
+    if (fingerprint === undefined) return null
+    var moved = 0
+    for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+      var base = IDENTITY_VAULT_KEYS[i]
+      var value = localValue(base)
+      if (value === null) continue
+      var target = base + ':' + fingerprint
+      if (localValue(target) === null) writeIdentityKey(base, value, fingerprint)
+      // ★ 旧键**必须**删（显式 `null` 作用在旧键本身 ✓ —— 传 `null` 才不命名空间化 ✓）
+      writeIdentityKey(base, null, null)
+      moved++
+    }
+    if (moved === 0) return null
+    var config = parseJsonOrUndefined(raw)
+    hostRecordUpsert({
+      fingerprint: fingerprint,
+      label: undefined,
+      slots: hostSlotsForConfig(config),
+      lastState: 'paired',
+      lastSeenAt: Date.now(),
+    })
+    setActiveHost(fingerprint)
+    console.info('[dsh-mobile] 已把 ' + moved + ' 个旧身份键迁移到宿主命名空间：' + fingerprint)
+    return fingerprint
+  }
+
+  // ─────────────── "宿主**明确拒绝**这台设备"（本轮修的那条路）───────────────
+  //
+  // ## 用户报的现象（原话）
+  //   · "更新了 apk 以后，进入 app 会一直尝试重连，但我此时还没有配对"✗
+  //   · "我进入设置页会自动被重新刷新退回到主页"✗
+  //
+  // ## 实测到的信号（临时实例 + 真 Chrome，见本轮报告 §①）
+  //   电脑端在设备面板上撤销设备之后，注册表里那条变成 `authorization: "revoked"` ✓，
+  //   而手机这边 `dsh-mobile.host` / `dsh-mobile.device-key` 还在 ✓
+  //   （壳的身份库还会把它恢复回来 ✗）。于是手机一开机就连隧道 ⇒
+  //   宿主在收到明文 ClientHello 后回一帧**明文 LinkError（帧类型 0x12）**：
+  //     {"code":"mobile/device-unknown","message":"device is not paired with this host"}
+  //   —— 这是**稳定契约**（`packages/protocol/src/wire.ts` 的 `ErrorCode` ✓：
+  //   "客户端必须按码分支，不得匹配 message 文本" ✓）。
+  //
+  // ## 判据：**只**认这两个码 ⇒ 只可能是"宿主不认这台设备"
+  //   · `mobile/device-unknown` —— 宿主注册表里没有这台设备（被撤销且无票据时走的就是这条 ✓）；
+  //   · `mobile/device-revoked` —— 协议里语义更直白的那个（Revoked 帧 / 握手期同码）。
+  //   ★ 为什么**不**把别的码一起算进来（每一条都会误删用户好好的配对 ✗）：
+  //   · `pairing-ticket-invalid` / `pairing-pending` / `pairing-rejected` 说的是**票据**不是设备 ✗。
+  //     实测：已撤销的设备**带着一张过期/用过的票据**去连，回的正是 `pairing-ticket-invalid` ✓ ——
+  //     但它同样会出现在"设备好好的、只是 URL 里留着旧票据"的情形里 ✗ ⇒ 认它就会删掉好设备 ✗。
+  //   · `protocol-version` / `handshake-*` / `decrypt-failed` / `capability-denied` 与身份无关 ✗。
+  //   · **网络不通 / 超时 / 电脑没开** ⇒ 前端**根本收不到任何帧** ✗（socket 级错误 ✓）⇒
+  //     走不到这里 ✓（"不误伤"由 `open()` 里"**全部**候选端点都被拒绝"那一段保证 ✓）。
+  var PAIRING_PAGE_PATH = '/mobile'
+  var IDENTITY_CLEARED_KEY = 'dsh-mobile.identityCleared'
+  /** 本页已经因为"被明确拒绝"清过身份（只清一次 ✓；前台自愈也读它 ✓）。 */
+  var deviceRejected = false
+
+  /** 这个错误码是不是"宿主不认这台设备"（判据见上面那段 ✓）。 */
+  function deviceRejectionCode(code) {
+    if (code === 'mobile/device-unknown') return 'mobile/device-unknown'
+    if (code === 'mobile/device-revoked') return 'mobile/device-revoked'
+    return undefined
+  }
+
+  /**
+   * 身份已废 ⇒ 一次做完三件事：**清身份（本机 + 壳的库）✓ ⇒ 停掉重连 ✓ ⇒ 回配对界面 ✓**。
+   *
+   * 为什么必须两边一起清 ✗：只清 localStorage 的话，下一次页面加载
+   * `restoreIdentityFromVault()` 会把刚清掉的身份**原样恢复** ✗ ——
+   * "解除配对当场失效"，这正是本 bug 的根 ✓。
+   * 壳那边的删除语义是**值为 `null`** ✓（`vaultSet` 的既有约定 ✓），
+   * 所以一律走 `removeIdentityKey`（= `writeIdentityKey(key, null)` ✓，全文件唯一写入口 ✓）。
+   */
+  function handleDeviceRejection(tunnel, code, detail) {
+    if (deviceRejected) return false
+    deviceRejected = true
+    try {
+      if (tunnel !== undefined && tunnel !== null) {
+        if (tunnel.config !== undefined) tunnel.config.autoReconnect = false
+        if (tunnel.reconnectTimer !== undefined) {
+          clearTimeout(tunnel.reconnectTimer)
+          tunnel.reconnectTimer = undefined
+        }
+        if (typeof tunnel.stopKeepalive === 'function') tunnel.stopKeepalive()
+      }
+    } catch (error) {
+      void error
+    }
+    var cleared = []
+    for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+      try {
+        /**
+         * ★★ P1a：**只清当前这台宿主**的四条 ✓。
+         *
+         * 为什么非这样不可 ✗：拒绝我们的是**某一台**宿主 ✓ —— 若把四条全清（或者写成
+         * "前缀匹配 `dsh-mobile.host:*` 全删" ✗），用户在 A 上被撤销会**连带清掉 B 的身份** ✗
+         * ⇒ 第二台电脑也得重新配对 ✓（多宿主下这是最容易被写错的一处 ✓）。
+         * `identityKeyFor` 在指纹不可得时返回**旧键本身** ✓ ⇒ 纯旧模式的行为与改动前一致 ✓。
+         */
+        var key = identityKeyFor(IDENTITY_VAULT_KEYS[i])
+        removeIdentityKey(key)
+        cleared.push(key)
+        // 旧键确实属于当前宿主时才连旧键一起清 ✓（归属对不上 ⇒ 一个字都不动 ✗）
+        if (key !== IDENTITY_VAULT_KEYS[i] && legacyKeyBelongsToLocal(IDENTITY_VAULT_KEYS[i], currentHostFingerprint())) {
+          writeIdentityKey(IDENTITY_VAULT_KEYS[i], null, null)
+          cleared.push(IDENTITY_VAULT_KEYS[i])
+        }
+      } catch (error) {
+        void error
+      }
+    }
+    // 手机上没有控制台 ⇒ "我的配对怎么没了"必须留痕 ✓（诊断页读它 ✓）
+    try {
+      localStorage.setItem(
+        IDENTITY_CLEARED_KEY,
+        JSON.stringify({
+          at: new Date().toISOString(),
+          code: code,
+          detail: String(detail === undefined ? '' : detail).slice(0, 300),
+          cleared: cleared,
+        }),
+      )
+    } catch (error) {
+      void error
+    }
+    console.warn('[dsh-mobile] 电脑端明确拒绝这台设备（' + code + '）⇒ 已清除本机与壳里的配对身份，回到配对界面 ✓：' + String(detail))
+    try {
+      // ★ 用 replace 而不是 href ✗：否则系统返回键会退回那个已经连不上的 app 页 ⇒ 立刻又被拒一次 ✗
+      location.replace(PAIRING_PAGE_PATH)
+    } catch (error) {
+      void error
+    }
+    return true
+  }
+
+  /**
+   * 启动时把 vault 里的身份**恢复**进 localStorage ✓ —— ★ 必须**早于**"是否已配对"的任何判断 ✗
+   * （否则新源会被判成"未配对"，`boot()` 直接走"尚未配对"分支、隧道根本不建 ✗）。
+   *
+   * 只补**本机缺**的键 ✓：本机已经有的以本机为准 ✗（壳的库是"另一个源的备份"，
+   * 不能反过来盖掉当前源里更新的值 ✓）；恢复出来的值**不回写**壳 ✗（它本来就从那儿来 ✓，
+   * 回写只会让两边互相刷 ✓）。
+   *
+   * ⚠️ "vault 里**缺**这个键" 与 "这个键的值是 `null`" **都不恢复** ✓ ——
+   * 后者是壳明确的**删除**语义（换槽时删 `lastGoodEndpoint` 就走这条路 ✓）。
+   *
+   * ## ★★ P1a：**只恢复"当前源对应的那个指纹"那四条** ✗✗（§3.2 点名的坑 ✓）
+   * 旧语义是"本机缺 + 库里有 ⇒ 恢复" ✓ —— 命名空间化之后**不能**再这么写 ✗：
+   * 那样在 B 宿主的源上会把 **A 宿主的私钥**恢复进来 ✓，症状是"隧道能建立、
+   * 但对面不认这台设备"✗（比"连不上"难查得多 ✓）。
+   * 指纹定不下来（`undefined`）⇒ **一个都不恢复** ✓（宁可让老路继续可用 ✓，绝不猜 ✗）。
+   * 旧键形态的库（老用户的壳 ✓）走 `legacyValueFromVault` ✓ —— 那里**必须**归属可证 ✓。
+   */
+  function restoreIdentityFromVault() {
+    var vault = vaultRead()
+    if (vault === null) return 0
+    var fingerprint = currentHostFingerprint()
+    if (!validHostFingerprint(fingerprint)) return 0
+    var restored = 0
+    for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+      var base = IDENTITY_VAULT_KEYS[i]
+      var key = identityKeyFor(base, fingerprint)
+      var value = vault[key]
+      if (typeof value !== 'string' || value.length === 0) {
+        // 壳里那份**旧键**（老用户的身份库 ✓）：归属必须可证，否则当它不存在 ✗
+        value = legacyValueFromVault(base, fingerprint, vault)
+      }
+      // 缺键 / null / 非字符串（理论上到不了 ✓）⇒ 都没有可恢复的值 ✓
+      if (typeof value !== 'string' || value.length === 0) continue
+      try {
+        if (localStorage.getItem(key) !== null) continue
+        localStorage.setItem(key, value)
+        restored++
+      } catch (error) {
+        void error
+      }
+    }
+    if (restored > 0) {
+      console.info('[dsh-mobile] 已按宿主指纹 ' + String(fingerprint).slice(0, 8) + '… 从壳的身份库恢复 ' + restored + ' 个跨源身份键（换地址后不用重新配对）')
+    }
+    return restored
+  }
+
+  /**
+   * ★★ 把**本机已有、而壳的库里还没有**的身份键补进壳 ✓。
+   *
+   * ## 为什么必须补（用户报的现象 A/B 的真根因，实测见本轮报告）
+   * 设备私钥原先**只在"生成的那一刻"**才镜像进壳的库（`loadOrCreateDeviceKey` 里那一句 ✓）。
+   * 于是所有"私钥早就在本机、只是从没进过壳的库"的装机 ——
+   * **升级 APK 之前配的对** ✓ / 当年配的时候桥还没有 vault ✓ —— 永远补不进去 ✗。
+   * 实测（真 Chrome + 临时实例，P7）：
+   *   · 壳的库里有 host / claimed-ticket / lastGoodEndpoint ✓，**偏偏没有 device-key** ✗；
+   *   · 把 localStorage 清空（= 壳换槽到**另一个源** ✓）之后，页面**又生成了一把新私钥** ✗
+   *     ⇒ deviceId 变了 ✓。
+   * 而配对的判据是"**claim 的那台设备**必须就是**握手的那台设备**"✓
+   * （宿主 `resolveByTicket`：`claim.deviceId !== hello.deviceId` ⇒ 拒绝 ✓）——
+   * 于是"电脑上允许的是 A、连上来的是 B" ⇒ 手机**永远连不上** ✗、
+   * 「已授权设备」里**永远不出现** ✗（用户原话："扫码扫上了以后电脑确实有新设备要连入，
+   * 但是允许以后不出现新的已授权设备，并且手机这边继续开始不断加载"✓）。
+   *
+   * ## 语义：只**补缺**，绝不覆盖 ✗
+   * 壳的库里已经有这个键就**一个字都不写** ✓（值是别的、或是显式删除 ✓ —— 后者在壳的库里
+   * 表现为"键不存在"✓，所以这里只能按"存在与否"判 ✓）。
+   * 极端情形（另一个源里还留着早已解除配对的旧身份 ✓）万一被补回去也不要紧 ✗✗：
+   * 那台设备在电脑端**已经撤销** ✓ ⇒ 一握手就被明确拒绝 ✓ ⇒ 上面那条
+   * `handleDeviceRejection` 立刻把两边一起清干净 ✓（自愈 ✓，不是死循环 ✓）。
+   *
+   * ## ★★ P1a：只用**当前指纹**的键名 ✓（外加宿主目录那两个跨源键 ✓）
+   * 指纹不可得 ⇒ 四条身份键**一条都不补** ✓（补旧键形态进库，等于给别的源埋一颗雷 ✗）；
+   * 宿主目录仍然照补 ✓（它本身就是跨源的 ✓ —— 与"哪台宿主"无关 ✓）。
+   */
+  function backfillIdentityVault() {
+    var vault = vaultRead()
+    if (vault === null) return 0
+    var patch = {}
+    var count = 0
+    var fingerprint = currentHostFingerprint()
+    if (validHostFingerprint(fingerprint)) {
+      for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
+        var key = identityKeyFor(IDENTITY_VAULT_KEYS[i], fingerprint)
+        if (vault[key] !== undefined) continue
+        var local = localValue(key)
+        if (local === null) continue
+        patch[key] = local
+        count++
+      }
+    }
+    var crossSourceKeys = [HOSTS_KEY, HOSTS_ACTIVE_KEY]
+    for (var j = 0; j < crossSourceKeys.length; j++) {
+      if (vault[crossSourceKeys[j]] !== undefined) continue
+      var value = localValue(crossSourceKeys[j])
+      if (value === null) continue
+      patch[crossSourceKeys[j]] = value
+      count++
+    }
+    if (count === 0) return 0
+    vaultMerge(patch)
+    console.info('[dsh-mobile] 已把本机 ' + count + ' 个身份键补进壳的库（换地址后不用重新配对）')
+    return count
+  }
+
+  /**
+   * 把壳量到的尺寸写进 CSS 变量（**唯一写入口** ✓）。
+   *
+   * `seen === false` 表示壳还没量过 insets ✓（极早的一次调用 ✓）——
+   * 那时**什么都不写**✓：写 0 会把 env() 的兜底值压掉 ✗，反而更糟 ✓。
+   *
+   * ★ round 124 多写两个**底部手势量** ✓（`--dshm-gesture-bottom` ✓ /
+   *   `--dshm-system-gesture-bottom` ✓）—— 与壳自己 `evaluateJavascript` 写的那一份同名同值 ✓。
+   *   本轮它们**不参与任何布局** ✗：只有「端侧诊断」那一行读 ✓
+   *   （补偿留到拿到真机数字之后的下一轮 ✓）。
+   *   壳是旧版（没有这两个字段 ✓）时 `Number(undefined)` 是 NaN ⇒ `write` 直接跳过 ✓
+   *   —— 不会写出 `NaNpx` 把变量弄脏 ✗。
+   */
+  /**
+   * ★★ round 142（本轮第 ④ 条）：**键盘让位只许算一次** ✓。
+   *
+   * ## 用户报的那一屏（原话）
+   *   "键盘弹起时，输入框右边会出现一条很短的竖滚动条，而且把上下文那一行顶得离键盘很远"✗。
+   *
+   * ## 量出来的真因（`scripts/shoot-ui.mjs --shot kb` 三态实测 ✓，数字见那里的日志）
+   *   我们的让位规则是 `centerCol { padding-bottom: var(--dshm-keyboard) }` ✓，
+   *   而 `--dshm-keyboard` = **壳量到的 IME 高度** ✓。问题在于 IME 弹起时，
+   *   "网页可用高度"其实有**两种**变矮的方式 ✓：
+   *     · `adjustNothing` 那一类壳（自己不变矮 ✗）：视口仍是 869 ✓ ⇒ 我们那条 padding
+   *       正好把 composer 顶到键盘上方 ✓ —— **这一态本来就没问题** ✓
+   *       （实测：上下文行底边离键盘 4px ✓）；
+   *     · `adjustResize`（**系统**把 WebView 变矮 ✓）：视口自己就矮成 569 了 ✓，
+   *       而壳**照样**报 ime=300 ✓ ⇒ 那 300px 被算了**两遍** ✗✗ ——
+   *       composer 被顶到键盘上方 ~304px ✗（= 用户说的"上下文那行离键盘很远"✓），
+   *       聊天记录那一层被压掉两遍、只剩 ~181px ✓
+   *       （= 用户看到的那条"很短的小竖条"✓ —— 它就是聊天层的滚动条 ✓）。
+   *
+   * ## 修法（为什么是这个）
+   *   真正该让位的量 = `max(0, IME − 视口已经矮掉的量)` ✓ ——
+   *   也就是"**容器高度跟着键盘走，但只走一次**"✓：
+   *     · 视口没矮 ⇒ 全额让位 ✓（老行为一个字不变 ✓）；
+   *     · 视口已经矮了 IME 那么多 ⇒ 让位 **0** ✓（不再叠第二遍 ✓）；
+   *     · 只矮了一部分（系统只 resize 了一半 ✓）⇒ 只补差额 ✓。
+   *   ★ "没被键盘压过时视口有多高"这个基准**不许猜** ✗（`screen.height` 会带上
+   *     状态栏/浏览器 chrome 的差 ✓）：基准由**键盘关着时的实测值**持续更新 ✓
+   *     （键盘关着 ⇒ 视口就是干净的 ✓），键盘一开就拿它和当下比 ✓。
+   *
+   * ## 为什么另开一个变量、而不是改写 `--dshm-keyboard`
+   *   `--dshm-keyboard` 的语义是"**壳量到的 IME 高度**"✓（「端侧诊断」那一行读它 ✓，
+   *   验收里也有几节**直接 setProperty 它**来模拟键盘 ✓）。把它改写成"修正后的让位量"
+   *   会把两件事混成一个数 ✗（正是本项目反复吃亏的"一个概念两个含义"✗）。
+   *   ⇒ 新变量 `--dshm-keyboard-pad` **只在需要修正时才写** ✓；
+   *     不需要修正时**删掉它** ✓ ⇒ CSS 的
+   *     `var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px))` 自动退回老行为 ✓
+   *     （于是既有验收"直接设 --dshm-keyboard"的写法一个字都不用改 ✓）。
+   *
+   * @returns 这一次**真正**让位了多少 px ✓（排障时直接读返回值，不必反推 ✓）。
+   */
+  var lastImePx = 0
+  var lastViewportWithoutIme = 0
+  /** ★ round 143：**只给调试框看的**两个记账值 ✓（算术不读它们 ✗ —— 见 syncKeyboardPad 末尾 ✓）。 */
+  var lastShrunkPx = 0
+  var lastPadPx = 0
+  function syncKeyboardPad() {
+    var rootElement = document.documentElement
+    if (rootElement === null || rootElement === undefined) return 0
+    /**
+     * ★★ round 148：把"**壳说键盘开着**"这件事落成一个可观察标记 ✓
+     *   （CSS 里那条"键盘弹起时收掉下内边距"就靠它 ✓，验收也断言它 ✓）。
+     *   判据取 `lastImePx > 0`（= 壳报的 IME ✓）而不是"我们让位了多少"✗ ——
+     *   系统自己把视口变矮时 `--dshm-keyboard-pad` 会是 0 ✓，但键盘**确实开着** ✓。
+     */
+    var markKeyboard = function () {
+      try {
+        var on = lastImePx > 0 ? '1' : '0'
+        if (rootElement.dataset.dshmKb !== on) rootElement.dataset.dshmKb = on
+      } catch (error) {
+        void error
+      }
+    }
+    var now = Number(window.innerHeight) || 0
+    if (!(lastImePx > 0)) {
+      // 键盘关着 ⇒ 记基准 ✓，并保证"不需要修正 ⇒ 变量不存在 ⇒ 走 --dshm-keyboard" ✓
+      if (now > 0) lastViewportWithoutIme = now
+      rootElement.style.removeProperty('--dshm-keyboard-pad')
+      lastShrunkPx = 0
+      lastPadPx = 0
+      markKeyboard()
+      refreshKeyboardDebugRow()
+      return 0
+    }
+    // 键盘开着时视口反而更高（转屏 / 分屏 ✓）⇒ 基准跟着抬 ✓，否则会算出负的"矮掉量" ✗
+    if (!(lastViewportWithoutIme > 0) || now > lastViewportWithoutIme) lastViewportWithoutIme = now
+    var shrunk = Math.max(0, lastViewportWithoutIme - now)
+    var pad = Math.max(0, lastImePx - shrunk)
+    /**
+     * ★★ round 143：把"刚刚算出来的两个数"记在模块变量里 ✓ ——
+     *   **纯记账** ✗：算术一个字没改 ✓，只是让调试框那一行能显示
+     *   "**这一份逻辑**到底算出了什么" ✓（而不是让诊断自己再算一遍 ✓ ——
+     *   那样两处算法会漂 ✗，而恰恰是"算出来的和想的不一样"才需要被看见 ✓）。
+     */
+    lastShrunkPx = shrunk
+    if (pad >= lastImePx) {
+      // 一点没被系统吃掉 ⇒ 全额让位，走老变量 ✓（变量删掉 = "没有修正" ✓）
+      rootElement.style.removeProperty('--dshm-keyboard-pad')
+      lastPadPx = lastImePx
+      markKeyboard()
+      refreshKeyboardDebugRow()
+      return lastImePx
+    }
+    rootElement.style.setProperty('--dshm-keyboard-pad', Math.round(pad) + 'px')
+    lastPadPx = Math.round(pad)
+    markKeyboard()
+    refreshKeyboardDebugRow()
+    return pad
+  }
+
+  function applyShellInsets(insets) {
+    if (insets === null || insets === undefined || typeof insets !== 'object') return false
+    if (insets.seen === false) return false
+    var rootElement = document.documentElement
+    if (rootElement === null || rootElement === undefined) return false
+    var write = function (name, value) {
+      var number = Number(value)
+      if (!isFinite(number) || number < 0) return
+      rootElement.style.setProperty(name, Math.round(number) + 'px')
+    }
+    write('--dshm-safe-top', insets.top)
+    write('--dshm-safe-bottom', insets.bottom)
+    write('--dshm-keyboard', insets.ime)
+    /**
+     * ★★ round 142（第 ④ 条）：把壳报的 IME 高度记下来 ✓，再算一次**真正该让位多少** ✓
+     *   （见 `syncKeyboardPad` 那段说明 ✓ —— 系统已经 resize 过时不再叠第二遍 ✓）。
+     */
+    var imePx = Number(insets.ime)
+    if (isFinite(imePx) && imePx >= 0) lastImePx = Math.round(imePx)
+    syncKeyboardPad()
+    write('--dshm-gesture-bottom', insets.gestureBottom)
+    write('--dshm-system-gesture-bottom', insets.systemGestureBottom)
+    return true
+  }
+
+  /** 主动拉一次 ✓（首帧、以及壳事件之后的补偿 ✓）。 */
+  function pullShellInsets() {
+    var insets = shellJson('insets')
+    if (insets === null) return false
+    return applyShellInsets(insets)
+  }
+
+  /**
+   * ───────────────────── 系统"返回"（侧滑手势 / 三键）：按页面层级返回 ─────────────────────
+   *
+   * 用户原话："目前手机的侧边返回会默认为退出 app，请你按照打开层级变为返回
+   * （比如我打开一个页面，我侧边返回是想回到这个页面打开之前）" ✗。
+   *
+   * 壳那半的病根（详见 `MainActivity` 类注释 §系统返回 ✓）：预测式返回默认开启 ⇒
+   * 返回不再走 `onKeyDown` ✗，而壳**没注册** `OnBackInvokedCallback` ✗
+   * ⇒ 系统按默认行为**结束 Activity** ✓ = 用户看到的"直接退出 App"✗。
+   *
+   * ## 为什么是"网页上报"而不是"壳在返回那一刻来问"
+   *
+   * 壳的 `evaluateJavascript` 是**异步**的 ✗，而返回必须在**同一帧**回答
+   * "这一下吃掉、还是退出" ✓ —— 等一个回调回来，这一帧早过去了 ✓
+   * （用户看到的就是"按了没反应"或者"直接退出"✗）。
+   * 所以反过来：网页在**三个开关状态变化时**把"现在有没有可返回的东西"推给壳 ✓
+   * （`DshmShell.setBackAvailable` ✓），壳只读一个布尔 ✓，同一帧就能决定 ✓。
+   *
+   * ## 状态只有一个来源
+   *
+   * 三个开关各自的**写入点**同时也是上报点 ✓（没有 200ms 轮询 ✗）：
+   *   · 文件面板：`setOpen`（`body.dataset.dshmFiles` ✓）
+   *   · 左抽屉：`setDrawer` + 点会话行自动收起那处（`body.dataset.dshMobileDrawer` ✓）
+   *   · DSH 预览：`syncDshPreviewState` 的开/关两支 + `finishPreviewCloseNow`（`body.dataset.dshmDshPreview` ✓）
+   * 判断本身仍以**那三个标记**为准 ✓ —— 不新造一份并行的状态（本项目栽过"同一个概念两个事实来源"✗）。
+   */
+  /** 上一次推给壳的值 ✓（`null` = 还没推过 ✓ —— 第一次无论如何都推 ✓）。 */
+  var dshmBackReported = null
+
+  /** 文件面板 / 左抽屉 / DSH 预览三者各自关闭动作的落脚点 ✓（由 `installShell` 装上 ✓）。 */
+  var dshmBackRuntime = null
+
+  /**
+   * ★ 交付卡片那句「打开所在目录」的落脚点 ✓（round 128 ✓，由 `installShell` 装上 ✓）。
+   *
+   * 为什么不新写一套"打开文件面板并跳目录" ✗：文件面板的进目录逻辑在 `installShell` 里
+   * （`openFilesSheet` → `renderFileBrowser` → `loadDirectory` ✓），卡片那条路够不着它 ✓。
+   * 这里只留**一个入口**（面板自己把它装进来 ✓），卡片只负责"说去哪" ✓ ——
+   * 两边共用同一份实现 ✓（本项目对"同一个概念两套实现"零容忍 ✓）。
+   */
+  var dshmFilesRuntime = null
+
+  /**
+   * ★★ round 144：**隧道状态的只读取值口** ✓（给"调试面板"那几行关键信息用 ✓）。
+   *
+   * 为什么要有它 ✗：`getTunnel` 是 `installShell` 作用域里的局部变量 ✓，
+   * 而调试面板是**顶层**那几个函数画的 ✓（够不着它 ✓）。这里照 `dshmFilesRuntime`
+   * 的老办法：由装它的那一处把一个**取值函数**递出来 ✓（不新造第二份状态 ✗）。
+   * 还没装上（首帧之前 ✓）时它是 `null` ⇒ 调用方按"未连接"显示 ✓。
+   */
+  var dshmTunnelProbe = null
+
+  /**
+   * ★ DSH 原生设置弹窗**开着吗** ✓（round 137 ✓）。
+   *
+   * 判据就是那个标记属性本身 ✓ —— **不再造一份并行状态** ✗（本项目栽过"同一个概念
+   * 两个事实来源"✗，见 backAvailableNow 上面那段说明 ✓）。这个判据文件里已经在用 ✓
+   * （`drawBar()` 里"原生整屏设置开着时先不打扰"那一条 ✓），这里只是把它提成一个函数 ✓，
+   * 好让 `backAvailableNow()` / `dshmBack()` / 侧滑判定三处**用同一把尺子** ✓。
+   */
+  function settingsOverlayOpen() {
+    try {
+      return document.querySelector('[data-dshm-settings="1"]') !== null
+    } catch (error) {
+      return false
+    }
+  }
+
+  /** 现在有没有"可返回的东西" ✓（只读那几个已经存在的标记 ✓）。 */
+  function backAvailableNow() {
+    var body = document.body
+    if (body === null || body === undefined || body.dataset === undefined) return false
+    return (
+      // ★ 全屏设置弹窗是**最上面**那一层 ⇒ 放最前 ✓（它盖着抽屉/面板/预览 ✓）
+      settingsOverlayOpen() ||
+      body.dataset.dshmFiles === 'open' ||
+      body.dataset.dshMobileDrawer === 'open' ||
+      body.dataset.dshmDshPreview === '1' ||
+      /**
+       * ★★ round 163（C ✓）：两级**内容层**的返回（「轨迹」⇒「对话」✓、
+       *   子代理会话 ⇒ 上一级 ✓ —— 见 `backOutOfTrajectoryView` /
+       *   `backOutOfSubagentSession` 的长注释 ✓）。
+       *
+       * ★ 这两条**必须在这里也回答"有"** ✗✗ —— 顺序是"壳**先问** `backAvailable` ✓，
+       *   为真才把这一下交给网页"（见 `MainActivity.handleBackPressed` ✓）⇒
+       *   这里漏了 ⇒ 返回键**根本到不了** `dshmBack()` ✓ ⇒ `goBack()`（DSH 从不写历史 ✗）
+       *   ⇒ `finish()` = **退出 App** ✗。用户报的"退不出来"正是这个形状 ✓。
+       */
+      backOutOfTrajectoryView(false) ||
+      backOutOfSubagentSession(false)
+    )
+  }
+
+  /**
+   * ★★ round 163（C ✓）：**「轨迹」页退回「对话」** —— 用户原话（2026-09-27）：
+   *   "只做 C，但不做侧滑了，只做返回，同理给**轨迹那一页**也做一个无侧滑返回"✓。
+   *
+   * ## 为什么这件事得我们做 ✗
+   * 「对话 | 轨迹」是 DSH 自己的 view 状态 ✓ —— 它**不写 URL**（整份客户端里
+   * 一处 `pushState` 都没有 ✓）、也不进任何"层级" ✓ ⇒ 站在「轨迹」页按返回，
+   * 壳那边只能 `goBack()`（无历史）→ `finish()` = **退出 App** ✗。
+   *
+   * ## 判据与动作都用 DSH 自己那颗 tab ✓（语义属性，不是哈希类名 ✓）
+   *   · **读**：`button[role="tab"]` 里当前 `aria-selected="true"` 的那颗**不是「对话」** ⇒ 可以退 ✓；
+   *   · **动**：点「对话」那颗 ⇒ 走 DSH 自己的 `onClick: () => selectView(id)` ✓
+   *     （我们不碰它的状态 ✗）。
+   * ★ 认"哪颗是对话"**不靠顺序** ✗：先按可见文案找（`对话` / `Conversation` ✓），
+   *   找不到才退回**第一颗** ✓ ⇒ 以后 DSH 多一个 view、或语言变了，也不会退错层 ✓。
+   *
+   * @param act - `true` = 真的点下去 ✓；`false`（或缺省）= 只回答"能不能退" ✓。
+   */
+  function backOutOfTrajectoryView(act) {
+    try {
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return false
+      var row = header.querySelector('[role="tablist"]')
+      if (row === null || row === undefined) return false
+      var tabs = row.querySelectorAll('[role="tab"]')
+      if (tabs.length < 2) return false
+      var active = null
+      var conversation = null
+      for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i].getAttribute('aria-selected') === 'true') active = tabs[i]
+        if (conversation !== null) continue
+        var label = String(tabs[i].textContent || '').replace(/\s+/g, '')
+        if (label === '对话' || /^conversation$/i.test(label)) conversation = tabs[i]
+      }
+      if (conversation === null) conversation = tabs[0]
+      if (active === null || active === conversation) return false
+      if (act !== true) return true
+      conversation.click()
+      return true
+    } catch (error) {
+      debugBoxLine('[back] 退回「对话」失败：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  /**
+   * ★★ round 163（C ✓）：**子代理会话退回上一级** —— 用户原话：
+   *   "目前进入子代理聊天以后退不出来，只能走左侧聊天页面回到主对话兜底"✓。
+   *
+   * ## 真根（读 DSH 装在本机的那份源码得到，不是猜 ✓）
+   * DSH **自己就有一个**"上一级"的入口 ✓ —— 会话头渲染的面包屑
+   * `nav.crumbs > span.crumbSeg > button.crumb` ✓，`onClick: () => open(summary.id)` ✓
+   * （父会话本身也是子代理时，那一格走 lineage 槽、带 `openTitle = () => open(parentId)` ✓，
+   * `onClick` 同样是导航 ✓）。
+   * **但它被我们藏掉了** ✗ —— round 155/158 为了让入口出现在「轨迹」右边，把标题行里
+   * "不在入口祖先链上"的节点全 `display:none` 了 ✓，而祖先面包屑正好是入口的**兄弟**
+   * （`tagLineageEntry` 只把 `entry.parentElement` 往上一路标成 chain ✓）⇒
+   * 手机上它**一个像素都不显示** ✓✓。
+   * ★ 于是这里**不新造控件**（用户选的是"只做 C"✓）：把那颗**已经存在**的按钮点一下 ✓ ——
+   *   `display:none` 不影响合成 click ✓（React 的 `onClick` 挂在根容器上 ✓，命中测试用不上 ✓）。
+   *
+   * ## 判据为什么用面包屑的**格数** ✓
+   * `deriveAncestry()` 只在"当前会话是子代理"时才会给出 ≥2 格 ✓
+   * （从当前会话一路向上 `unshift`、遇到非子代理就停 ✓）⇒
+   * "**≥2 格**" = "此刻在子代理会话里" ✓ —— 与我们那颗控件认不认得出入口**无关** ✓
+   * （控件坏了这条路照样能用 ✓）。
+   *
+   * ★ 顺带记下 DSH 侧的事实（省得下次再查 ✓）：它的"子代理切换器"菜单里**只有兄弟/下级** ✗
+   *   （`CatalogDropdown` 只列 `kind === "child"` 的条目 ✓；`parentAvailable` 只用于
+   *   "父会话不在线 ⇒ 变只读" ✓）⇒ 菜单里**没有向上的口子** ✓，"走左抽屉"是唯一兜底 ✓。
+   *
+   * @param act - `true` = 真的点下去 ✓；`false`（或缺省）= 只回答"能不能退" ✓。
+   */
+  function backOutOfSubagentSession(act) {
+    try {
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return false
+      var candidates = header.querySelectorAll('[class*="crumbSeg"]')
+      var segs = []
+      for (var i = 0; i < candidates.length; i++) {
+        // ★ 子串先筛、再用 `classHasSuffix` 确认 ✓（"选择器写太宽"这个项目已经栽过四次 ✗）
+        if (classHasSuffix(candidates[i], '_crumbSeg')) segs.push(candidates[i])
+      }
+      if (segs.length < 2) return false
+      // 紧邻的上一级 = **倒数第二格** ✓（最后一格是"当前会话"✓，它那颗按钮是 `disabled` 且没有 onClick ✗）
+      var target = segs[segs.length - 2].querySelector('button')
+      if (target === null || target === undefined) return false
+      if (act !== true) return true
+      target.click()
+      return true
+    } catch (error) {
+      debugBoxLine('[back] 退回上一级失败：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  /**
+   * 把"有没有可返回的东西"推给壳 ✓（只在**值变了**的时候推 ✓，`force` 用于安装时对齐一次 ✓）。
+   * 没有壳（浏览器 / 桌面端 ✓）时**什么都不做** ✓ —— 这条桥只服务 APK 表面 ✓。
+   */
+  function reportBackAvailable(force) {
+    try {
+      var bridge = shellBridge()
+      if (bridge === undefined || typeof bridge.setBackAvailable !== 'function') return false
+      var available = backAvailableNow()
+      if (force !== true && available === dshmBackReported) return false
+      dshmBackReported = available
+      bridge.setBackAvailable(available)
+      return true
+    } catch (error) {
+      // 桥抛错不该把"关面板"这件事带崩 ✗（但也不静默 ✓）
+      try {
+        debugBoxLine('[back] 上报可返回状态失败：' + String(error && error.message ? error.message : error))
+      } catch (ignored) {}
+      return false
+    }
+  }
+
+  /**
+   * ★ 壳在返回时调用的那一个函数 ✓（`MainActivity.handleBackPressed` ✓）。
+   *
+   * 按**最上层优先**依次尝试关掉 ✓：
+   *   ① DSH 原生设置弹窗 ✓ ② DSH 预览 ✓ ③ 文件面板 ✓ ④ 左抽屉 ✓
+   *   ★★ round 163（C ✓）再加**两级内容层**：⑤「轨迹」页 ⇒「对话」✓
+   *   ⑥ 子代理会话 ⇒ 上一级 ✓（见 `backOutOfTrajectoryView` / `backOutOfSubagentSession` ✓）。
+   *   （★ round 158 把"DSH 预览"从第 ④ 提到第 ② ✓ —— 理由见下面那一大段 ✓）
+   * 关掉任意一个就返回 `true` = "这一下被我吃掉了" ✓；
+   * 一个都没开返回 `false` ✓ = 交给壳（网页历史回退 ✓ / 都没有就退出 ✓）。
+   *
+   * ★ 为什么设置页必须排在**左抽屉之前** ✗：它是从**打开着的左抽屉**里点进去的 ✓
+   *   （DSH 的「设置」触发行就在 `sidebar.settings` 槽里 ✓）—— 抽屉这时还在它背后开着 ✓。
+   *   顺序反了就成了"返回只关掉抽屉、设置页还盖在屏幕上" ✓（我们第 5 点要的正是
+   *   "侧滑/返回 = 回上一层"，而上一层就是设置页 ✓）。
+   *
+   * ★ DSH 预览这一支**复用已有的那条路** ✓（`clickDshCollapseControl` + `finishPreviewCloseNow` ✓，
+   *   与右滑返回 `pushBackDshPreview` 同一套 ✓）—— 不新写一套"猜类名关闭"✗。
+   */
+  function dshmBack() {
+    try {
+      var runtime = dshmBackRuntime
+      if (runtime === null || runtime === undefined) return false
+      var body = document.body
+      if (body === null || body === undefined || body.dataset === undefined) return false
+      if (settingsOverlayOpen()) {
+        /**
+         * 归 DSH 自己的关闭路径（`closeSettingsOverlay` ✓）：
+         * 它按"我们标记过的关闭键 → Escape → 蒙层"依次尝试 ✓。
+         * 点空（那一帧正在重渲染 ✓）时**仍然返回 true** ✓ —— 这一下已经属于
+         * "返回设置页"这个层级 ✓，不能因为一次点空就退出 App ✗（下一次返回会再试 ✓）。
+         */
+        if (typeof runtime.closeSettings === 'function') runtime.closeSettings()
+        reportBackAvailable()
+        return true
+      }
+      /**
+       * ★★ round 158（B1 ✓）：**DSH 预览这一支要排在「文件面板」之前** ✗✗。
+       *
+       * 为什么（这是本轮 B1 的直接后果 ✓）：round 158 起，"从文件面板点开的 DSH 预览"
+       * **不再收起文件面板** ✓（用户原话："目前的返回文件目录是先回到主页面，然后让文件
+       * 目录跳出来，这点不好"✗）⇒ 预览开着的那段时间里，`data-dshm-files` 一直是 `'open'` ✓。
+       * 而**能看见的最上面那一层是 DSH 预览** ✓（实测：那一层 `0,38 → 412,915` 盖住整屏 ✓，
+       * 我们只是**不画**面板 ✓ —— 见 `body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet` 那条 ✓）。
+       * 所以"返回 = 关掉最上面那一层"这条规矩要求：**先关预览** ✓，再谈面板 ✓。
+       * 顺序反了的后果（正是用户 B2 的原话："**用返回键无法回到文件目录**"✓）：
+       * 返回键会把**看不见的**面板关掉 ✓、预览却还盖在屏幕上 ✗ ⇒ 用户按一下返回"什么都没发生"✗✗。
+       */
+      /**
+       * ★★ round 168：这一支**不能只看标记** ✗✗ —— 标记是"探测链"写上去的 ✓（200ms 轮询 + DOM 观察者 ✓），
+       *   而"预览层在不在"是 **DOM 事实** ✓。用户实拍：预览明明开着、标记却没写上 ✓
+       *   （真根见 `dshPreviewSurface()` 里 `visible()` 那条修正 ✓ —— 面板一开、列表盖住视口中心就漏判 ✓）
+       *   ⇒ 返回键于是**跳过**这一支 ✓、落到「关文件面板」那一支 ✗ ⇒ 面板被关掉 ✓、
+       *   再被"预览关闭后把面板还回去"的逻辑拉起来 ✓ = 用户原话"**一起把文件面板返回，然后再拉起**"✗。
+       * ⇒ 这里在**按下返回的那一下**直接问一次 DOM ✓（`dshPreviewSurface()` ✓，只在按键时调 ✓，不贵 ✓）
+       *   —— 标记与事实**取或** ✓，两条路都兜住 ✓。
+       */
+      if (
+        body.dataset.dshmDshPreview === '1' ||
+        (typeof dshPreviewSurface === 'function' && dshPreviewSurface() !== null)
+      ) {
+        /**
+         * ★ 点了「关闭 / 收起右侧边栏」之后**立刻**结束"预览开着"这个状态 ✓
+         *   （`finishPreviewCloseNow` ✓）—— 与右滑返回同一个道理 ✓：
+         *   那条 180ms 的宽限期是留给"DSH 自己重渲染"的抖动 ✓，
+         *   我们自己按下的关闭不必等 ✓（否则顶栏会多隐身一会儿 ✗）。
+         * 点空（那一行正在重渲染 ✓）时**仍然返回 true** ✓ ——
+         * 这一下已经属于"返回预览"这个层级 ✓，不能因为一次点空就退出 App ✗；
+         * 下一次返回会再试一次 ✓（这时 DSH 那边通常已经渲染好了 ✓）。
+         */
+        var clicked = clickDshCollapseControl()
+        if (clicked !== '' && clicked.indexOf('(无匹配') !== 0) finishPreviewCloseNow()
+        reportBackAvailable()
+        return true
+      }
+      if (body.dataset.dshmFiles === 'open') {
+        /**
+         * ★★ round 142（本轮第 1 条）：**面板里可能停在一个子视图上** ✓
+         *   （现在只有一个：`'capabilities'` = 文件面板底部那行「端侧能力」进来的 ✓）。
+         *   有子视图 ⇒ **先退一层**（回文件视图 ✓，面板不关 ✓）；
+         *   没有 ⇒ 才是"关面板" ✓（老行为一个字没变 ✓）。
+         * ★ 这就是"按层级返回"在面板内部的那一层 ✓ —— 用户报的那类问题
+         *   （"打开一个页面，侧边返回是想回到这个页面打开之前"✓）在这里同样适用 ✓。
+         */
+        if (typeof runtime.backOutOfFiles === 'function' && runtime.backOutOfFiles() === true) {
+          reportBackAvailable()
+          return true
+        }
+        runtime.closeSheet()
+        reportBackAvailable()
+        return true
+      }
+      if (body.dataset.dshMobileDrawer === 'open') {
+        runtime.closeDrawer()
+        reportBackAvailable()
+        return true
+      }
+      /**
+       * ★★ round 163（C ✓）：**两级"内容层"返回** —— 覆盖层（①②③④ ✓）全在上面，
+       *   这两级是**页面自己**的层级 ✓（用户原话："只做 C，但不做侧滑了，只做返回，
+       *   同理给轨迹那一页也做一个无侧滑返回"✓）：
+       *     ⑤ 「轨迹」页 ⇒ 退回「对话」✓
+       *     ⑥ 子代理会话 ⇒ 退回**上一级**（父会话）✓
+       * ★ 顺序"由内到外" ✓：先离开当前 view ✓、再离开当前会话 ✓ ——
+       *   站在子代理会话的轨迹页上连按两次返回 = 对话 → 主对话 ✓。
+       * ★ 用户明确要求**不做侧滑** ✗ ⇒ 这两级**只接返回键** ✓：
+       *   `installSwipeNavigation` 一个字都没动 ✓（侧滑那一套仍然只管抽屉/面板/预览 ✓）。
+       */
+      if (backOutOfTrajectoryView(true) === true) {
+        reportBackAvailable()
+        return true
+      }
+      if (backOutOfSubagentSession(true) === true) {
+        reportBackAvailable()
+        return true
+      }
+      return false
+    } catch (error) {
+      debugBoxLine('[back] 返回处理出错（交给壳去 goBack/finish ✓）：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  /**
+   * 把 `window.__dshmBack` 装上 ✓ —— **只在有壳时**装 ✓（与 `installShell` 同一条件 ✓）。
+   *
+   * 为什么要有这个单独的函数（而不是在 `installShell` 里直接赋值 ✗）：
+   * 验收脚本要**冒充壳**（往 `window` 塞一个假 `DshmShell` ✓，见 check-mobile-layout ✓）
+   * 再验这条链 ✓ —— 那条路必须走**同一份**安装逻辑 ✓，否则验的就不是线上那条 ✓。
+   *
+   * @returns true = 装上了 ✓；false = 没有壳，什么都没做 ✓。
+   */
+  function installBackHook() {
+    try {
+      if (shellBridge() === undefined) return false
+      /**
+       * ★ round 137：顺手补一次"我们在壳里"的标记 ✓（幂等 ✓）。
+       *
+       * 为什么需要：`index.html` 首帧那一处只能判**当时**有没有桥 ✓，而
+       * **验收（与将来可能的宿主）是在页面加载之后才把 `DshmShell` 塞进 `window`** ✓ ——
+       * 那条路上标记会一直缺席 ✗ ⇒ 所有带 `html[data-dshm-shell="android"]` 前缀的
+       * CSS（本轮的"壳里藏掉设置页内容头 / 藏掉 DSH 正文"✓）**全都不会生效** ✓。
+       * 而它们在真机上是有壳的 ✓ ⇒ "验收里看不到"与"真机上就是坏的"长得一模一样 ✗✗。
+       * `installBackHook` 是"确认桥存在"的既有入口之一 ✓（验收也是显式调它 ✓），
+       * 所以在这里补一次最省事、也最不容易被漏掉 ✓。
+       */
+      markShellRoot()
+      globalThis.__dshmBack = dshmBack
+      reportBackAvailable(true)
+      return true
+    } catch (error) {
+      try {
+        debugBoxLine('[back] 装返回钩子失败：' + String(error && error.message ? error.message : error))
+      } catch (ignored) {}
+      return false
+    }
+  }
+
+  /**
+   * ★ 发一条**原生**系统通知 ✓ —— APK 里唯一进得了通知栏的路 ✓。
+   *
+   * 为什么网页那套（`new Notification()` / `ServiceWorkerRegistration.showNotification()`）
+   * 在 APK 里必然失败 ✗：**Android WebView 不实现 Web Notification API** ✓。
+   * 用户报的"通知权限没获取"✗，根因就在这 ✓ —— 不是权限没申请，
+   * 而是那条路在 WebView 里根本不存在 ✓（申请也无处可申请 ✓）。
+   *
+   * @returns `ok` / `default` / `denied` / `untrusted` / `error`；**没有壳 → null** ✓
+   *          （调用方据此决定要不要退回 Web Notification / 页面横幅 ✓）。
+   */
+  function shellNotify(title, body) {
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge.notify !== 'function') return null
+    try {
+      return String(bridge.notify(String(title === undefined ? '' : title), String(body === undefined ? '' : body)))
+    } catch (error) {
+      return 'error'
+    }
+  }
+
+  /** 申请通知权限：有壳走**原生**运行时权限 ✓，没壳才走 Web 那套 ✓。 */
+  function requestNotifyPermission() {
+    var bridge = shellBridge()
+    if (bridge !== undefined && typeof bridge.requestNotificationPermission === 'function') {
+      try {
+        bridge.requestNotificationPermission()
+        return 'native'
+      } catch (error) {
+        return 'error'
+      }
+    }
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        void Notification.requestPermission()
+        return 'web'
+      }
+      return typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
+    } catch (error) {
+      return 'error'
+    }
+  }
+
+  /** 通知权限的**当前**状态：壳在就信壳 ✓（WebView 里 `Notification.permission` 不算数 ✗）。 */
+  function notifyPermissionState() {
+    var bridge = shellBridge()
+    if (bridge !== undefined && typeof bridge.notificationPermission === 'function') {
+      try {
+        return String(bridge.notificationPermission())
+      } catch (error) {
+        return 'unknown'
+      }
+    }
+    try {
+      return typeof Notification === 'undefined' ? 'unsupported' : String(Notification.permission)
+    } catch (error) {
+      return 'unknown'
+    }
+  }
+
+  /**
+   * ★★ 把文件**存到手机上**（round 128 ✓）—— 修的是用户真机反馈的那句
+   *   "手机上下载提示成功但文件没到手机" ✗。
+   *
+   * ## 病根（一句话）
+   *
+   * 文件面板的下载是"JS 里拿到字节 → 点一个 `<a download>`（blob: URL）"✗，
+   * 而 **Android WebView 默认把下载整条丢掉** ✗（壳没有 `setDownloadListener` ✓，
+   * 与 `target="_blank"` / `<input type=file>` 同一类"WebView 原生行为静默失效"✓）
+   * ⇒ 屏幕上那句"下载成功"是**假成功** ✗。
+   *
+   * blob 下载**不能**靠 `setDownloadListener` 救 ✗（它只对网络 URL 触发 ✓）⇒ 走桥：
+   * 网页把字节交给壳 ✓（`DshmShell.saveFile(name, base64)` ✓，壳用 MediaStore 写进
+   * 系统的「下载」目录 ✓，**不需要任何权限** ✓）。
+   *
+   * ## 有壳 / 没壳是两条路（**不许混** ✗）
+   *
+   * · **有壳** ⇒ 走桥 ✓（下面这一套 ✓）；
+   * · **没壳**（纯浏览器 / 桌面端 ✓）⇒ **保持原行为** ✓ —— 那里的 `<a download>` 是好用的 ✓，
+   *   一个字都不改 ✗（调用方自己分支 ✓）。
+   */
+
+  /**
+   * 手机端「保存到下载」的体积上限 ✓ —— **必须与壳里 `SAVE_FILE_MAX_BYTES` 同值** ✓。
+   *
+   * 网页这一侧先判一次是为了**根本不把超大文件送过桥** ✓：桥调用要把整段 base64
+   * 变成字符串跨 JNI ✓，一个 24 MB 的文件光这一步就够把界面卡住 ✗。
+   * 壳那侧还会再判一次 ✓（两边都不许偷偷放宽 ✗）。
+   */
+  var SHELL_SAVE_LIMIT_BYTES = 16 * 1024 * 1024
+
+  /** 页面上那条"存到哪了"的提示条（我们自己造的 ✓ —— 卡片那条路上文件面板可能根本没开 ✓）。 */
+  var shellToastTimer = null
+
+  /**
+   * 把一句话显示在页面上 ✓（手机上没有控制台 ✓，"点了之后发生了什么"必须看得见 ✓）。
+   *
+   * 与面板底部的 `#dsh-mobile-sheet-note` 是**两个**去处 ✓：面板开着时用户看的是那一行 ✓，
+   * 卡片上点「下载」时面板根本没开 ✓ —— 只写 note 等于什么都没说 ✗。
+   * 两条都写 ✓（`saveFeedback` ✓）。
+   */
+  function shellToast(text) {
+    try {
+      if (document.body === null || document.body === undefined) return false
+      var box = document.getElementById('dshm-shell-toast')
+      if (box === null) {
+        box = document.createElement('div')
+        box.id = 'dshm-shell-toast'
+        box.setAttribute('role', 'status')
+        document.body.appendChild(box)
+      }
+      box.textContent = text
+      box.dataset.open = '1'
+      if (shellToastTimer !== null) clearTimeout(shellToastTimer)
+      shellToastTimer = setTimeout(function () {
+        shellToastTimer = null
+        try {
+          var live = document.getElementById('dshm-shell-toast')
+          if (live !== null) live.dataset.open = '0'
+        } catch (error) {
+          void error
+        }
+      }, 12_000)
+      return true
+    } catch (error) {
+      return false
+    }
+  }
+
+  /** 「保存」这件事的统一反馈口 ✓（面板提示行 + 页面提示条 + 调试框 ✓，三处同一条文案 ✓）。 */
+  function saveFeedback(text) {
+    var message = String(text)
+    try {
+      setNote(message)
+    } catch (error) {
+      void error
+    }
+    shellToast(message)
+    try {
+      debugBoxLine('[save] ' + message)
+    } catch (error) {
+      void error
+    }
+    return message
+  }
+
+  /**
+   * 把一段字节交给**壳**存进手机的「下载」目录 ✓。
+   *
+   * 返回值就是壳那句**同步**状态 ✓（`ok` / `too-large` / `untrusted` / `no-bridge` /
+   * `error:…` ✓），调用方据此立刻给出**不同**的文案 ✓ ——
+   * 绝不再无条件说"下载成功" ✗（那正是这一轮要修的病 ✓）。
+   *
+   * @param name 建议的文件名 ✓（壳还会再洗一遍 ✓）。
+   * @param bytes Uint8Array ✓。
+   * @returns 同步状态字符串 ✓。
+   */
+  function shellSaveBytes(name, bytes) {
+    var label = String(name === undefined || name === null ? '文件' : name)
+    if (bytes === undefined || bytes === null || bytes.length === 0) {
+      saveFeedback('保存失败：' + label + ' 是空文件，壳那边收不到任何内容')
+      return 'empty'
+    }
+    if (bytes.length > SHELL_SAVE_LIMIT_BYTES) {
+      saveFeedback(
+        '保存失败：' + label + ' 太大（' + formatSize(bytes.length) + '，手机端上限 ' + formatSize(SHELL_SAVE_LIMIT_BYTES) + '）',
+      )
+      return 'too-large'
+    }
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge.saveFile !== 'function') {
+      saveFeedback('这个 App 里还没有「保存文件」这座桥（装的是旧版 APK）—— 重装最新 APK 之后才能存到手机')
+      return 'no-bridge'
+    }
+    var status
+    try {
+      status = String(bridge.saveFile(label, bytesToBase64(bytes)))
+    } catch (error) {
+      saveFeedback('保存失败：调用壳的「保存文件」出错（' + String(error && error.message ? error.message : error) + '）')
+      return 'error'
+    }
+    if (status === 'ok') {
+      saveFeedback('已交给手机保存：' + label + '（' + formatSize(bytes.length) + '）—— 存好之后会告诉你落在哪')
+      return 'ok'
+    }
+    if (status === 'too-large') {
+      saveFeedback('保存失败：' + label + ' 太大（手机端上限 ' + formatSize(SHELL_SAVE_LIMIT_BYTES) + '）')
+      return 'too-large'
+    }
+    if (status === 'untrusted') {
+      saveFeedback('保存失败：当前页面不在壳的信任名单里（这一下被拒绝了）')
+      return 'untrusted'
+    }
+    saveFeedback('保存失败：' + label + '（壳说：' + status + '）')
+    return status
+  }
+
+  /**
+   * 壳写完之后的**异步**回报 ✓（`reportToPage("saveFile", json)` ✓）——
+   * 到这里才能说"**已保存到「下载」：<文件名>**" ✓，以及失败的真实原因 ✓。
+   */
+  function handleShellSaveCallback(text) {
+    var info = null
+    try {
+      info = JSON.parse(String(text))
+    } catch (error) {
+      info = null
+    }
+    if (info === null || info === undefined || typeof info !== 'object') {
+      saveFeedback('手机保存的结果看不懂：' + String(text).slice(0, 80))
+      return
+    }
+    var name = String(info.name === undefined || info.name === null ? '文件' : info.name)
+    if (info.status === 'ok') {
+      var size = typeof info.bytes === 'number' && info.bytes > 0 ? '（' + formatSize(info.bytes) + '）' : ''
+      saveFeedback('已保存到「下载」：' + name + size)
+      return
+    }
+    saveFeedback('保存失败：' + name + '（' + String(info.reason === undefined || info.reason === null ? '壳没有说明原因' : info.reason) + '）')
+  }
+
+  // 壳的**推**那条路：insets 变了立刻重算 ✓（不必等 200ms 的轮询 ✓）。
+  try {
+    window.addEventListener('dshm-shell-insets', function () {
+      try {
+        pullShellInsets()
+        if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+      } catch (error) {
+        void error
+      }
+    })
+  } catch (error) {
+    void error
+  }
+
+  /**
+   * ★★ round 142（本轮第 ④ 条）：**视口变了也要立刻重算"该让位多少"** ✓。
+   *
+   * 为什么两条通知都要听 ✗：IME 弹起时，
+   *   · "壳报 ime=300" 走 `dshm-shell-insets` ✓；
+   *   · "系统把 WebView 变矮了" 走 **resize** ✓ ——
+   * 这是**两条独立的通知** ✓（谁先到不一定 ✓，甚至只有一条 ✓）。少了这一条，
+   * 两者之间会有一小段"让位被算了两遍"的窗口 ✓ —— 用户看到的就是那一下
+   * 输入区被顶得很远 + 右边一条很短的小竖条 ✓（见 `syncKeyboardPad` 的说明 ✓）。
+   */
+  try {
+    globalThis.addEventListener('resize', function () {
+      try {
+        syncKeyboardPad()
+      } catch (error) {
+        void error
+      }
+    })
+  } catch (error) {
+    void error
+  }
+
+  // 壳的权限对话框是**异步**的 ✓ —— 结果从这里回来（见 MainActivity.reportToPage ✓）。
+  try {
+    globalThis.__dshmShellCallback = function (name, value) {
+      var text = String(value)
+      globalThis.__dshmNotifyPermission = text
+      /**
+       * ★ round 128：「存到哪了」也从这里回来 ✓（壳写完文件之后才报 ✓）——
+       *   在这一条之前，网页那句"下载成功"是在**什么都没发生**的时候说的 ✗。
+       */
+      if (name === 'saveFile') {
+        try {
+          handleShellSaveCallback(text)
+        } catch (error) {
+          void error
+        }
+        return
+      }
+      if (name !== 'notificationPermission') return
+      try {
+        debugBoxLine('[notify] 原生权限结果=' + text)
+      } catch (error) {
+        void error
+      }
+      try {
+        var note = document.getElementById('dsh-mobile-sheet-note')
+        if (note !== null && note !== undefined) {
+          note.textContent =
+            text === 'granted'
+              ? '系统通知权限已授予 ✓（原生通知）'
+              : '系统通知权限未授予（' + text + '）—— 通知会退回页面横幅'
+        }
+      } catch (error) {
+        void error
+      }
+    }
+  } catch (error) {
+    void error
+  }
+
+  /**
+   * ★ 立刻拉一次 ✓ —— 这一段是整个安全区修复里**最要紧的一行**：
+   *   它在任何布局之前执行 ✓，所以"页面从屏幕顶端开始画、顶栏让开状态栏"
+   *   在**首帧**就成立 ✓（不会先闪一下再跳 ✓）。
+   */
+  try {
+    markShellRoot()
+    pullShellInsets()
+  } catch (error) {
+    try {
+      console.error('[dshm] 读取壳的 insets 失败', error)
+    } catch (ignored) {}
+  }
+
+  // ── 调试开关（屏幕上可见的调试框）────────────────────────────────────
+  // 手机没有控制台，所以调试信息写到屏幕上；开关用 URL 参数**带一次就记住**，
+  // 免得每次都要手动加参数（从历史记录或主屏图标打开时参数根本带不进去 ✗）。
+  //   ?debug=1 → 打开并记住；?debug=0 → 关闭并忘记
+  var DEBUG_BOX_ON = (function () {
+    try {
+      var param = new URLSearchParams(location.search).get('debug')
+      if (param === '1') localStorage.setItem('dsh-mobile.debug', '1')
+      else if (param === '0') localStorage.removeItem('dsh-mobile.debug')
+      return localStorage.getItem('dsh-mobile.debug') === '1'
+    } catch (error) {
+      void error
+      return false
+    }
+  })()
+
+  /** 往屏幕上的调试框追加一行（手机上看不到 console，这是唯一可行的取证方式）。 */
+  // ★ `document.body` 还不存在时（脚本在 <head> 同步执行就是这种情形）绝不能把整行丢掉。
+  //   旧实现直接 `document.body.appendChild(box)` 抛错、被下面的 catch 吞掉 —— **整行消失**，
+  //   于是“这行代码没执行”和“执行了但写不进去”在手机屏幕上完全一样。
+  //   今天正是被这一点骗了一轮：调试框里只剩顶层那行 [boot]，怎么加仪表都“没反应”。
+  var debugBoxPending = []
+  var debugBoxFlushHooked = false
+  function debugBoxFlush() {
+    if (debugBoxPending.length === 0) return
+    var lines = debugBoxPending.slice()
+    debugBoxPending.length = 0
+    for (var i = 0; i < lines.length; i++) debugBoxLine(lines[i])
+  }
+  /**
+   * ★★ round 143：把"建那个调试框"抽出来 ✓ —— 现在有**两处**要用它 ✓：
+   *   ① 追加日志（`debugBoxLine` ✓，老路径 ✓）；
+   *   ② **键盘诊断行**（`refreshKeyboardDebugRow` ✓，每次 insets/resize 都要刷新它 ✓）。
+   *   两份建框代码一定会漂 ✗（本项目对这条零容忍 ✓）。
+   */
+  function ensureDebugBox() {
+    if (!DEBUG_BOX_ON) return null
+    if (typeof document === 'undefined') return null
+    if (document.body === null || document.body === undefined) return null
+    try {
+      var box = document.getElementById('dshm-upload-debug')
+      if (box !== null) return box
+      box = document.createElement('pre')
+      box.id = 'dshm-upload-debug'
+      /**
+         * ★ `pointer-events: none` —— 调试框**绝不能吃触摸** ✗。
+         *
+         * 用户报"聊天里的文件链接手机点不开" ✓，而 `?debug=1` 是**会被记住**的 ✓
+         * （localStorage ✓）—— 于是那个盖住上方约 40vh、`z-index: 300` 的框
+         * 会**吞掉那片区域的所有点击** ✓（链接、按钮、消息统统点不动 ✗），
+         * 而它看上去只是"一屏日志" ✓，很难联想到是它 ✗。
+         * 它本来就是**只读**的 ✓，所以直接不参与命中测试 ✓；
+         * 要滚动或复制里面的文字，就把调试关掉（`?debug=0` ✓）—— 这条写进框里 ✓。
+         */
+      box.style.cssText =
+        'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);z-index:300;' +
+        'pointer-events:none;' +
+        'max-height:40vh;overflow:auto;margin:0;padding:10px;border-radius:10px;font-size:11px;' +
+        'line-height:1.5;color:#fff;background:rgba(0,0,0,.85);white-space:pre-wrap;word-break:break-all'
+      document.body.appendChild(box)
+      return box
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
+  function debugBoxLine(text) {
+    if (!DEBUG_BOX_ON) return
+    if (typeof document === 'undefined') return
+    if (document.body === null || document.body === undefined) {
+      debugBoxPending.push(text)
+      if (!debugBoxFlushHooked) {
+        debugBoxFlushHooked = true
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', debugBoxFlush)
+        else setTimeout(debugBoxFlush, 0)
+      }
+      return
+    }
+    setTimeout(function () { try { debugBoxActions() } catch (error) { void error } }, 0)
+    try {
+      var box = ensureDebugBox()
+      if (box === null) return
+      box.textContent = (box.textContent + '\n' + text).slice(-2000)
+      renderDebugBox()
+    } catch (error) {
+      void error
+    }
+  }
+
+  /**
+   * ★★ round 144：**隧道状态那句话只许有一份实现** ✓（这正是本项目反复守的那条 ✗）。
+   *
+   * 它原来长在 `fillConnSettings` 里 ✓（设置页那一行「隧道」✓），而 round 144 的调试面板
+   * 也要显示同一件事 ✓ ⇒ 抽成这个函数 ✓，两处**共用** ✓（各写一份必然漂 ✗）。
+   */
+  function tunnelStatusText(transport) {
+    if (transport === undefined || transport === null) return '未连接'
+    if (transport.placeholder === true) return '连接中…'
+    /**
+     * ★★ round 152：自动重连已放弃时，这一行必须**说出那件事** ✓（用户第 1 条要的"通知用户" ✓）——
+     *   否则设置页上仍然写着「已连接（端到端加密）」✗，而链路其实早就断了 ✗
+     *   （最迷惑人的那种状态：界面说连着、点什么都没反应 ✓）。
+     *   它是本轮"放弃通知"的**第三个去处** ✓（另两处：页面提示条 / 调试框 ✓，见 `giveUpAutoReconnect` ✓）。
+     */
+    /**
+     * ★★ round 153：次数取自**真实的** `failStreak` ✓ —— 放弃可能由"20 秒总预算"触发 ✓，
+     *   那时写死"已试 5 次"就是假话 ✗（数满 5 轮那一条仍是"已试 5 次"✓，既有断言不变 ✓）。
+     */
+    if (transport.autoPaused === true) {
+      var tried = Number(transport.failStreak)
+      if (!isFinite(tried) || tried <= 0) tried = AUTO_RECONNECT_LIMIT
+      return '重连失败（已试 ' + tried + ' 次）'
+    }
+    return '已连接（端到端加密）'
+  }
+
+  /** 壳版本（调试面板那一行关键信息 ✓）。取不到就写 `—` ✓，**绝不编数** ✗。 */
+  function shellVersionText() {
+    var bridge = shellBridge()
+    if (bridge === undefined || bridge === null) return '—'
+    try {
+      if (typeof bridge.version === 'function') return String(bridge.version())
+    } catch (error) {
+      void error
+    }
+    return '—'
+  }
+
+  /**
+   * ★★ round 143：诊断行**内容** ✓ —— 真机要回答的那几个数（用户照着念就行 ✓）。
+   *
+   *   · `壳报`    = `--dshm-keyboard` ✓ = **壳量到的 IME 高度**（Java 侧 `insets.ime` ✓）；
+   *   · `基准`    = 上一次**键盘关着**时的 `innerHeight` ✓（判断"系统矮掉多少"的基准 ✓）；
+   *   · `视口`    = 当前 `window.innerHeight` ✓（**布局视口** ✓ —— 系统 resize 时它会变小 ✓）；
+   *   · `vv`      = `visualViewport.height` ✓（有的 WebView 上它与布局视口不同 ✓，所以两个都报 ✓）；
+   *   · `已矮`    = `基准 − 视口` ✓ = **系统自己吃掉的高度** ✓（真机关键数 ✗）；
+   *              括号里的 `逻辑=` 是**让位逻辑自己算的**那个数 ✓（两处若不同 ⇒ 一眼看出 ✓）；
+   *   · `让位`    = 真正 pad 了多少 ✓；括号里是 `--dshm-keyboard-pad` 的**原文** ✓
+   *              （`未写` = 走老变量 ✓）；
+   *   · `行→键盘` = 我们那条「上下文用量」行底边到**键盘顶边**的距离 ✓；
+   *   · `聊天层高` = 那条"很短的小竖条"所在层的 `clientHeight` ✓。
+   *
+   * ★ 拿不到的数一律写 `—` ✓，**绝不算一个假数** ✗。
+   */
+  function keyboardDebugText() {
+    try {
+      var rootElement = document.documentElement
+      if (rootElement === null || rootElement === undefined) return '键盘 —'
+      var ime = Math.round(parseFloat(getComputedStyle(rootElement).getPropertyValue('--dshm-keyboard')) || 0)
+      var padRaw = String(rootElement.style.getPropertyValue('--dshm-keyboard-pad') || '').trim()
+      var inner = Math.round(Number(window.innerHeight) || 0)
+      var vv =
+        window.visualViewport !== undefined && window.visualViewport !== null
+          ? Math.round(Number(window.visualViewport.height) || 0)
+          : -1
+      var shrunk = Math.max(0, lastViewportWithoutIme - inner)
+      var keyboardTop = inner - lastPadPx
+      var stats = document.getElementById('dshm-stats')
+      var statsDistance = '—'
+      if (stats !== null && stats !== undefined) {
+        statsDistance = String(keyboardTop - Math.round(stats.getBoundingClientRect().bottom))
+      }
+      var chatCands = []
+      try {
+        var all = document.querySelectorAll('[class*="scrollBody"]')
+        for (var i = 0; i < all.length; i++) if (all[i].offsetParent !== null) chatCands.push(all[i])
+        chatCands.sort(function (a, b) {
+          return b.clientHeight - a.clientHeight
+        })
+      } catch (error) {
+        void error
+      }
+      var chat = chatCands.length > 0 ? chatCands[0] : null
+      /**
+       * ★★ round 147（用户："滚动条是没有了，但是距离还是远"✓）：把"**眼睛看到的那个距离**"
+       *   直接报出来 ✓ —— 上一版的 `行→键盘` 用的是**页面内坐标** ✓，而用户看的是**屏幕** ✓，
+       *   两者差一个 `visualViewport.offsetTop` ✗ ⇒ 这就是"量着 4px、看着很远"的来源 ✓。
+       * 追加字段（**不改**前面那些 ✓ —— 验收里那几条 `^[键盘] 壳报=…` 的前缀判据照旧成立 ✓）：
+       *   `行底`/`行高` = 那一行的 `getBoundingClientRect()` ✓；
+       *   `pb`/`mt`   = 它的 `padding-bottom` / `margin-top` **计算值** ✓
+       *                  （round 127/129 给小白条加的那笔补偿就在 `pb` 里 ✓，
+       *                   真机 `safe-bottom=20px` ⇒ 实垫 **18px** ✓，而键盘弹起时小白条早被盖住 ✗）；
+       *   `键盘顶(屏)` = `visualViewport.offsetTop + visualViewport.height` ✓（**屏幕坐标** ✓）；
+       *   `屏可见间距` = `键盘顶(屏) − 行底` ✓ —— **这才是用户眼睛看到的那个数** ✓。
+       */
+      var pb = '—'
+      var mt = '—'
+      var rectText = '—'
+      var screenGap = '—'
+      var keyboardTopScreen = '—'
+      if (stats !== null && stats !== undefined) {
+        var csStats = getComputedStyle(stats)
+        pb = String(Math.round(parseFloat(csStats.paddingBottom) || 0))
+        mt = String(Math.round(parseFloat(csStats.marginTop) || 0))
+        var rect = stats.getBoundingClientRect()
+        rectText = Math.round(rect.top) + '..' + Math.round(rect.bottom) + '(h' + Math.round(rect.height) + ')'
+        var vvTop = window.visualViewport !== undefined && window.visualViewport !== null ? Number(window.visualViewport.offsetTop) || 0 : 0
+        var vvH = window.visualViewport !== undefined && window.visualViewport !== null ? Number(window.visualViewport.height) || 0 : Number(window.innerHeight) || 0
+        keyboardTopScreen = String(Math.round(vvTop + vvH))
+        screenGap = String(Math.round(vvTop + vvH - rect.bottom))
+      }
+      return (
+        '壳报=' + ime + 'px 基准=' + lastViewportWithoutIme + ' 视口=' + inner +
+        ' vv=' + (vv < 0 ? '—' : vv) + ' 已矮=' + shrunk + '（逻辑=' + lastShrunkPx + '）' +
+        ' 让位=' + lastPadPx + 'px（变量:' + (padRaw === '' ? '未写' : padRaw) + '）' +
+        '｜行→键盘=' + statsDistance + 'px 聊天层高=' + (chat === null ? '—' : chat.clientHeight) + 'px' +
+        '｜行底=' + rectText + ' pb=' + pb + ' mt=' + mt +
+        ' 键盘顶(屏)=' + keyboardTopScreen + ' 屏可见间距=' + screenGap + 'px'
+      )
+    } catch (error) {
+      return '读不到：' + String(error && error.message ? error.message : error).slice(0, 60)
+    }
+  }
+
+  /**
+   * ★★ round 144：**调试面板**（用户真机反馈："这个 debug 页面太混乱了，底下有三个空间，
+   *   我没法点到设置切换到非 debug 模式"✗）。
+   *
+   * ## 三个真问题（都来自真机 ✓）
+   *   ① **进去容易出来难** ✗：`?debug=1` 是"带一次就记住"✓，而被挡住时既点不到设置、
+   *      又没法在地址栏里敲 `?debug=0` ✓ ⇒ 必须给一条**不依赖地址栏**的出口 ✓；
+   *   ② **太乱** ✗：整块日志直接铺在屏幕上 ✓ ⇒ 默认只留**关键行** ✓，其余**折叠** ✓；
+   *   ③ **挡住关键点击** ✗：老代码那行 `#dshm-debug-actions` 是 `position:fixed; bottom:8px`
+   *      的三个按钮 ✓（用户说的"底下有三个空间"就是它 ✓）—— 它压着**输入框**与设置页底部 ✓。
+   *
+   * ## 现在的结构（三个 fixed 元素 ✓，只有**按钮**吃事件 ✓）
+   *   · `#dshm-kb-debug`（顶栏正下方 ✓，**永远可见** ✓）：
+   *       第一行 `[键盘] …`（round 143 那行诊断 ✓，默认可见 ✗不许折叠）
+   *       + 一行关键信息 `[外壳] …｜[隧道] …` ✓
+   *       + 两个按钮：**展开日志/收起日志** ✓、**关掉调试并刷新** ✓
+   *       （面板本体 `pointer-events:none` ✓，只有按钮是 `auto` ✓ —— 这样它永远不挡应用 ✗）；
+   *   · `#dshm-debug-actions`（三个能力按钮 ✓）与 `#dshm-upload-debug`（原始日志 ✓）：
+   *       **只在展开时**出现 ✓，位置紧贴上面那条栏 ✓（不再钉在屏幕底部 ✗）。
+   *
+   * ## 两个刻意的设计
+   *   · **键盘弹起时自动只留那条栏** ✓：面板在顶部、键盘在底部 ✓，两者不会打架 ✓
+   *     （展开的日志在矮屏 + 键盘时会盖到输入区 ✗）；
+   *   · `z-index` 取**很大**的值 ✓：脱身按钮必须压在**任何**浮层之上 ✓
+   *     （DSH 自己的设置弹窗层级未知 ✓ —— 它正是用户被困住的那一屏 ✗）。
+   *
+   * ## 折叠状态
+   *   与 `DEBUG_BOX_ON` **同一套存法** ✓（`dsh-mobile.debug.log` ✓）：写 `'1'` = 展开 ✓，
+   *   删掉 = 折叠 ✓（默认 ✓）。**只记住"展开"** ✗ —— 免得留一个"明明关了还在"的残余 ✓。
+   */
+  var DEBUG_LOG_EXPANDED = (function () {
+    try {
+      return localStorage.getItem('dsh-mobile.debug.log') === '1'
+    } catch (error) {
+      void error
+      return false
+    }
+  })()
+
+  function setDebugLogExpanded(on) {
+    DEBUG_LOG_EXPANDED = on === true
+    try {
+      if (DEBUG_LOG_EXPANDED) localStorage.setItem('dsh-mobile.debug.log', '1')
+      else localStorage.removeItem('dsh-mobile.debug.log')
+    } catch (error) {
+      void error
+    }
+    renderDebugBox()
+  }
+
+  /**
+   * ★★ round 144 的**脱身按钮** ✓：清掉"记住的调试开关" ⇒ 刷新 ⇒ 回到正常界面 ✓。
+   *
+   * ★ 必须**同时把地址里的 `?debug=1` 去掉** ✗（这一条不做，按钮就是句空话 ✓）：
+   *   那个参数是"带一次就记住"的 ✓，而它**仍然留在地址栏里** ✓（只有配对那条路会
+   *   `history.replaceState` 清 query ✗）⇒ 直接 `location.reload()` 会**又被它打开** ✗✗。
+   *   所以先 `history.replaceState` 抹掉 `debug` 这一个参数 ✓（其它参数/路径/哈希原样保留 ✓，
+   *   它们可能带着实例票据 ✓），再刷新 ✓。
+   */
+  /**
+   * ★★ round 151（用户："**另外你再加一个切换 debug 和正常模式的功能吧**"✓）：
+   *   **调试模式的唯一读写口** ✓ —— 两处入口（调试栏那颗按钮 ✓ / 设置页那行开关 ✓）
+   *   **共用这一份** ✗（各写一份必然漂 ✓：一边改存储、一边忘改地址栏 ⇒ 刷新后状态不一致 ✗）。
+   *
+   * 三件事一起做 ✓（缺一就会出现"看着开了、刷新又回去了"✗）：
+   *   ① **本地存储里的记住标志** ✓（`dsh-mobile.debug` ✓ —— 与 `DEBUG_BOX_ON` 同一套存法 ✓）；
+   *   ② **地址栏里的 `?debug`** ✓（`history.replaceState` ✓ —— 开着要**补上** ✓、
+   *      关掉要**抹掉** ✓；不补的话"开了再刷新"会掉回去 ✗，不抹的话"关了再刷新"会自己回来 ✗）；
+   *   ③ **刷新** ✓（`DEBUG_BOX_ON` 是启动时算的 ✓ ⇒ 必须重载才真正切换 ✓）。
+   *
+   * @param on - true = 切到调试模式 ✓；false = 切回正常模式 ✓。
+   * @param reload - 省略 = 刷新 ✓（验收里可以传 false 只看存储/地址的变化 ✓）。
+   */
+  function setDebugMode(on, reload) {
+    try {
+      if (on === true) localStorage.setItem('dsh-mobile.debug', '1')
+      else {
+        localStorage.removeItem('dsh-mobile.debug')
+        localStorage.removeItem('dsh-mobile.debug.log')
+      }
+    } catch (error) {
+      void error
+    }
+    try {
+      var url = new URL(location.href)
+      var before = url.search
+      if (on === true) url.searchParams.set('debug', '1')
+      else url.searchParams.delete('debug')
+      var next = url.pathname + (url.search === '' ? '' : url.search) + url.hash
+      if (url.search !== before) history.replaceState(null, '', next)
+    } catch (error) {
+      void error
+    }
+    if (reload === false) return
+    try {
+      location.reload()
+    } catch (error) {
+      void error
+    }
+  }
+
+  /** 关掉调试并刷新 ✓（= `setDebugMode(false, true)` ✓ —— 保留这个名字，语义没变 ✓）。 */
+  function turnDebugOffAndReload() {
+    setDebugMode(false, true)
+  }
+
+  /** 那条栏里要显示的**关键行** ✓（键盘诊断 + 外壳版本 + 隧道状态 ✓）。 */
+  function debugBarText() {
+    var tunnel = typeof dshmTunnelProbe === 'function' ? dshmTunnelProbe() : undefined
+    return (
+      '[键盘] ' +
+      keyboardDebugText() +
+      '\n[外壳] ' +
+      shellVersionText() +
+      '｜[隧道] ' +
+      tunnelStatusText(tunnel)
+    )
+  }
+
+  function ensureDebugBar() {
+    var bar = document.getElementById('dshm-kb-debug')
+    if (bar !== null) return bar
+    if (document.body === null || document.body === undefined) return null
+    bar = document.createElement('pre')
+    bar.id = 'dshm-kb-debug'
+    /**
+     * `pointer-events:none` 打在**面板本体**上 ✓ —— 只有里面那两颗按钮是 `auto` ✓。
+     * 这样"面板不挡应用"与"按钮点得到"同时成立 ✓（用户那条抱怨的正面修法 ✓）。
+     */
+    bar.style.cssText =
+      'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);' +
+      'z-index:2147483000;pointer-events:none;margin:0;padding:6px 10px;border-radius:10px;' +
+      'font-size:11px;line-height:1.5;color:#fff;background:rgba(0,0,0,.86);white-space:pre-wrap;word-break:break-all'
+    var text = document.createElement('span')
+    text.id = 'dshm-kb-text'
+    bar.appendChild(text)
+    var buttons = document.createElement('span')
+    buttons.id = 'dshm-kb-buttons'
+    // ★ 只有这一行吃事件 ✓（`pointer-events:auto` ✓）—— 面板其余部分一律不接收 ✗
+    buttons.style.cssText = 'display:flex;gap:6px;margin-top:6px;pointer-events:auto'
+    var toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.id = 'dshm-kb-toggle'
+    toggle.style.cssText =
+      'flex:1;padding:9px 10px;border:0;border-radius:8px;font-size:12px;color:#fff;background:#2d6cdf'
+    toggle.addEventListener('click', function (event) {
+      if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+      setDebugLogExpanded(!DEBUG_LOG_EXPANDED)
+    })
+    var escape = document.createElement('button')
+    escape.type = 'button'
+    escape.id = 'dshm-kb-off'
+    escape.style.cssText =
+      'flex:1;padding:9px 10px;border:0;border-radius:8px;font-size:12px;color:#fff;background:#b3261e'
+    escape.textContent = '切到正常模式'
+    escape.addEventListener('click', function (event) {
+      if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+      turnDebugOffAndReload()
+    })
+    buttons.appendChild(toggle)
+    buttons.appendChild(escape)
+    bar.appendChild(buttons)
+    document.body.appendChild(bar)
+    return bar
+  }
+
+  /**
+   * 调试面板的**唯一画法** ✓（键盘状态一变就重画一次 ✓，见 `refreshKeyboardDebugRow` ✓）。
+   *
+   * 它做四件事：关键行文字 ✓ / 两颗按钮的文案 ✓ / 展开区的显示与位置 ✓ / 键盘弹起时只留那条栏 ✓。
+   * ★ 与日志框的关系：**不写它的 textContent** ✗ —— 日志由三个写入点自己 append ✓
+   *   （`debugBoxLine` ✓ / 端侧通道 `debugLine` ✓ / 上传钩子 `showDebug` ✓），
+   *   那些老写入点都是从**头截断**的 ✓（`slice(-1600)` ✓）⇒ 任何"塞进去的东西"都会被截掉 ✗
+   *   （round 143 实测两次 ✓）。所以诊断与按钮自成元素 ✓。
+   */
+  function renderDebugBox() {
+    if (!DEBUG_BOX_ON) return
+    var box = ensureDebugBox()
+    var bar = ensureDebugBar()
+    if (box === null || bar === null) return
+    try {
+      var text = document.getElementById('dshm-kb-text')
+      if (text !== null) {
+        var wanted = debugBarText()
+        if (text.textContent !== wanted) text.textContent = wanted
+      }
+      var toggle = document.getElementById('dshm-kb-toggle')
+      if (toggle !== null) {
+        var label = DEBUG_LOG_EXPANDED ? '收起日志' : '展开日志'
+        if (toggle.textContent !== label) toggle.textContent = label
+      }
+      var keyboardPx = Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard')) || 0)
+      /**
+       * ★ 展开区只在这两种情况下出现 ✓：用户**主动展开** ✓ **且**键盘没弹起 ✓。
+       *   键盘弹起时高度只剩 ~570px ✓，展开的日志会盖到输入区 ✗（用户要的是"能点到"✓）。
+       */
+      var showLog = DEBUG_LOG_EXPANDED && keyboardPx === 0
+      var barH = Math.round(bar.getBoundingClientRect().height) + 6
+      var actions = document.getElementById('dshm-debug-actions')
+      var boxTop = 'calc(var(--dshm-top-h, 52px) + 8px + ' + barH + 'px)'
+      if (actions !== null) {
+        actions.style.display = showLog ? 'flex' : 'none'
+        if (actions.style.top !== boxTop) actions.style.top = boxTop
+      }
+      var actionsH = actions === null || showLog !== true ? 0 : Math.round(actions.getBoundingClientRect().height) + 6
+      box.style.display = showLog ? 'block' : 'none'
+      var logTop = 'calc(var(--dshm-top-h, 52px) + 8px + ' + (barH + actionsH) + 'px)'
+      if (box.style.top !== logTop) box.style.top = logTop
+      // 展开区是用户**主动**打开的 ⇒ 它吃事件 ✓（收起时 display:none ✓，影响不到任何东西 ✓）
+      var wanted = showLog ? 'auto' : 'none'
+      if (box.style.pointerEvents !== wanted) box.style.pointerEvents = wanted
+    } catch (error) {
+      void error
+    }
+  }
+
+  /**
+   * 键盘状态一变就重画那条栏 ✓（两个调用点：`syncKeyboardPad()` 的三个分支 ✓
+   * —— 壳推 insets ✓ / 视口 resize ✓ / 键盘收起 ✓；以及 `debugBoxLine()` 每写一行日志 ✓）。
+   */
+  function refreshKeyboardDebugRow() {
+    renderDebugBox()
+  }
+
+  /**
+   * 在黑箱里挂两个**动作按钮**：启用提醒 / 启用通知。
+   *
+   * 为什么放这里：这两个开关原先只在文件面板的工具栏里，而工具栏**只有进入某个目录后
+   * 才会渲染**（面板初始是工作区列表）—— 用户点了半天其实点的是别处（真实反馈：
+   * "点击允许通知黑箱完全没变化"，说明处理函数压根没跑到）。
+   * 黑箱是调试开关打开时**必然存在**的元素，把按钮挂在这里，就不存在"找不到入口"。
+   */
+  // 接收 Service Worker 的回执并写进黑箱（模块级安装，避免依赖端侧通道的内部作用域）。
+  // 有了它，"通知到底有没有被系统接受"在黑箱里看得见 —— 否则只能看到"已 postMessage"、
+  // 然后就没了下文（真实现象 ✗）。
+  try {
+    if (typeof navigator !== 'undefined' && navigator.serviceWorker !== undefined) {
+      navigator.serviceWorker.addEventListener('message', function (event) {
+        var data = event.data || {}
+        if (data.kind === 'notify-ok') debugBoxLine('[notify] SW 已显示通知 ✓')
+        else if (data.kind === 'notify-fail') debugBoxLine('[notify] SW 显示失败 ✗ ' + String(data.message))
+      })
+    }
+  } catch (error) {
+    void error
+  }
+
+  function debugBoxActions() {
+    if (!DEBUG_BOX_ON) return
+    /**
+     * ★★ round 144：这里顺带把面板**重画一次** ✓ —— 它是"每写一行日志就顺手对一次"的那个点 ✓
+     *   （`debugBoxLine` 末尾会调本函数 ✓）。为什么需要 ✗：面板上那几个读数
+     *   （`行→键盘` / `聊天层高` ✓）会随**会话**变化 ✓，而键盘状态没变时没人叫醒面板
+     *   就会一直显示 `—` ✓（截图里真的看到了 ✓）。挂在这里**不新增任何定时器** ✓
+     *   （既有 200ms/4s 的心跳本来就在写日志 ✓）。
+     */
+    refreshKeyboardDebugRow()
+    try {
+      var box = document.getElementById('dshm-upload-debug')
+      if (box === null || document.getElementById('dshm-debug-actions') !== null) return
+      var row = document.createElement('div')
+      row.id = 'dshm-debug-actions'
+      /**
+       * ★★ round 144：**位置改了** ✗✓（用户真机反馈："底下有三个空间，我没法点到设置"✗）。
+       *
+       * 原来它是 `position:fixed; bottom: safe-bottom + 8px` ✓ —— 也就是**钉在屏幕最底下** ✓，
+       * 三个按钮正好压在**输入框**与**设置页底部**上 ✓✓（用户点不到设置就是这么来的 ✓）。
+       * 现在它跟着**调试面板那条栏**走 ✓（在屏幕**上方** ✓，见 `renderDebugBox` 写 top ✓），
+       * 而且**只在展开日志时**出现 ✓（默认收起 ⇒ 它根本不显示 ✓）。
+       */
+      row.style.cssText =
+        'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);' +
+        'z-index:2147483000;display:none;gap:6px;pointer-events:auto'
+      // 「测试通知」：**不依赖审批**，直接走一遍"发系统通知"的完整链路。
+      // 为什么需要它：整条链路原先只能由"真实审批"触发 ✗，而审批未必会发生
+      //（权限预设可能自动放行），于是用户刷新多少次都"没有变化" ✓。
+      // 有了这个按钮，通知这条路能不能通，一次点击就能判定 ✓。
+      var testButton = document.createElement('button')
+      testButton.textContent = '测试通知'
+      testButton.style.cssText =
+        'flex:1;padding:8px;border:0;border-radius:8px;font-size:12px;color:#fff;background:#8a5cf6'
+      testButton.addEventListener('click', function () {
+        void testNotification()
+      })
+      row.appendChild(testButton)
+      ;['show', 'notify'].forEach(function (capability) {
+        var button = document.createElement('button')
+        button.textContent = '启用' + (capability === 'notify' ? '通知' : '提醒')
+        button.style.cssText =
+          'flex:1;padding:8px;border:0;border-radius:8px;font-size:12px;color:#fff;background:#2d6cdf'
+        button.addEventListener('click', function () {
+          void enableDeviceCapability(capability)
+        })
+        row.appendChild(button)
+      })
+      document.body.appendChild(row)
+    } catch (error) {
+      void error
+    }
+  }
+
+  /** 点一下就把"发系统通知"整条链路走一遍，并把每一步写进黑箱。 */
+  async function testNotification() {
+    debugBoxLine('[test] 开始')
+    // ★ 有壳（APK）就直接走原生 ✓：WebView 里没有 Web Notification API ✗，
+    //   再往下走 SW 那条只会得到一句"此环境没有 serviceWorker"✗（用户看到的"点了没反应"✓）。
+    debugBoxLine('[test] 权限=' + notifyPermissionState() + '（' + (shellBridge() !== undefined ? '原生壳' : '浏览器') + '）')
+    var nativeResult = shellNotify('DSH 测试通知', '如果你看到这条，通知链路是通的 ✓')
+    if (nativeResult !== null) {
+      debugBoxLine(
+        '[test] 原生通知 → ' + nativeResult +
+          (nativeResult === 'ok'
+            ? ' ✓ 现在去下拉通知栏看看'
+            : nativeResult === 'default'
+              ? ' ✗ 还没授权 → 先点上面的「启用通知」✓'
+              : ' ✗（' + nativeResult + '）'),
+      )
+      return
+    }
+    try {
+      if (typeof navigator === 'undefined' || navigator.serviceWorker === undefined) {
+        debugBoxLine('[test] 此环境没有 serviceWorker ✗')
+        return
+      }
+      var registration = await navigator.serviceWorker.ready
+      debugBoxLine('[test] SW ready | active=' + String(registration.active !== null))
+      var worker = registration.active ?? registration.waiting ?? registration.installing
+      if (worker === null || worker === undefined) {
+        debugBoxLine('[test] 没有可用的 SW worker ✗')
+        return
+      }
+      worker.postMessage({ kind: 'notify', title: 'DSH 测试通知', body: '如果你看到这条，通知链路是通的 ✓' })
+      debugBoxLine('[test] 已 postMessage 给 SW（等它的回执）')
+    } catch (error) {
+      debugBoxLine('[test] 失败：' + String(error && error.message ? error.message : error))
+    }
+  }
+
+  /** 启用某项端侧能力：本机 + 宿主两处都改，并在手势里申请通知权限。 */
+  async function enableDeviceCapability(capability) {
+    localStorage.setItem('dsh-mobile.deviceAsk.' + capability, 'yes')
+    localStorage.setItem('dsh-mobile.deviceEnabled.' + capability, 'yes')
+    var before = notifyPermissionState()
+    var route = shellBridge() !== undefined ? '原生壳' : '浏览器'
+    debugBoxLine('[enable] ' + capability + ' → 本机已置 yes | 权限(前)=' + before + '（' + route + '）')
+    if (capability === 'notify') {
+      if (before === 'denied') {
+        // `denied` 是**浏览器/系统层面的屏蔽**，不是我们代码能改的 ✗：
+        // 而且只有 `default` 状态才会弹询问框 —— 所以这里不能再"静默跳过"，
+        // 必须把**怎么解除**讲出来（否则用户只会看到"点了没反应"）。
+        // ★ 有壳（APK）时那条路完全不同 ✓ —— WebView 里没有"站点通知权限"这回事 ✗，
+        //   要去**安卓设置**里开（round 115 起 ✓）。
+        debugBoxLine(
+          '[enable] 权限=denied → 解除办法：' +
+            (shellBridge() !== undefined
+              ? '安卓设置 → 应用 → DSH Mobile → 通知 → 打开'
+              : '地址栏左侧的锁/滑块图标 → 权限 → 通知 → 允许；' +
+                '或 Chrome → 设置 → 网站设置 → 通知 → 删掉本站在“已屏蔽”里的条目；' +
+                '并确认 Android 设置 → 应用 → Chrome → 通知 是开着的'),
+        )
+      } else if (before === 'default' || before === 'unsupported') {
+        try {
+          var asked = requestNotifyPermission()
+          debugBoxLine('[enable] 已请求权限（' + asked + '）✓' + (asked === 'native' ? ' 原生对话框是异步的，结果会再写一行 ✓' : ''))
+          if (asked !== 'native') debugBoxLine('[enable] 权限(后)=' + notifyPermissionState())
+        } catch (error) {
+          debugBoxLine('[enable] 权限申请抛错：' + String(error && error.message ? error.message : error))
+        }
+      } else {
+        debugBoxLine('[enable] 权限已授予 ✓ 系统通知可用（' + route + '）')
+      }
+    }
+    try {
+      var transport = await waitForTunnel()
+      if (transport === undefined || transport.placeholder === true) {
+        debugBoxLine('[enable] 隧道未就绪，宿主侧未同步')
+        return
+      }
+      var response = await transport.fetch('/api/mobile/device/enable', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'dev-' + b64u(crypto.getRandomValues(new Uint8Array(8))),
+          method: 'mobile/device/enable',
+          payload: { args: { capability: capability, enabled: true } },
+        }),
+      })
+      var envelope = await response.json()
+      debugBoxLine('[enable] 宿主侧返回：' + JSON.stringify(envelope.result).slice(0, 160))
+    } catch (error) {
+      debugBoxLine('[enable] 宿主侧同步失败：' + String(error && error.message ? error.message : error))
+    }
+    debugBoxActions()
+  }
+
+  var PROTOCOL_VERSION = 1
+  // 与 protocol 的 MAX_FRAME_BYTES 保持一致：DSH 的会话历史快照可能是数 MB 的单条消息。
+  var MAX_FRAME_BYTES = 32 * 1024 * 1024
+  var FRAME_HEADER_BYTES = 14
+  var AUTH_TAG_BYTES = 16
+  var HANDSHAKE_NONCE_BASE = new Uint8Array([0, 0, 0, 1])
+  var STORAGE_KEY = 'dsh-mobile.host'
+  var DEVICE_KEY = 'dsh-mobile.device-key'
+  var CLAIMED_KEY = 'dsh-mobile.claimed-ticket'
+
+  var FrameType = {
+    ClientHello: 0x01,
+    ServerHello: 0x02,
+    ClientAuth: 0x03,
+    ServerAuthOk: 0x04,
+    Ping: 0x10,
+    Pong: 0x11,
+    LinkError: 0x12,
+    Revoked: 0x13,
+    RpcRequest: 0x20,
+    RpcResponse: 0x21,
+    StreamOpen: 0x22,
+    StreamItem: 0x23,
+    StreamEnd: 0x24,
+    StreamError: 0x25,
+    StreamCancel: 0x26,
+  }
+  var FrameFlags = { None: 0x00, Json: 0x01, Ack: 0x02, Final: 0x04 }
+
+  // ───────────────────────────── 基础工具 ─────────────────────────────
+
+  function b64u(bytes) {
+    var view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    var binary = ''
+    for (var i = 0; i < view.length; i++) binary += String.fromCharCode(view[i])
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  }
+
+  function unb64u(text) {
+    var normalized = String(text).replace(/-/g, '+').replace(/_/g, '/')
+    while (normalized.length % 4 !== 0) normalized += '='
+    var binary = atob(normalized)
+    var out = new Uint8Array(binary.length)
+    for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i)
+    return out
+  }
+
+  function utf8(text) {
+    return new TextEncoder().encode(text)
+  }
+
+  function fromUtf8(bytes) {
+    return new TextDecoder().decode(bytes)
+  }
+
+  function concat(parts) {
+    var total = 0
+    for (var i = 0; i < parts.length; i++) total += parts[i].length
+    var out = new Uint8Array(total)
+    var offset = 0
+    for (var j = 0; j < parts.length; j++) {
+      out.set(parts[j], offset)
+      offset += parts[j].length
+    }
+    return out
+  }
+
+  function u32(value) {
+    var out = new Uint8Array(4)
+    new DataView(out.buffer).setUint32(0, value, false)
+    return out
+  }
+
+  function u64(value) {
+    var out = new Uint8Array(8)
+    new DataView(out.buffer).setBigUint64(0, BigInt(value), false)
+    return out
+  }
+
+  function subtle() {
+    if (typeof crypto === 'undefined' || crypto.subtle === undefined) {
+      throw new Error(
+        'dsh-mobile: 本页面缺少 WebCrypto。局域网内请通过 http://<电脑IP>:3080 访问，' +
+          '或让电脑端启用 HTTPS；某些浏览器仅在安全上下文（HTTPS 或 localhost）下提供 crypto.subtle。',
+      )
+    }
+    return crypto.subtle
+  }
+
+  // ───────────────────────────── 密码学封装 ─────────────────────────────
+
+  async function generateEphemeral() {
+    return subtle().generateKey({ name: 'X25519' }, false, ['deriveBits'])
+  }
+
+  async function exportRawPublic(key) {
+    return new Uint8Array(await subtle().exportKey('raw', key))
+  }
+
+  async function deriveShared(privateKey, peerRawPublic) {
+    var peer = await subtle().importKey('raw', peerRawPublic, { name: 'X25519' }, false, [])
+    return new Uint8Array(await subtle().deriveBits({ name: 'X25519', public: peer }, privateKey, 256))
+  }
+
+  async function hkdf(ikm, salt, info) {
+    var key = await subtle().importKey('raw', ikm, 'HKDF', false, ['deriveBits'])
+    return new Uint8Array(
+      await subtle().deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: salt, info: utf8(info) }, key, 256),
+    )
+  }
+
+  async function importAes(rawKey) {
+    return subtle().importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+  }
+
+  async function sha256(bytes) {
+    return new Uint8Array(await subtle().digest('SHA-256', bytes))
+  }
+
+  async function hmac(keyBytes, data) {
+    var key = await subtle().importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+    return new Uint8Array(await subtle().sign('HMAC', key, data))
+  }
+
+  /** 常量时间比较。 */
+  function equalBytes(a, b) {
+    if (a.length !== b.length) return false
+    var diff = 0
+    for (var i = 0; i < a.length; i++) diff |= a[i] ^ b[i]
+    return diff === 0
+  }
+
+  /** 指纹：签名公钥 SHA-256 的前 16 字节，hex。 */
+  async function fingerprintOf(signingPublicRaw) {
+    var digest = await sha256(signingPublicRaw)
+    var out = ''
+    for (var i = 0; i < 16; i++) out += digest[i].toString(16).padStart(2, '0')
+    return out
+  }
+
+  /** 把指纹格式化成 4 字符一组，便于人工比对。 */
+  function formatFingerprint(hex) {
+    return (hex.match(/.{1,4}/g) || []).join('-').toUpperCase()
+  }
+
+  /** transcript 的规范化编码：每个字段前置 4 字节大端长度，防止拼接歧义。 */
+  function transcriptHash(fields) {
+    var parts = []
+    for (var i = 0; i < fields.length; i++) {
+      var bytes = utf8(String(fields[i]))
+      parts.push(u32(bytes.length), bytes)
+    }
+    return sha256(concat(parts))
+  }
+
+  // ───────────────────────────── 帧编解码 ─────────────────────────────
+
+  async function sealFrame(opts) {
+    var counter = u64(opts.counter)
+    var nonce = concat([opts.nonceBase, counter])
+    var key = await importAes(opts.key)
+    var sealed = new Uint8Array(
+      await subtle().encrypt(
+        { name: 'AES-GCM', iv: nonce, additionalData: counter, tagLength: 128 },
+        key,
+        opts.payload,
+      ),
+    )
+    // 标签一律完整 16 字节：WebCrypto 只支持 128 位标签，而"按需截断"会让标签长度
+    // 变成一个两端都要猜的参数（曾因此出现 Node 写 8 字节、解析按 16 字节的错位）。
+    // 每帧多 8 字节的代价远小于一类难以排查的互通故障。
+    var body = sealed
+    if (FRAME_HEADER_BYTES + body.length > MAX_FRAME_BYTES) throw new Error('dsh-mobile: 帧超过上限')
+    var header = new Uint8Array(FRAME_HEADER_BYTES)
+    var view = new DataView(header.buffer)
+    view.setUint8(0, opts.type)
+    view.setUint8(1, opts.flags)
+    view.setUint32(2, body.length, false)
+    header.set(counter, 6)
+    return concat([header, body])
+  }
+
+  /** 明文控制帧（仅握手期使用，无认证标签）。 */
+  function sealPlaintextFrame(type, flags, payload, counter) {
+    var header = new Uint8Array(FRAME_HEADER_BYTES)
+    var view = new DataView(header.buffer)
+    view.setUint8(0, type)
+    view.setUint8(1, flags)
+    view.setUint32(2, payload.length, false)
+    header.set(u64(counter === undefined ? 1 : counter), 6)
+    return concat([header, payload])
+  }
+
+  /**
+   * ★★ 本页**见过帧长不匹配**吗 ✓（0 = 没见过 ✓）—— round 184 加，用户真机报的那条 ✓。
+   *
+   * ## 为什么必须单独记一笔 ✗（这是"退出 App 就断联"那轮改动带出来的新状态 ✓）
+   *
+   * 用户原话（2026-09-29）："我在**小退再进**以后，发消息提示**帧长不同步**，
+   * 确实我的消息没有上手机的聊天界面，但电脑上可以看到我已经发了消息" ✗。
+   *
+   * 真因不是"连接断了" ✗ —— **隧道一直报 `connected`** ✓（socket 活着、RPC 也通 ✓），
+   * 坏掉的是**帧长解析器**：它读错了字节数，于是后面每一帧都错位 ✗ ⇒
+   * 宿主来的会话事件再也解不出来 ⇒ **聊天界面不再更新** ✓（而发出去的消息照样到电脑 ✓，两边症状不对称 ✓）。
+   *
+   * ★★ 为什么这一笔非有不可 ✗✗：既有的**前台自愈**（`selfHealDecision` ✓）唯一的判据是
+   *   `state() !== 'connected'` ✓ —— 而这正是本病的特征：**它一直说 connected** ✗
+   *   ⇒ 自愈**永远不触发** ✗ ⇒ 页面卡在"看着像好的、其实再也不更新"的状态里 ✓。
+   *
+   * ★ 为什么"重载"仍是唯一解 ✓：新开一条 socket **不会**重建这个解析器 ✗
+   *   （它不知道自己错在哪一帧 ✓）—— 这一条是既有注释里早就写明的结论 ✓
+   *   （见 `installForegroundSelfHeal` 的类注释 ✓），这里只是把**触发条件**补上 ✓。
+   *
+   * ★ 它是**内存态** ✓ ⇒ 重载即清零 ✓（不会"一次出错、以后每次回前台都重载"✗）；
+   *   而 `localStorage` 里那条 `dsh-mobile.lastFrameError` ✓（下面那句 ✓）继续留着给人查 ✓。
+   */
+  var frameDesyncAt = 0
+
+  /**
+   * 解析帧头。标签长度固定 16 字节（与 Node 端一致）。
+   */
+  function parseFrame(bytes, hasTag) {
+    var buffer = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    var tagLen = AUTH_TAG_BYTES
+    var minimum = FRAME_HEADER_BYTES + (hasTag === false ? 0 : tagLen)
+    if (buffer.length < minimum) throw new Error('dsh-mobile: 帧过短')
+    var view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+    var payloadLen = view.getUint32(2, false)
+    if (FRAME_HEADER_BYTES + payloadLen !== buffer.length) {
+      // 这是一条**偶发**错误（用户实测"偶尔提示帧长不匹配"）。现场信息必须带出来：
+      // 手机上打不开控制台，只报一句"帧长不匹配"无法定位。
+      // 头部前 8 字节 + 实际/声称长度 + 是否处于握手期，足以区分
+      // "帧被拆/并"、"标签长度算错"、"旧 socket 的迟到帧"这几种成因。
+      var head = []
+      for (var i = 0; i < Math.min(8, buffer.length); i++) head.push(buffer[i].toString(16).padStart(2, '0'))
+      var detail = 'dsh-mobile: 帧长不匹配（声称=' + (FRAME_HEADER_BYTES + payloadLen) +
+        ' 实际=' + buffer.length + ' 首字节=' + head.join(' ') + ' 标签=' + (hasTag === false ? '无' : '有') + '）'
+      // ★ 记一笔给**前台自愈**看 ✓（它据此重载页面 ✓ —— 见 `frameDesyncAt` 的说明 ✓）
+      frameDesyncAt = Date.now()
+      try { localStorage.setItem('dsh-mobile.lastFrameError', detail + ' @' + new Date().toISOString()) } catch (e) { void e }
+      throw new Error(detail)
+    }
+    return {
+      type: view.getUint8(0),
+      flags: view.getUint8(1),
+      counter: view.getBigUint64(6, false),
+      ciphertext: hasTag === false ? buffer.subarray(FRAME_HEADER_BYTES) : buffer.subarray(FRAME_HEADER_BYTES, buffer.length - tagLen),
+      tag: hasTag === false ? new Uint8Array(0) : buffer.subarray(buffer.length - tagLen),
+    }
+  }
+
+  /** 反重放滑动窗口：接受区间为 [highest - w, highest + w]，位图标记已见。 */
+  function ReplayWindow(size) {
+    this.windowSize = BigInt(size === undefined ? 1024 : size)
+    this.capacity = Number(this.windowSize) * 2 + 1
+    this.bitmap = new Uint8Array((this.capacity + 7) >> 3)
+    this.highest = 0n
+    this.lowest = 0n
+    this.started = false
+  }
+  ReplayWindow.prototype.bitIndex = function (counter) {
+    var offset = counter - this.lowest
+    if (offset < 0n || offset >= BigInt(this.capacity)) return -1
+    return Number(offset)
+  }
+  ReplayWindow.prototype.check = function (counter) {
+    if (counter <= 0n) return 'reserved'
+    if (!this.started) return undefined
+    if (counter > this.highest + this.windowSize) return 'beyond-window'
+    if (counter < this.highest - this.windowSize) return 'too-old'
+    var index = this.bitIndex(counter)
+    if (index >= 0 && (this.bitmap[index >> 3] & (1 << (index & 7))) !== 0) return 'seen'
+    return undefined
+  }
+  ReplayWindow.prototype.accept = function (counter) {
+    if (!this.started) {
+      this.started = true
+      this.highest = counter
+      this.lowest = counter
+      this.bitmap[0] |= 1
+      return
+    }
+    var needed = counter - BigInt(this.capacity - 1)
+    if (needed > this.lowest) {
+      var shift = Number(needed - this.lowest)
+      if (shift >= this.capacity) {
+        this.bitmap.fill(0)
+      } else {
+        var byteShift = shift >> 3
+        var bitShift = shift & 7
+        var next = new Uint8Array(this.bitmap.length)
+        for (var i = this.bitmap.length - 1; i >= 0; i--) {
+          var low = i - byteShift >= 0 ? this.bitmap[i - byteShift] : 0
+          var carry = bitShift > 0 && i - byteShift - 1 >= 0 ? this.bitmap[i - byteShift - 1] : 0
+          next[i] = bitShift === 0 ? low : ((low << bitShift) | (carry >>> (8 - bitShift))) & 0xff
+        }
+        this.bitmap = next
+        this.lowest += BigInt(shift)
+      }
+    }
+    var index = this.bitIndex(counter)
+    if (index >= 0) this.bitmap[index >> 3] |= 1 << (index & 7)
+    if (counter > this.highest) this.highest = counter
+  }
+
+  async function openFrame(opts) {
+    var header = opts.header
+    var reason = opts.replay.check(header.counter)
+    if (reason !== undefined) throw Object.assign(new Error('dsh-mobile: 帧被拒绝（' + reason + '）'), { code: 'mobile/replay-detected' })
+    var counter = u64(header.counter)
+    var nonce = concat([opts.nonceBase, counter])
+    var key = await importAes(opts.key)
+    try {
+      var plaintext = new Uint8Array(
+        await subtle().decrypt(
+          { name: 'AES-GCM', iv: nonce, additionalData: counter, tagLength: 128 },
+          key,
+          concat([header.ciphertext, header.tag]),
+        ),
+      )
+      opts.replay.accept(header.counter)
+      return plaintext
+    } catch (error) {
+      throw Object.assign(new Error('dsh-mobile: 帧认证失败'), { code: 'mobile/decrypt-failed' })
+    }
+  }
+
+  // ───────────────────────────── 设备身份 ─────────────────────────────
+
+  /** 载入或生成设备签名密钥（P-256，raw 公钥 65 字节）。 */
+  async function loadOrCreateDeviceKey() {
+    /**
+     * ★ P1a：读**当前源对应指纹**那一份 ✓（旧键在此仅作"归属可证"的回退 ✓ ——
+     *   见 `readIdentityKeyValue` ✓）。指纹不可得 ⇒ 生成新密钥并写旧键形态 ✓
+     *   （纯旧模式 ✓ —— 行为与改动前一致 ✓）。
+     */
+    var fingerprint = currentHostFingerprint()
+    var stored = readIdentityKeyValue(DEVICE_KEY, fingerprint)
+    if (stored !== null) {
+      try {
+        var parsed = JSON.parse(stored)
+        var privateKey = await subtle().importKey(
+          'jwk',
+          parsed.privateKeyJwk,
+          { name: 'ECDSA', namedCurve: 'P-256' },
+          true,
+          ['sign'],
+        )
+        var publicRaw = unb64u(parsed.publicKey)
+        return { deviceId: parsed.deviceId, privateKey: privateKey, publicRaw: publicRaw }
+      } catch (error) {
+        // 存储损坏则重新生成（会导致需要重新配对，故记录原因）
+        console.warn('[dsh-mobile] 设备密钥不可用，将重新生成：', error)
+      }
+    }
+    var pair = await subtle().generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    var raw = await exportRawPublic(pair.publicKey)
+    var jwk = await subtle().exportKey('jwk', pair.privateKey)
+    var deviceId = 'web-' + b64u(crypto.getRandomValues(new Uint8Array(9)))
+    // ★ 走身份写入口 ✓：这台设备的私钥必须**跨源存活** ✗（换地址后新源里没有它就等于没配对 ✓）
+    // ★ P1a：写**带指纹**的键 ✓（指纹不可得时才退回旧键形态 ✓ —— 见 writeIdentityKey ✓）
+    writeIdentityKey(DEVICE_KEY, JSON.stringify({ deviceId: deviceId, publicKey: b64u(raw), privateKeyJwk: jwk }), fingerprint)
+    return { deviceId: deviceId, privateKey: pair.privateKey, publicRaw: raw }
+  }
+
+  async function signTranscript(privateKey, hash) {
+    var signature = new Uint8Array(await subtle().sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, hash))
+    // WebCrypto 输出的就是 raw r‖s（64 字节），与协议一致；若浏览器给出 DER 则转 raw
+    return signature.length === 64 ? signature : derToRaw(signature)
+  }
+
+  /** 兼容路径：某些实现对 EC 签名返回 DER。 */
+  function derToRaw(der) {
+    if (der[0] !== 0x30) throw new Error('dsh-mobile: 无法识别的签名格式')
+    var offset = 2
+    if (der[1] > 0x80) offset += der[1] - 0x80
+    function readInt() {
+      if (der[offset] !== 0x02) throw new Error('dsh-mobile: 签名缺少 INTEGER')
+      var len = der[offset + 1]
+      offset += 2
+      var value = der.subarray(offset, offset + len)
+      offset += len
+      var start = 0
+      while (start < value.length - 1 && value[start] === 0) start++
+      var trimmed = value.subarray(start)
+      var out = new Uint8Array(32)
+      out.set(trimmed, 32 - trimmed.length)
+      return out
+    }
+    var r = readInt()
+    var s = readInt()
+    return concat([r, s])
+  }
+
+  /** 校验宿主身份签名（ECDSA P-256 + SHA-256，raw 64 字节）。 */
+  async function verifyHostSignature(hostPublicRaw, hash, signature) {
+    try {
+      var key = await subtle().importKey(
+        'raw',
+        hostPublicRaw,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify'],
+      )
+      var sig = signature
+      if (sig.length !== 64) sig = rawToDer(signature)
+      return await subtle().verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig, hash)
+    } catch (error) {
+      console.warn('[dsh-mobile] 宿主签名校验异常：', error)
+      return false
+    }
+  }
+
+  function rawToDer(raw) {
+    function encodeInt(bytes) {
+      var start = 0
+      while (start < bytes.length - 1 && bytes[start] === 0) start++
+      var trimmed = bytes.subarray(start)
+      var needsPad = (trimmed[0] & 0x80) !== 0
+      var body = needsPad ? concat([new Uint8Array([0]), trimmed]) : trimmed
+      return concat([new Uint8Array([0x02, body.length]), body])
+    }
+    var body = concat([encodeInt(raw.subarray(0, 32)), encodeInt(raw.subarray(32, 64))])
+    return concat([new Uint8Array([0x30, body.length]), body])
+  }
+
+  // ───────────────────────────── 隧道客户端 ─────────────────────────────
+
+  function Tunnel(config) {
+    this.config = config
+    this.socket = undefined
+    this.keys = undefined
+    this.nonceBase = { client: undefined, server: undefined }
+    this.outCounter = 1n
+    this.inReplay = new ReplayWindow(1024)
+    this.streams = new Map()
+    this.nextStreamId = 1
+    this.pending = new Map()
+    this.ready = undefined
+    this.closedReason = undefined
+    this.reconnectTimer = undefined
+    this.pingTimer = undefined
+    this.attempt = 0
+    /**
+     * ★★ round 152：**连续失败的拨号轮次**（成功清零 ✓）。
+     * 一轮 = 一次拨号（把全部候选端点试完算一轮 ✓，见 `Tunnel.prototype.open` ✓）。
+     */
+    this.failStreak = 0
+    /**
+     * ★★ round 153：**自动重连阶段的截止时刻** ✓（`Date.now()` 毫秒 ✓；`undefined` = 本阶段还没开始 ✓）。
+     *   · 第一次**拨号失败**时写上（= 那一刻 + 总预算 ✓，见 `noteDialFailure` ✓）；
+     *   · 成功 / 手动连上时清掉 ✓（见 `noteDialSuccess` ✓）；
+     *   · 排下一次重连与定时器到点时都拿它跟**当前时钟**比 ✓（见 `autoBudgetExhausted` ✓）。
+     */
+    this.autoReconnectDeadline = undefined
+    /** ★ 自动那一路是否已经**放弃**（= 数满 `AUTO_RECONNECT_LIMIT` 轮 ⇒ 此后等用户手动 ✓）。 */
+    this.autoPaused = false
+    /**
+     * ★★ round 156（B ✓）：此刻是不是**在等人在电脑上点「允许此设备」** ✓
+     *   （宿主回 `mobile/pairing-pending` ✓ ⇒ 见 `noteDialFailure` ✓）。
+     *   这一阶段**不设上限** ✓（不烧 5 轮 / 20 秒预算 ✓）—— 等的是人，不是网络 ✓。
+     */
+    this.awaitingApproval = false
+    /** ★ 我们是否已经**替 DSH 按下过 `offline`** ✓（只有按过才需要派发 `online` ✓，见 `noteDialSuccess` ✓）。 */
+    this.offlineDispatched = false
+    /** ★ 此刻是否有一次拨号在飞 ✓（按需重拨靠它去重 ⇒ 绝不并发拨两次 ✗）。 */
+    this.dialing = false
+    /**
+     * 候选隧道端点（按尝试顺序）。
+     *
+     * 为什么是列表：手机离开局域网后，配置里排第一的局域网地址**必然连不上**。
+     * 以前只有一个 `tunnelUrl`，于是它会一直重连那个死地址——表现就是"永远重连中"。
+     * 兼容旧配置（只有单个 tunnelUrl 时退化为单元素列表）。
+     */
+    this.endpoints = Array.isArray(config.tunnelUrls) && config.tunnelUrls.length > 0
+      ? config.tunnelUrls.slice()
+      : (config.tunnelUrl === undefined ? [] : [config.tunnelUrl])
+    /** 当前正在使用的端点（成功后写入；诊断与日志都会带上它）。 */
+    this.activeEndpoint = undefined
+    this.listeners = { state: [] }
+  }
+
+  /** 上次成功的端点存这里：手机换网后优先试它，通常一次就中。 */
+  var LAST_ENDPOINT_KEY = 'dsh-mobile.lastGoodEndpoint'
+
+  /**
+   * ★★ P1a：读"上次成功的端点" ✓ —— **只认与当前源同一个 host 的那条** ✓。
+   *
+   * ## 为什么必须有这道源校验（点位 B ✓）
+   * 壳在**换槽**那一刻会删掉 vault 里的 `dsh-mobile.lastGoodEndpoint` ✓
+   * （`MainActivity.forgetLastGoodEndpoint()` —— 硬编码旧名字 ✗），
+   * 目的是"换源之后别把上一个源那条端点当首选、白等 8 秒" ✗。
+   * 命名空间化之后网页写的是 `dsh-mobile.lastGoodEndpoint:<指纹>` ✓ ⇒
+   * **壳删不到它了** ✗（本轮**不改 Java** ✗）⇒ 这条保护会**静默失效** ✓。
+   *
+   * ⇒ 网页侧接管同一语义 ✓，而且比壳那条更准 ✓（壳是"换槽就删"，
+   *   我们按"**这条端点的 host 还是不是当前源**"判 ✓）：
+   *   · host 一致 ⇒ 当首选 ✓；
+   *   · host 不一致（= 换过槽 / 换过电脑 ✓）⇒ **忽略 + 顺手删掉** ✓（走唯一写入口 ✓）。
+   * ★ 隧道端点记的是 `wss://host:3443/mobile/ws` ✓，页面源是 `https://host:3443` ✓
+   *   ⇒ 比的是 **host** ✗（比 origin 会把 wss 与 https 判成两个源 ✗）。
+   */
+  function readLastGoodEndpointForCurrentSource() {
+    var value = readIdentityKeyValue(LAST_ENDPOINT_KEY)
+    if (value === null) return null
+    var host = ''
+    try {
+      host = new URL(value, location.href).host
+    } catch (error) {
+      void error
+    }
+    if (host !== '' && host === location.host) return value
+    console.info('[dsh-mobile] 忽略并清除"属于别的源"的上次端点：' + value + '（当前源 ' + location.host + ' ✓）')
+    removeIdentityKey(LAST_ENDPOINT_KEY)
+    return null
+  }
+  /** 单个端点的尝试上限。多候选时必须收紧：否则 3 个候选最坏要等 45 秒才轮到可用的那个。 */
+  var ENDPOINT_TIMEOUT_MS = 8000
+
+  /**
+   * ★★ round 152（用户第 1 条）：**自动重连的轮次上限** —— 连续失败到这一轮就**放弃自动** ✓。
+   *
+   * 为什么必须有 ✗：`scheduleReconnect` 原先是**无限**的（1s→2s→…→20s 封顶，永远排下一次 ✓）。
+   * 手机离开局域网之后界面会永远停在"重连中" ✗ —— 用户既不知道它试了几轮 ✓，
+   * 也不知道自己还能做什么 ✗，只能干等 ✓。
+   *
+   * ★ 上限只约束**机器自动那一轮** ✗：用户手动重连**不做上限** ✓（人来决定 ✓，见 `dialNow` ✓）。
+   * 判据是"**连续**失败" ✓ —— 成功即清零（见 `noteDialSuccess` ✓）。
+   */
+  var AUTO_RECONNECT_LIMIT = 5
+
+  /**
+   * ★★ round 153（用户："缩短，最多 20s 吧"✓）：**自动重连阶段的总预算**（毫秒 ✓）。
+   *
+   * 为什么必须有 ✗：只有"5 轮上限"管不住**时长** ✓ —— 旧退避是 2+4+8+16+20 ≈ 50 秒 ✗，
+   * 再加每轮候选端点的 8 秒超时，断线到"放弃"最坏能拖到 30~90 秒 ✓，
+   * 用户看到的就是"永远在重连"✗。
+   *
+   * ★ 判据是**时钟**（`Date.now()` ✓）不是"退避相加" ✗：拨号本身也会吃掉端点超时 ✓
+   *   （`ENDPOINT_TIMEOUT_MS = 8000` ✓）—— 只看退避之和会以为"才过了 15 秒"✗，
+   *   实际早就超了 ✓。见 `autoReconnectDeadline` / `autoBudgetExhausted` ✓。
+   *
+   * ★ 与"5 轮上限"**任一先到即放弃** ✓（两条都走 `giveUpAutoReconnect` 这一条路 ✓，
+   *   绝不另写一条放弃路径 ✗）。
+   * ★ `config.reconnectBudgetMs` 只给**验收**用 ✓（把 20 秒压成 1ms ✓，生产配置里从不写 ✓）。
+   */
+  var RECONNECT_BUDGET_MS = 20000
+
+  /** 自动退避的基数（毫秒）：第 `attempt` 轮 = `base × min(attempt, 5)` ⇒ 1/2/3/4/5 秒。 */
+  var RECONNECT_BASE_MS = 1000
+
+  /**
+   * ★ 派发一个**合成的**浏览器联网状态事件 —— DSH 自己的连接控制器**只认这一个开关** ✓。
+   *
+   * 依据（不是猜的 ✗）：`@deepseek-ai/dsh-client-connection` 的 `watchBrowserNetwork`
+   * 里 `addEventListener("online")` / `addEventListener("offline")` **各一处** ✓；
+   * 收到 `offline` ⇒ `setNetworkAvailable(false)` ⇒ 它 `emitState("disconnected")`
+   * 并**停在那里不再自动重试** ✓（那时它那颗橙色指示器稳定显示「连接异常，点击立即重连」✓）。
+   *
+   * ⚠️ 有去必须有回 ✗✗：`offline` 之后连上了必须派发 `online`（见 `noteDialSuccess` ✓），
+   *   否则 DSH 那套会被我们**永久**卡在 disconnected ✗。
+   * ⚠️ 只在手机表面做 ✗：电脑端（纯浏览器）一个字节都不许变 ✓ —— 那里 DSH 的控制器同样在跑 ✓，
+   *   给它发假的 offline 就是改电脑端的行为 ✗。
+   *
+   * @returns 真的派发成功了吗（`false` = 没壳 / 没 window / 派发抛错 —— 调用方据此决定要不要记账 ✓）。
+   */
+  function dispatchShellNetworkEvent(kind) {
+    try {
+      if (!isShellSurface()) return false
+      if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return false
+      if (typeof Event !== 'function') return false
+      window.dispatchEvent(new Event(kind))
+      return true
+    } catch (error) {
+      // 派发失败**绝不能**影响重连本身 ✓（它只是一条"让 DSH 那套也停下来"的旁路 ✓）
+      return false
+    }
+  }
+
+  /** 把失败原因压成一句话 ✓（页面上那条提示会把整段错误铺满屏 ✗，截到 120 字 ✓）。 */
+  function shortReason(reason) {
+    var text = String(reason === undefined || reason === null ? '' : reason)
+      .replace(/\s+/g, ' ')
+      .trim()
+    return text.length > 120 ? text.slice(0, 120) + '…' : text
+  }
+
+  Tunnel.prototype.onState = function (listener) {
+    this.listeners.state.push(listener)
+  }
+
+  Tunnel.prototype.emitState = function (state) {
+    for (var i = 0; i < this.listeners.state.length; i++) {
+      try {
+        this.listeners.state[i](state)
+      } catch (error) {
+        console.warn('[dsh-mobile] 状态监听器异常：', error)
+      }
+    }
+  }
+
+  /** 建立连接并完成握手；重复调用返回同一个进行中的 Promise。 */
+  Tunnel.prototype.connect = function (kind) {
+    if (this.ready !== undefined) return this.ready
+    var self = this
+    /**
+     * ★★ round 152：`kind === 'manual'` = **用户点的那一下** ✓（只有 `dialNow` 会这么调 ✓）。
+     *   它**不吃**自动重连的 5 次额度 ✓（用户第 2 条：人来决定，不做上限 ✓）；
+     *   不带参数的一律算**机器自动**（boot 的首次连接 / `scheduleReconnect` ✓）。
+     */
+    var manual = kind === 'manual'
+    this.dialing = true
+    this.ready = (async function () {
+      await self.open()
+    })()
+    this.ready.then(
+      function () {
+        self.dialing = false
+      },
+      function () {
+        self.dialing = false
+      },
+    )
+    this.ready.catch(function (error) {
+      // 允许后续重试
+      self.ready = undefined
+      self.noteDialFailure(error, manual)
+    })
+    return this.ready
+  }
+
+  /**
+   * ★ 链路是否**活着**（socket 已开 + 会话密钥已就绪 ✓）。
+   *
+   * 为什么不能只看 `this.ready` ✗：连接成功后 `ready` 是一个**已决议**的 promise ✓，
+   * 而 socket 可能早就断了 ✓ —— 那时 `connect()` 会把这个陈旧的 promise 原样还给调用方 ✗，
+   * 于是"拨号"根本没发生、请求静默挂住 ✗（用户看到的就是"点了没反应" ✓）。
+   */
+  Tunnel.prototype.hasLiveSocket = function () {
+    return this.socket !== undefined && this.socket.readyState === 1 && this.keys !== undefined
+  }
+
+  /** 清掉待发的自动重连定时器 ✓（放弃 / 按需重拨时都要清 ✗）。 */
+  Tunnel.prototype.clearReconnectTimer = function () {
+    if (this.reconnectTimer === undefined) return
+    try {
+      clearTimeout(this.reconnectTimer)
+    } catch (error) {
+      void error
+    }
+    this.reconnectTimer = undefined
+  }
+
+  /**
+   * ★★ round 153：自动重连的**总预算**（毫秒 ✓）：默认 20 秒 ✓。
+   *   `config.reconnectBudgetMs` 只给**验收**用 ✓（把 20 秒压成 1ms ✓，生产配置里从不写 ✗）。
+   *   与退避基数同一套写法（见 `reconnectBaseMs` 那段 ✓），**一处定义、两处用** ✓
+   *   （预算判据 / 放弃文案里的秒数 ✓）。
+   */
+  Tunnel.prototype.autoReconnectBudgetMs = function () {
+    var budget = Number(this.config.reconnectBudgetMs)
+    if (!isFinite(budget) || budget <= 0) return RECONNECT_BUDGET_MS
+    return budget
+  }
+
+  /**
+   * ★★ round 153：**时钟判据** —— 自动重连阶段的总预算用完了吗 ✓。
+   *
+   * 为什么是 `Date.now()` 而不是"退避之和" ✗：拨号本身也会吃时间 ✓
+   *   （单个候选端点最坏 `ENDPOINT_TIMEOUT_MS = 8000` ✓）——
+   *   只看退避之和会把"其实已经 25 秒了"算成"才 15 秒"✗。
+   */
+  Tunnel.prototype.autoBudgetExhausted = function () {
+    return this.autoReconnectDeadline !== undefined && Date.now() >= this.autoReconnectDeadline
+  }
+
+  /**
+   * ★★ round 152（用户第 2 条）：**按需重拨** —— 发现没有可用 socket 就**立刻**拨一次 ✓。
+   *
+   * 为什么必须有它 ✗：连接成功后 `ready` 是一个已决议的 promise ✓，断开之后
+   * `rpc` / `openStream` 里那句 `await this.connect()` 会**立刻返回**（根本没拨号 ✗），
+   * 于是请求既发不出去、也不失败 —— 静默挂住 ✗。用户点那颗橙色提示
+   * （= DSH 的 `connection.reconnect()` ✓）也只是重新走进同一条死路 ✗。
+   *
+   * 三条语义（本轮定的 ✓）：
+   *   · **delay 0**：清掉退避定时器 ✓，立刻拨（用户点了就要马上有反应 ✓）；
+   *   · **清 `autoPaused`**：手动那一路不受 5 次上限约束 ✓（用户第 2 条 ✓）；
+   *   · **失败原地汇报** ✓：见 `noteDialFailure` / `reportManualReconnectFailure` ✓，
+   *     并且**保持可点** ⇒ 用户想再点几下都行 ✓。
+   *
+   * @param allowWhilePaused - 自动那一路已放弃时，还允不允许**这次调用**发起拨号 ✓。
+   *   · `true`：来自 **DSH 连接控制器的世代来源**（事件流 `openStream` ✓）——
+   *     用户点那颗橙色提示走的**正是它** ✓ ⇒ 必须拨 ✓；
+   *   · `false`：业务请求（`rpc` / `fetch` ✓）—— 自动已放弃时**不拨** ✗，
+   *     直接给一个可读的失败 ✓（绝不静默挂住 ✗）。为什么 ✗：端侧通道有一条
+   *     **4 秒一轮**的 `mobile/device/pending` 轮询 ✓（见 `installDeviceChannel` ✓）——
+   *     不拦住的话，"放弃自动重连"之后机器还会每 4 秒拨一次 ✓、
+   *     并且每 4 秒报一次"手动重连失败"（用户根本没点 ✗✗）。
+   *     而自动**没有**放弃时它们照拨不误 ✓（"请求把连接带起来"这条老行为一个字节没变 ✓）。
+   */
+  Tunnel.prototype.dialNow = function (allowWhilePaused) {
+    if (this.hasLiveSocket()) return Promise.resolve()
+    // 已经有一次拨号在飞 ⇒ 搭上它，绝不并发拨第二次 ✗
+    if (this.dialing === true) return this.ready
+    if (this.autoPaused === true && allowWhilePaused !== true) {
+      return Promise.reject(
+        new Error(
+          'dsh-mobile: 自动重连已停止（连续 ' +
+            AUTO_RECONNECT_LIMIT +
+            ' 轮失败）；请点左侧栏那颗橙色提示手动重连',
+        ),
+      )
+    }
+    // 自动已放弃却还走到这里 ⇒ 这一下是**用户手动**的 ✓（机器那一路已经被停掉了 ✓）
+    var manual = this.autoPaused === true
+    this.clearReconnectTimer()
+    this.ready = undefined
+    this.autoPaused = false
+    return this.connect(manual === true ? 'manual' : 'auto')
+  }
+
+  /**
+   * ★★ **原生时钟的"重连那一半"** ✓ —— 页面被冻结时，把**既有那套重连**重新点着 ✓。
+   *
+   * ## 为什么必须有它 ✗✗（否则 B′ 只做成了半件事）
+   *
+   * 页面自己的重连**全靠 `setTimeout` 退避** ✓（`scheduleReconnect` ✓）——
+   * 而 App 退到后台、页面被冻结时，**`setTimeout` 同样不响** ✗ ⇒
+   * 一旦在后台断线，**原生戳一万次也接不回来** ✗✗：
+   * `scheduleReconnect()` 会被"已有一个定时器排在队里"那句（本文件 `:3783` ✓）直接挡掉 ✓，
+   * 而那个定时器永远不会到点 ✗。⇒ 那 B′ 就只做成"维持一条**没断**的连接"✗，
+   * 没做成"**断了能自己回来**"✗ —— 而后者才是"后台不断联"的本体 ✓。
+   * 原生那 4 秒 / 15 秒一次的 tick **就是那个不会被冻的时钟** ✓：
+   * 它到场一次，就等于替页面把"这一发该拨了"**在它自己那一轮 JS 里**执行掉 ✓。
+   *
+   * ## ★★ 只复用，不新建（一条都不绕过 ✓）
+   *
+   * 它自己**没有任何重连逻辑** ✗，只按既有那几道判据依次问一遍，然后调**既有的**拨号入口：
+   *   ① `hasLiveSocket()` —— 链路活着 ⇒ 不拨 ✓；
+   *   ② `dialing` —— 已经有拨号在飞 ⇒ **绝不并发拨第二次** ✓（既有那句"搭上它" ✓）；
+   *   ③ `config.autoReconnect === false` —— 明确说了别自动重连（设备被撤销那条路 ✓）⇒ 不拨 ✓；
+   *   ④ `autoPaused` —— ★★ **自动那一路已经放弃** ✓（用户 2026-09-27 拍板：**5 轮 / 20 秒**上限 ✓）
+   *      ⇒ **原生戳也不许把它变成无限重试** ✗✗（那等于偷偷推翻用户的决定 ✗）⇒ 不拨 ✓；
+   *   ⑤ `autoBudgetExhausted()` —— 20 秒总预算已到 ⇒ 走**同一条**放弃路径
+   *      （`giveUpAutoReconnect` ✓：判据与出口都与退避定时器体里那句**逐字一致** ✓），不拨 ✓；
+   *   ⑥ 全过了才 `dialNow(false)` ✓ —— 这是**既有**的"按需重拨"入口 ✓
+   *      （页面自己**每一条业务请求** `rpc` 走的就是它 ✓，见 `Tunnel.prototype.rpc` 开头那句
+   *      `await this.dialNow(false)` ✓）⇒ 会话复位等一整套都在 `openEndpoint` 里照旧发生 ✓
+   *      （round 157 那份"所有拨号路径共用一份复位"因此原样成立 ✓）。
+   *
+   * ★ **计数器是共用的** ✓：这一发拨号与页面自己那一发走的是**同一个**
+   *   `noteDialFailure` / `failStreak` / `autoReconnectDeadline` ✓ ——
+   *   原生戳出来的失败**照样吃预算** ✓，5 轮 / 20 秒一到就 `autoPaused` ✓，
+   *   此后本函数只回 `'paused'`、**一次都不再拨** ✓（下面那条断言就是钉它的 ✓）。
+   *
+   * ★ **退避的"等 1/2/3/4/5 秒"这一层有意不照搬** ✗ —— 它本来就是用 `setTimeout` 实现的 ✓，
+   *   而后台里正是不响的那个东西 ✗；替代它的是**原生 tick 自己的节拍** ✓
+   *   （poll 4 秒 / ping 15 秒 ✓，与退避的 1–5 秒同一量级、只会更疏不会更密 ✓），
+   *   而**上限那两条（5 轮 / 20 秒）一个字没动** ✓ —— 那才是用户拍板要保住的东西 ✓。
+   *   也不会"狂拨" ✗：②挡住并发 ✓、④⑤挡住无限 ✓、预算由既有那本账记 ✓。
+   *
+   * ★ **页面自己那一套该重排的，仍由既有那些触发点负责** ✗（断线时的 `socket.onclose`
+   *   → `scheduleReconnect` ✓、回到前台的自愈重载 ✓、DSH 自己那个连接控制器 ✓）——
+   *   这里**不另立调度** ✗，只负责"把该拨的那一发提前到现在" ✓。
+   *
+   * @returns 一个**给人念**的串 ✓（`keepAliveRedialText` 把它拼进 `tick` 的返回串 ✓）：
+   *   `'redial'`（真的催了一发 ✓）/ `'live'`（链路活着 ✓）/ `'dialing'`（已经在拨 ✓）/
+   *   `'off'`（明确关掉了自动重连 ✓）/ `'paused'`（★ 已放弃，在等用户手动 ✓）/
+   *   `'budget'`（总预算刚到，顺手走了既有那条放弃路径 ✓）。**绝不抛** ✗。
+   */
+  Tunnel.prototype.nativeClockRedial = function () {
+    var verdict
+    if (this.hasLiveSocket()) verdict = 'live'
+    else if (this.dialing === true) verdict = 'dialing'
+    else if (this.config.autoReconnect === false) verdict = 'off'
+    else if (this.autoPaused === true) verdict = 'paused'
+    else if (this.autoBudgetExhausted()) verdict = 'budget'
+    else verdict = 'redial'
+    keepAliveStats.lastRedialVerdict = verdict
+    if (verdict === 'budget') {
+      // ★ 与退避定时器体里那句**同一个判据、同一个出口** ✓（`giveUpAutoReconnect` ✓）——
+      //   不然"20 秒上限"在后台里就是一句空话 ✗（那条定时器永远不响 ⇒ 永远不会放弃 ✗）。
+      this.giveUpAutoReconnect(
+        '自动重连总预算已到（' + Math.round(this.autoReconnectBudgetMs() / 1000) + ' 秒）',
+      )
+      return verdict
+    }
+    if (verdict !== 'redial') return verdict
+    keepAliveStats.redials += 1
+    keepAliveStats.lastRedialAt = Date.now()
+    /**
+     * ★ 失败的结算**一律交给既有那套** ✗：`connect()` 自己会走 `noteDialFailure`
+     *   （数 `failStreak` / 判 5 轮与 20 秒 / 到点 `giveUpAutoReconnect` ✓）——
+     *   在这里再处理一遍就是第二份实现 ✗，也正是"双份维护"最容易出事的地方 ✓。
+     *   这里只做一件事：把拒绝吞掉并留一行（否则就是一条没人接的 unhandled rejection ✗，
+     *   而"拒绝"在这一支里是**预期**的 ✓ —— 拨号失败本来就会拒绝 ✓）。
+     */
+    this.dialNow(false).catch(function (error) {
+      console.warn('[dsh-mobile] 原生时钟催重拨失败（已计入既有预算）：', error)
+    })
+    return verdict
+  }
+
+  /**
+   * 一次拨号**失败** ✓（机器自动那一轮 / 用户手动那一下 —— 由 `manual` 区分 ✓）。
+   *
+   * 两条路**刻意不同** ✗：
+   *   · 自动那一轮：累加 `failStreak` ✓，数满 `AUTO_RECONNECT_LIMIT` ⇒ 放弃（见 `giveUpAutoReconnect` ✓）；
+   *   · 手动那一下：**不吃额度** ✓，只原地汇报失败原因 ✓，并把"自动已放弃"的状态**留住** ✓
+   *     —— 那颗橙色提示因此仍然可点 ✓，用户想再点几下都行 ✓。
+   */
+  Tunnel.prototype.noteDialFailure = function (error, manual) {
+    var reason = shortReason(error && error.message ? error.message : error)
+    if (manual === true) {
+      this.autoPaused = true
+      this.reportManualReconnectFailure(reason)
+      return
+    }
+    /**
+     * ★★ round 156（B ✓）：**"等你点允许"（`pairing-pending`）不设上限** ✗✓ ——
+     *   它不计入 `failStreak` ✓、也不消耗 20 秒总预算 ✓（整段等待期都不烧 ✓）。
+     *
+     * 为什么必须分开 ✗✗（真机回归 ✓）：宿主在"等你点允许"时回的那个码是**流程的正常一环** ✓，
+     *   不是"连不上"✗。混在一起数的后果：扫码配对 ⇒ 手机开始重试 ⇒ 用户走到电脑前点「允许」
+     *   只要超过约 20 秒 ⇒ 手机**已经放弃了** ✗✗（旧行为是无限重试直到批准 ✓）。
+     *   ⇒ 判据是"**等人类**"（按退避一直重试、直到批准 ✓）对"**连不上**"（照旧 5 轮 / 20 秒 ✓）。
+     *
+     * 预算怎么"不消耗" ✓（一处写清 ✓）：把 `autoReconnectDeadline` **清掉** ✓ ——
+     *   下一次**真失败**会重新起一笔（见下面那段 ✓），于是等待人工批准的这段时间
+     *   一秒都不算进 20 秒 ✓；而 `failStreak` 保持不变 ✓ ⇒ 之前真失败攒下的轮数**不会**被洗掉 ✓
+     *   （"真失败照旧 5 轮"这条护栏因此原样成立 ✓）。
+     * ★ 只清截止时刻、**不清** `failStreak`：清 streak 等于"等一会儿就能再白试 5 轮"✗。
+     */
+    var pending =
+      (error !== null && error !== undefined && error.code === 'mobile/pairing-pending') ||
+      this.attemptPendingCode === 'mobile/pairing-pending'
+    if (pending) {
+      this.awaitingApproval = true
+      this.autoReconnectDeadline = undefined
+      return
+    }
+    this.awaitingApproval = false
+    /**
+     * `autoReconnect === false` = 已经明确"别再自动重连了" ✓（见 `handleDeviceRejection` ✓，
+     * 那条路自己会清身份、回配对界面 ✓）⇒ 不数、不通知 ✓。
+     */
+    if (this.config.autoReconnect === false) return
+    /**
+     * ★★ round 153（用户："缩短，最多 20s 吧"✓）：**第一次失败起**就开始算自动阶段的总预算 ✓
+     *   （`undefined` 才算开始 ✓ —— 同一轮失败 streak 里只写一次 ✓；成功会清掉 ✓，
+     *   所以下一轮断线是**新的一笔** ✓）。
+     */
+    if (this.failStreak === 0 || this.autoReconnectDeadline === undefined) {
+      this.autoReconnectDeadline = Date.now() + this.autoReconnectBudgetMs()
+    }
+    this.failStreak += 1
+    /**
+     * ★★ round 153：**任一先到即放弃** ✓ —— 5 轮上限 / 20 秒总预算，两条都走
+     *   `giveUpAutoReconnect` 这**一条**路 ✓（不新写放弃路径 ✗）。
+     */
+    if (this.failStreak >= AUTO_RECONNECT_LIMIT || this.autoBudgetExhausted()) this.giveUpAutoReconnect(reason)
+  }
+
+  /** 一次拨号**成功**：计数清零 ✓ + 总预算作废 ✓ + 把先前替 DSH 按下的 `offline` **复原** ✓。 */
+  Tunnel.prototype.noteDialSuccess = function () {
+    this.failStreak = 0
+    this.autoPaused = false
+    // ★ round 153：连上了 ⇒ 这一轮"自动阶段"结束，总预算作废（下次断线重新计时 ✓）
+    this.autoReconnectDeadline = undefined
+    // ★★ round 156（B ✓）：连上了 ⇒ "等你点允许"那一阶段结束 ✓（下一次断线重新判 ✓）
+    this.awaitingApproval = false
+    if (this.offlineDispatched !== true) return
+    this.offlineDispatched = false
+    // ⚠️ 有去必须有回 ✗✗：不派发 online 的话 DSH 那套会**永远**停在 disconnected ✗
+    dispatchShellNetworkEvent('online')
+  }
+
+  /**
+   * ★★ 放弃自动重连：**通知用户** + **让 DSH 自己那套也停下来** ✓。
+   *
+   * 两条触发路径 ✓（round 153）—— **数满 5 轮** / **20 秒总预算用完** ✓，任一先到都走这里 ✓。
+   * 通知落在三处 ✓（少一处真机上就会瞎 ✗，用户第 1 条说得很清楚 ✓）：
+   *   ① `shellToast` —— 页面上那句，**如实**说清是"试满 5 次"还是"持续约 20 秒" ✓
+   *      （预算先到时还说"试满 5 次"就是假话 ✗），以及到哪去手动重连 ✓；
+   *   ② `debugBoxLine` —— 真机排障靠它（无壳 / 无控制台时唯一的线索来源 ✓）；
+   *   ③ 设置页「隧道」那一行 —— 由 `tunnelStatusText` 读 `autoPaused` / `failStreak` 改文案 ✓
+   *      （一处实现、两处用 ✓）；
+   * 另外**顺手试一次**原生通知桥 ✓（`DshmShell.notify` ✓：没壳 ⇒ 静默、没授权 ⇒ 静默 ✓，不影响任何流程 ✓）。
+   *
+   * 然后是最要紧的一步 ✗✗：**合成一次 `offline`** ✓ ——
+   *   DSH 自己的连接控制器也在无限重试 ✓，光我们自己停没用 ✗。它只认窗口事件 ✓，
+   *   收到 `offline` 之后它停下 ✓，那颗橙色指示器稳定变成「连接异常，点击立即重连」可点 ✓。
+   */
+  Tunnel.prototype.giveUpAutoReconnect = function (reason) {
+    if (this.autoPaused === true && this.offlineDispatched === true) return
+    this.autoPaused = true
+    this.clearReconnectTimer()
+    /**
+     * ★★ round 153：文案要**如实**说是哪一条先到的 ✓ ——
+     *   · 数满 5 轮 ⇒ 老文案一个字不改 ✓（既有验收 152-② 守的就是它 ✓）；
+     *   · 总预算先用完 ⇒ 说"持续约 20 秒"✓（**不说**"试满 5 次"✗）。
+     */
+    var byCount = this.failStreak >= AUTO_RECONNECT_LIMIT
+    var seconds = Math.round(this.autoReconnectBudgetMs() / 1000)
+    var text = byCount
+      ? '自动重连已试满 ' +
+        AUTO_RECONNECT_LIMIT +
+        ' 次仍未成功，已停止自动重连。请点左侧栏那颗橙色提示手动重连。'
+      : '自动重连已持续约 ' +
+        seconds +
+        ' 秒仍未成功，已停止自动重连。请点左侧栏那颗橙色提示手动重连。'
+    if (isShellSurface()) {
+      shellToast(text)
+      shellNotify('DSH 移动端：连接中断', text)
+    }
+    debugBoxLine(
+      '[tunnel] 自动重连已放弃（连续 ' +
+        this.failStreak +
+        ' 轮失败' +
+        (byCount ? '' : '、达总预算 ' + seconds + ' 秒') +
+        '）：' +
+        reason,
+    )
+    if (dispatchShellNetworkEvent('offline')) this.offlineDispatched = true
+  }
+
+  /** 用户手动重连失败：**原地**说清原因 ✓（保持可点 ⇒ 用户可再点 ✓）。 */
+  Tunnel.prototype.reportManualReconnectFailure = function (reason) {
+    if (isShellSurface()) shellToast('手动重连失败：' + reason + '（可再点一次那颗橙色提示重试）')
+    debugBoxLine('[tunnel] 手动重连失败：' + reason)
+  }
+
+  /**
+   * 依次尝试候选端点，任何一个完成握手即成功。
+   *
+   * 全部失败时把**每个端点各自的失败原因**汇总抛出——手机上排障只能靠这条信息，
+   * 只说"连不上"等于没说（分不清是超时、证书、还是被信任栅栏拒了）。
+   */
+  Tunnel.prototype.open = function () {
+    var self = this
+    // 上次成功的端点提到最前：换网（家里 ↔ 公司 ↔ 4G）后通常一次就中
+    if (self.activeEndpoint !== undefined) {
+      var at = self.endpoints.indexOf(self.activeEndpoint)
+      if (at > 0) {
+        self.endpoints.splice(at, 1)
+        self.endpoints.unshift(self.activeEndpoint)
+      }
+    }
+    self.fallbackInProgress = self.endpoints.length > 1
+    var tryFrom = function (index, failures) {
+      if (index >= self.endpoints.length) {
+        self.fallbackInProgress = false
+        var detail = failures
+          .map(function (f) {
+            return f.url + ' → ' + f.reason
+          })
+          .join('；')
+        /**
+         * ★★ 全部候选端点都被宿主**明确拒绝** ⇒ 这不是网络抖动 ✗，是"宿主的注册表里没有这台设备"
+         *   （被撤销 / 换了电脑 / 重装过 ✓）。**必须全部**都是明确拒绝才算 ✗：
+         *   只要有一个端点连不上（超时 / DNS / 拒绝连接 ✓）⇒ 就按"网络问题"处理、一个字都不清 ✓
+         *   （防的是"某条路暂时不通就把用户好好的配对删掉" ✗）。
+         *   判据只有一条：**有没有从对端解析出带 code 的 LinkError 帧** ✓（见 deviceRejectionCode ✓）。
+         */
+        var rejectedEverywhere = failures.length > 0
+        for (var k = 0; k < failures.length; k++) {
+          if (failures[k].code === undefined) rejectedEverywhere = false
+        }
+        /**
+         * ★★ round 156（B ✓）：**"等你点允许"不是连不上** ✓ —— 把这条信号**如实带上** ✓。
+         *
+         * 为什么必须在这里补 ✗✗：`pairing-pending` 那一帧的 code 只在**帧那一层**是活的 ✓
+         *   （`onMessage` 抛出 `{code:'mobile/pairing-pending'}` ✓）；
+         *   走到这个汇总点时，上面那句 `deviceRejectionCode()` **故意不认**票据类码 ✓
+         *   （它只认 device-unknown / device-revoked ✓，见那段说明 ✓）⇒ `code` 落成 undefined ✓
+         *   ⇒ 这个函数原来一律 reject 成一句"所有候选端点都连不上"（**没有 code** ✗）
+         *   ⇒ `noteDialFailure` 于是把它当成一次**真失败**、烧掉 5 轮 / 20 秒预算 ✗✗。
+         *   真机现象：扫码配对后走到电脑前点「允许」，超过约 20 秒手机就先放弃了 ✗
+         *   （旧行为是无限重试直到批准 ✓ —— 用户等的是人，不是网络 ✓）。
+         */
+        var pendingEverywhere = failures.length > 0
+        for (var q = 0; q < failures.length; q++) {
+          if (failures[q].pending !== true) pendingEverywhere = false
+        }
+        if (pendingEverywhere) {
+          return Promise.reject(
+            Object.assign(new Error('dsh-mobile: 电脑端还在等你点「允许此设备」（' + detail + '）'), {
+              code: 'mobile/pairing-pending',
+            }),
+          )
+        }
+        if (rejectedEverywhere) {
+          self.rejectedCode = failures[0].code
+          handleDeviceRejection(self, failures[0].code, detail)
+          return Promise.reject(
+            Object.assign(new Error('dsh-mobile: 电脑端不认这台设备（' + detail + '）'), { code: failures[0].code }),
+          )
+        }
+        return Promise.reject(new Error('dsh-mobile: 所有候选端点都连不上（' + detail + '）'))
+      }
+      var url = self.endpoints[index]
+      return self.openEndpoint(url).then(
+        function () {
+          self.fallbackInProgress = false
+          self.activeEndpoint = url
+          try {
+            // ★ 身份写入口 ✓（壳换槽时会把 vault 里这一条删掉 ✓ ⇒ 换源后不会拿旧端点在前面白等 ✗）
+            writeIdentityKey(LAST_ENDPOINT_KEY, url)
+          } catch (error) {
+            void error
+          }
+          return undefined
+        },
+        function (error) {
+          failures.push({
+            url: url,
+            reason: String(error && error.message ? error.message : error),
+            // ★ 只有"宿主明确拒绝这台设备"才有 code ✓；网络错误 / 超时这里必然是 undefined ✓
+            //   （当场记下的 attemptRejectionCode 兜住"发完 LinkError 立刻关连接"那条竞态 ✓）
+            code:
+              (error === null || error === undefined ? undefined : deviceRejectionCode(error.code)) ||
+              self.attemptRejectionCode,
+            /**
+             * ★★ round 156（B ✓）：这一轮是不是**"等你点允许"**（`mobile/pairing-pending` ✓）。
+             *   它**不是**"宿主不认这台设备"✗（那条走上面的 code ✓），也**不是**连不上 ✗ ——
+             *   它只是"人在电脑前还没点那颗按钮"✓ ⇒ 汇总时单独判 ✓（见上面那段 ✓）。
+             */
+            pending:
+              (error !== null && error !== undefined && error.code === 'mobile/pairing-pending') ||
+              self.attemptPendingCode === 'mobile/pairing-pending',
+          })
+          console.info('[dsh-mobile] 端点不可用，试下一个：' + url)
+          return tryFrom(index + 1, failures)
+        },
+      )
+    }
+    return tryFrom(0, [])
+  }
+
+  /**
+   * ★★ round 157（D ✓）：**会话级状态的唯一一份复位** ✓ —— 每一条拨号路径都必须经过它 ✓。
+   *
+   * ## 真机故障（用户原话）
+   * 把电脑端 DSH 远程关掉再重开 ⇒ 点手机页里那颗橙色「手动重连」⇒
+   * `手动重连失败：dsh-mobile: 所有候选端点都连不上`
+   * `（wss://100.123.136.82:3443/mobile/ws → dsh-mobile: 帧被拒绝（seen））` ✗。
+   *
+   * ## 根因
+   * `帧被拒绝（seen）` 来自**我们自己的反重放窗口**（`ReplayWindow.check` ✓）——
+   * 新会话的入站帧计数从 1 重来 ✓，却被拿去比**上一个会话的"已见"位图** ✗
+   * （`ServerAuthOk` 恒为 counter=1 ✓ ⇒ 老窗口已经把它标成"见过" ✓）⇒ 正常帧被判重放 ✗。
+   *
+   * 为什么会比到老位图 ✗：复位**散在两个地方、而且都不全** ✓——
+   *   · `scheduleReconnect` 的定时器体里**手工抄了五行**（`keys` / `inReplay` / `outCounter` ✓）；
+   *   · `openEndpoint` 入口那块抄了**另外六个字段**（`keys` / `nonceBase` / `pendingKeys` /
+   *     `transcript` / `hello` / `ephemeral` ✓），**漏了 `inReplay` 与 `outCounter`** ✗；
+   *   · 手动入口 `dialNow` **一处都没抄** ✗。
+   * ⇒ 只要这次拨号不是由那条定时器带起来的（按需重拨 `rpc` / `openStream` ⇒ `dialNow` ✓、
+   *   以及手动那一下 ✓），`inReplay` 就还是旧会话的 ✗ ⇒ 一连上就被自己拒掉 ✓✓。
+   *
+   * ## 为什么抽成**一个函数**（本项目对"同一个概念两份实现"零容忍 ✓）
+   * "新会话开始了 ⇒ 会话级状态必须归零"是**一个事实** ✓。两份抄写已经漂过一次 ✗
+   * （定时器体有 `inReplay`、`openEndpoint` 没有 ⇒ 两条路行为不同 ✓）——
+   * 不再抄第二遍 ✗：**所有人都调它** ✓（见下面两处调用点 ✓）。
+   *
+   * ## 哪些算"会话级"（含 `nonceBase` 的理由 ✓）
+   * 判据是"**它属于哪一次握手**"✓：
+   *   · `keys` / `pendingKeys` / `transcript` / `hello` / `ephemeral` —— 本次握手的中间物 ✓，
+   *     留着就会把上一次的 transcript 带进本次的 MAC / 会话标识校验 ✗；
+   *   · `nonceBase` —— **必须一起清** ✗✗：`onMessage` 开头判"还在不在明文握手阶段"
+   *     用的就是 `this.keys === undefined && this.nonceBase.server === undefined` ✓，
+   *     留下旧的 `server` 值会让宿主回的**明文 ServerHello 被当成会话帧解析** ✗
+   *     （round 156 抓到的真根之一 ✓：现象是"重连永远连不上"✗）；
+   *   · `inReplay` —— 本次会话的**入站**反重放窗口 ✓（本条故障的元凶 ✓）；
+   *   · `outCounter` —— 本次会话的**出站**计数 ✓（归 1 ✓：`ServerAuthOk` 之后会被写成 2 ✓，
+   *     与宿主"数据帧从 2 开始"的约定一致 ✓）。
+   * ★ 只清**会话级** ✗ —— 重试额度（`failStreak` / `autoReconnectDeadline` / `autoPaused` ✓）、
+   *   传输对象（`socket` / `ready` / `pingTimer` ✓）与"本次端点尝试"的两个码
+   *   （`attemptRejectionCode` / `attemptPendingCode` ✓，它们由 `openEndpoint` 每次尝试自己清 ✓）
+   *   都**不在这里**动 ✓（动了会吃掉用户点的那一下的额度和提示 ✓）。
+   */
+  Tunnel.prototype.resetSessionState = function () {
+    this.keys = undefined
+    this.pendingKeys = undefined
+    this.transcript = undefined
+    this.hello = undefined
+    this.ephemeral = undefined
+    this.nonceBase = { client: undefined, server: undefined }
+    this.inReplay = new ReplayWindow(1024)
+    this.outCounter = 1n
+  }
+
+  /** 连接**一个**端点并完成握手。 */
+  Tunnel.prototype.openEndpoint = function (url) {
+    var self = this
+    return new Promise(function (resolve, reject) {
+      var settled = false
+      // ★ 本次尝试期间"宿主明确拒绝过吗"——由 onMessage 在解析到帧的当场写下 ✓（见那里的说明 ✗）
+      self.attemptRejectionCode = undefined
+      // ★★ round 156（B ✓）：本次尝试期间"宿主在等你点允许吗"——同上，在解析到帧的当场写下 ✓
+      self.attemptPendingCode = undefined
+      /**
+       * ★★ 每一次端点尝试都必须是**干净的握手状态** ✗✗（本轮抓到的真根之二 ✓）。
+       *
+       * scheduleReconnect 只清了 keys ✓，**没清 nonceBase.server** ✗ ⇒ 断线重连时
+       * onMessage 开头那句"是不是还在明文握手阶段"
+       * （this.keys === undefined && this.nonceBase.server === undefined ✓）判成 **false** ✗ ⇒
+       * 宿主回的**明文 ServerHello / 明文 LinkError 全被当成会话帧解析** ✗：
+       *   · 明文 ServerHello 解析失败 ⇒ **重连永远连不上** ✗
+       *     （实测：电脑重启回来后，同页面自愈重试 60 秒仍连不上 ✗；改前改后同一个样 ✗）；
+       *   · 明文 LinkError 连 code 都读不出来 ⇒ "设备被撤销"识别不出来 ✗
+       *     ⇒ 现象就是**永远重连、永不退回配对界面** ✓（用户报的那条 ✓）。
+       * 端点回退（fallback）也走同一个坑 ✓ —— 所以复位放在**每次尝试的入口** ✓。
+       * ★★ round 157（D ✓）：这一整块**换成一个函数** ✓（`resetSessionState` ✓）——
+       *   原来这里手工抄了六个字段 ✗，而**漏了 `inReplay` / `outCounter`** ✗✗
+       *   ⇒ 只要拨号不是那条退避定时器带起来的（按需重拨 / 手动 ✓），
+       *   新会话的帧就会被旧会话的反重放位图拒掉（真机：`帧被拒绝（seen）`✗）。
+       *   现在**所有拨号路径**都在这里经过同一份复位 ✓ —— 谁也漏不掉 ✓。
+       */
+      self.resetSessionState()
+      self.emitState('connecting')
+      var socket
+      try {
+        socket = new WebSocket(url)
+      } catch (error) {
+        reject(error)
+        return
+      }
+      socket.binaryType = 'arraybuffer'
+      self.socket = socket
+
+      var timeout = setTimeout(function () {
+        if (settled) return
+        settled = true
+        try {
+          socket.close()
+        } catch (error) {
+          void error
+        }
+        reject(new Error('dsh-mobile: 连接超时'))
+      }, ENDPOINT_TIMEOUT_MS)
+
+      socket.onopen = function () {
+        void self.performHandshake().then(
+          function () {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            self.attempt = 0
+            // ★ round 152：连上了 ⇒ 连续失败清零 + 把"已放弃"时按下的 offline 复原 ✓
+            self.noteDialSuccess()
+            self.startKeepalive()
+            self.emitState('connected')
+            resolve()
+          },
+          function (error) {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            reject(error)
+          },
+        )
+      }
+
+      socket.onmessage = function (event) {
+        void self.onMessage(event.data).catch(function (error) {
+          // 配对等待**不是错误**，是流程的正常一环（电脑还没点"允许此设备"）。
+          // 早期把它按"隧道建立失败"打出来，日志里满屏红色 error，
+          // 排查时很容易把它当成故障——而它只是"还没被批准"。这里降为 info 并
+          // 单独给出状态，让"等待批准"和"真的坏了"在日志里一眼可辨。
+          if (error !== null && error !== undefined && error.code === 'mobile/pairing-pending') {
+            console.info('[dsh-mobile] 已在电脑端登记，等待你在电脑上点「允许此设备」…')
+            self.emitState('awaiting-approval')
+            self.fail(error)
+            return
+          }
+          console.error('[dsh-mobile] 处理帧失败：', error)
+          self.fail(error)
+        })
+      }
+
+      socket.onerror = function () {
+        if (settled) {
+          self.emitState('disconnected')
+          return
+        }
+        settled = true
+        clearTimeout(timeout)
+        reject(new Error('dsh-mobile: 无法连接到电脑，请确认地址与电脑端 DSH 正在运行'))
+      }
+
+      socket.onclose = function () {
+        self.stopKeepalive()
+        // ★ 回退期间**不要**调度重连：这个端点只是"没选上"，不是链路断了。
+        //   让它调度会和 open() 的"试下一个候选"打架——两边同时改 ready/attempt，
+        //   状态机互相踩（实测表现为候选齐全却始终 disconnected）。
+        if (self.fallbackInProgress === true) {
+          if (!settled) {
+            settled = true
+            clearTimeout(timeout)
+            reject(new Error('dsh-mobile: 端点在握手完成前被关闭'))
+          }
+          return
+        }
+        self.emitState('disconnected')
+        // 流与一元请求都要结算。只结算流曾导致 DSH 首次拉数据的 Promise 永久挂起，
+        // 表现为"隧道连上了但侧栏永远是空的"（见 failPending 的说明）。
+        var offline = new Error('dsh-mobile: 与电脑的连接已断开，正在自动重连')
+        offline.code = 'mobile/link-closed'
+        self.failStreams(offline)
+        self.failPending(offline)
+        if (!settled) {
+          settled = true
+          clearTimeout(timeout)
+          reject(new Error('dsh-mobile: 连接在握手完成前被关闭'))
+          return
+        }
+        self.scheduleReconnect()
+      }
+    })
+  }
+
+  /**
+   * 应用层保活：定期发 Ping 帧。
+   *
+   * ## 为什么必须有（真实故障）
+   *
+   * 手机上表现为"连上之后二十多秒就断、界面一直重连中、操作无效"，
+   * 而**空闲**隧道在电脑上可以稳定一分钟以上。原因是**空闲连接会被中间设备回收**：
+   * 移动网络的 NAT 映射、以及移动浏览器对后台标签的连接回收，都会在没有字节往来时
+   * 静默断开——双方都不报错，只是收到 close。
+   *
+   * 协议里的 `Ping`/`Pong` 帧两边**都实现了响应**，但一直没有人**发送**，
+   * 所以链路上没有任何周期性流量。这里补上发送侧：只要连接在，每 15 秒一次。
+   * 15 秒远小于常见的 30-60 秒空闲阈值，代价是每 15 秒一个几十字节的加密帧。
+   */
+  Tunnel.prototype.startKeepalive = function () {
+    var self = this
+    this.stopKeepalive()
+    // 定时器不可用时（某些沙箱/旧环境）**绝不能抛错**：
+    // 这一步在 connect() 的成功回调里，抛出去会让整个握手流程中断——
+    // 表现为"连不上"，而真正的原因只是保活起不来。保活是增强，不是必需。
+    if (typeof setInterval !== 'function') return
+    try {
+      this.pingTimer = setInterval(function () {
+        /**
+         * ★★ 每一发都问一次"这一发该不该由页面自己发" ✓（原生时钟在驱动时**让位** ✓）。
+         *
+         * 为什么判据落在**每一发**上、而不是"启动时判一次就停表" ✗：原生时钟是**会死的**
+         * （服务被系统杀掉 / 用户装的还是老 APK ✓）—— 启动时判一次 = 永久让位 ✗，
+         * 那种情况下页面自己的定时器**再也不跑** ✓，而屏幕上什么都不会说 ✗✗。
+         * 判据与租约长度见 `keepAliveShouldRun` / `NATIVE_CLOCK_LEASE_MS` ✓。
+         */
+        if (!keepAliveShouldRun('ping')) return
+        // ★ 那一发 Ping 的**唯一实现** ✓ —— 原生 `tick('ping')` 走的是**同一个函数** ✓
+        //   （两个触发源共用一份 ✓，绝不抄第二份 ✗）。
+        self.sendKeepalivePing()
+      }, 15000)
+    } catch (error) {
+      console.warn('[dsh-mobile] 保活定时器不可用（不影响连接）：', error)
+    }
+  }
+
+  /**
+   * ★★ 那一发保活 Ping 的**唯一实现** ✓（两个触发源共用这一份 ✓）。
+   *
+   * ## 两个触发源
+   *   ① 页面自己的 15 秒定时器 ✓（`startKeepalive` 里那个 `setInterval` ✓）；
+   *   ② **原生时钟**注入的 `tick('ping')` ✓（前台服务的 `Handler` ✓）——
+   *      App 退到后台、页面定时器被冻结时，靠的就是它 ✓
+   *      （见本文件"原生时钟驱动网页"那一段的说明 ✓）。
+   *   ★ 抽出来的**唯一**目的就是"两个源共用一份" ✗ —— 不是"顺手重构" ✓：
+   *     抄第二份的话，以后改前置判断只会改到其中一份 ✓，而症状是"有一路在偷偷用旧口径"✗
+   *     （这个项目为双份维护吃过大亏 ✓）。
+   *
+   * ## 前置判断**原样保留** ✗（不许因为多了一个调用源就放宽 ✓）
+   *   · socket 不在 OPEN ⇒ **直接不发** ✓（否则 `sendFrame` 会抛 ✓，控制台刷屏 ✗）；
+   *   · 会话密钥没建立 ⇒ `sendFrame` 自己抛"会话尚未建立" ✓ —— 它是 `async` 的 ✓，
+   *     同步 `try/catch` **抓不到** ✗，所以原来那处 `.catch(...)` 原样留着 ✓（它就是为这条写的 ✓）。
+   *   ⇒ "有没有隧道 / 隧道是不是 connected / 有没有会话密钥"三道判断一道都没少 ✓。
+   *
+   * @returns true = 确实把那一帧交出去了 ✓；false = 前置条件不满足，**什么都没做** ✓
+   *          （`tick` 据此回一个能念的串 ✓，绝不抛 ✗）。
+   */
+  Tunnel.prototype.sendKeepalivePing = function () {
+    if (this.socket === undefined || this.socket.readyState !== 1) return false
+    // 记账放在"确实要发"这一支 ✓（诊断行的"最近一次 ping"= 真的发了 ✓，
+    // 而不是"定时器跑了但被前置判断挡住"✗ —— 那两个数在排障时意思完全不同 ✓）。
+    keepAliveStats.lastPingAt = Date.now()
+    this.sendFrame(FrameType.Ping, FrameFlags.None, new Uint8Array(0)).catch(function (error) {
+      console.warn('[dsh-mobile] 保活 Ping 发送失败：', error)
+    })
+    return true
+  }
+
+  /** 停止保活（连接关闭或重连时调用）。 */
+  Tunnel.prototype.stopKeepalive = function () {
+    if (this.pingTimer === undefined) return
+    try {
+      clearInterval(this.pingTimer)
+    } catch (error) {
+      void error
+    }
+    this.pingTimer = undefined
+  }
+
+  Tunnel.prototype.scheduleReconnect = function () {
+    if (this.config.autoReconnect === false) return
+    /**
+     * ★★ round 152（用户第 1 条）：**自动那一路数到 5 就停** ✗ ——
+     *   到点之后**不再排下一次** ✓（见 `AUTO_RECONNECT_LIMIT` 那段 ✓）。
+     *   用户看到的是"稳定的、可点的橙色提示" ✓，而不是一个永远转圈的"重连中" ✗。
+     */
+    if (this.autoPaused === true) return
+    var self = this
+    if (this.reconnectTimer !== undefined) return
+    /**
+     * ★★ round 153：排下一次之前先看**时钟** ✓ —— 总预算已经用完就**不再排** ✗，
+     *   直接走**同一条**放弃路径 ✓（不新写一条 ✗）。
+     */
+    if (this.autoBudgetExhausted()) {
+      this.giveUpAutoReconnect(
+        '自动重连总预算已到（' + Math.round(this.autoReconnectBudgetMs() / 1000) + ' 秒）',
+      )
+      return
+    }
+    this.attempt += 1
+    /**
+     * 退避基数默认 1000ms ✓；`config.reconnectBaseMs` 只给**验收**用 ✓
+     *   （生产配置里从不写它 ✗）。
+     * ★★ round 153：退避序列从 2/4/8/16/20 秒（≈50 秒 ✗）换成**短序列**
+     *   `base × min(attempt, 5)` ⇒ 1/2/3/4/5 秒（≈15 秒 ✓）——
+     *   再套上 20 秒总预算，任一条先到就放弃 ✓。
+     */
+    var base = Number(this.config.reconnectBaseMs)
+    if (!isFinite(base) || base <= 0) base = RECONNECT_BASE_MS
+    var delay = base * Math.min(this.attempt, AUTO_RECONNECT_LIMIT)
+    /**
+     * ★ 退避不许**越过**截止时刻 ✓：最后一段按"剩余预算"截短 ✓
+     *   （否则 19 秒时排一段 5 秒退避 ⇒ 24 秒才轮到判据 ✗，20 秒就成了空话 ✗）。
+     */
+    if (this.autoReconnectDeadline !== undefined) {
+      var remain = this.autoReconnectDeadline - Date.now()
+      if (remain < delay) delay = Math.max(0, remain)
+    }
+    this.reconnectTimer = setTimeout(function () {
+      self.reconnectTimer = undefined
+      /**
+       * ★★ round 153：到点先按**时钟**复查一遍 ✓ —— 这段退避期间预算可能已经用完
+       *   （也可能上一次拨号自己吃掉了 8 秒端点超时 ✓）⇒ 不再拨、直接放弃 ✓。
+       */
+      if (self.autoBudgetExhausted()) {
+        self.giveUpAutoReconnect(
+          '自动重连总预算已到（' + Math.round(self.autoReconnectBudgetMs() / 1000) + ' 秒）',
+        )
+        return
+      }
+      self.stopKeepalive()
+      self.ready = undefined
+      self.socket = undefined
+      /**
+       * ★★ round 157（D ✓）：这里原来**手工抄了三行**（`keys` / `inReplay` / `outCounter` ✓）——
+       *   而 `openEndpoint` 入口那块抄的是**另外六个字段** ✗ ⇒ 两份抄写各漏一半 ✓✓：
+       *   走定时器这条路的会话状态齐 ✓、走按需重拨/手动那条路的 `inReplay` 却是旧的 ✗
+       *   （真机：手动重连一连上就被自己的反重放窗口拒掉，`帧被拒绝（seen）` ✗）。
+       *   现在**只有一份实现** ✓（`resetSessionState` ✓），这里只调它 ✓。
+       *   `socket` / `ready` / 保活是**传输级**的 ✓、不属于会话级 ✗ ⇒ 仍旧留在这里 ✓。
+       */
+      self.resetSessionState()
+      void self.connect().catch(function (error) {
+        console.warn('[dsh-mobile] 重连失败：', error)
+      })
+    }, delay)
+  }
+
+  /** 握手：ClientHello（明文）→ ServerHello（K_hs）→ ClientAuth（K_hs）→ ServerAuthOk（会话密钥）。 */
+  Tunnel.prototype.performHandshake = async function () {
+    var device = await loadOrCreateDeviceKey()
+    this.device = device
+    var ephemeral = await generateEphemeral()
+    var ephemeralPublic = await exportRawPublic(ephemeral.publicKey)
+    this.ephemeral = ephemeral
+
+    var clientNonceBytes = crypto.getRandomValues(new Uint8Array(32))
+    var hello = {
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId: device.deviceId,
+      ephemeralPublicKey: b64u(ephemeralPublic),
+      clientNonce: b64u(clientNonceBytes),
+      ...(this.config.pairingTicket === undefined ? {} : { pairingTicket: this.config.pairingTicket }),
+    }
+    this.hello = hello
+    this.send(sealPlaintextFrame(FrameType.ClientHello, FrameFlags.Json, utf8(JSON.stringify(hello))))
+
+    await new Promise((resolve, reject) => {
+      this.handshakeWaiters = { resolve, reject }
+      setTimeout(() => reject(new Error('dsh-mobile: 握手超时（电脑端未响应）')), 15000)
+    })
+  }
+
+  Tunnel.prototype.onMessage = async function (data) {
+    var bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer ?? data)
+
+    // 阶段 1：明文——ServerHello 的 {e, sh} 或握手期 LinkError
+    if (this.keys === undefined && this.nonceBase.server === undefined) {
+      // 明文 LinkError：首字节即帧类型且无标签
+      if (bytes.length >= FRAME_HEADER_BYTES && bytes[0] === FrameType.LinkError) {
+        var errFrame = parseFrame(bytes, false)
+        var errPayload = JSON.parse(fromUtf8(errFrame.ciphertext))
+        /**
+         * ★★ 必须在**解析到这一帧的当场**把"明确拒绝"记下来 ✗✗（只靠下面那条 reject 会漏 ✓）：
+         *   宿主的 `fail()` 是"**先发 LinkError、再关连接**"✓ ⇒ close/error 事件常常**先**到 ✓，
+         *   于是 `openEndpoint` 那条 reject 带的是"连接在握手完成前被关闭"（**没有 code** ✗）⇒
+         *   判据会把它当成"网络问题"、一个字节都不清 ✗ —— 真机上表现为"修了还是无限重连"✗。
+         *   （本轮第一次实测就是这么红的 ✓：帧确实收到了 26 条 device-unknown ✓，身份却没清 ✗。）
+         */
+        var attemptRejection = deviceRejectionCode(errPayload.code)
+        if (attemptRejection !== undefined) this.attemptRejectionCode = attemptRejection
+        /**
+         * ★★ round 156（B ✓）：与上面那条**同一个理由**（宿主的 `fail()` 是"先发 LinkError、
+         *   再关连接"✓ ⇒ close/error 事件常常**先**到 ✓）—— "等你点允许"也必须**在解析到
+         *   这一帧的当场**记下来 ✗✗，否则 `openEndpoint` 那条 reject 带的是
+         *   "连接在握手完成前被关闭"（**没有 code** ✗）⇒ 它会被当成一次**真失败**、
+         *   烧掉 5 轮 / 20 秒预算 ✗（真机现象：点了允许却已经来不及 ✓）。
+         *   `attemptPendingCode` 每次端点尝试的入口清掉 ✓（与 `attemptRejectionCode` 同一处 ✓）。
+         */
+        if (errPayload.code === 'mobile/pairing-pending') this.attemptPendingCode = 'mobile/pairing-pending'
+        throw Object.assign(new Error(errPayload.message || 'dsh-mobile: 电脑端拒绝连接'), { code: errPayload.code })
+      }
+      if (bytes[0] === 0x7b /* '{' */) {
+        var sealed = JSON.parse(fromUtf8(bytes))
+        await this.acceptServerHello(sealed)
+        return
+      }
+      throw new Error('dsh-mobile: 收到无法识别的明文帧')
+    }
+
+    var header = parseFrame(bytes, true)
+
+    // 阶段 2：ServerAuthOk —— 用会话密钥 + serverNonceBase + counter=1
+    if (header.type === FrameType.ServerAuthOk) {
+      var pending = this.pendingKeys
+      if (pending === undefined) throw new Error('dsh-mobile: 在 ClientAuth 之前收到 ServerAuthOk')
+      var plaintext = await openFrame({
+        header: header,
+        key: pending.s2c,
+        nonceBase: this.nonceBase.server,
+        replay: this.inReplay,
+      })
+      var authOk = JSON.parse(fromUtf8(plaintext))
+      var expected = await hmac(pending.confirmServer, this.transcript)
+      if (!equalBytes(unb64u(authOk.confirm), expected.subarray(0, 16))) {
+        throw new Error('dsh-mobile: 宿主确认 MAC 不匹配（可能存在中间人）')
+      }
+      var expectedSession = Array.from(this.transcript.subarray(0, 16))
+        .map(function (b) {
+          return b.toString(16).padStart(2, '0')
+        })
+        .join('')
+      if (authOk.sessionId !== expectedSession) {
+        throw new Error('dsh-mobile: 会话标识不一致')
+      }
+      this.keys = pending
+      this.sessionId = authOk.sessionId
+      this.capabilities = authOk.capabilities
+      // ServerAuthOk 占用了 counter=1：数据帧从 2 开始（与宿主一致）
+      this.outCounter = 2n
+      var waiter = this.handshakeWaiters
+      this.handshakeWaiters = undefined
+      if (waiter !== undefined) waiter.resolve()
+      return
+    }
+
+    // 阶段 3：会话期帧，用 s2c 密钥
+    var session = this.keys
+    if (session === undefined) throw new Error('dsh-mobile: 会话尚未建立就收到数据帧')
+    var body = await openFrame({
+      header: header,
+      key: session.s2c,
+      nonceBase: this.nonceBase.server,
+      replay: this.inReplay,
+    })
+
+    switch (header.type) {
+      case FrameType.Ping:
+        await this.sendFrame(FrameType.Pong, FrameFlags.None, new Uint8Array(0))
+        return
+      case FrameType.Pong:
+        // 宿主对我们心跳 Ping 的应答。刻意不做存活判定：发送 Ping 本身就足以
+        // 保活（刷新 NAT/代理的空闲计时），要求应答会把"单向可达"的链路误判为断开。
+        // 早期没有这一支，Pong 落到 default 分支被打成"忽略未知帧类型：17"，
+        // 成了排查连接问题时的红鲱鱼。
+        return
+      case FrameType.RpcResponse: {
+        var response = JSON.parse(fromUtf8(body))
+        var entry = this.pending.get(response.rpcId)
+        if (entry !== undefined) {
+          this.pending.delete(response.rpcId)
+          entry.resolve(response)
+        }
+        return
+      }
+      case FrameType.StreamItem: {
+        var item = JSON.parse(fromUtf8(body))
+        var stream = this.streams.get(item.streamId)
+        if (stream !== undefined) stream.push(item.value)
+        return
+      }
+      case FrameType.StreamEnd: {
+        var endFrame = JSON.parse(fromUtf8(body))
+        var endStream = this.streams.get(endFrame.streamId)
+        if (endStream !== undefined) {
+          this.streams.delete(endFrame.streamId)
+          endStream.finish()
+        }
+        return
+      }
+      case FrameType.StreamError: {
+        var errorFrame = JSON.parse(fromUtf8(body))
+        var errorStream = this.streams.get(errorFrame.streamId)
+        if (errorStream !== undefined) {
+          this.streams.delete(errorFrame.streamId)
+          errorStream.fail(makeError(errorFrame.error))
+        }
+        return
+      }
+      case FrameType.LinkError: {
+        var linkError = JSON.parse(fromUtf8(body))
+        throw makeError(linkError)
+      }
+      case FrameType.Revoked: {
+        // 宿主撤销了本设备：清身份 + 回配对界面 + 停掉自动重连（走**同一个**入口 ✓，别写第二份 ✗）
+        handleDeviceRejection(this, 'mobile/device-revoked', '收到 Revoked 帧（帧类型 0x13）')
+        throw Object.assign(new Error('dsh-mobile: 本设备已被电脑端撤销授权'), { code: 'mobile/device-revoked' })
+      }
+      default:
+        console.warn('[dsh-mobile] 忽略未知帧类型：', header.type)
+    }
+  }
+
+  Tunnel.prototype.acceptServerHello = async function (sealed) {
+    var serverEphemeral = unb64u(sealed.e)
+    var shared = await deriveShared(this.ephemeral.privateKey, serverEphemeral)
+    var handshakeKey = await hkdf(shared, new Uint8Array(0), 'dsh-mobile/v1/hs')
+
+    var frame = parseFrame(unb64u(sealed.sh), true)
+    var plaintext = await openFrame({
+      header: frame,
+      key: handshakeKey,
+      nonceBase: HANDSHAKE_NONCE_BASE,
+      replay: new ReplayWindow(16),
+    })
+    var serverHello = JSON.parse(fromUtf8(plaintext))
+
+    if (serverHello.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(
+        'dsh-mobile: 协议版本不匹配（电脑端 ' + serverHello.protocolVersion + '，本页 ' + PROTOCOL_VERSION + '），请更新',
+      )
+    }
+
+    // transcript 与宿主必须逐字段一致
+    this.transcript = await transcriptHash([
+      String(PROTOCOL_VERSION),
+      this.hello.clientNonce,
+      serverHello.serverNonce,
+      this.hello.ephemeralPublicKey,
+      serverHello.ephemeralPublicKey,
+      this.device.deviceId,
+      serverHello.hostId,
+    ])
+
+    // 宿主身份签名校验：这是防中间人的关键一步，失败必须中止
+    var hostPublic = unb64u(serverHello.hostSigningKey)
+    var hostFingerprint = await fingerprintOf(hostPublic)
+    if (hostFingerprint !== serverHello.hostFingerprint) {
+      throw new Error('dsh-mobile: 宿主指纹与其公钥不一致（可疑）')
+    }
+    var pinned = this.config.pinnedHostFingerprint
+    if (pinned !== undefined && pinned !== hostFingerprint) {
+      throw new Error(
+        'dsh-mobile: 电脑身份已变化！\n期待 ' +
+          formatFingerprint(pinned) +
+          '\n实际 ' +
+          formatFingerprint(hostFingerprint) +
+          '\n若你确实换了电脑或重装过 DSH，请重新配对；否则可能存在中间人攻击。',
+      )
+    }
+    var signatureOk = await verifyHostSignature(hostPublic, this.transcript, unb64u(serverHello.signature))
+    if (!signatureOk) throw new Error('dsh-mobile: 宿主签名校验失败（可能存在中间人）')
+
+    this.hostFingerprint = hostFingerprint
+
+    var c2s = await hkdf(shared, this.transcript, 'dsh-mobile/v1/c2s')
+    var s2c = await hkdf(shared, this.transcript, 'dsh-mobile/v1/s2c')
+    var confirmClient = await hkdf(shared, this.transcript, 'dsh-mobile/v1/confirm-client')
+    var confirmServer = await hkdf(shared, this.transcript, 'dsh-mobile/v1/confirm-server')
+
+    var clientNonceBase = crypto.getRandomValues(new Uint8Array(4))
+    this.nonceBase.client = clientNonceBase
+    this.nonceBase.server = unb64u(serverHello.serverNonceBase)
+
+    var confirm = (await hmac(confirmClient, this.transcript)).subarray(0, 16)
+    var signature = await signTranscript(this.device.privateKey, this.transcript)
+    var clientAuth = {
+      signature: b64u(signature),
+      confirm: b64u(confirm),
+      clientNonceBase: b64u(clientNonceBase),
+    }
+
+    // ClientAuth 用 K_hs 保护（宿主此时还不知道客户端的 nonce 前缀），counter=2
+    var authFrame = await sealFrame({
+      key: handshakeKey,
+      nonceBase: HANDSHAKE_NONCE_BASE,
+      type: FrameType.ClientAuth,
+      flags: FrameFlags.Json,
+      counter: 2n,
+      payload: utf8(JSON.stringify(clientAuth)),
+      truncateTag: false,
+    })
+    this.pendingKeys = { c2s: c2s, s2c: s2c, confirmClient: confirmClient, confirmServer: confirmServer }
+    this.send(authFrame)
+  }
+
+  Tunnel.prototype.send = function (bytes) {
+    var socket = this.socket
+    if (socket === undefined || socket.readyState !== 1) return false
+    socket.send(bytes)
+    return true
+  }
+
+  Tunnel.prototype.sendFrame = async function (type, flags, payload) {
+    var session = this.keys
+    if (session === undefined) throw new Error('dsh-mobile: 会话尚未建立')
+    var counter = this.outCounter
+    this.outCounter += 1n
+    var bytes = await sealFrame({
+      key: session.c2s,
+      nonceBase: this.nonceBase.client,
+      type: type,
+      flags: flags,
+      counter: counter,
+      payload: payload,
+      truncateTag: true,
+    })
+    this.send(bytes)
+  }
+
+  /** 一元 RPC：与 DSH 的 client-request 信封保持一致。 */
+  /**
+   * 一元 RPC。
+   *
+   * ## `rpcId` 必须沿用 DSH 给的那个（真实故障）
+   *
+   * DSH 的客户端会校验"响应的 rpcId === 我发出的 rpcId"，不等就抛
+   * `rpcId mismatch for <endpoint>: sent X, got Y`——而且**只在界面自己的调用上校验**，
+   * 所以症状是界面功能失效、而底层隧道看起来一切正常。
+   * 我们替换的是传输层、不是协议层，因此必须把 DSH 的信封**原样**送回，
+   * 包括它自己生成的 rpcId；早期这里另生成了一个 `web-xxxx`，把原 id 丢了。
+   */
+  Tunnel.prototype.rpc = async function (endpoint, payload, dshRpcId) {
+    /**
+     * ★ round 152：**按需重拨** ✓ —— 没有可用 socket 时立刻拨一次（delay 0 ✓），
+     *   而不是把那个陈旧的 `ready` 原样还回来、再把请求静默挂住 ✗（见 `dialNow` ✓）。
+     *   `false` = 业务请求：自动已放弃时**不拨** ✓（防端侧通道那条 4 秒一轮的轮询 ✓）。
+     */
+    await this.dialNow(false)
+    var rpcId = typeof dshRpcId === 'string' && dshRpcId.length > 0
+      ? dshRpcId
+      : 'web-' + b64u(crypto.getRandomValues(new Uint8Array(8)))
+    // 信封与 DSH 的 client-request 逐字段一致（type/rpcId/method/payload）
+    var message = { type: 'client-request', rpcId: rpcId, method: endpoint, payload: payload }
+    var self = this
+    return new Promise(function (resolve, reject) {
+      // 两个都要存：只存 resolve 的话，链路一断这个 Promise 就永远既不 resolve
+      // 也不 reject（见 failPending 的说明，这是"侧栏永远空的"的根因）。
+      self.pending.set(rpcId, { resolve: resolve, reject: reject })
+      self
+        .sendFrame(FrameType.RpcRequest, FrameFlags.Json, utf8(JSON.stringify(message)))
+        .catch(reject)
+    })
+  }
+
+  /** 打开一条逻辑流，返回 AsyncIterable 与 cancel。 */
+  Tunnel.prototype.openStream = function (endpoint, payload) {
+    var self = this
+    var streamId = this.nextStreamId++
+    var queue = []
+    var waiter
+    var done = false
+    var failure
+    var cancelled = false
+
+    var state = {
+      push: function (value) {
+        queue.push(value)
+        if (waiter !== undefined) {
+          var w = waiter
+          waiter = undefined
+          w()
+        }
+      },
+      finish: function () {
+        done = true
+        if (waiter !== undefined) {
+          var w = waiter
+          waiter = undefined
+          w()
+        }
+      },
+      fail: function (error) {
+        failure = error
+        done = true
+        if (waiter !== undefined) {
+          var w = waiter
+          waiter = undefined
+          w()
+        }
+      },
+    }
+    this.streams.set(streamId, state)
+
+    var iterable = {
+      [Symbol.asyncIterator]: function () {
+        return {
+          next: async function () {
+            for (;;) {
+              if (queue.length > 0) return { done: false, value: queue.shift() }
+              if (failure !== undefined) throw failure
+              if (done) return { done: true, value: undefined }
+              await new Promise(function (resolve) {
+                waiter = resolve
+              })
+            }
+          },
+          return: async function () {
+            if (!cancelled && !done) {
+              cancelled = true
+              self.streams.delete(streamId)
+              await self.sendFrame(FrameType.StreamCancel, FrameFlags.Json, utf8(JSON.stringify({ streamId: streamId })))
+            }
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+
+    // 连接与 open 都是异步的；用惰性启动让调用方可以先拿到 iterable
+    void (async function () {
+      try {
+        /**
+         * ★ round 152：**按需重拨** ✓ —— `true` = 这条是 DSH 连接控制器的世代来源
+         *   （事件流 ✓）⇒ 即便自动那一路已经放弃，**用户点那颗橙色提示也走得通** ✓
+         *   （`connection.reconnect()` ⇒ 世代来源 ⇒ 这里 ⇒ 立刻拨一次 ✓）。
+         */
+        await self.dialNow(true)
+        await self.sendFrame(
+          FrameType.StreamOpen,
+          FrameFlags.Json,
+          utf8(JSON.stringify({ streamId: streamId, endpoint: endpoint, payload: payload })),
+        )
+      } catch (error) {
+        state.fail(error)
+      }
+    })()
+
+    return iterable
+  }
+
+  Tunnel.prototype.fail = function (error) {
+    this.failStreams(error)
+    this.failPending(error)
+    var waiter = this.handshakeWaiters
+    this.handshakeWaiters = undefined
+    if (waiter !== undefined) waiter.reject(error)
+  }
+
+  /**
+   * 结算所有在途的**一元请求**。
+   *
+   * ★ 这里曾经整条缺失，后果非常隐蔽（用户报"列表确实为空，只能看到一些控件"）：
+   *   链路在 DSH 客户端**首次拉数据**的过程中断开时，`session/list`、
+   *   `workspace/follow` 之类的 Promise 既不 resolve 也不 reject ——
+   *   而 DSH 的 store 就停在"空"并**永远不再重试**（它只等这个 Promise）。
+   *   于是出现最迷惑人的状态：隧道后来明明连上了（在页面里直接发请求全都正常），
+   *   侧栏却永远只有"新会话 / 工作区 / 未分组 / 设置"。
+   *
+   * 断线时必须把在途请求**明确失败掉**：宁可有可读的错误让上层重试，
+   * 也不要静默挂起——挂起是"看不出哪里坏了"的根源。
+   */
+  Tunnel.prototype.failPending = function (error) {
+    this.pending.forEach(function (entry) {
+      try {
+        entry.reject(error)
+      } catch (thrown) {
+        void thrown
+      }
+    })
+    this.pending.clear()
+  }
+
+  Tunnel.prototype.failStreams = function (error) {
+    this.streams.forEach(function (stream) {
+      stream.fail(error)
+    })
+    this.streams.clear()
+  }
+
+  function makeError(wire) {
+    var error = new Error(wire && wire.message ? wire.message : 'dsh-mobile: 远端错误')
+    error.code = wire && wire.code
+    error.details = wire && wire.details
+    return error
+  }
+
+
+  /**
+   * 首次配对时向宿主提交设备公钥（claim）。
+   *
+   * 为什么在客户端做而不是让用户手动操作：手机打开配对链接时，宿主的配对状态是
+   * "已有票据、尚无设备公钥"。宿主需要公钥才能在电脑端展示指纹供人工比对，
+   * 因此 claim 必须由手机发起。
+   *
+   * 幂等性：宿主对同一票据的重复 claim 只接受第一次；重复提交不会破坏已完成的配对。
+   * 失败（网络、票据过期、已配对）都不阻断流程——连接会继续重试，
+   * 真正的门禁始终在电脑端的人工确认。
+   */
+  async function submitPairingClaim(config, device) {
+    var ticket = config.pairingTicket
+    if (ticket === undefined) return
+    // P1a：票据记录也要按宿主命名空间化 ✓（换源/换电脑后不会把同一张票据的公钥再提交一遍 ✓）
+    var fingerprint = currentHostFingerprint()
+    // 已经成功连过就不再提交，避免每次重连都打一次请求
+    if (readIdentityKeyValue(CLAIMED_KEY, fingerprint) === ticket) return
+    try {
+      var response = await fetch('/mobile/pair/claim', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ticket: ticket,
+          deviceId: device.deviceId,
+          deviceSigningKey: b64u(device.publicRaw),
+          fingerprint: await fingerprintOf(device.publicRaw),
+          name: navigator.userAgent.slice(0, 60),
+          platform: 'browser',
+        }),
+      })
+      if (response.ok) {
+        // ★ 身份写入口 ✓（换源之后不该把同一张票据的公钥再提交一遍 ✓）
+        writeIdentityKey(CLAIMED_KEY, ticket, fingerprint)
+        console.info('[dsh-mobile] 已提交配对请求，请在电脑上核对指纹并点「允许此设备」')
+      }
+    } catch (error) {
+      console.warn('[dsh-mobile] 提交配对请求失败（将重试连接）：', error)
+    }
+  }
+
+  // ───────────────────────────── 配置与安装 ─────────────────────────────
+
+  /**
+   * 读取本机保存的配对配置，**并校验它与当前页面是否兼容**。
+   *
+   * ## 为什么必须校验（真实故障）
+   *
+   * 配置里存着 `baseUrl` 与 `tunnelUrl`。我们后来把手机侧从 HTTP 改成 HTTPS 之后，
+   * 手机浏览器 localStorage 里仍是旧配置（`http://<ip>:3081`、`ws://<ip>:3081/mobile/ws`）。
+   * 于是：HTTPS 页面拿着 `ws://` 去连 → 浏览器按**混合内容**拦掉 → 隧道永远建不起来；
+   * 而占位传输层会一直等它 → 界面停在"重连中"，所有控件点不动。
+   * 用户看到的正是这个现象，而且清理浏览器数据才会好——极难自行定位。
+   *
+   * 规则（宁可当成"没配对"，也不要拿错配置去连）：
+   *  - `baseUrl` 必须能解析、且 **scheme 与 host（含端口）与当前页面一致**；
+   *  - 当前页面是 HTTPS 时，`tunnelUrl` 必须是 `wss:`（否则一定是旧的混合内容配置）。
+   * 不满足就丢弃本地配置并清掉，让页面回到配对入口——重新配对是幂等的，代价很小。
+   */
+  /**
+   * 推导隧道候选端点（按尝试顺序去重）。
+   *
+   * 候选有三个来源，排序即优先级：
+   *   1. **上次成功的端点**（手机换网后通常一次就中）
+   *   2. **当前页面来源**——这个地址刚刚把页面加载出来了，必然可达
+   *   3. 配对票据 / manifest 给的 `endpoints`（局域网地址，将来还有中继地址）
+   *
+   * 为什么必须多候选：手机离开局域网后，第 3 类里的局域网地址**必然连不上**；
+   * 只有一个 `tunnelUrl` 时，客户端会一直重连那个死地址，表现就是"永远重连中"。
+   *
+   * @param sources - 基础地址（`http(s)://` 或已经是 `ws(s)://`），可以来自票据或已存配置。
+   * @param pageOrigin - 当前页面来源。
+   */
+  function deriveTunnelUrls(sources, pageOrigin) {
+    var out = []
+    var push = function (url) {
+      if (typeof url === 'string' && url.length > 0 && out.indexOf(url) < 0) out.push(url)
+    }
+    var fromBase = function (base) {
+      if (typeof base !== 'string' || base.length === 0) return
+      // 已经是 ws/wss 的直接用；http(s) 的补上隧道路径
+      if (base.indexOf('ws://') === 0 || base.indexOf('wss://') === 0) {
+        push(base)
+        return
+      }
+      try {
+        var parsed = new URL(base, pageOrigin)
+        push((parsed.protocol === 'https:' ? 'wss://' : 'ws://') + parsed.host + '/mobile/ws')
+      } catch (error) {
+        void error
+      }
+    }
+    try {
+      // P1a：上次成功的端点也按宿主命名空间化 ✓（多宿主下不会拿别台电脑的端点先白等 ✓）
+      fromBase(readLastGoodEndpointForCurrentSource())
+    } catch (error) {
+      void error
+    }
+    fromBase(pageOrigin)
+    if (Array.isArray(sources)) {
+      for (var i = 0; i < sources.length; i++) fromBase(sources[i])
+    }
+    return out
+  }
+
+  /**
+   * 壳**当前持有**的槽的 authority 列表 ✓（`endpoints()` ✓）——
+   * 没有壳 / 桥没有这个方法 / 返回不是 JSON / `slots` 不是数组 ⇒ **空数组** ✓
+   * （★ 这条"没壳就是空"是下面"放宽只在有壳时生效"的**唯一**依据 ✗）。
+   *
+   * 为什么按 `authority`（host:port）而不是整个 URL 比：候选槽里带的路径可能不同
+   * （`/mobile/app` ✓ / 根路径 ✓），而"这是不是同一台电脑的入口"只由 authority 决定 ✓。
+   */
+  function shellEndpointHosts() {
+    var info = shellJson('endpoints')
+    if (info === null || !Array.isArray(info.slots)) return []
+    var hosts = []
+    for (var i = 0; i < info.slots.length; i++) {
+      var slot = info.slots[i]
+      var url = slot !== null && typeof slot === 'object' ? slot.url : slot
+      if (typeof url !== 'string' || url.length === 0) continue
+      try {
+        var parsed = new URL(url, location.href)
+        if (hosts.indexOf(parsed.host) < 0) hosts.push(parsed.host)
+      } catch (error) {
+        void error
+      }
+    }
+    return hosts
+  }
+
+  /**
+   * 壳换槽的判定上限（用户拍板 **2000ms** ✓）。
+   *
+   * 与隧道自己的 `ENDPOINT_TIMEOUT_MS`（8000ms ✓）是**两件事** ✗：那一个是"手机构建 WebSocket
+   * 握手"的上限 ✓，这一个是"壳在 WebView 里等页面加载出来"的上限 ✓（壳侧执行 ✓）。
+   */
+  var SHELL_SLOT_TIMEOUT_MS = 2000
+
+  /** `100.64.0.0/10`（CGNAT ✓ —— Tailscale 给设备的就是这一段 ✓）判定。 */
+  function isTailscaleHost(hostname) {
+    var parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(hostname))
+    if (parts === null) return false
+    return Number(parts[1]) === 100 && Number(parts[2]) >= 64 && Number(parts[2]) <= 127
+  }
+
+  /**
+   * ★★ round 139：manifest 的 `phoneBaseUrl` —— **学校槽的第四条来源** ✓
+   *   （也是这一轮真正要修的那条 ✓）。
+   *
+   * ## 为什么必须有它（用户真机反馈："目前似乎是直接进的 tailscale"✗）
+   * 已有的三条来源（① 票据 endpoints ② 当前页面源 ③ 壳里已有的槽 ✓）**都可能拿不到学校地址** ✓：
+   *   · 手机上的**票据是"重启之前"签的** ✗ —— 那时广告的学校端点是**明文 HTTP** ✓，
+   *     而 `derivePageSlots` 按规矩把非 https 候选全丢掉 ✓（这条规矩**不能改** ✗：
+   *     HTTPS 页面里的混合内容 + 壳清单 `usesCleartextTraffic="false"` ⇒ 双重不可用 ✓）；
+   *   · 页面源是 Tailscale ✓（用户当时就在 Tailscale 上 ✓）；
+   *   · 壳里存的也只有 Tailscale ✓。
+   * ⇒ 上报给壳的只剩**一条** ✓ ⇒ 壳"直接进 Tailscale"✓
+   *   （**不是**策略没跑 ✗ —— 是它手里只有一条路 ✓）。
+   *
+   * 而宿主在 `GET /mobile/manifest` 里**一直**广告着那条地址 ✓（`phoneBaseUrl` ✓ =
+   * 安装参数 `--phone-base-url` 给的那个 HTTPS 地址 ✓），**它恰好就是"学校"这一条** ✓ ——
+   * 网页侧此前从来没读过它 ✗（`grep /mobile/manifest boot.js` 零命中 ✓）。
+   *
+   * ## ★ 为什么这是"**刷新页面就能好**"（**不需要重新配对** ✗✗）
+   * 槽是**每次上报都重算**的 ✓（`derivePageSlots` 不缓存结论 ✓，只缓存 manifest 那一次 fetch ✓）——
+   * 票据旧不旧、是不是明文，都不再要紧 ✓：只要宿主在跑 ✓，`manifest.phoneBaseUrl`
+   * 就是把学校那条地址**重新**递给手机的那条路 ✓。
+   * ★★ 所以对用户的话只有一句：**刷新一下页面** ✓（这是本轮最容易被误判成
+   * "必须重新配对"的地方 ✗ —— 重新配对当然也能好 ✓，但**不必要** ✗）。
+   *
+   * ## 纪律（一条都不能破）
+   *   · 只认 `https` ✓（明文候选照旧在 `pushCandidate` 里被丢掉 ✓ —— 这里不搞特例 ✗）；
+   *   · 一样走 `100.64.0.0/10` 分类 ✓（万一 `phoneBaseUrl` 是 Tailscale 地址 ✓，
+   *     它就**该**进兜底桶 ✓ —— 分类是规则说了算，不是来源说了算 ✓）；
+   *   · 学校仍排第一 ✓、按 URL 去重 ✓、最多两条 ✓（全是 `derivePageSlots` 的既有规则 ✓）；
+   *   · **fetch 失败绝不能让上报消失或抛错** ✗✗ —— 拿不到就按原来那三条来源照常上报 ✓
+   *     （网络差、老宿主没有这个路由，都必须照旧能用 ✓）；
+   *   · **不写死任何地址** ✗（一切以宿主给的 manifest 为准 ✓）。
+   */
+  /** manifest 里那条学校地址 ✓（`null` = 还没拿到 / 没拿到 ✓）。 */
+  var manifestBaseUrl = null
+  /** 是否**成功**取到过 ✓（成功过就不再取 ✓；失败**不置位** ⇒ 下一次上报会重试 ✓ —— 自愈 ✓）。 */
+  var manifestBaseUrlSettled = false
+  /**
+   * ★ 宿主自己报的**机器名** ✓（`manifest.machineName` ✓，形如 `Mac-mini-2024.local` ✓）——
+   * 面板的行名用它 ✓。
+   *
+   * 为什么必须向宿主问名字 ✗✗：壳里那两条默认链接的名字永远是「**学校**」✓
+   * （`defaultLinkLabel` 只分 Tailscale / 其它 ✓）⇒ **两台电脑都会叫「学校」** ✗，
+   * 等于没有名字 ✓（用户 2026-09-28 真机验收时就是这么看到的 ✓）。
+   * ★ 拿不到（老宿主没这个字段 ✓）⇒ 保持 `null` ✓，行名退回既有兜底 ✓ —— **绝不编** ✗。
+   */
+  var manifestMachineName = null
+  /**
+   * 机器名这一路**问过没有** ✓ —— 与 `phoneBaseUrl` 分开记 ✓。
+   * 为什么不能共用 `manifestBaseUrlSettled` ✗：老宿主没有 `machineName` 字段 ✓，
+   * 那份 manifest 仍然是"问过了" ✓ —— 不结案的话每次上报都白 fetch 一次 ✗。
+   * ★ 失败（网络 / 不是 JSON ✓）**一律不置位** ⇒ 下一次上报重试 ✓（自愈 ✓）。
+   */
+  var manifestMachineSettled = false
+  /** 正在飞的那一次 fetch ✓（同一时刻只发一次 ✓ —— 两个上报点都调它也不会打两枪 ✓）。 */
+  var manifestFetchInFlight = null
+
+  /**
+   * 取一次 manifest 的 `phoneBaseUrl` ✓（同源 `fetch('/mobile/manifest')` ✓，拿到就缓存 ✓）。
+   *
+   * ★ **永不 reject** ✗：网络差、老宿主没这个路由、返回不是 JSON ✓ ——
+   *   一律解析成"这次没拿到" ✓，调用方照常上报 ✓（`catch` 里还会写一行调试框 ✓，
+   *   "没读到"和"读到了但没用上"在手机上必须能区分 ✓）。
+   *
+   * @returns Promise&lt;string|null&gt; —— 拿到的地址 ✓，或 null ✓。
+   */
+  function loadManifestBaseUrl() {
+    // ★ 两路都问过才算结案 ✓（老宿主那一路也要结案 ✗ —— 否则每次上报都白 fetch ✓）
+    if (manifestBaseUrlSettled && manifestMachineSettled) return Promise.resolve(manifestBaseUrl)
+    if (manifestFetchInFlight !== null) return manifestFetchInFlight
+    var promise = Promise.resolve()
+      .then(function () {
+        if (typeof globalThis.fetch !== 'function') return null
+        return globalThis.fetch('/mobile/manifest', { credentials: 'same-origin' })
+      })
+      .then(function (response) {
+        if (response === null || response === undefined || response.ok !== true) return null
+        return response.json()
+      })
+      .then(function (body) {
+        var value = body !== null && typeof body === 'object' ? body.phoneBaseUrl : null
+        if (typeof value === 'string' && value.length > 0) {
+          manifestBaseUrl = value
+          manifestBaseUrlSettled = true
+        }
+        /**
+         * ★ 机器名（可选字段 ✓）：拿到就用 ✓，拿不到就是"这家宿主没报" ✓ ——
+         * **两种都算问过了** ✓（`manifestMachineSettled = true` 放在这一支里、
+         * 只要响应是个对象就置位 ✓）⇒ 老宿主只多花一次 fetch ✓，不会每次都问 ✗。
+         */
+        if (body !== null && typeof body === 'object') {
+          manifestMachineSettled = true
+          var machine = body.machineName
+          if (typeof machine === 'string' && machine.length > 0) {
+            manifestMachineName = machine
+            /**
+             * ★ 拿到就**当场补写**这条记录 ✓ —— 不能只等"下一次连接" ✗✗：
+             *   面板上"另一台"那一行读的是**它自己记录里**的名字 ✓（跨源读不到对方的 manifest ✓），
+             *   所以每台必须在**自己那次连接**里把自己的名字落进记录 ✓，否则永远是「学校」✗。
+             * ★ 写的只能是**当前这台** ✓（`currentHostFingerprint()` ✓，与 ticket/baseUrl 同一套口径 ✓）。
+             * 失败一律吞 ✓（名字只是显示 ✓，绝不许影响连接 ✗）。
+             */
+            try {
+              var current = currentHostFingerprint()
+              if (current !== undefined) hostRecordUpsert({ fingerprint: current, label: machine })
+            } catch (error) {
+              void error
+            }
+          }
+        }
+        return manifestBaseUrl
+      })
+      .catch(function (error) {
+        debugBoxLine('[slots] 读 manifest.phoneBaseUrl 失败（照旧用另外三条来源 ✓）：' + describeError(error))
+        return manifestBaseUrl
+      })
+      .then(function (value) {
+        manifestFetchInFlight = null
+        return value
+      })
+    manifestFetchInFlight = promise
+    return promise
+  }
+
+  /**
+   * ★ 上报前**先把 manifest 那条来源准备好** ✓（round 139 ✓）。
+   *
+   * 返回值是**混合**的（有意为之 ✓，每一支都有理由）：
+   *   · **没有壳** ⇒ `null`，而且是**同步**的 ✓ —— 一是保住"纯浏览器/桌面端里这条路整体
+   *     不存在、返回 null"那条既有契约 ✓（验收里正有一条这么断言 ✓），
+   *     二是**不会白发一次 fetch** ✓（桌面端根本用不着槽 ✓）；
+   *   · **manifest 已经取到过** ⇒ **同步**返回上报结果（数组 ✓）—— 这一支很要紧 ✗：
+   *     `connected` 那次上报**必须抢在**同一 tick 里的 `location.replace` 之前 ✓，
+   *     而那一刻启动阶段早就把 manifest 取回来了 ✓ ⇒ 走的正是这一支 ✓；
+   *   · **还没取到** ⇒ Promise ✓（多等一次同源 fetch ✓，通常几毫秒 ✓）。
+   */
+  function prepareEndpointSlots(configLike) {
+    if (shellBridge() === undefined) return null
+    if (manifestBaseUrlSettled) return reportEndpointSlots(configLike)
+    return loadManifestBaseUrl().then(function () {
+      return reportEndpointSlots(configLike)
+    })
+  }
+
+  /**
+   * 推出要上报给壳的**两个候选槽** ✓（学校优先 / Tailscale 兜底 ✓）。
+   *
+   * 候选来源（去重前的顺序就是它们进列表的顺序 ✓）：
+   *   ⓪ **manifest 的 `phoneBaseUrl`**（round 139 新增 ✓）—— 宿主广告的那条 HTTPS 地址 ✓，
+   *      "学校"这一条最可靠的来源 ✓（见上面那段长注释：它修的就是"学校槽整条消失"✗）；
+   *   ① **票据 endpoints**（`readUrlConfig` 那一次带 `?pair=` 的加载 ✓）—— 电脑广告给手机的地址 ✓；
+   *   ② **当前页面源**（`origin + location.pathname` ✓）—— 这个地址刚刚把页面加载出来了，必然可达 ✓；
+   *   ③ **壳当前持有的槽**（`shellJson('endpoints')` ✓）—— ★ 这一条是本项目自己有意的补充 ✓：
+   *      票据只存在于**第一次**加载 ✓（`storeHost` 之后配置里就没有 `endpoints` 了 ✓），
+   *      若不把壳里那一份并进来，第二次加载（以及换源之后 ✓）就只剩"当前页面源"一条 ⇒
+   *      一次上报就把壳的**两个**默认链接缩成**一个** ✗，Tailscale 兜底当场消失 ✗。
+   *      并进来之后，重新上报是**单调**的：只会补全，不会缩水 ✓。
+   *
+   * 规则：
+   *   · **丢掉非 `https:` 的候选** ✗（明文：HTTPS 页面里的混合内容会被拦 ✓，
+   *     壳清单又是 `usesCleartextTraffic="false"` ✓ —— 双重不可用 ✓）；
+   *   · 分类：hostname 落在 `100.64.0.0/10` ⇒ 「Tailscale」✓，其余 ⇒ 「学校」✓；
+   *   · **学校排第一** ✓、按 URL 去重 ✓、**最多两条** ✓；
+   *   · 一条都推不出来 ⇒ 返回**空数组** ✓（调用方据此**不上报** ✗ —— 别把空槽写进壳 ✗）。
+   *
+   * URL 一律重写成 `origin + location.pathname` ✓：壳要能**直接 load** ✓，
+   * 而 `location.pathname` 正是当前这份页面自己的路径（`/mobile/app` ✓）。
+   */
+  function derivePageSlots(configLike) {
+    var candidates = []
+    var pushCandidate = function (base) {
+      if (typeof base !== 'string' || base.length === 0) return
+      var parsed
+      try {
+        parsed = new URL(base, location.href)
+      } catch (error) {
+        return
+      }
+      if (parsed.protocol !== 'https:') return
+      var url = parsed.origin + location.pathname
+      if (candidates.indexOf(url) < 0) candidates.push(url)
+    }
+
+    // ⓪ manifest 那条（本轮新增 ✓）—— 放最前 ✓：学校桶里的**插入顺序**决定谁排第一 ✓
+    if (typeof manifestBaseUrl === 'string' && manifestBaseUrl.length > 0) pushCandidate(manifestBaseUrl)
+    if (configLike !== null && typeof configLike === 'object' && Array.isArray(configLike.endpoints)) {
+      for (var i = 0; i < configLike.endpoints.length; i++) pushCandidate(configLike.endpoints[i])
+    }
+    pushCandidate(location.origin + location.pathname)
+    var held = shellJson('endpoints')
+    if (held !== null && Array.isArray(held.slots)) {
+      for (var j = 0; j < held.slots.length; j++) {
+        var slot = held.slots[j]
+        pushCandidate(slot !== null && typeof slot === 'object' ? slot.url : slot)
+      }
+    }
+
+    // 分类 + 稳定分区（学校在前 ✓，各自保持进入列表时的相对顺序 ✓）
+    var school = []
+    var tailscale = []
+    for (var k = 0; k < candidates.length; k++) {
+      var parsedCandidate
+      try {
+        parsedCandidate = new URL(candidates[k])
+      } catch (error) {
+        continue
+      }
+      var bucket = isTailscaleHost(parsedCandidate.hostname) ? tailscale : school
+      if (bucket.indexOf(candidates[k]) < 0) bucket.push(candidates[k])
+    }
+    var ordered = school.concat(tailscale).slice(0, 2)
+    var slots = []
+    for (var n = 0; n < ordered.length; n++) {
+      var parsedOrdered = new URL(ordered[n])
+      slots.push({ label: isTailscaleHost(parsedOrdered.hostname) ? 'Tailscale' : '学校', url: ordered[n] })
+    }
+    return slots
+  }
+
+  /**
+   * 把两个槽上报给壳 ✓（`DshmShell.setEndpointSlots` ✓ —— 壳只**落盘** ✓，绝不许引起导航 ✗✗：
+   * 上报一次就重载会变成"重载 → 上报 → 重载"的死循环 ✗，这是本轮最要紧的一条纪律 ✓）。
+   *
+   * 没有桥 ⇒ 直接 `null` ✓（纯浏览器里这条路整体不存在 ✓）；
+   * 一切都包在 try/catch 里 ✓（桥抛错不能影响页面 ✗）；空槽不上报 ✗。
+   */
+  function reportEndpointSlots(configLike) {
+    try {
+      var bridge = shellBridge()
+      if (bridge === undefined || typeof bridge.setEndpointSlots !== 'function') return null
+      var slots = derivePageSlots(configLike)
+      if (slots.length === 0) return null
+      bridge.setEndpointSlots(JSON.stringify({ slots: slots, timeoutMs: SHELL_SLOT_TIMEOUT_MS }))
+      return slots
+    } catch (error) {
+      // 桥抛错不该把页面带崩 ✗（但也不静默 ✓）
+      console.warn('[dsh-mobile] 上报候选槽失败（不影响页面）：', error)
+      return null
+    }
+  }
+
+  function readStoredHost() {
+    try {
+      /**
+       * ★★ P1a：配置也按**当前源对应的指纹**取 ✓（旧键回退见 `readIdentityKeyValue` ✓）。
+       *
+       * `rootedByFingerprint` = "这份配置是从**带指纹**的键里取到的" ✓ ——
+       * 它决定下面那条**按源校验**怎么用（这一处是单宿主时代留下的判据 ✓，
+       * 命名空间化之后它的语义必须重想 ✓，见下面那段长注释 ✓）。
+       */
+      var fingerprint = currentHostFingerprint()
+      var scopedKey = identityKeyFor(STORAGE_KEY, fingerprint)
+      var rootedByFingerprint = scopedKey !== STORAGE_KEY && localValue(scopedKey) !== null
+      var raw = readIdentityKeyValue(STORAGE_KEY, fingerprint)
+      if (raw === null) return undefined
+      var parsed = JSON.parse(raw)
+      if (parsed === null || typeof parsed !== 'object') return undefined
+
+      if (typeof parsed.baseUrl !== 'string' || parsed.baseUrl.length === 0) return undefined
+      var storedOrigin
+      try {
+        storedOrigin = new URL(parsed.baseUrl)
+      } catch (error) {
+        void error
+        return dropStaleHost('baseUrl 无法解析', scopedKey)
+      }
+      if (storedOrigin.protocol !== location.protocol || storedOrigin.host !== location.host) {
+        /**
+         * ★ 放宽：**壳上报的候选槽**里出现过的来源也认 ✓（round 131 ✓）。
+         *
+         * 为什么非放宽不可：壳换地址（学校 ↔ Tailscale）**就是换源** ✗，而 `localStorage`
+         * 按源隔离 ⇒ 新源里根本没有 `dsh-mobile.host` ✗。它只能来自壳的身份库（跨源 ✓），
+         * 而那份配置的 `baseUrl` 记的是**上一个源** ⇒ 今天这条判据会**把刚恢复的配置当场删掉** ✗，
+         * 用户看到的就是"切过去又要重新配对" ✗ —— 整个"两个默认链接"功能死在这一行 ✓。
+         *
+         * 判据仍然是**可信来源**，不是"什么都收" ✗：只有 `shellJson('endpoints')`（壳当前
+         * 持有的槽 ✓，由网页自己上报 ✓）里出现过的 authority 才放行 ✓。
+         * ⚠️ **没有壳时 `shellEndpointHosts()` 返回空** ⇒ 这一整段与今天**一字不差** ✓
+         * （多个验收脚本跑在无壳的无头 Chrome 里 ✓，那里的行为必须原样保留 ✗）。
+         *
+         * ★★ P1a 补的那一半（**必须点名的一处** ✓）：如果这份配置是从
+         * `<名字>:<指纹>` 里取到的 ✓，那"来源不同"**本来就是预期的** ✗ ——
+         * 指纹才是身份锚 ✓（同一台电脑的学校槽 / Tailscale 槽是两个源 ✓），
+         * 而"当前源 → 指纹"这一步已经由 `currentHostFingerprint()` 用**目录里的槽**
+         * 证过了 ✓ ⇒ 这里再拿 baseUrl 比一次源，就是把**刚按指纹取回来的正确配置**
+         * 当场删掉 ✗（旧判据在单宿主时代用来防"拿着旧配置换了源"✓；
+         * 现在这件事由"指纹 + 目录槽"回答 ✓，比 origin 更准 ✓）。
+         * ★ 旧键形态取到的配置 **不**享受这条豁免 ✗（归属已证 ≠ 来源已证 ✓）：走原判据 ✓。
+         * ★ 跨源的旧 `tunnelUrl` **照样丢** ✗（下面那一段一个字没动 ✓）。
+         */
+        if (rootedByFingerprint) {
+          console.info(
+            '[dsh-mobile] 按宿主指纹取回配置：baseUrl ' +
+              storedOrigin.protocol + '//' + storedOrigin.host +
+              ' 属于同一台电脑的另一个槽（当前源 ' + location.protocol + '//' + location.host + ' ✓）⇒ 接受 ✓',
+          )
+        } else {
+          var slotHosts = shellEndpointHosts()
+          if (slotHosts.indexOf(storedOrigin.host) < 0) {
+            return dropStaleHost('配置来源 ' + storedOrigin.protocol + '//' + storedOrigin.host + ' 与当前页面 ' + location.protocol + '//' + location.host + ' 不一致', scopedKey)
+          }
+          console.info(
+            '[dsh-mobile] 接受了跨源但属于候选槽的来源：' +
+              storedOrigin.protocol + '//' + storedOrigin.host +
+            '（当前页面 ' + location.protocol + '//' + location.host +
+            '；壳的候选槽 ' + (slotHosts.length === 0 ? '（无）' : slotHosts.join('、')) + '）',
+          )
+        }
+      }
+      if (location.protocol === 'https:' && typeof parsed.tunnelUrl === 'string' && parsed.tunnelUrl.indexOf('wss:') !== 0) {
+        return dropStaleHost('HTTPS 页面不能用 ws:// 隧道（混合内容会被拦截）', scopedKey)
+      }
+      /**
+       * ★ 跨源恢复时**丢掉过期的 `tunnelUrl`** ✓（round 131 ✓）。
+       *
+       * 它指向的是**上一个源**的隧道（例如学校的 `wss://学校:3443/mobile/ws` ✓）。
+       * 留着它就会在候选列表里排到**当前页面源**前面 ⇒ 换到 Tailscale 之后先白等
+       * 一个 8 秒超时 ✗（用户感觉是"切过去很慢/像卡住了" ✗）。
+       *
+       * ⚠️ **不是**去改 `deriveTunnelUrls` 的"lastGood → 页面源 → 票据"**顺序** ✗✗ ——
+       * `scripts/check-relay-e2e.mjs` 正靠那个顺序（它把 `lastGoodEndpoint` 指到中继 ✓）
+       * 断言"实际端点就是中继" ✓，而且它跑在**无壳**环境里、根本走不到这一段 ✓。
+       * 顺序一个字不动 ✓，这里只把**这一条**已经确定到不了的值去掉 ✓。
+       *
+       * 判据里带 `tunnelHost !== location.host` ✓：同一台上不同端口的配置不算"过期" ✗
+       * （只有**确实是别的机子/别的槽**的隧道才丢 ✓）。
+       */
+      if (storedOrigin.host !== location.host && typeof parsed.tunnelUrl === 'string') {
+        var tunnelHost = ''
+        try {
+          tunnelHost = new URL(parsed.tunnelUrl, location.href).host
+        } catch (error) {
+          void error
+        }
+        if (tunnelHost !== '' && tunnelHost !== location.host) {
+          delete parsed.tunnelUrl
+          console.info('[dsh-mobile] 已丢弃跨源的旧隧道端点：' + tunnelHost + '（候选将从当前页面源开始 ✓）')
+        }
+      }
+      // 候选端点每次都重新推导：上次成功的端点、当前页面来源、票据/配置里的地址。
+      // 旧的 `tunnelUrl` 仍作为其中一个来源保留，所以老配置不需要迁移。
+      parsed.tunnelUrls = deriveTunnelUrls(
+        [parsed.tunnelUrl].concat(Array.isArray(parsed.tunnelUrls) ? parsed.tunnelUrls : []),
+        location.origin,
+      )
+      return parsed
+    } catch (error) {
+      void error
+      return undefined
+    }
+  }
+
+  /** 丢弃与当前页面不兼容的本地配置，并留下可诊断的日志。 */
+  function dropStaleHost(reason, key) {
+    try {
+      // P1a：删的是**这次真正读到的那把键** ✓（带指纹的 / 旧键 ✓）——
+      // 只 removeItem(STORAGE_KEY) 的话，"从带指纹键读到、却删不掉" ⇒ 下次又读回来 ✗。
+      if (typeof key === 'string' && key.length > 0 && isIdentityKeyAllowed(key)) writeIdentityKey(key, null)
+      else localStorage.removeItem(STORAGE_KEY)
+    } catch (error) {
+      void error
+    }
+    console.warn('[dsh-mobile] 已丢弃过期的配对配置（需重新配对）：' + reason)
+    return undefined
+  }
+
+  function storeHost(config) {
+    /**
+     * ★ P1a：**配置自己带的指纹优先** ✓（配对当次最可信 ✓）——
+     * 绝不拿 `hosts.active` 去猜 ✗（在别的电脑的新源上会把配置写进错的名字空间 ✗）。
+     * 完全没有指纹时才退回旧键形态 ✓（否则配对会当场丢失 ✗ —— 见交付说明里的偏差 ✓）。
+     */
+    var fingerprint = fingerprintFromConfig(config)
+    if (fingerprint === undefined) fingerprint = currentHostFingerprint()
+    // ★ 身份写入口 ✓（配对配置必须跨源存活 ✗ —— 否则壳一换地址，新源就是"没配对" ✗）
+    writeIdentityKey(STORAGE_KEY, JSON.stringify(config), fingerprint)
+    if (fingerprint === undefined) return
+    // P1a：把这台宿主记进目录并标成当前 ✓（面板要列的就是它 ✓；失败绝不影响配对 ✗）
+    try {
+      hostRecordUpsert({
+        fingerprint: fingerprint,
+        slots: hostSlotsForConfig(config),
+        label: manifestNameForRecord(),
+        lastState: config !== null && config !== undefined && config.pairingTicket !== undefined ? 'pairing' : undefined,
+        lastSeenAt: Date.now(),
+      })
+      setActiveHost(fingerprint)
+    } catch (error) {
+      void error
+    }
+  }
+
+  /** 从 URL 查询串读取配对参数（扫码跳转或手输 6 位码）。 */
+  function readUrlConfig() {
+    var params = new URLSearchParams(location.search)
+    var token = params.get('pair')
+    if (token === null) return undefined
+    try {
+      var decoded = JSON.parse(fromUtf8(unb64u(token)))
+      // 票据里带着电脑给出的 `endpoints`（局域网地址；将来还有中继地址）。
+      // 把它一起变成候选，手机一离开局域网就有别的路可走。
+      var ticketEndpoints = Array.isArray(decoded.endpoints) ? decoded.endpoints : []
+      return {
+        baseUrl: location.origin,
+        tunnelUrl:
+          (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/mobile/ws',
+        tunnelUrls: deriveTunnelUrls(ticketEndpoints, location.origin),
+        endpoints: ticketEndpoints,
+        pairingTicket: decoded.ticket,
+        pairingCode: decoded.code,
+        pinnedHostFingerprint: decoded.hostFingerprint,
+      }
+    } catch (error) {
+      console.warn('[dsh-mobile] 配对链接无法解析：', error)
+      return undefined
+    }
+  }
+
+  /** 移动端布局：把 DSH 的三栏框架改成窄屏单栏 + 抽屉侧栏。 */
+  // ───────────────── 自建移动外壳（顶栏 / 抽屉 / 文件目录）─────────────────
+  //
+  // 这一版是**从零重写**。旧版把"移动端适配"理解成"给 DSH 原生布局打 CSS 补丁"，
+  // 于是陷入"修好 A 又坏 B"，并且犯了一个根本性错误：
+  //
+  //   ★ 旧版自建 `body[data-dsh-mobile-drawer]` 当抽屉状态，再用 CSS 把侧栏列
+  //     （宽度被 `!important` 钉成 0）平移进屏幕。但 **DSH 在"自认收起"时
+  //     根本不渲染会话列表**——sidebarRoot 带 `collapsed` 类，会话行数为 0。
+  //     抽屉滑进来永远是空的 → 用户看到的就是"汉堡键点开又不渲染了"。
+  //     实测：点 DSH 自己的侧栏开关后，sessionRow 0 → 4、projectRow 0 → 5。
+  //
+  // 三条原则（后续所有 UI 工作都遵守）：
+  //   1. **状态单一来源是 DSH 自己。** 汉堡按钮**点击 DSH 的侧栏开关**让它进入
+  //      展开态；我们的 `body[data-dsh-mobile-drawer]` 只是 DSH 状态的**镜像**
+  //      （由 MutationObserver 同步），不再自作主张。
+  //   2. **顶栏完全自建。** DSH 顶栏在欢迎页**根本不存在**（盒子高度 0，内容垂直居中），
+  //      在会话页是 76px，且同一排元素的 top 分别是 11 / 14 / 18 —— 这就是
+  //      "顶栏纵向不对齐"的来源。给它做对齐是徒劳：我们渲染自己的 flex 行，
+  //      `align-items:center` 让三个区域天然对齐。
+  //   3. **只改几何，不重建内容。** 会话列表与对话区仍由 DSH 渲染（真实数据、
+  //      真实标题、点一下能真正打开会话），我们只安排它们的位置与尺寸。
+  //
+  // 与 DSH 结构的耦合点（DSH 升级后若失效，`probeLayout` 与
+  // `scripts/check-mobile-layout.mjs` 会报出来，不会静默降级）：
+  //   [class*="frame"] / sidebarCol / centerCol / rightbarCol —— AppFrame 三栏
+  //   *_root（侧栏内容根，带 *_collapsed 类表示自认收起）
+  //   *_titleRow（会话页顶栏标题行，被我们隐藏）
+  //   button[aria-label="打开侧边栏"|"收起侧边栏"]（被我们程序化点击）
+
+  /** 顶栏高度（不含安全区）。CSS 与 JS 共用，避免两边各写一个数字。 */
+  var TOPBAR_HEIGHT = 52
+
+  /** 电脑文件目录图标（文件夹），与汉堡一样是纯文字按钮，不依赖图标字体。 */
+  var ICON_FOLDER =
+    '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l.9 1.2H19a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>' +
+    '</svg>'
+
+  /** 面板用的小图标：统一 24 网格、1.7 线宽、currentColor（跟随主题）。 */
+  function svgIcon(paths, size) {
+    var n = size === undefined ? 18 : size
+    return (
+      '<svg width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>'
+    )
+  }
+  var ICON_CHEVRON = svgIcon('<path d="M9 6l6 6-6 6"/>', 16)
+  var ICON_FILE = svgIcon('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>', 18)
+  var ICON_LINK = svgIcon('<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>', 18)
+  /**
+   * 「连接与设备」那一项用的插头图标 ✓（16px ✓ —— 与 DSH 设置导航里那排图标的尺寸一致 ✓，
+   * 见 `navIcon` 里统一用的 `size: 16` ✓）。同一套 24 网格 / 1.7 线宽 / currentColor ✓。
+   */
+  var ICON_PLUG_16 = svgIcon(
+    '<path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v5"/>',
+    16,
+  )
+  var ICON_UP = svgIcon('<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>', 14)
+  var ICON_REFRESH = svgIcon('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>', 16)
+  var ICON_DESKTOP = svgIcon('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>', 16)
+  /**
+   * ★ round 142：这里原来还有一颗 `ICON_GEAR`（文件面板右上角那颗设置齿轮 ✓）。
+   *   用户第 ③ 条把那个入口删了 ✗ ⇒ 图标常量**跟着一起删** ✓
+   *   （留着它就是"删了入口、把图标留在源码里"那种半拉子清理 ✗）。
+   *   设置页现在的唯一入口是 DSH 左侧栏 → 设置 →「连接与设备」✓。
+   */
+  var ICON_FOLDER_SM = svgIcon('<path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l.9 1.2H19a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>', 19)
+
+  /**
+   * 交付卡片那条路上的两颗图标：**全部直接取自 DSH 自己** ✓。
+   *
+   * ★ round 130：round 128 曾用它们画"卡片上我们自己注入的两颗按钮" ✓ ——
+   *   那两颗按钮**本轮已撤掉** ✓（用户："很丑，我不是说收纳进 dsh 的原生控件吗？" ⇒ A 方案 ✓）。
+   *   现在这两个图标只用在**兜底菜单**里 ✓（DSH 那颗 v 打不开时的那个浮层 ✓，
+   *   见 installPresentedMenuBridge 那一段 ✓）—— 形状与 DSH 菜单项的 16px 图标同量级 ✓，
+   *   所以看起来仍然是 DSH 自己的东西 ✓。
+   *
+   * 任务的原话是"**尽量贴近 DSH 原生图标** —— 优先从 DSH 包里取现成的图标 SVG，
+   * **不要自己画一套**" ✗。所以这里一个都不是手画的 ✓：
+   *
+   *   · `ICON_CARD_DOWNLOAD` ← `IconDownloadOutline16` ✓
+   *     （DSH 的「下载 Session 日志」菜单项用的就是它 ✓）；
+   *   · `ICON_CARD_FOLDER`   ← `IconFolderOpenOutline16` ✓
+   *     （DSH 的「打开所在文件夹」那一类动作用的图标 ✓）。
+   *
+   * 取处：`@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`
+   * （DSH 界面的图标组件都在那个 bundle 里 ✓）。
+   *
+   * 两个都是**单路径 + `fill="currentColor"`** ✓（不是我们常用的 stroke 那套 ✗）——
+   * 所以颜色完全跟随外层给的 `color` ✓（我们给的是 DSH 的 `--dsw-alias-*` token ✓，
+   * 尺寸按 400px 宽度下的观感缩到 15px ✓ —— 与 DSH 卡片里那个 16px 的菜单图标同量级 ✓）。
+   */
+  function dshFilledIcon(path, viewBox, size) {
+    return (
+      '<svg width="' + size + '" height="' + size + '" viewBox="' + viewBox + '" fill="none" aria-hidden="true">' +
+      '<path d="' + path + '" fill="currentColor"/></svg>'
+    )
+  }
+  var ICON_CARD_DOWNLOAD = dshFilledIcon(
+    'M15.3695 11.411L15.1234 12.8866C14.8869 14.3042 13.6603 15.3436 12.223 15.3436H3.77673C2.33958 15.3434 1.1128 14.3042 0.876343 12.8866L0.630249 11.411L2.05408 11.1747L2.29919 12.6493C2.41973 13.3713 3.04475 13.9001 3.77673 13.9003H12.223C12.9551 13.9002 13.58 13.3713 13.7006 12.6493L13.9457 11.1747L15.3695 11.411ZM8.72205 8.994C8.77717 8.93934 8.83792 8.88106 8.90271 8.81627L12.4828 5.23424L13.5043 6.25572L9.92224 9.8358C9.6395 10.1185 9.38763 10.3732 9.15857 10.5575C8.91892 10.7503 8.63953 10.9224 8.2865 10.9784C8.09711 11.0083 7.90363 11.0083 7.71423 10.9784C7.36106 10.9224 7.0809 10.7503 6.84119 10.5575C6.61215 10.3732 6.36022 10.1185 6.07751 9.8358L2.49646 6.25572L3.51697 5.23424L7.09705 8.81627C7.16219 8.88142 7.22331 8.94006 7.27869 8.99498V1.3065H8.72205V8.994Z',
+    '0 0 16 16',
+    15,
+  )
+  var ICON_CARD_FOLDER = dshFilledIcon(
+    'M5.19629 1.57104C5.81144 1.5711 6.38623 1.8786 6.72754 2.39038L7.19922 3.09839C7.28454 3.22635 7.42824 3.30344 7.58203 3.30347H12.1699C13.5039 3.30348 14.5859 4.38548 14.5859 5.71948V6.62671C15.2694 7.02689 15.6605 7.85012 15.4385 8.68726L14.3848 12.658C14.1037 13.7164 13.1449 14.4527 12.0498 14.4529H2.91699C1.51651 14.4529 0.451662 13.2814 0.501954 11.9519V3.98706C0.501954 2.65305 1.58396 1.57104 2.91797 1.57104H5.19629ZM3.7793 7.75562C3.30994 7.75562 2.89883 8.07153 2.77832 8.52515L1.91602 11.7722C1.74167 12.4291 2.23734 13.073 2.91699 13.073H12.0498C12.5191 13.0728 12.9304 12.757 13.0508 12.3035L14.1045 8.33374C14.1819 8.04202 13.9619 7.756 13.6602 7.75562H3.7793ZM2.91797 2.9519C2.34625 2.9519 1.88281 3.41534 1.88281 3.98706V7.2937C2.33068 6.7269 3.02249 6.37476 3.7793 6.37476H13.2051V5.71948C13.2051 5.14777 12.7416 4.68434 12.1699 4.68433H7.58203C6.96675 4.6843 6.39209 4.37595 6.05078 3.86401L5.5791 3.15601C5.49379 3.02821 5.34995 2.95196 5.19629 2.9519H2.91797Z',
+    '0 0 16 16',
+    15,
+  )
+
+  /**
+   * 判断元素是否带某个 DSH 的"语义类名后缀"。
+   *
+   * DSH 的类名形如 `hHd-Xa_root`——前缀是构建哈希（会随版本变），后缀是语义名（稳定）。
+   * 因此只在**词尾**匹配，既抗哈希变化，又不会误命中 `_root_1nxmc_1` 这类嵌套类名
+   * （它并不以 `_root` 结尾）。用 `[class*="_root"]` 会误命中后者——真实踩过的坑。
+   */
+  function classHasSuffix(element, suffix) {
+    var list = String(element.className === undefined ? '' : element.className).split(/\s+/)
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].length >= suffix.length && list[i].slice(-suffix.length) === suffix) return true
+    }
+    return false
+  }
+
+  /** DSH 的侧栏列（宽度 0 的网格轨道元素；我们把它改成覆盖式抽屉）。 */
+  function dshSidebarColumn() {
+    return document.querySelector('[class*="sidebarCol"]')
+  }
+
+  /**
+   * DSH 侧栏的内容根（自认收起时它带 `*_collapsed` 类）。
+   *
+   * 逐层走 `firstElementChild` 而不是 querySelector：DSH 在列与根之间夹了一层
+   * `display:contents` 的包装元素（宽度恒为 0，无法设宽——早期对着它调宽度，
+   * 白查了很久）。这里跳过它拿到真正的根。
+   */
+  function dshSidebarRoot() {
+    var column = dshSidebarColumn()
+    if (column === null) return null
+    var all = column.querySelectorAll('*')
+    for (var i = 0; i < all.length; i++) {
+      if (classHasSuffix(all[i], '_root')) return all[i]
+    }
+    return null
+  }
+
+  /**
+   * DSH 是否处于"侧栏展开"状态。
+   *
+   * 只看 `collapsed` 类，**不做几何测量**：这个函数在 MutationObserver 里高频调用，
+   * 读 `getBoundingClientRect()` 会强制同步布局（对话流式输出时每次 DOM 变动都触发）。
+   * 类名是 DSH 自己的状态量，切换是同步的，足够可靠。
+   */
+  function dshSidebarExpanded() {
+    var root = dshSidebarRoot()
+    if (root === null) return false
+    return !classHasSuffix(root, '_collapsed')
+  }
+
+  /**
+   * 切换 DSH 自己的侧栏开关。
+   *
+   * **必须点 DSH 的按钮**：DSH 在收起态不渲染列表内容，我们自己平移容器
+   * 只会得到空抽屉。按钮可能不可见（旧版把它 `display:none` 了），
+   * 但程序化 `click()` 对隐藏元素同样有效——这正是"隐藏它、由我们代点"的可行性来源。
+   *
+   * @returns 是否找到了开关（找不到说明 DSH 结构变了，调用方应提示而不是静默失败）。
+   */
+  function dshToggleSidebar() {
+    var buttons = document.querySelectorAll('button[aria-label]')
+    var exact = ['打开侧边栏', '收起侧边栏', '打开侧栏', '收起侧栏']
+    var i
+    var j
+    for (i = 0; i < buttons.length; i++) {
+      var label = String(buttons[i].getAttribute('aria-label'))
+      for (j = 0; j < exact.length; j++) {
+        if (label === exact[j]) {
+          buttons[i].click()
+          return true
+        }
+      }
+    }
+    // 兜底：DSH 改文案时按关键字匹配。注意不能匹配到我们自己的汉堡
+    // （它的 aria-label 是"会话列表"/"关闭会话列表"，不含"侧栏"）。
+    for (i = 0; i < buttons.length; i++) {
+      var text = String(buttons[i].getAttribute('aria-label'))
+      if (/侧边栏|侧栏/.test(text) || /sidebar/i.test(text)) {
+        buttons[i].click()
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * 当前会话标题。
+   *
+   * 来源是 `document.title`——DSH 把会话标题写在那里，形如
+   * `"<会话标题> — DeepSeek Harness"`。这是全页唯一**稳定携带会话标题**的地方：
+   *   · `session/list` 的 `SessionSummary` 只有 `{sessionId,updatedAt,running,blank,cwd,projections}`，
+   *     **没有 title 字段**（标题是会话日志里的 `session/title` 事件）；
+   *   · URL 里也不带 sessionId（会话打开后仍是 `/mobile/app`，实测）。
+   * 标题本身是 `document.title` 的前半段。
+   */
+  function conversationTitle() {
+    var raw = String(document.title === undefined ? '' : document.title)
+    var cut = raw.indexOf(' \u2014 ')
+    var text = (cut > 0 ? raw.slice(0, cut) : raw).trim()
+    if (text === '' || text === 'DeepSeek Harness') return ''
+    return text
+  }
+
+  /**
+   * 由 `installShell` 注入：重算"主页面往哪边让位"。
+   *
+   * 放在模块级是因为 `buildFilesSheet()` 在 `installShell` 之外定义（它也确实是
+   * 面板自己的职责），够不到闭包里的函数。用一个可替换的钩子比把面板改成闭包内定义更清楚。
+   */
+  var refreshPush = function () {}
+
+  /**
+   * 「DSH 自带预览是不是开着」的探测 ✓ —— **模块级**声明，安装时再赋实现 ✓。
+   *
+   * ★ 为什么必须是模块级：第一版我把这两个函数写在 `installShell` 里 ✗，
+   *   而用它的 `touchstart` 在 `installSwipeNavigation` 里 ✗ ——
+   *   跨作用域调用 = `ReferenceError` = **静默失效** ✓
+   *   （监听器里抛错在手机上只表现为"滑了没反应" ✗，这正是本项目反复吃过的那类坑 ✓）。
+   *   `refreshPush` 早就是这个模式 ✓，照它写 ✓。
+   */
+  /**
+   * ★ 输入区：**把滚动关在输入区里面** ✓（用户反馈的核心要求）。
+   *
+   * 用户原话："我希望我的手在输入栏的范围的时候是**划不动背景的聊天记录**的。
+   * 而且目前输入栏的滑动做的**很粗糙**" ✗。
+   *
+   * 机制：给 composer 某一层加 `max-height + overflow-y:auto` ✗ 只在
+   * **那一层真的能滚** 时才管用 ✓；否则浏览器会顺着往上找**最近的可滚动祖先** ✓
+   * —— 那通常就是聊天记录本身 ✓ → 手指明明在输入栏上 ✓，却把聊天划走了 ✓✓。
+   *
+   * 所以这里做两件事 ✓：
+   *   1. 给 composer 那一族（类名含 composer ✓）加限高 + 内部滚动 ✓，
+   *      并标 `overscroll-behavior-y: contain` ✓ —— **滚到头也不把惯性传给聊天记录** ✓；
+   *   2. 给"输入区 ↔ 聊天记录"之间的那几层也标上 contain ✓（双保险 ✓）。
+   *
+   * 每次调用都很便宜 ✓（用 data 标记跳过已处理过的节点 ✓），所以挂在已有的
+   * 200ms 心跳上跑 ✓ —— composer 被 DSH 重渲染后也能自动补上 ✓。
+   */
+  function tuneComposerScroll() {
+    try {
+      var center = document.querySelector('[class*="centerCol"]')
+      if (center === null) return
+      var input = center.querySelector('[contenteditable="true"], textarea')
+      if (input === null) return
+      var node = input
+      var scrollerFound = false
+      while (node !== null && node !== center) {
+        var className = String(node.className || '')
+        var style = getComputedStyle(node)
+        var declaresScroll = /(auto|scroll)/.test(style.overflowY)
+        /**
+         * ★ 限高必须加在**真正会滚的那一层** ✓ —— 用户反馈："在输入框上滑动我希望滑动输入框，
+         *   但实际上**并不能滑动**" ✗。
+         * 上一轮我加在 composer 外层（`composerSeat/Stack`）✗ ——
+         * 那两层的 `scrollHeight == clientHeight` ✓，**根本滚不动** ✗；
+         * DSH 自己那层才声明了 `overflow-y: auto` ✓（实测 `uV2eYG_scroll` ✓），
+         * 文字变长时该滚的是**它** ✓。
+         */
+        if (declaresScroll && !scrollerFound) {
+          scrollerFound = true
+          /**
+           * ★ 上限**故意收小** ✓ —— 用户原话："输入栏的高度上限太大了，缩小一点，
+           *   让用户**意识到可以滑动看**且方便看即可" ✓。
+           * 取 `min(20vh, 140px)` ✓：常见手机（915px 高）≈ 5 行 ✓ ——
+           * 再长就在框内滚 ✓，露出的那半行本身就是"还能往下看"的提示 ✓。
+           * 用 `min()` 是为了照顾矮屏 ✓（只按 vh 会在小屏上又变很大 ✗）。
+           */
+          if (node.dataset.dshmComposerScroller !== 'v2') {
+            node.dataset.dshmComposerScroller = 'v2'
+            node.style.maxHeight = 'min(20vh, 140px)'
+            node.style.webkitOverflowScrolling = 'touch'
+          }
+        }
+        /**
+         * ★★ round 119 修正：**外层不再限高** ✓（用户真机反馈，这一条是量出来的 ✓）。
+         *
+         * 用户原话："你设置的上限**没有考虑底部的上下文容量提示、token 提示那一行** ✗，
+         *   导致了**文本框外出现了滑动条**来滑动 ✓。实际上我想要的只是**文本框内的滑动**，
+         *   文本框到上限了就不再增加即可" ✓。
+         *
+         * 真因：这里曾经给**外层**（`composerStack` / `composerSeat` ✓）也写
+         *   `max-height: min(26vh,190px)` ✗ —— 而**外层恰恰包含 token/上下文那一行** ✓
+         *   ⇒ 内容比盒子高 ⇒ **外层溢出 ⇒ 框外那条滚动条** ✓✓，
+         *   顺带把工具栏（含"添加文件"）挤到可点区域之外 ✗（附件点不到就是这个 ✓）。
+         *
+         * 现在只留**文本框自己那一层**的上限 ✓（上面 `declaresScroll` 那一支 ✓）：
+         *   文字到顶就在框内滚 ✓，外层随内容自然增高 ✓ —— 正是用户要的行为 ✓。
+         */
+        // 从输入元素到聊天之间的每一层都标 contain ✓：划到头也不带动聊天记录 ✓
+        node.style.overscrollBehaviorY = 'contain'
+        node = node.parentElement
+      }
+    } catch (error) {
+      /* 输入区还没渲染出来是正常的 ✓（首屏会再跑一次 ✓）；异常本身写一行日志 ✓ */
+      try {
+        console.warn('[dshm] tuneComposerScroll', error)
+      } catch (ignored) {}
+    }
+  }
+
+  /**
+   * ★ 安全区的**唯一读法**（JS 侧）✓ —— 必须与 CSS 里写的那一套**完全一致** ✓。
+   *
+   * CSS 那边统一写的是 `max(env(safe-area-inset-top,0px), var(--dshm-safe-top,0px))` ✓
+   * （见本文件里顶栏 / 抽屉 / 面板 / 预览那几处 ✓）。
+   * 而 round 115 之前，**JS 这边只读变量** ✗ ——
+   * 于是只要"变量为 0、env() 不为 0"（或者反过来 ✓），就会出现
+   * **"CSS 让位了、JS 不让位"**（或反之）✗ —— 而用户看到的正是
+   * "预览的头部还压在状态栏里"✓。两套事实来源 = 修不好的根因之一 ✓。
+   *
+   * ★ round 116 真机数据（`端侧诊断` 截图）：**安全区 48px｜壳实测｜edge-to-edge ✓** ——
+   *   48px 比验收里一直模拟的 24px **大一倍** ✓，所以"24px 下刚好过去"的那些元素，
+   *   在真机上仍然在状态栏里 ✗（验收的模拟值必须跟着真机走 ✓）。
+   */
+  function safeTopPx() {
+    var fromVar = 0
+    try {
+      fromVar = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dshm-safe-top')) || 0
+    } catch (error) {
+      fromVar = 0
+    }
+    var fromEnv = 0
+    try {
+      if (document.body !== null && document.body !== undefined) {
+        var probe = document.createElement('div')
+        probe.style.cssText = 'position:absolute;left:-9999px;top:0;height:env(safe-area-inset-top,0px);'
+        document.body.appendChild(probe)
+        fromEnv = Math.round(probe.getBoundingClientRect().height) || 0
+        probe.remove()
+      }
+    } catch (error) {
+      fromEnv = 0
+    }
+    return Math.max(fromVar, fromEnv)
+  }
+
+  /**
+   * ★★ 把**预览层之外**那些"顶在安全区里"的 DSH 工具行也推下去（round 116）。
+   *
+   * ## 这就是用户说的"仍然进入状态栏"的直接原因
+   *
+   * round 115（以及再上一轮）只处理了 `[class*="_preview"]` 那一层 ✓ ——
+   * 给它加内边距 ✓、把层内的 `fixed/sticky` 细头部下移 ✓。
+   * 但真机上打开预览后，**最顶上那一行根本不是预览层的后代** ✗：
+   * 验收里一直打印着的"预览层外（含祖先，诊断用）"那一行写得明明白白 ✓ ——
+   * **关闭 / 新标签页 / 分栏 / 收起右侧边栏**，实测 y=10..14px ✓。
+   * 它们在**标签条**上 ✓，与预览层是**兄弟**（同一个面板里）✓ ——
+   * 所以预览层的内边距**推不动它们** ✗。用户看到的"所有控件都在最上面、点不到"就是这一行 ✓。
+   *
+   * ## 判据为什么是几何的，不是类名
+   *
+   * DSH 的类名是**构建哈希**（`_tabClose_17p4l_314` ✓）✗：升级一次全变 ✓，
+   * 写死它等于给自己埋一个"下次 DSH 升级就复发"✗。所以这里量的是**它长什么样**：
+   *   落在视口顶部安全区里 ✓ + 高度 < 160px（一条工具行，而不是整屏面板 ✓）
+   *   + 宽度 ≥ 半屏（不是某个小图标 ✓）+ **真的含有可点元素** ✓。
+   * 位移方式按定位方式分：`fixed`/`sticky` → `top` ✓；普通流 → `margin-top` ✓。
+   * 两种都是**绝对值**写入 ✓ ⇒ 重复跑不会累加 ✓（这点很要紧：本函数每 200ms 跑一次 ✓）。
+   * 只动**最外层**那一条 ✓（动过的子树打标记 ✓，父子各动一次 = 位移翻倍 ✗）。
+   */
+  /**
+   * ★ **立刻**把推下去的那些顶部工具行还原 ✓（round 118）。
+   * 为什么不能只靠 `tuneDshTopChrome` 在下一轮自己发现"预览关了"✗：
+   * 那是**最多 200ms 之后** ✓ —— 屏幕上就是"关掉预览后顶栏先错一下、再跳回来" ✗
+   * （用户原话："顶栏的下沉没有解决" ✓）。关闭那一刻必须**同一帧**还回去 ✓。
+   */
+  /**
+   * ★ **立刻结束"预览开着"这个状态** ✓（round 118 七次修正）。
+   *
+   * 用户真机反馈："退出的时候又出现**顶栏不加载**的问题" ✗ ——
+   * 就是那条 180ms 的宽限期造成的 ✓：标记清得慢 ⇒ 顶栏就一直 `visibility: hidden` ✓
+   * ⇒ 屏幕上"顶栏没加载出来" ✓，过一会儿才出现 ✓。
+   *
+   * 宽限期本身是必要的（防 DSH 重渲染造成的单帧闪烁 ✓），所以**不动它** ✓；
+   * 但"我们**自己**按下的关闭"（右滑返回 ✓）根本不需要等 ✓ ——
+   * 那一刻我们已经确定用户要走了 ✓，直接清标记 + 收尾 ✓。
+   */
+  function finishPreviewCloseNow() {
+    try {
+      delete document.body.dataset.dshmDshPreview
+      // ★ 状态变了就上报 ✓（系统返回要靠它决定"这一下吃掉还是退出"✓，见 dshmBack ✓）
+      reportBackAvailable()
+    } catch (error) {
+      void error
+    }
+    if (dshmPrevDocOverflow !== null) {
+      try {
+        document.documentElement.style.overflow = dshmPrevDocOverflow
+      } catch (error) {
+        void error
+      }
+      dshmPrevDocOverflow = null
+    }
+    dshmPreviewPadCache = { layer: null, safeTop: -1, need: 0 }
+    try {
+      /**
+       * ★★ round 173（用户实拍："**偶尔**文件预览的顶栏一开始还在状态栏位置，打开的瞬间才到标准位置"）：
+       *   这里原来在**关预览时**把变量清成 `0px` ✗ ⇒ 下一次预览的**第一帧**就按 0 上内边距画 ✓
+       *   ⇒ 它自己的顶栏又出现在状态栏位置 ✓，等 JS 量完才复位 ✓（"偶尔"= 只在"上一次也量出 0"时才复现 ✓）。
+       * ⇒ 空闲时把它留在**安全区**（= CSS 那条兜底值 ✓）：
+       *   · 预览出现的第一帧就已经留足了安全区 ✓（**结构上不可能**再压在状态栏里 ✓）；
+       *   · JS 量完若发现"其实不用这么多"（顶部工具行与预览层在同一个流里那种 ✓），
+       *     会在**同一个 tick 里**收窄 ✓（round 171 ✓）⇒ 屏幕上不会出现中间帧 ✓。
+       */
+      document.documentElement.style.setProperty(
+        '--dshm-preview-pad',
+        'max(env(safe-area-inset-top, 0px), ' + String(safeTopPx()) + 'px)',
+      )
+    } catch (error) {
+      void error
+    }
+    try {
+      restoreTopChrome()
+    } catch (error) {
+      void error
+    }
+    dshmPreviewEnterPlayed = false
+    /**
+     * ★★ round 157（B ✓）：这一下是**我们自己按下的关闭**（右滑返回 / 系统返回 ✓）——
+     *   它同时是"用户要回文件列表"那一下 ✓ ⇒ 把为此收起的文件面板还回去 ✓
+     *   （与 `syncDshPreviewState` 的关闭支调的是**同一个函数** ✓，只还一次 ✓）。
+     * ★ 放在**最后** ✓：先把预览态/顶栏/文档滚动都复位 ✓，再把面板拉上来 ✓ ——
+     *   否则"面板回来了、顶栏还在隐身"会闪一下 ✗。
+     */
+    restoreFilesAfterDshPreview('本机按下关闭')
+  }
+
+  /**
+   * ★★ round 157（B ✓）：这次"预览看不见了"是不是**只是被藏起来/最小化**（而不是关掉）✗。
+   *
+   * 两条判据（任一成立就算"不是关闭"✓）：
+   *   ① **页面自己不在前台** ✓（`document.visibilityState === 'hidden'` ✓ —— 切到后台 /
+   *      APK 被最小化 ✓）。这时 `elementFromPoint` 那一步必然量不到预览层 ✗，
+   *      但那只是"没在画"✗，不是用户关了它 ✓；
+   *   ② 那一层**还在文档里** ✓，而且它所在的右栏**仍然挂着"展开"标记**
+   *      （`[data-sidebar-right-panel][data-sidebar-right-open]` ✓）——
+   *      这正是 DSH 自己的"**最小化/仍开着、只是暂不可见**"与"收起（= 关闭）"的差别 ✓：
+   *      收起时那个属性会被摘掉 ✓（实测 DSH 的 CSS：`[data-sidebar-right-panel]` 基态
+   *      `visibility:hidden` + `translate(100%)` ✓，`[data-sidebar-right-open]` 才 `visibility:visible`✓）。
+   *
+   * ★ 判据都取**语义属性** ✓（不用哈希类名 ✗）：认不到右栏（例如预览正文挂在 body 下 ✓）
+   *   就只按①判 ✓ —— 认错的方向是"多恢复一次"✗，那是用户明确要的回来路 ✓；
+   *   漏认才会"凭空弹面板"✗✗，所以②只在**证据确凿**时才说"不是关闭"✓。
+   */
+  function dshPreviewMinimizedNotClosed() {
+    try {
+      if (document.visibilityState === 'hidden') return true
+      var layer = dshmPreviewLastLayer
+      if (layer === null || layer === undefined || layer.isConnected !== true) return false
+      if (typeof layer.closest !== 'function') return false
+      var panel = layer.closest('[data-sidebar-right-panel]')
+      if (panel === null || panel === undefined) return false
+      return panel.hasAttribute('data-sidebar-right-open') === true
+    } catch (error) {
+      // 判不出来就按"真的关掉了"处理 ✓（认错方向：宁可少弹一次面板，也绝不错过用户要的返回 ✓）
+      return false
+    }
+  }
+
+  /**
+   * ★★ round 158（B1 ✓）：文件面板**现在**就开着、而且正停在 `memory.path` 上吗 ✓。
+   *
+   * 判据只取**屏幕上的两个事实** ✓（不碰闭包里的 state ✗ —— 那份 state 在
+   * `renderFileBrowser` 里面 ✓，这里够不着 ✓）：
+   *   · `body[data-dshm-files="open"]` ✓；
+   *   · 面包屑那个 `.dshm-crumb-path` 的 `title`（绝对路径 ✓，157-B-①～③ 一直用它 ✓）
+   *     与记忆里的 `path` **逐字节**相同 ✓。
+   * 读不到就返回 `false` ✓（退回老路：老老实实重开一次 ✓ —— 宁可多画一次，
+   * 也不要让用户"返回之后落在聊天页"✗）。
+   */
+  function filesSheetAtPath(memory) {
+    try {
+      if (memory === null || memory === undefined) return false
+      if (document.body === null || document.body === undefined) return false
+      if (document.body.dataset.dshmFiles !== 'open') return false
+      var crumb = document.querySelector('.dshm-crumb-path')
+      if (crumb === null || crumb === undefined) return false
+      return String(crumb.getAttribute('title') || '') === String(memory.path)
+    } catch (error) {
+      return false
+    }
+  }
+
+  /**
+   * ★★ round 157（B ✓）：DSH 预览关掉之后，把"为它收起的文件面板"**还回去** ✓（只还一次 ✓）。
+   *
+   * 这是**唯一一份实现** ✓：`syncDshPreviewState` 的关闭支与 `finishPreviewCloseNow`
+   * 都调它 ✓（两条路描述的是同一个事实：预览没了 ✓ —— 各写一遍就一定漂 ✗）。
+   *
+   * 落点用 `openFilesSheet(sheet, getTunnel, path)` ✓（与"点按钮打开面板"同一条路 ✓，
+   * 它会按 `path` 找到所属工作区并**直接落到那个目录** ✓）—— 所以"还在原目录"是**逐字节**
+   * 相同的路径 ✓，不是"回到工作区根"✗。
+   *
+   * @returns true = 确实把面板还回去了 ✓；false = 没有记忆 / 这次只是最小化 / 失败 ✓。
+   */
+  function restoreFilesAfterDshPreview(where) {
+    var memory = dshmFilesReturnAfterPreview
+    if (memory === null || memory === undefined) return false
+    /**
+     * ★ 护栏②：**只是被最小化不算关闭** ✗ —— 记忆**留着**（不消费 ✓），
+     *   等它真的被关掉时再还 ✓（用户要的是"关掉预览 ⇒ 回文件列表"，
+     *   而不是"预览一缩小 ⇒ 文件面板自己弹出来"✗）。这一支要留一行日志 ✗（不静默 ✓）。
+     */
+    if (dshPreviewMinimizedNotClosed()) {
+      debugBoxLine('[files] DSH 预览只是被藏起来/最小化（' + where + '）⇒ 先不还文件面板 ✓')
+      return false
+    }
+    // ★ 只恢复一次 ✓：先把记忆摘掉再动手 ✓（重开那一步是异步的 ✓，慢一拍就会还两次 ✗）
+    dshmFilesReturnAfterPreview = null
+    // ★ round 158（B2 ✓）：令牌也一起清 ✓（这次预览这一轮用完了 ✓，不许漏到下一轮 ✗）
+    dshmPreviewOpenRequested = false
+    try {
+      /**
+       * ★★ round 158（B1 ✓）：**面板本来就在那儿**（round 158 起它全程没被关 ✓）⇒
+       *   什么都不做 ✗ —— 尤其**不要**再 `renderFileBrowser` 重画一遍 ✓：
+       *   重画会重新拉一次目录（滚动位置、选中态全丢 ✗），而那一帧正是用户抱怨的
+       *   "**让文件目录跳出来**"✓✗。这一支就是"零闪烁"的落地处 ✓ ——
+       *   面板还是原来那个节点、原来那个目录 ✓，屏幕上根本没有中间帧 ✓。
+       *
+       * 日志**沿用同一句话**（`⇒ 回到文件列表的原目录：<path>` ✓）——
+       * 157-B-③ 与"恢复只发生一次"那两条断言都靠它 ✓，本轮**不许放松** ✓
+       * （只多一个括号说明 ✓）。
+       */
+      var alreadyThere = filesSheetAtPath(memory)
+      debugBoxLine(
+        '[files] DSH 预览关闭（' + where + '）⇒ 回到文件列表的原目录：' + String(memory.path) +
+          (alreadyThere ? '（面板全程没被关 ✓ 无需重画 ✓）' : ''),
+      )
+      if (alreadyThere) return true
+      /**
+       * ★★ `setOpen(true)` + `renderFileBrowser(...)` = `openFilesSheet` 里"进入某个工作区"
+       *   那两步 ✓（**同一份实现** ✓，没有第二套渲染 ✗）。为什么不直接调 `openFilesSheet` ✗：
+       *   它会拿 `path` 去**字符串匹配**工作区表里的根 ✗ —— 而 macOS 的
+       *   `/var/…` 与 `/private/var/…` 是同一个目录的两种写法 ✓（本项目有 `samePath` 就是为它 ✓）
+       *   ⇒ 匹配不上就会落到"工作区列表"那一屏 ✗（用户要的"停在原目录"就没了 ✓）。
+       *   直接拿**这一屏自己的** `workspace` / `targets` 进去 ⇒ 落点**逐字节**就是 `state.path` ✓。
+       */
+      if (memory.sheet !== null && memory.sheet !== undefined && typeof memory.sheet.setOpen === 'function') {
+        memory.sheet.setOpen(true)
+      }
+      if (memory.workspace !== undefined && memory.workspace !== null) {
+        renderFileBrowser(memory.sheet, memory.workspace, memory.targets, memory.getTunnel, memory.path)
+      } else {
+        // 兜底（理论上不会走到 ✓）：没有工作区对象时按老路走一遍 ✓
+        void openFilesSheet(memory.sheet, memory.getTunnel, memory.path)
+      }
+      return true
+    } catch (error) {
+      debugBoxLine('[files] 还文件面板失败（' + where + '）：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  function restoreTopChrome() {
+    if (dshmTopChromeMoved.length === 0) return 0
+    var restored = 0
+    for (var i = 0; i < dshmTopChromeMoved.length; i++) {
+      var record = dshmTopChromeMoved[i]
+      try {
+        record.node.style.marginTop = record.marginTop
+        record.node.style.top = record.top
+        if (record.node.dataset !== undefined) delete record.node.dataset.dshmSafeTop
+        restored += 1
+      } catch (error) {
+        void error
+      }
+    }
+    dshmTopChromeMoved = []
+    return restored
+  }
+
+  function tuneDshTopChrome(safeTop, layer) {
+    if (!(safeTop > 0)) return 0
+    var body = document.body
+    if (body === null || body === undefined) return 0
+    /**
+     * 只在"DSH 预览盖住整屏"时动手 ✓。
+     * 平时（聊天界面）顶部是**我们自己的顶栏** ✓，DSH 自己的顶栏由
+     * `[data-dshm-topheader]` 的让位规则处理 ✓ —— 这里再动一次就是**重复位移** ✗。
+     * 两个判据都看：我们自己打的标记 ✓，以及"预览层真的盖住视口"这个几何事实 ✓
+     * （万一标记没打上，几何事实还能兜住 ✓）。
+     */
+    var previewOpen = body.dataset.dshmDshPreview === '1'
+    /**
+     * ★★ round 178（**"还是闪"的真机制** ✓）：`data-dshm-preview-pending` = "**我们刚请求过预览、
+     *   它还没被认出来**" ✓（在 `openFileInDshPreview` 里、调桥**之前**就打上 ✓，四条路都会清 ✓）。
+     *   为什么必须有它 ✗：PDF 那一层要**渲染一会儿**才进 DOM ✓ ⇒ 这段"加载窗口"里探测器返回 null ✗
+     *   ⇒ 本函数的 `previewOpen` 就成了 false ✗ ⇒ 它**不但不推，还会去 `restoreTopChrome()`
+     *   把之前推下去的还原** ✗✗ ⇒ 等那一层真出现、我们再推上去 ⇒ **一还原一推 = 用户看到的"闪"** ✓✓。
+     *   ⇒ 把 pending 也算进"预览开着" ✓：从"点了文件"那一刻起，本函数就一直在**推** ✓，
+     *   而且 round 177 的短轮询（60ms ✓）保证**只要那一刻的元素一出现就被推** ✓。
+     * ★ 稳态无副作用 ✓：pending 只在"我们请求预览之后、它还没被认出来"这段里存在 ✓
+     *   （认出来 ⇒ `syncDshPreviewState` 清掉它 ✓；打不开 / 12s 超时 ⇒ 也清掉 ✓）。
+     */
+    if (!previewOpen && body.dataset.dshmPreviewPending === '1') previewOpen = true
+    if (!previewOpen && layer !== null && layer !== undefined) {
+      try {
+        var lr = layer.getBoundingClientRect()
+        previewOpen = lr.width >= window.innerWidth * 0.9 && lr.height >= window.innerHeight * 0.9
+      } catch (error) {
+        previewOpen = false
+      }
+    }
+    /**
+     * ★★ round 181（**用户实拍："对话/轨迹/子代理那一栏会在 app 刚打开的时候往下沉，
+     *   打开一个文件预览再返回才正常"** ✗）：这里 round 176 曾补过一条"**不看类名**"的结构判据
+     *   （"视口中心命中的那一层里，有没有一个盖住 ≥95%×95%、且不是我们的元素"✓），**撤回** ✓✗。
+     *
+     * 为什么它必须撤 ✗：**首屏/普通聊天上它会误判** ✓ —— 那时视口中心命中的是 DSH 自己的
+     * 大容器（宽高都接近满屏、不是我们的 ✓）⇒ `previewOpen` 变成 true ✗
+     * ⇒ 下面那段就**去推聊天自己的那一行** ✓，而它不是 `fixed/sticky` ✓ ⇒ 走
+     * `bar.style.marginTop = safeTop + 'px'` ✓ = **整行往下沉 48px** ✓✓（用户看到的"下沉"✓）。
+     * 而唯一会把它还原的是 `restoreTopChrome()` ✓ —— 那个只在**预览关闭**时跑 ✓
+     * ⇒ "**打开一个文件预览、再返回才正常**" ✓✓ 逐字对上 ✓。
+     *
+     * ★ 那"PDF 预览认不出"怎么办 ✗：由 round 178 的 `data-dshm-preview-pending` 兜住 ✓ ——
+     *   它精确得多 ✓（只在"我们真的请求了预览、它还没被认出来"这段里成立 ✓），
+     *   而且**我们自己开预览**这条主路一定经过它 ✓。**判据宁可窄、不可宽** ✗：
+     *   宽了就会像这次一样，去动不该动的东西 ✓。
+     */
+    if (!previewOpen) {
+      restoreTopChrome()
+      return 0
+    }
+    var moved = 0
+    var handled = []
+    /**
+     * ★ 找法用**命中测试**（`elementsFromPoint`），不是"把全文档扫一遍" ✗。
+     *
+     * 为什么必须这样：本函数每 200ms 跑一次 ✓，而真机上 DSH 的 DOM 可以到**二十万节点**
+     * （大目录那一段实测过 ✓）—— 每 200ms 跑一次 `body.querySelectorAll('*')` + 每个元素
+     * 一次 `getBoundingClientRect()` 就是**必然的卡顿** ✗（用户会报"变卡了"✓，
+     * 而那是我们新加的 ✓）。命中测试只问几个点 ✓，成本与 DOM 大小无关 ✓。
+     *
+     * ★ 顺带解决"假阳性" ✓：命中测试返回的是**最上层**的元素 ✓ ——
+     * 全屏预览**底下**那些聊天记录（实测它们也有 top=41 的 ✓）不会被返回 ✓，
+     * 而那些元素本来也点不到 ✗，不该被算作"压在状态栏里点不到"✗。
+     */
+    var probeY = Math.max(1, Math.min(safeTop - 2, Math.round(safeTop / 2)))
+    var fractions = [0.06, 0.22, 0.4, 0.6, 0.78, 0.94]
+    for (var i = 0; i < fractions.length; i++) {
+      var x = Math.round(window.innerWidth * fractions[i])
+      var stack = []
+      try {
+        stack = document.elementsFromPoint(x, probeY) || []
+      } catch (error) {
+        stack = []
+      }
+      for (var j = 0; j < stack.length; j++) {
+        var bar = topBarAt(stack[j], safeTop, layer)
+        if (bar === null || handled.indexOf(bar) >= 0) continue
+        handled.push(bar)
+        var position = getComputedStyle(bar).position
+        // ★ 记下**改动前**的行内值 ✓（还原用 ✓ —— 不能想当然地写 ''，
+        //   万一 DSH 自己就写了行内 margin/top，清掉就是替它改样式 ✗）
+        dshmTopChromeMoved.push({ node: bar, marginTop: bar.style.marginTop, top: bar.style.top })
+        if (position === 'fixed' || position === 'sticky') bar.style.top = safeTop + 'px'
+        else bar.style.marginTop = safeTop + 'px'
+        bar.dataset.dshmSafeTop = '1'
+        moved += 1
+      }
+    }
+    // 每秒（5 轮）取一次快照 ✓ —— 只在预览打开时 ✓，且用的是**打点**而不是全文档扫描 ✓，
+    // 所以哪怕真机 DOM 二十万节点也不会成为负担 ✓。
+    dshmTopBandTick += 1
+    if (dshmTopBandTick % 5 === 1) dshmTopBandLast = probeTopBand(safeTop)
+    return moved
+  }
+
+  /**
+   * 从一个命中点往上找"**顶在安全区里的那条工具行**" ✓。
+   *
+   * 判据全是几何的（不看哈希类名 ✓，那些每次 DSH 构建都变 ✗）：
+   *   高度 < 160px（是一条工具栏，不是整屏面板 ✓）
+   *   + 宽度 ≥ 半屏（不是某个小图标 ✓）
+   *   + 顶边落在安全区里 ✓
+   *   + 真的含有可点元素 ✓。
+   * 往上走的过程中**越靠外越优先** ✓（取最外层那一条 ✓）—— 只推一条，
+   * 父子各推一次 = 位移翻倍 ✗。
+   */
+  function topBarAt(hit, safeTop, layer) {
+    var node = hit
+    var best = null
+    while (node !== null && node !== undefined && node !== document.body) {
+      var id = String(node.id || '')
+      // 我们自己的外壳元素是"边界"：越过它就别再往上看了 ✓
+      if (id.indexOf('dsh-mobile') === 0 || id.indexOf('dshm-') === 0) return best
+      // 已经在让位子树里的 —— 说明这一条已经处理过了 ✓
+      if (node.dataset !== undefined && node.dataset.dshmSafeTop === '1') return null
+      // 预览层自己那一套由 tuneDshPreviewSafeArea 管 ✓（别两处都动 ✗）
+      if (layer !== null && layer !== undefined && (node === layer || layer.contains(node))) return best
+      /**
+       * ★★ **我们自己定位的那条顶栏绝不推**（round 118，用户真机反馈：
+       *   "顶栏的下沉没有解决 —— 标题那一条消失，然后**对话轨迹那一条也消失并下沉**" ✗✓）。
+       *
+       * 真因就在这里没拦住 ✓：`对话 / 轨迹` 那一行的容器正是 `[data-dshm-topheader]` ✓
+       * （它的让位量由我们那条 CSS 规则算 ✓），而本函数在预览期间把它当"顶部工具行"✗
+       * 又加了一次 `margin-top` ✗ ⇒ 关掉预览后要等下一轮 200ms 轮询才还原 ✓
+       * ⇒ 屏幕上就是"先**下沉**、再跳回来" ✓✓。
+       */
+      if (typeof node.closest === 'function' && node.closest('[data-dshm-topheader]') !== null) return best
+      var rect
+      try {
+        rect = node.getBoundingClientRect()
+      } catch (error) {
+        return best
+      }
+      if (
+        rect.height > 0 &&
+        rect.height < 160 &&
+        rect.width >= window.innerWidth * 0.5 &&
+        rect.top < safeTop - 1 &&
+        rect.top >= -1 &&
+        node.querySelector('button, [role="button"], a[href]') !== null
+      ) {
+        best = node
+      }
+      node = node.parentElement
+    }
+    return best
+  }
+
+  /**
+   * 点 DSH 自己的「收起右侧边栏」✓ —— 按**可读标签**找，不猜哈希类名 ✓
+   * （与 `hideUselessPreviewControls` 同一套办法 ✓；DSH 的类名每次构建都变 ✗）。
+   *
+   * @returns `true` = 点到了 ✓
+   */
+  /** 最近一次"关掉 DSH 预览"点到了哪个键 ✓（诊断用 ✓ —— 手机上看不见 DOM，只能靠这个 ✓）。 */
+  var dshmLastCloseResult = ''
+
+  function clickDshCollapseControl() {
+    /**
+     * ★ 顺序很要紧（round 117 实测逼出来的 ✓）：
+     *   **先试"真正关掉这一页"的键** —— 标签上的「关闭」✓（它会让 DSH **卸载**预览层 ✓），
+     *   再退回「收起右侧边栏」✓。
+     *   为什么不能只点「收起右侧边栏」✗：那一颗只把列收成 rail ✓，
+     *   而预览正文是 `position: fixed` 挂在 `body` 下的**独立一层** ✓ ——
+     *   实测点完之后它**还在屏幕上**✗（用户看到的就是"右滑没反应"✓）。
+     *
+     * ★ 为什么按 `rect.top` **排序取最靠上的那个** ✓，而不是要求"必须在顶部 140px 内"✗：
+     *   右滑返回时我们**已经给这一层加了 `translateX`** ✓ —— 那一刻
+     *   "层还盖不盖住屏幕中心"这条判据会失效 ✓（我们自己定位预览层就靠它 ✗），
+     *   于是"点收起键"实测**点了个空** ✓（`lastClose` 返回空串 ✓）。
+     *   改成"把这些标签的可见按钮按位置排队、点最靠上那个" ✓，
+     *   不管预览层被推到哪儿都能点到 ✓；而 `关闭`/`收起右侧边栏` 这两个标签
+     *   本来就只出现在这一个地方 ✓，不会误伤别处 ✗。
+     */
+    var labels = [
+      /^关闭$/,
+      /^close$/i,
+      /收起右侧边栏/,
+      /收起侧边栏/,
+      /收起侧栏/,
+      /collapse (right )?(sidebar|panel)/i,
+    ]
+    var nodes = document.querySelectorAll('button, [role="button"]')
+    /**
+     * ★★ 只在**预览区**里找（round 118 六次修正，验收当场抓到 ✓）。
+     *
+     * 事故：我为了"预览层被我们推走时也能点到"✗，把范围放宽到**全文档** ✓ ——
+     * 结果这一轮匹配到了一条**聊天消息** ✗（它的正文里提到了"收起"✓，
+     * 日志里点到的键是 `"思考Done: the …"` ✗）⇒ 预览根本没关 ✓ ⇒
+     * 后面 16 条断言连锁失败 ✗✓。
+     * 现在**不再有那个理由**了 ✓ —— 我们**不再变换预览层**（跟手与滑出都撤掉了 ✓），
+     * 所以 `dshPreviewSurface()` 随时都能找到它 ✓ ⇒ 搜索范围收回预览区 ✓。
+     * 另外再兜一条：**排除聊天列**（`[class*="centerCol"]` ✓）—— 那是消息所在的地方 ✓。
+     */
+    var hitLayer = dshPreviewSurface()
+    var scope = hitLayer
+    if (scope !== null && scope !== undefined) {
+      for (var up = 0; up < 5 && scope.parentElement !== null; up++) scope = scope.parentElement
+    }
+    var best = null
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
+      if (scope !== null && scope !== undefined && scope.contains(node) === false) continue
+      if (typeof node.closest === 'function' && node.closest('[class*="centerCol"]') !== null) continue
+      var label = String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '')
+      var matched = false
+      for (var j = 0; j < labels.length; j++) {
+        if (labels[j].test(label)) {
+          matched = true
+          break
+        }
+      }
+      if (!matched) continue
+      var rect
+      try {
+        var cs = getComputedStyle(node)
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue
+        rect = node.getBoundingClientRect()
+      } catch (error) {
+        continue
+      }
+      if (rect.width <= 0 || rect.height <= 0) continue
+      if (best === null || rect.top < best.top) best = { node: node, top: rect.top, label: label.trim().slice(0, 12) }
+    }
+    if (best === null) {
+      /**
+       * ★ 找不到就把**当时 DOM 里有什么**带回去 ✓ —— 手机上看不见 DOM，
+       *   而"点空了"这件事必须能自证 ✓（本轮就是靠这一手才判出
+       *   "收起右侧边栏不会真的卸载预览层" ✓）。
+       */
+      var sample = []
+      var all = document.querySelectorAll('button, [role="button"]')
+      for (var k = 0; k < all.length && sample.length < 6; k++) {
+        var cs2 = getComputedStyle(all[k])
+        if (cs2.display === 'none' || cs2.visibility === 'hidden') continue
+        var r2 = all[k].getBoundingClientRect()
+        if (r2.top < 0 || r2.top > 140 || r2.width <= 0) continue
+        sample.push(String(all[k].getAttribute('aria-label') || all[k].getAttribute('title') || all[k].textContent || '').trim().slice(0, 8))
+      }
+      return '(无匹配｜顶部可见=' + sample.join('|') + ')'
+    }
+    best.node.click()
+    return best.label
+  }
+
+  /**
+   * ★ DSH 预览的**入场动画**（round 117）✓：从**右边栏的宽度**滑到 0 ✓ ——
+   * 视觉上就是"从右边栏向左拓展铺满" ✓（用户明确要的那个感觉 ✓）。
+   *
+   * 两个必须做对的细节：
+   *   1. **两步之间要强制一次布局** ✓（`void layer.offsetWidth`）——
+   *      否则浏览器会把"起点"和"终点"合并成一帧 ✓，用户看到的还是**瞬间全屏** ✗；
+   *   2. 动画结束**清掉内联 transform** ✓ —— 它会让这一层成为 `position: fixed`
+   *      后代的包含块 ✓（本项目在抽屉那里踩过同样的坑 ✓），留着就是给以后埋雷 ✗。
+   */
+  function playDshPreviewEnter() {
+    /**
+     * ★★ round 118 三次修正：**我们不再加入场位移动画** ✓（函数留着，方便后人读懂为什么 ✗）。
+     *
+     * 决定性证据来自用户的真机观察 ✓：
+     *   "第一次移动**顶栏没有被文件页的操作界面遮盖**，然后第二次出现了文件页" ✓。
+     * 也就是说两次移动是**两个不同的东西** ✓：
+     *   ① 第一次 = **DSH 自己**在把那一列从 rail 展开到全宽 ✓（那时预览内容还没画出来 ✓，
+     *      所以顶栏还露着 ✓）；
+     *   ② 第二次 = **我们**这段 `translateX(右边栏宽度 → 0)` ✓。
+     * 用户当初要的"从右边栏向左拓展" **DSH 自己已经在做** ✓ —— 我们再补一段就是**重复** ✗，
+     * 观感上就是"移两次" ✓✓。
+     *
+     * 所以这里**什么都不做** ✓。`previewPlays` 计数器保留 ✓ ——
+     * 验收靠它断言"真实打开时我们一次位移都没加" ✓（它必须恒为 0 ✓）。
+     */
+    return
+  }
+
+  /**
+   * ★ DSH 原生预览：把**它的头部**真正顶到安全区以下 ✓（用户反馈第一条的正解）。
+   *
+   * 用户澄清："我说的都是 dsh 渲染，指的是**打开文件的时候走 dsh 原生预览**" ✓ ——
+   * 那个界面在 APK 里是全屏的 ✓，而它最顶上那一行（路径 + 打开方式 + 收起边栏 ✓）
+   * 会钻到状态栏下面 ✓ → **点不到** ✓。
+   *
+   * 只给容器加 `padding-top` 是不够的 ✗ —— 如果头部自己是 `fixed`/`sticky` ✓，
+   * 内边距推不动它 ✗。
+   * 所以**三层一起做** ✓：
+   *   ① 预览层**之外**的顶部工具行（标签条等 ✓）整体下移 —— round 116 新增 ✓，见上 ✓；
+   *   ② 预览层自己的上内边距 ✓ —— ★ 但值要**量出来**（见下 ✓），不能无脑写 `safeTop` ✗；
+   *   ③ 层内仍然是 `fixed`/`sticky` 的细头部单独下移 ✓（内边距对它无效 ✓）。
+   *
+   * ★ ②为什么要"量"：如果 ① 那条工具行与预览层**在同一个流里**（同一个面板的上下两块 ✓），
+   *   那么 ① 已经把预览层整体推下去 48px 了 ✓ —— 这时再加 48px 内边距就是**96px 的空档** ✗
+   *   （用户会看到预览顶上莫名其妙一大块空白 ✓）。
+   *   反过来，如果那条工具行是 `fixed`（推不动预览层 ✓），内边距就必须补上 48px ✓。
+   *   所以这里读**预览层自己的矩形顶边**（它自己的 border-box 不受自身内边距影响 ✓），
+   *   还差多少就补多少 ✓ —— 两种情况都对 ✓，而且重复跑不会累加 ✓。
+   */
+  function tuneDshPreviewSafeArea() {
+    try {
+      // 安全区必须与 CSS 同源 ✓（见 safeTopPx 的注释：两套来源就是修不好的根因之一 ✓）
+      var safeTop = safeTopPx()
+      var layer = dshPreviewSurface()
+      // ① 预览层之外的顶部工具行（标签条 / 工具行 ✓）
+      tuneDshTopChrome(safeTop, layer)
+      if (layer === null) return
+      // ② 预览层自己：还差多少补多少 ✓（写进 `--dshm-preview-pad` ✓ ——
+      //    那条 CSS 规则的兜底值保证"JS 没跑到"时也不会漏 ✓，见那里的注释 ✓）
+      /**
+       * ★★ 只在"换了层 / 换了安全区"时**重算一次**（round 118，用户真机反馈：
+       *   "上滑往下翻的时候会出现两个滚动条，页面来回上下晃动" ✗）。
+       *
+       * 为什么以前会晃：这个函数每 200ms 跑一轮 ✓，而 `need` 是拿
+       * `layer.getBoundingClientRect().top` **现算**的 ✓ —— 一旦**文档本身也能滚**
+       * （预览层比视口略高一点就会出现第二条滚动条 ✓），滚动时这个 top 就会变 ✗
+       * ⇒ 每 200ms 重写一次 `--dshm-preview-pad` ⇒ 内容被推来推去 ⇒
+       * **看着就是"页面来回上下晃动"** ✓✓。
+       * 内边距本来就只该由"安全区"和"是哪一层"决定 ✓，与滚动位置**无关** ✓。
+       */
+      var cache = dshmPreviewPadCache
+      if (cache.layer !== layer || cache.safeTop !== safeTop) {
+        var need = 0
+        if (safeTop > 0) {
+          try {
+            /**
+             * ★★ **必须夹到 `[0, safeTop]`**（round 118 二次修正，用户真机反馈：
+             *   "打开预览的时候……**文档疯狂上下滑动**" ✗✓）。
+             *
+             * 真因：这个差值原来**没有上界** ✗。而文档一旦被滚下去 S 像素（预览层比视口略高，
+             * 手机上很容易滚起来 ✓），`layer.getBoundingClientRect().top` 就变成 **−S** ✗ ⇒
+             * `need = safeTop + S` ⇒ 内边距被写成几百 px ⇒ 层更高 ⇒ 更能滚 ⇒
+             * 下一轮算出来更大 ⇒ **正反馈、文档自己疯狂上下滚** ✓✓✓。
+             * 内边距在物理上**最多只该等于安全区** ✓ —— 所以这里夹死 ✓。
+             */
+            need = Math.min(safeTop, Math.max(0, Math.round(safeTop - layer.getBoundingClientRect().top)))
+          } catch (error) {
+            need = safeTop
+          }
+        }
+        dshmPreviewPadCache = { layer: layer, safeTop: safeTop, need: need }
+      }
+      var wanted = dshmPreviewPadCache.need > 0 ? dshmPreviewPadCache.need + 'px' : '0px'
+      if (document.documentElement.style.getPropertyValue('--dshm-preview-pad') !== wanted) {
+        document.documentElement.style.setProperty('--dshm-preview-pad', wanted)
+      }
+      if (safeTop <= 0) return
+      // ③ 层内的 fixed/sticky 细头部：内边距推不动它们 ✓，只能改 top ✓
+      var nodes = layer.querySelectorAll('*')
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i]
+        var position = getComputedStyle(node).position
+        if (position !== 'fixed' && position !== 'sticky') continue
+        var rect = node.getBoundingClientRect()
+        // 顶到安全区里的、且是"一条细头部"（不是整屏面板 ✓）才动它 ✓
+        if (rect.top < safeTop - 1 && rect.height > 0 && rect.height < 160) {
+          node.style.top = safeTop + 'px'
+          node.dataset.dshmSafeTop = '1'
+        }
+      }
+    } catch (error) {
+      try {
+        console.warn('[dshm] tuneDshPreviewSafeArea', error)
+      } catch (ignored) {}
+    }
+  }
+
+  var dshPreviewSurface = function () {
+    return null
+  }
+  /**
+   * ★ 被"推到安全区以下"的顶部工具行（记着**改动前**的行内值 ✓，供预览关闭时还原 ✓）。
+   * 见 `tuneDshTopChrome` ✓ —— 没有这份台账，预览关掉之后聊天界面会永久少一块 ✗。
+   */
+  var dshmTopChromeMoved = []
+  /**
+   * ★ 预览打开时**最近一次**测到的"压在安全区里的可点控件" ✓（round 116）。
+   *
+   * 为什么要存一份快照：用户**看不到**预览打开状态下的设置面板 ✗
+   * （预览是整屏的 ✓，而「端侧诊断」在文件面板里 ✓）——
+   * 所以他只能在**关掉预览之后**才看到那一行 ✓，那时实时值必然是"没有"✗。
+   * 存下"预览打开时测到的那个数" ✓，这一行才有意义 ✓。
+   */
+  var dshmTopBandLast = null
+  /** 入场动画"最近一次播放的时刻"与"播放次数" ✓（冷却用 ✓ + 验收读数用 ✓，见 playDshPreviewEnter）。 */
+  /**
+   * 预览层内边距的**缓存** ✓（`{layer, safeTop, need}`）——
+   * 见 `tuneDshPreviewSafeArea` 里那段长注释：每 200ms 现算会让页面上下晃 ✗。
+   */
+  var dshmPreviewPadCache = { layer: null, safeTop: -1, need: 0 }
+  /** 预览打开前 `html` 上的行内 overflow ✓（关掉时原样还回去 ✓，不假设它一定是空 ✓）。 */
+  var dshmPrevDocOverflow = null
+  /** 我们对预览层动过的 `z-index` 的台账 ✓（关掉时还回去 ✓）。 */
+  var dshmPreviewZTarget = null
+  var dshmPreviewPrevZ = ''
+  var dshmPreviewEnterAt = 0
+  /** 本次打开是否已经放过入场动画 ✓（关掉时复位 ✓ —— 见 playDshPreviewEnter 的长注释）。 */
+  var dshmPreviewEnterPlayed = false
+  var dshmPreviewPlays = 0
+  var dshmTopBandTick = 0
+
+  /**
+   * ★★ round 157（B ✓）：**最近一次量到的 DSH 预览层** ✓（用来区分"关掉了"与"只是被藏起来/最小化"✗）。
+   *
+   * 为什么需要它 ✗：`dshPreviewSurface()` 的判据是"盖住视口 **且** 视口中心命中的是它" ✓ ——
+   * 面板被收起（DSH 自己那套是 `visibility:hidden` + 滑出屏外 ✓）或页面被切到后台时，
+   * 那一层**仍在文档里** ✓，只是量不到 ✗。两种情形在下游长得一模一样 ✓，
+   * 而"要不要把文件面板重新拉上来"必须分开（见 `dshPreviewMinimizedNotClosed` ✓）。
+   */
+  var dshmPreviewLastLayer = null
+  /** ★ round 176：认不出预览层时的诊断节流（签名 + 上次记录时刻 ✓，见 `dshPreviewSurface` ✓）。 */
+  var dshmPreviewMissSig = ''
+  var dshmPreviewMissAt = 0
+
+  /**
+   * ★★ round 157（B ✓）：**"为看 DSH 预览而收起的文件面板"要还回去** 的那笔记忆 ✓。
+   *
+   * 用户原话（本轮第 2 条）："**2 不行**" ✓ —— 从文件面板点开一个文件 ⇒ DSH 预览开 ✓、
+   * 我们的面板被收掉（`openFileInDshPreview` 结尾那句 `setOpen(false)` ✓）⇒
+   * 用户按返回（预览关掉 ✓）时**底下已经没有面板了** ✗ ⇒ 直接落到聊天页 ✗。
+   * round 153 的"预览返回 ⇒ 回列表"只覆盖了**自家预览**那一屏（`currentView === 'preview'` ✓），
+   * DSH 自带预览这条路一直漏着 ✗。
+   *
+   * 形状：`{ sheet, getTunnel, path, workspace, targets, at }` ✓ ——
+   *   · `sheet` / `getTunnel` 是"重新打开面板"要用的两个东西 ✓；
+   *   · `path` 是**落点** ✓（`state.path` ✓ —— 用户要"停在原目录"✓，
+   *     ★ 不能拿 `sheet.restoreFiles` 顶替 ✗：那个落点是**工作区根**✓，不是当前目录 ✗）；
+   *   · `workspace` / `targets` 是**文件浏览器那一屏自己的两个入参** ✓ ——
+   *     恢复时直接调 `renderFileBrowser`（"打开某个工作区的文件列表"那份**唯一实现** ✓），
+   *     **不走 `openFilesSheet` 的"按路径找所属工作区"那一步** ✗✗。
+   *     为什么这条很要紧 ✓：macOS 上 `/var/…` 与 `/private/var/…` 是**同一个目录的两种写法** ✓
+   *     （本项目已有 `samePath` 就是为它写的 ✓）—— 工作区表里是宿主配置里那种写法 ✓、
+   *     而文件浏览器里的 `state.path` 是宿主 `list` 回的 **realpath** ✓ ⇒
+   *     拿 realpath 去跟表里的路径做**字符串前缀匹配**会**匹配不上** ✗ ⇒
+   *     面板重开却落到"工作区列表"那一屏 ✗（用户要的"停在原目录"就没了 ✓）。
+   *   · `at` 是**佩戴时刻** ✓（只作废"不是刚为它收起面板"的那种陈旧记忆 ✓，见 open 那一支 ✓）。
+   * 用完**立刻清** ✓（只恢复一次 ✓ —— `syncDshPreviewState` 与 `finishPreviewCloseNow`
+   * 两条路都会走到这里 ✓，不清就会弹两次 ✓）。
+   */
+  var dshmFilesReturnAfterPreview = null
+  /**
+   * ★★ round 158（B2 ✓）：**"这一次预览是我们（文件面板那条路）请求出来的"** 令牌 ✓。
+   *
+   * round 157 判"这预览是不是刚从文件面板点开的"**只看时间**（`at` + 3000ms ✓）——
+   * 真机上文件一大、预览那一层进 DOM 就可能**晚于 3 秒** ✓ ⇒ 记忆被 `syncDshPreviewState`
+   * 那条"佩戴时刻"判据**当场作废** ✗ ⇒ 这一轮的返回点就没了 ✓
+   * ⇒ 用户原话："**打开多个文件（开一个退出不关闭）以后用返回键无法回到文件目录**"✓
+   * （时灵时不灵 ✓ —— 连续几轮里只要有**一轮**预览到得慢，就断链 ✓）。
+   * 令牌的语义：`openFileInDshPreview` 里 `bridge.open` 回了 `{ok:true}` 就置上 ✓，
+   * **预览真的出现时消费掉**（这时**不清记忆** ✓，也不管中间过了多久 ✓）。
+   * 护栏①（聊天里的文件链接 ✓）一个字没松 ✓：那条路**不会**置这个令牌 ⇒
+   * 照旧落在"超过 3000ms 就作废"的时间判据上 ✓。
+   */
+  var dshmPreviewOpenRequested = false
+  /**
+   * 佩戴记忆与"预览真的开了"之间的合理间隔 ✓（桥 `open` 之后我们还要等
+   * `setTimeout(syncDshPreviewState, 0)` + 一帧 rAF ✓ ⇒ 实测在几百毫秒内 ✓）。
+   * 只用来**作废陈旧记忆** ✗（护栏①：不是从文件面板点开的预览，关掉后不许凭空弹面板 ✓）。
+   */
+  var DSH_PREVIEW_ARM_MS = 3000
+
+  /** 在安全区那条带子里打几个点，看命中的是不是**我们之外的**可点控件 ✓（成本与 DOM 无关 ✓）。 */
+  function probeTopBand(safeTop) {
+    var found = []
+    if (!(safeTop > 0)) return found
+    var probeY = Math.max(1, Math.min(safeTop - 2, Math.round(safeTop / 2)))
+    var fractions = [0.06, 0.22, 0.4, 0.6, 0.78, 0.94]
+    for (var i = 0; i < fractions.length; i++) {
+      var x = Math.round(window.innerWidth * fractions[i])
+      var hit = null
+      try {
+        hit = document.elementFromPoint(x, probeY)
+      } catch (error) {
+        hit = null
+      }
+      if (hit === null) continue
+      var node = hit
+      var control = null
+      while (node !== null && node !== undefined && node !== document.body) {
+        var id = String(node.id || '')
+        // 我们自己的东西不算 ✓（预览态下顶栏本来就整体隐藏了 ✓）
+        if (id.indexOf('dsh-mobile') === 0 || id.indexOf('dshm-') === 0) {
+          control = null
+          break
+        }
+        var tag = String(node.tagName || '').toLowerCase()
+        if (tag === 'button' || tag === 'a' || String(node.getAttribute ? node.getAttribute('role') : '') === 'button') {
+          control = node
+          break
+        }
+        node = node.parentElement
+      }
+      if (control === null) continue
+      var name = String(control.className || control.tagName || '?').split(' ')[0].slice(0, 18)
+      if (found.indexOf(name) < 0) found.push(name)
+    }
+    return found
+  }
+  var syncDshPreviewState = function () {
+    return false
+  }
+
+  /** 生成顶栏里的图标按钮（44×44 触控目标，无背景块，与顶栏融为一体）。 */
+  function shellIconButton(id, label, content) {
+    var button = document.createElement('button')
+    button.id = id
+    button.type = 'button'
+    button.setAttribute('aria-label', label)
+    button.title = label
+    if (content.charAt(0) === '<') button.innerHTML = content
+    else button.textContent = content
+    return button
+  }
+
+  /**
+   * 安装自建移动外壳。返回一个诊断用的状态读取器。
+   *
+   * @param getTunnel - 取当前隧道（可能尚未建立：本函数在隧道创建之前就被调用，
+   *                    所以这里必须传**取值函数**而不是隧道对象本身）。
+   */
+  /**
+   * DSH 设计 token 的"桥"。
+   *
+   * ## 为什么必须有它（这是"两个抽屉颜色不一致"的真正根因）
+   *
+   * 我们所有面板都挂在 `document.body` 下（不在 DSH 的 React 根里），而
+   * `--dsw-alias-*` 这些 token 是**定义在 DSH 根元素上**的 ✗ ——
+   * 于是我们写的 `var(--dsw-alias-bg-base, #15171a)` 里那个"万不得已的兜底值"
+   * **一直在生效**：实测侧栏 `rgb(27,27,28)` vs 我们的面板 `rgb(21,21,23)` ✗。
+   * 兜底值成了实际值，肉眼只能看出"颜色不太一样"，说不清差在哪
+   * （用户的原话就是"风格不一致，颜色、控件细节"）—— 验收里的等式断言把它变成了数字 ✓。
+   *
+   * ## 做法
+   *
+   * 从 DSH 子树里的任意元素读**解析后的值**（自定义属性会继承，所以在作用域内随便取 ✓），
+   * 写到 `document.body` 上 —— 我们的节点都在 body 下，于是全部继承到 ✓。
+   * 写在 body 上**不会影响 DSH 自己**：它在自己更深的根元素上重新定义了这些 token ✓。
+   *
+   * ## 三个必须守住的细节
+   *
+   * 1. DSH 可能还没挂载（脚本先跑）→ 取不到来源时**重试**，不是一次就放弃 ✗；
+   * 2. 用户切浅色/深色主题时 DSH 只改自己的根元素，**不会通知我们** ✗ →
+   *    监听 `prefers-color-scheme` 与根元素属性变化，重新桥一次 ✓；
+   * 3. 取不到的 token 要**说出来**（调试框里报），不能让它们继续悄悄吃兜底值 ✗
+   *    —— 这正是这个 bug 藏了这么久的原因 ✓。
+   */
+  var THEME_TOKENS = [
+    '--dsw-alias-bg-base',
+    '--dsw-alias-label-primary',
+    '--dsw-alias-label-secondary',
+    '--dsw-alias-label-tertiary',
+    '--dsw-alias-border-l1',
+    '--dsw-alias-border-l2',
+    '--dsw-alias-state-business-primary',
+    '--dsw-alias-state-warn-primary',
+  ]
+  /**
+   * 桥接状态。**必须能被读到**（诊断对象 + `?debug=1` 的调试框两条路都有）：
+   * 这个 bug 之所以藏了这么久，就是因为"没取到值"是完全静默的 ✗ ——
+   * 面板照旧吃兜底色，屏幕上只表现为"颜色有点不一样"，谁也说不清差在哪。
+   */
+  var themeBridgeState = { owner: '(未找到)', values: {}, updatedAt: 0, attempts: 0 }
+  var themeBridgeSignature = ''
+
+  /** DSH 界面里第一个可用的主题来源元素（三栏任意一栏都在作用域内 ✓）。 */
+  function themeSourceElement() {
+    var candidates = ['[class*="centerCol"]', '[class*="sidebarCol"]', '[class*="frame"]', '#root']
+    for (var i = 0; i < candidates.length; i++) {
+      var node = document.querySelector(candidates[i])
+      if (node !== null && node !== undefined) return node
+    }
+    return null
+  }
+
+  function describeElement(element) {
+    if (element === null || element === undefined) return '(空)'
+    var name = String(element.tagName || '').toLowerCase()
+    var id = element.id === '' || element.id === undefined ? '' : '#' + element.id
+    var parts = String(element.className || '').split(/\s+/)
+    var cls = ''
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] !== '') {
+        cls = '.' + parts[i]
+        break
+      }
+    }
+    return name + id + cls
+  }
+
+  /**
+   * 候选层：**先祖先、后内层**。
+   *
+   * ★ 这里踩过一次：一开始直接从 `[class*="sidebarCol"]` 上读，取到空串，
+   *   于是桥接什么都没做、面板继续吃兜底色 ✗ —— token 定义在**别的层**上，
+   *   而自定义属性只向下继承，"这个元素在不在作用域里"和"它这层有没有值"是两件事 ✗。
+   */
+  function themeCandidateElements() {
+    var source = themeSourceElement()
+    if (source === null || source === undefined) return []
+    var list = []
+    var node = source
+    while (node !== null && node !== undefined) {
+      list.push(node)
+      node = node.parentElement
+    }
+    var inner = source.querySelectorAll('*')
+    var limit = Math.min(inner.length, 800)
+    for (var i = 0; i < limit; i++) list.push(inner[i])
+    return list
+  }
+
+  /**
+   * 找出"定义 token 最多"的那一层，并取回它定义的全部值。
+   *
+   * 为什么不是"每个 token 各找各的层"：那样会从不同层拼出一套**互相不属于对方**的颜色 ✗
+   * （例如底色取自主题 A、文字色取自主题 B，浅色主题下就会出现白字白底）。
+   * 所以以"一层为准" ✓，找不到的少数 token 就如实记为"DSH 未定义"。
+   */
+  function readThemeDefinitions() {
+    var candidates = themeCandidateElements()
+    if (candidates.length === 0) return null
+    var best = { owner: null, values: {}, count: 0 }
+    for (var i = 0; i < candidates.length; i++) {
+      var computed = globalThis.getComputedStyle(candidates[i])
+      var values = {}
+      var count = 0
+      for (var t = 0; t < THEME_TOKENS.length; t++) {
+        var name = THEME_TOKENS[t]
+        var value = String(computed.getPropertyValue(name) || '').trim()
+        if (value !== '') {
+          values[name] = value
+          count += 1
+        }
+      }
+      if (count > best.count) best = { owner: candidates[i], values: values, count: count }
+      if (best.count === THEME_TOKENS.length) break
+    }
+    return best.owner === null ? null : best
+  }
+
+  /**
+   * 量出侧栏**实际刷出来的**底色。
+   *
+   * 为什么不从 token 取：实测侧栏可见面是 `rgb(27,27,28)`，而它那层能读到的
+   * `--dsw-alias-bg-base` 是 `#151517` ✗ —— 那个颜色**不来自任何一个 bg token**
+   * （DSH 自己的样式表在更深处画了它）。用户要的是"看起来一致"，
+   * 那就量看起来的那个值 ✓，而不是继续猜 token 名（已经猜错两轮 ✗）。
+   */
+  function themeSurfaceColor() {
+    var column = document.querySelector('[class*="sidebarCol"]')
+    if (column === null || column === undefined) return ''
+    var node = column
+    for (var depth = 0; depth < 6 && node !== null && node !== undefined; depth++) {
+      var color = String(globalThis.getComputedStyle(node).backgroundColor || '').trim()
+      if (color !== '' && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') return color
+      node = node.firstElementChild
+    }
+    return ''
+  }
+
+  /**
+   * 把 DSH 的 token 值同步到 `document.body` 上（我们的节点都在它下面，于是全部继承到 ✓）。
+   *
+   * 写在 body 上**不会影响 DSH 自己** —— 它在自己更深的根元素上重新定义了这些 token ✓。
+   *
+   * @param reason - 触发原因，写进调试框（判断"是挂载时同步的，还是切主题时"）。
+   */
+  function bridgeThemeTokens(reason) {
+    if (document.body === null || document.body === undefined) return false
+    themeBridgeState.attempts += 1
+    var found = readThemeDefinitions()
+    if (found === null) return false
+    var absent = []
+    var pairs = []
+    for (var i = 0; i < THEME_TOKENS.length; i++) {
+      var name = THEME_TOKENS[i]
+      var value = found.values[name]
+      if (value === undefined) absent.push(name)
+      else pairs.push(name + '=' + value)
+    }
+    // 侧栏的实际底色也一起抄（它不是 token，只是"屏幕上那个颜色" ✓）
+    var surface = themeSurfaceColor()
+    if (surface !== '') pairs.push('--dshm-surface-sidebar=' + surface)
+    var signature = describeElement(found.owner) + '|' + pairs.join(';') + '|' + absent.join(',')
+    if (signature === themeBridgeSignature) return absent.length === 0
+    themeBridgeSignature = signature
+    for (var k = 0; k < pairs.length; k++) {
+      var split = pairs[k].indexOf('=')
+      var property = pairs[k].slice(0, split)
+      var setting = pairs[k].slice(split + 1)
+      if (document.body.style.getPropertyValue(property) !== setting) document.body.style.setProperty(property, setting)
+    }
+    themeBridgeState.owner = describeElement(found.owner)
+    themeBridgeState.values = found.values
+    themeBridgeState.surface = surface
+    themeBridgeState.updatedAt = Date.now()
+    debugBoxLine(
+      '[theme] token 桥（' + reason + '）：' + String(pairs.length) + '/' + String(THEME_TOKENS.length) +
+        ' 个，来源 ' + themeBridgeState.owner +
+        (absent.length === 0 ? ' ✓' : '；DSH 未定义：' + absent.join(' ')),
+    )
+    return absent.length === 0
+  }
+
+  /**
+   * 启动桥接并保持它跟着主题走。
+   *
+   * 三条刷新路径缺一不可（每条都对应一种"屏幕上颜色不对"的真实成因）：
+   *   1. **挂载竞态**：boot.js 可能比 DSH 挂载更早 → 前 20 次每 300ms 重试 ✓；
+   *   2. **主题切换**：DSH 只改自己的根元素，不会通知我们 ✗ → 盯 `prefers-color-scheme`
+   *      与根元素属性变化 ✓，并在前 20 秒每秒再看一眼（有些主题是注入 <style> 生效，
+   *      属性根本不变 ✗ —— 这条兜住它）✓；
+   *   3. **回到前台**：手机切回页面时 DSH 可能已重建过 DOM ✗ → `visibilitychange` 再同步 ✓。
+   */
+  function startThemeBridge() {
+    var attempts = 0
+    var tick = function () {
+      var done = bridgeThemeTokens('挂载' + String(attempts + 1))
+      attempts += 1
+      if (done || attempts >= 20) return
+      setTimeout(tick, 300)
+    }
+    tick()
+    var watch = 0
+    var watcher = setInterval(function () {
+      bridgeThemeTokens('前 20 秒巡检')
+      watch += 1
+      if (watch >= 20) clearInterval(watcher)
+    }, 1000)
+    try {
+      globalThis.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+        bridgeThemeTokens('系统主题切换')
+      })
+    } catch (error) {
+      void error
+    }
+    try {
+      var observer = new MutationObserver(function () {
+        bridgeThemeTokens('DSH 根元素变化')
+      })
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+      if (document.body !== null && document.body !== undefined) {
+        observer.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+      }
+    } catch (error) {
+      void error
+    }
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') bridgeThemeTokens('回到前台')
+    })
+  }
+
+  /** 最近一笔滑动导航的判定（验收脚本读它，避免"只看结果、猜原因" ✓）。 */
+  var swipeNavigationState = {
+    last: null,
+    count: 0,
+    lastBlocked: null,
+    /** 原始事件计数：滑了没反应时，先看这里——**没收到事件**和**收到了但没判定**是两回事 ✓。 */
+    raw: { starts: 0, moves: 0, ends: 0, cancels: 0, lastDx: 0, lastDy: 0 },
+  }
+
+  /** 给一个节点起个能认出来的名字（诊断用：标签 + id + 第一个类名 ✓）。 */
+  function describeNode(node) {
+    if (node === null || node === undefined) return '(空)'
+    var name = String(node.tagName || '').toLowerCase()
+    var id = node.id === '' || node.id === undefined ? '' : '#' + node.id
+    var parts = String(node.className || '').split(/\s+/)
+    var cls = parts.length > 0 && parts[0] !== '' ? '.' + parts[0] : ''
+    return name + id + cls
+  }
+
+  /**
+   * 中央区域的滑动导航（用户要求）。
+   *
+   * 语义（用户原话："中央左滑打开文件目录，右滑打开对话记录边栏，同样反着来是返回"）：
+   *   · 内容区**左滑** → 打开右侧「工作目录」面板；
+   *   · 内容区**右滑** → 打开左侧「聊天记录」抽屉；
+   *   · 在已经打开的那一侧**反向滑动** → 关掉它（返回）✓。
+   *
+   * 四条不能省的"不抢"规则（少一条就会毁掉别的操作，而且用户只会说"卡/乱"）：
+   *   1. **竖向一漂移就放弃** —— 否则在消息列表里上下滚会顺手打开面板 ✗（最招骂的一种）；
+   *   2. **横向必须是主导方向**（|dx| ≥ 1.5×|dy|）—— 斜着划不抢 ✓；
+   *   3. **输入框与可横向滚动的区域不抢** —— 那里横滑是选字、是滚代码块/表格 ✓；
+   *   4. **多指触摸不参与，且一笔只处理一次** —— 双指缩放不能被当成滑动 ✓。
+   *
+   * 监听一律 `passive: true`：我们**从不** preventDefault，滚动手感完全交给浏览器 ✓。
+   * 判定结果写进调试框与 `__DSH_MOBILE_BOOT__.swipe()`，屏幕上就能自证 ✓。
+   *
+   * @param sheet - 文件面板的 api（开关都走它，别自己改 dataset ✗）。
+   * @param setDrawer - 左抽屉的开关（与汉堡/遮罩共用同一份实现 ✓）。
+   */
+  /**
+   * ★★ round 160（A ✓）：左抽屉的**滑行**用 FLIP 交给合成层 —— 与「电脑文件目录」
+   *   面板同一套观感 ✓（用户："照这个改法再改一下左侧聊天面板和主页面的动画"✓）。
+   *
+   * ## 为什么不能直接把 CSS 的 `left` 换成 `transform` ✗
+   * `[class*="sidebarCol"]` **不能长期带 transform** ✗✗：DSH 的设置弹窗是渲染在
+   * 侧栏列内部的 `position: fixed` 浮层 ✓ —— 这一列一旦有 transform（或
+   * `will-change: transform` ✓），就成了那些 fixed 后代的**包含块** ✓，
+   * 实测把设置面板压成 263px（= 抽屉宽度）、设置界面完全不可用 ✗
+   * （见 `tagSettingsOverlay` 的注释 ✓）。这条已经踩过一次，不许再踩 ✗。
+   *
+   * ## 所以反过来做：位置照旧，只把"那一段路"补出来（标准 FLIP ✓）
+   *   ① **量**：改状态**之前**先量出"视觉上还在哪" ✓（`getBoundingClientRect` 会把
+   *      正在跑的过渡、跟手拖动中的内联位移都算进去 ✓ —— 这正是我们要的"当前在哪"✓）；
+   *   ② **改**：同步执行 `mutate`（改 `left` / 改 body 标记 ✓）⇒ 位置**一步到位** ✓；
+   *   ③ **补**：把差量写成内联 `transform` ✓ ⇒ 屏幕上看不出跳变 ✓；
+   *   ④ **放**：`transition: none` 下强制一次布局 ✓（让浏览器把这个 transform 记成
+   *      **起点** ✗ —— 不刷的话两次写入会被合并进同一次样式重算 ⇒ 看不到起点 ⇒ 没有过渡 ✗），
+   *      然后清掉内联 `transition`/`transform` ✓ ⇒ CSS 里那条
+   *      `transition: transform var(--dshm-slide)` 接手，**合成层**用 240ms 滑回 0 ✓。
+   *
+   * 结果：静止态**没有** transform（fixed 后代安全 ✓），运动态**不重排**
+   *（一次布局、一次绘制 ✓，不再每帧重排会话列表 + 重画 36px 阴影 ✗）。
+   *
+   * ★ 与主页面（`--dshm-push` 那条 transform 过渡 ✓）在**同一次任务**里起步 ✓、
+   *   共用同一条 `--dshm-slide` ✓ ⇒ 抽屉与主页面锁死同步 ✓。
+   *
+   * @param mutate - 真正改状态的那一下 ✓（必须**同步**完成 ✓）。
+   */
+  function flipDrawerMotion(mutate) {
+    var node = document.querySelector('[class*="sidebarCol"]')
+    if (node === null || node === undefined || node.style === undefined || node.getBoundingClientRect === undefined) {
+      mutate()
+      return
+    }
+    var before = node.getBoundingClientRect()
+    mutate()
+    var after = node.getBoundingClientRect()
+    var dx = before.left - after.left
+    /**
+     * 没有位移 ⇒ 什么都不补 ✓（测试桩、或者状态本来就对 ✓）。
+     * ★ 两端都**整块在屏幕外**时也不补 ✓：收尾那次 `removeProperty('left')` 会把
+     *   内联的"推出去 24px"换成状态值（差 16px ✓）—— 两次都在屏外 ✓，
+     *   补一段谁也看不见的 240ms 只是白占一个合成层 ✗。
+     */
+    var offscreen = function (rect) {
+      return rect.left + rect.width <= 0 || rect.left >= window.innerWidth
+    }
+    if (!(Math.abs(dx) > 0.5)) return
+    if (offscreen(before) && offscreen(after)) return
+    node.style.transition = 'none'
+    node.style.transform = 'translateX(' + String(Math.round(dx * 100) / 100) + 'px)'
+    // ★ 强制一次布局（见上）：不刷就没有"起点"，过渡不会发生 ✗
+    void node.offsetWidth
+    node.style.transition = ''
+    node.style.transform = ''
+  }
+
+  function installSwipeNavigation(sheet, setDrawer, openFiles, syncPush) {
+    /** 打开（内容区）：横滑到这个距离就开 ✓（打开是"往前拉"，不存在误触问题 ✓）。 */
+    var MIN_DX = 56
+    var MAX_DY = 70
+    /**
+     * 关闭（面板/抽屉上）：**必须推到位**才关，而不是"滑过一小段就关" ✗。
+     *
+     * ★ 这是用户第三次真机反馈逼出来的：
+     *   "目前似乎只是依赖速度判定的，会导致我在浏览文件左右滑的时候即使没有滑动到边缘，
+     *    也会意外返回，这不是很好" ✓
+     *   —— 旧实现只要横向位移过 56px 就立刻关闭 ✗，而翻文件时手指横飘一下就到了 ✗。
+     *
+     * 现在改成**跟手拖动**（面板跟着手指走 ✓）+ 松手时看"推了多远"：
+     *   · 推过面板宽度的 35%（且至少 90px）→ 关掉 ✓（"推到边缘"的直觉 ✓）；
+     *   · 快速甩一下（> 0.7px/ms 且已推过 48px）→ 也算 ✓（老手感不至于完全丢掉 ✓）；
+     *   · 否则**回弹** —— 误触的代价从"面板没了"变成"晃一下" ✓。
+     */
+    var COMMIT_RATIO = 0.35
+    var COMMIT_MIN_PX = 90
+    var FLICK_VELOCITY = 0.7
+    var FLICK_MIN_PX = 48
+    var start = null
+    /** 正在跟手拖动的那个表面：`{action, surface, offset, lastOffset, lastAt}` ✓。 */
+    var drag = null
+    /**
+     * ★ 最近一次跟手拖动的**表面对象**（round 117）✓。
+     *
+     * 为什么必须留着它：收尾时**不能再去找一遍**预览层 ✗ ——
+     * 那个瞬间它正被我们自己的 `translateX` 推在右边 ✓，
+     * 而"预览层还在不在前台"的判据是"屏幕中心命中的是不是它"✓ ——
+     * 被推走之后中心命中的是别的东西 ✗ → 找不到层 → 什么都不做 ✓
+     * （验收里就是这么红的：滑动**提交了**、`lastClose` 却是空的 ✗）。
+     */
+    var lastDragSurface = null
+    /**
+     * 每笔手势一个**令牌** ✓：异步回调（rAF、收尾的清理定时器）拿到的令牌若已过期，
+     * 就直接放弃 ✓ —— 这是"手快时偶尔对不上"的结构性根因之一 ✗：
+     * 上一笔的收尾回调会在下一笔已经拖到一半时执行，把位移**覆盖**回旧值 ✓。
+     */
+    var gestureToken = 0
+    /** 已排队的帧句柄（一帧只写一次 ✓）。 */
+    var frameHandle = null
+    /**
+     * 所有"跟着让位量走"的元素 —— 拖动期间它们必须与面板**同一帧**移动 ✓。
+     *
+     * ★ 这份名单已经漏过两次 ✗：round 90 漏了主页面那一列、round 92 漏了顶栏 ✓
+     *   （用户两次都一眼看出来："主页面没同步切进来"、"顶栏是脱节的" ✓）。
+     *   所以不再靠人记 ✗：**我们自己的元素统一带 `data-dshm-push-follower`** ✓，
+     *   这里按属性取（外加 DSH 的内容列 —— 那是别人的 DOM，标记不了 ✓）。
+     *   以后再加"跟着让位走"的东西，只要带上这个属性就自动进名单 ✓。
+     */
+    var pushFollowers = function () {
+      var found = document.querySelectorAll('[data-dshm-push-follower], [class*="centerCol"]')
+      var list = []
+      for (var i = 0; i < found.length; i++) list.push(found[i])
+      return list
+    }
+    var rafOf = function (callback) {
+      if (typeof globalThis.requestAnimationFrame === 'function') return globalThis.requestAnimationFrame(callback)
+      return setTimeout(callback, 16)
+    }
+    var cancelRafOf = function (handle) {
+      if (handle === null || handle === undefined) return
+      if (typeof globalThis.cancelAnimationFrame === 'function') globalThis.cancelAnimationFrame(handle)
+      else clearTimeout(handle)
+    }
+
+    var areaOf = function (node) {
+      if (node === null || node === undefined || node.closest === undefined) return 'other'
+      /**
+       * ★ round 137：DSH 原生设置弹窗是**整屏**的 ✓ ⇒ 它必须排在其它区域**之前** ✓。
+       *   不然手指落在它上面时 `closest()` 会一路走到 `html` ✓ → 返回 `'other'` ✓ →
+       *   `decide()` 返回 null ✓ → 只剩 `run()` 那条"按当前开着什么推断"的兜底 ✓，
+       *   而兜底只认文件面板与左抽屉 ✗ ⇒ **在设置页上右滑什么都不会发生** ✗
+       *   （用户要的正是"这里也绑上侧滑返回的逻辑"✓）。
+       *   判据与 `settingsOverlayOpen()` 同一把尺子 ✓（`[data-dshm-settings="1"]` ✓）。
+       */
+      if (node.closest('[data-dshm-settings="1"]') !== null) return 'settings'
+      if (node.closest('#dsh-mobile-sheet-panel') !== null) return 'files'
+      if (node.closest('[class*="sidebarCol"]') !== null) return 'drawer'
+      // ★ 蒙层与遮罩也要算进来：它们**只在对应的面板打开时**接收触摸 ✓
+      //   （文件面板的蒙层 `#dsh-mobile-sheet-backdrop` 只在面板打开时存在 ✓；
+      //     左抽屉的遮罩 `#dsh-mobile-scrim` 关闭时是 `pointer-events: none` ✓）。
+      //   真机反馈"左滑无法返回"就出在这里：面板只占右侧 64vw，左边那 36% 是蒙层 ✗，
+      //   手指从那儿起滑会被判成"无关区域"、什么都不做 ✓ —— 而在用户眼里
+      //   "在面板附近随便怎么滑都该能退出去" ✓。
+      if (node.closest('#dsh-mobile-sheet-backdrop') !== null) return 'backdrop'
+      if (node.closest('#dsh-mobile-scrim') !== null) return 'scrim'
+      if (node.closest('[class*="centerCol"]') !== null) return 'content'
+      return 'other'
+    }
+
+    /**
+     * 这块区域里横滑本来就另有含义（选字 / 滚表）吗？
+     *
+     * @returns `null` = 可以抢；否则返回 `{reason, node}` —— **必须说清是谁吞的** ✓
+     *   （"被忽略"这三个字在手机上等于没有线索 ✗，本轮就为此多跑了一轮验收）。
+     */
+    var horizontalTerritory = function (node) {
+      if (node === null || node === undefined || node.closest === undefined) return null
+      var editable = node.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')
+      if (editable !== null) return { reason: '输入框/可编辑区', node: describeNode(editable) }
+      /**
+       * ★★ round 157（C ✓）：**已知的横向拖动面要整笔让开** ✗ —— 用户本轮的原话：
+       *   "轨迹可以在时间轴横向选取时间，但我们的横滑仍然生效，你需要保证在**输入、模型、工具**
+       *    这一栏横向滑动的时候不触发横滑" ✓。
+       *
+       * ## 为什么下面那条"可横滚祖先"救不了它 ✗（这是本轮的关键）
+       * DSH 的轨迹时间轴**不是原生滚动，是 JS 拖动** ✓ ——
+       * 那个轨道的无障碍串写着「时间线概览；**水平拖动**可聚焦事件」✓
+       * （`dsh-client-ui-trajectory` 的 `timeline.overviewAria` ✓），
+       * 它自己处理 pointer 事件 ✓、`scrollWidth === clientWidth` ✗ ⇒
+       * 下面那条 `scrollWidth > clientWidth` 的几何判据**一条都不成立** ✗✓。
+       * ⇒ 必须再用**语义**认一遍 ✓（判据必须是用户/无障碍可见的东西 ✓，不是构建哈希类名 ✗）。
+       *
+       * ## 认哪些（安全失败式 ✓）
+       *   · `[role="slider"]` —— "能拖"这件事的定义本身 ✓，任何地方都认 ✓；
+       *   · `aria-label` 里含「时间线 / 拖动 / 轨迹」（以及英文 Timeline / Trajectory / drag ✓）的容器 ✓
+       *     —— 实测 DSH 轨迹视图那三个：`section[aria-label="轨迹时间线"]` ✓、
+       *     轨道 `div[aria-label="时间线概览；水平拖动可聚焦事件"]` ✓、
+       *     工具条 `[aria-label="轨迹工具栏"]` ✓ ⇒ 「输入 / 模型 / 工具」那一栏（泳道标签）
+       *     与轨道本体**都在 section 里面** ✓ 一笔全覆盖 ✓。
+       * ★ **认错的方向**：最多是"那一笔横滑不触发我们的导航"（用户再滑一次即可 ✓）；
+       *   漏认就是用户报的这条 bug ✓ ⇒ 宁可多让 ✓。
+       *
+       * ## 为什么要把后两条**限定在"不是我们自己的面板/抽屉"里** ✗（回归护栏 ✓）
+       * 光按文案匹配会误伤一条真实动线：**会话标题**里出现「轨迹」两个字时，
+       * 左抽屉里的会话行 `aria-label` 就可能带上它 ✗ ⇒ 在抽屉里横滑关不掉抽屉 ✗✗
+       * （用户第 4 条："防止一刀切让手把功能关死" ✓）。
+       * 而轨迹视图只可能长在对话区那一边 ✓ —— 抽屉与文件面板里没有它 ✓。
+       */
+      var slider = node.closest('[role="slider"]')
+      if (slider !== null) return { reason: '拖动面（role=slider）', node: describeNode(slider) }
+      if (node.closest('#dsh-mobile-sheet-panel') === null && node.closest('[class*="sidebarCol"]') === null) {
+        var dragSurface = node.closest(
+          '[aria-label*="时间线"], [aria-label*="拖动"], [aria-label*="轨迹"], ' +
+            '[aria-label*="timeline" i], [aria-label*="trajectory" i], [aria-label*="drag" i]',
+        )
+        if (dragSurface !== null) return { reason: '轨迹/时间线横向拖动面', node: describeNode(dragSurface) }
+      }
+      /**
+       * ★ 祖先链要**一路走到根**，不能只走 4 层 ✗。
+       *
+       * 用户反馈："在我翻聊天记录的宽表格时，很容易拉起左右边栏" ✓ ——
+       * 宽表格的横向滚动容器在 `td → tr → tbody → table → 包装层` 之后 ✓，
+       * 也就是说从单元格往上要 **5 层**才够 ✓，而旧代码 4 层就停了 ✗ →
+       * "在表格里横向平移"被当成滑动导航 ✓。
+       * 上限 24 层只是防御（正常 DOM 远小于它 ✓）；每一层只做一次 `getComputedStyle` ✓，
+       * 而且只在 touchstart 时算一次 ✓，开销可以忽略 ✓。
+       */
+      var walk = node
+      for (var depth = 0; depth < 24 && walk !== null && walk !== undefined; depth++) {
+        /**
+         * ★ 判"**真的能横向滚**"，判"overflow-x 是不是 auto" ✗ ——
+         *   后者害我白跑一轮：按 CSS 规范，只要一个轴不是 visible，另一个轴的计算值
+         *   就会变成 auto ✓，于是**任何竖向滚动容器**（文件面板主体、抽屉列表）
+         *   都被判成"横向区域"，面板里所有滑动被静默忽略 ✗
+         *   （屏幕上的表现就是"滑动在内容区有用、在面板里没用"，
+         *    而调试框里只有一行"被忽略（输入框或可横向滚动区域）"——线索全在 ✓）。
+         *   现在的判据是内容真的溢出了：`scrollWidth > clientWidth` ✓，
+         *   并且它没有把横向溢出藏起来（`overflow-x: hidden` 的元素不该抢手势，
+         *   那种情况用户根本滚不动 ✗）。
+         */
+        var style = globalThis.getComputedStyle(walk)
+        /**
+         * ★ 判据必须是"**用户真的能横向滚**"，两个条件缺一不可：
+         *   · `scrollWidth > clientWidth`（内容真的溢出了 ✓）
+         *   · `overflow-x` 是 `auto`/`scroll`（他真的滚得动 ✓）
+         *
+         * 为什么要加第二个条件：只判"溢出"会误伤 —— DSH 侧栏里有些行的文字比容器宽，
+         * 但 `overflow-x: visible`（根本不能滚 ✗），于是那些行把**返回手势**整个吞掉 ✗。
+         * 真机反馈"左滑无法返回"里就有这一条 ✓（另一条是蒙层没算进区域，见 `areaOf`）。
+         * 这条规则只该保护"横滑另有含义"的地方：代码块、可横滚的表格、选字区域 ✓。
+         */
+        var scrollableX = style.overflowX === 'auto' || style.overflowX === 'scroll'
+        if (scrollableX && walk.scrollWidth > walk.clientWidth + 1) {
+          return { reason: '可横向滚动 ' + String(walk.scrollWidth - walk.clientWidth) + 'px', node: describeNode(walk) }
+        }
+        walk = walk.parentElement
+      }
+      return null
+    }
+
+    /**
+     * 一笔手势 → 该做什么（`null` = 什么都不做）。
+     *
+     * ★ 语义是**严格反向**（用户第二次真机反馈定下来的）：
+     *
+     *   · 内容区**左滑** → 打开右侧「工作目录」；在该面板上**右滑** → 推回去 ✓
+     *   · 内容区**右滑** → 打开左侧「聊天记录」；在该抽屉上**左滑** → 推回去 ✓
+     *
+     * 直觉来自**物理**：面板从哪一边拉出来，就把它往哪一边推回去 ✓。
+     *
+     * 中途我试过"两个方向都能返回"（为了让"怎么滑都能退"✓），用户当即指出这样
+     * **兼容性不好、不符合直觉** ✗ —— 因为同一个方向的第二次滑动会变成"反向操作"，
+     * 而人对手势的预期是稳定的：同一个方向永远是同一件事 ✓。
+     * 于是现在：**同方向再滑一次什么也不做**（不退、也不重复打开）✓，
+     * 反向滑才返回 ✓。这也是用户最初提的那句"同样反着来是返回" ✓。
+     */
+    /** 关闭动作对应的"可拖动表面"（文件面板 / 左抽屉），拿不到就退回到"直接关" ✓。 */
+    /**
+     * 量一个 CSS 长度（如 `var(--dshm-files-w)`）解析后的**像素值**。
+     *
+     * ★ 为什么需要它：**面板关闭时量不到宽度** ✗ —— `#dsh-mobile-sheet` 在 `data-open="0"`
+     *   时是 `display: none` ✓，于是 `getBoundingClientRect().width` 是 **0** ✗。
+     *   而"打开"手势恰恰要在**关闭状态**下量它 ✓（决定推多远算到位 ✓）——
+     *   结果算出"面板宽 1px"✗，推进量永远到不了阈值 → **打开手势永远不提交** ✓
+     *   （真机现象：侧滑打开没反应 ✓；单元测试看不见，因为桩里的宽度恒为 264 ✗）。
+     *   这里用一个离屏探针把 CSS 变量解析成像素 ✓，两种状态都准 ✓。
+     */
+    var measureWidth = function (cssLength) {
+      var probe = document.createElement('div')
+      probe.style.cssText =
+        'position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none;width:' + cssLength
+      document.body.appendChild(probe)
+      var width = Math.round(probe.getBoundingClientRect().width)
+      probe.remove()
+      return width
+    }
+
+    var surfaceOfAction = function (action) {
+      /**
+       * ★ round 137：DSH 原生设置弹窗也是一块"可以推回去"的表面 ✓。
+       *
+       * 宽度按**整屏**算 ✓（它本来就是整屏的 ✓）—— 于是"推到位"的阈值
+       * （35% / 至少 90px ✓）与别处同一套手感 ✓。
+       * `kind: 'settings'` 让下面几处把它当**静音表面**处理 ✓（与 DSH 预览同一套取舍 ✓，
+       * 理由见 `beginDrag` 里那段"错位"注释 ✓）。
+       */
+      if (action === 'close-settings') {
+        var settingsPanel = document.querySelector('[data-dshm-settings="1"] [data-dshm-panel="1"]')
+        if (settingsPanel === null || settingsPanel === undefined) return null
+        return {
+          action: action,
+          node: settingsPanel,
+          kind: 'settings',
+          width: Math.max(1, Math.round(globalThis.innerWidth) || 1),
+        }
+      }
+      /**
+       * ★ round 117：DSH 预览也是一块**可以推回去的表面** ✓（用户："不能右滑返回" ✗）。
+       * 宽度按**右边栏的宽度**算 ✓（不是整屏 ✗）—— 这样"推回去"的终点正好是
+       * 右边栏所在的位置 ✓，阈值也沿用手感那套（35% / 90px ✓）。
+       */
+      if (action === 'close-dsh-preview') {
+        var previewLayer = dshPreviewSurface()
+        if (previewLayer === null || previewLayer === undefined) return null
+        var sidebarWidth = measureWidth('var(--dshm-files-w)')
+        return {
+          action: action,
+          node: previewLayer,
+          kind: 'dsh-preview',
+          width: Math.max(1, sidebarWidth > 0 ? sidebarWidth : 264),
+        }
+      }
+      var isFiles = action === 'close-files' || action === 'open-files'
+      var selector = isFiles ? '#dsh-mobile-sheet-panel' : '[class*="sidebarCol"]'
+      var node = document.querySelector(selector)
+      if (node === null || node === undefined) return null
+      var measured = Math.round(node.getBoundingClientRect().width)
+      /**
+       * 量不到（面板关着时 display:none ✓）就按 CSS 变量解析 ✓ ——
+       * 公式与样式表**同一个来源**（`--dshm-files-w` / `--dshm-drawer-w` ✓），
+       * 所以不会出现"代码里写 264、CSS 里改成 70vw"这种分叉 ✗。
+       */
+      var width = measured > 0 ? measured : measureWidth(isFiles ? 'var(--dshm-files-w)' : 'var(--dshm-drawer-w)')
+      return {
+        action: action,
+        node: node,
+        kind: isFiles ? 'files' : 'drawer',
+        width: Math.max(1, width),
+      }
+    }
+
+    /**
+     * 把表面按手指位移挪一挪。
+     *
+     * 两个细节必须对：
+     *   1. **拖动时关掉过渡**（`transition: none`）—— 否则每一步移动都要 240ms 补间，
+     *      手感会"黏" ✗（松手时恢复成 CSS 里的过渡 ✓，于是回弹/滑出都是动画 ✓）；
+     *   2. 左抽屉是**用 `left` 位移的**（它不能用 transform：那会成为 fixed 后代的包含块，
+     *      而 DSH 的设置弹窗正是那种后代 ✗ —— 见上面"抽屉 = 覆盖式抽屉"那段注释），
+     *      所以这里也动 `left`，并且必须带 `!important` 才压得过打开态的 `left: 0 !important` ✓。
+     */
+    /** 让位量的**唯一公式**（拖动与状态两侧共用 ✓，避免两个写入者算出不同的值 ✗）。 */
+    var pushFor = function (surface, offset) {
+      // ★ DSH 预览往后推时**不带动任何东西** ✓：它底下是我们自己的聊天界面 ✓，
+      //   而那层不该跟着动 ✗（用户要的是"预览退回右边栏"，不是"整屏一起让位"✓）。
+      //   ★ round 137：整屏设置弹窗同理（**比预览更彻底** ✓）—— 它是模态整屏 ✓，
+      //   它底下不该有任何东西跟着让位 ✓（跟了就是"主界面在一个全屏对话框底下乱动"✗）。
+      if (surface.kind === 'dsh-preview' || surface.kind === 'settings') return 0
+      var remaining = Math.max(0, surface.width - offset)
+      return surface.kind === 'files' ? -remaining : remaining
+    }
+
+    /**
+     * 把"这一帧该长什么样"一次性写完。
+     *
+     * ★ 这是"一劳永逸"的核心：**一个写入者、一帧一次** ✓。
+     *   之前的写法是"touchmove 里直接改根变量 `--dshm-push`"✗ ——
+     *   而面板走的是**内联 transform** ✓，两个写入点、两次样式重算，
+     *   手快时就会偶尔差一帧 ✓（用户："还是有概率对不上，但少很多了"）。
+     *   现在两者都在**同一个函数、同一帧**里写 ✓，并且**不再碰根变量** ✓
+     *   （根变量只在手势结束、交还给状态时由 `refreshPush()` 写一次 ✓）。
+     *
+     * @param live - true = 拖动中（此时主页面也必须逐帧跟随 ✓）。
+     */
+    var applyFrame = function (surface, offset, live) {
+      if (surface === null || surface.node === null || surface.node === undefined) return
+      var push = pushFor(surface, offset)
+      var style = surface.node.style
+      // 面板自己：拖动中关过渡（否则每帧都在追动画 ✗），松手恢复（回弹/滑出要是动画 ✓）
+      style.transition = live === true ? 'none' : ''
+      if (surface.kind === 'dsh-preview' || surface.kind === 'settings') {
+        /**
+         * ★ 这一层只能用 **transform** 推 ✓（不能用 `left` ✗）：
+         *   DSH 的预览层很可能是 `inset: 0`（left/right 都是 0 ✓）——
+         *   改 `left` 会把它**压窄**✗，而不是整体右移 ✓。
+         *   代价：动画期间它成为 `position: fixed` 后代的包含块 ✓ ——
+         *   所以**动画一结束、或者一松手就清掉内联 transform** ✓（见下面的 else 与 run ✓）。
+         *
+         * ★ round 137：整屏设置弹窗走同一支 ✓，而且**更严格** ✗ —— 它是 `position: fixed;
+         *   inset: 0` ✓（我们的整屏改写 ✓），改 `left` 会当场把它压窄 ✗✗。
+         *   它同时也被标成"静音表面" ✓（`beginDrag` ✓），所以拖动期间**根本不会走到这里** ✓；
+         *   这里只服务收尾那一句"把内联位移清干净" ✓（offset === 0 ✓），
+         *   免得留下一个 `translateX(...)` 把下一次打开顶到屏幕外 ✗。
+         */
+        style.transform = offset === 0 ? '' : 'translateX(' + String(offset) + 'px)'
+      } else if (surface.kind === 'files') {
+        style.transform = offset === 0 ? '' : 'translateX(' + String(offset) + 'px)'
+      } else {
+        /**
+         * ★★ round 160（A ✓）：抽屉这一支走 **FLIP** ✓（见 `flipDrawerMotion` 的长注释 ✓）——
+         *   `left` 只是**状态**（一步到位 ✓）、`transform` 才是**那 240ms 的动画** ✓。
+         *   三个收尾分支都从这里过，一个都不能漏 ✗：
+         *     · 打开提交 → `run()` 切状态后走到 `offset === 0` ⇒ 清内联 ⇒ 归 0 ✓；
+         *     · 关闭提交 → `offset = 宽度+24` ⇒ 写内联 ⇒ 推到屏外 ✓；
+         *     · 回弹 → `offset === 0` ⇒ 清内联 ⇒ 弹回原位 ✓。
+         *   （拖动中 `live === true` 不走这里 ✓ —— 那时写的是内联 `left`，
+         *     跟手必须逐像素、不能带任何补间 ✓。）
+         */
+        flipDrawerMotion(function () {
+          if (offset === 0) style.removeProperty('left')
+          else style.setProperty('left', String(-offset) + 'px', 'important')
+        })
+      }
+      /**
+       * 所有跟随者（内容列 + 我们的顶栏 + 以后任何带标记的元素 ✓）：
+       * 拖动中写**内联** transform（与面板同一帧 ✓），松手清掉交还给状态 ✓。
+       */
+      var followers = pushFollowers()
+      for (var i = 0; i < followers.length; i++) {
+        var node = followers[i]
+        if (node === null || node === undefined || node.style === undefined) continue
+        if (live === true) {
+          node.style.transition = 'none'
+          node.style.transform = 'translateX(' + String(push) + 'px)'
+        } else {
+          // 清掉内联 → 样式表里的 `translateX(var(--dshm-push))` 接手 ✓
+          //（同一个值，所以不会跳 ✓），再把根变量刷成状态值 ✓
+          node.style.transition = ''
+          node.style.transform = ''
+        }
+      }
+      if (live !== true && typeof syncPush === 'function') syncPush()
+    }
+
+    /**
+     * ★ 把 DSH 预览**推回右边栏**（右滑返回的收尾 ✓，round 117）。
+     *
+     * 三步，一步都不能少 ✓：
+     *   ① 补完动画（跟手已经推到一半了 ✓ —— 从这里滑到"右边栏宽度"的位置 ✓）；
+     *   ② 点 DSH 自己的「收起右侧边栏」✓（**不猜类名** ✓：按可读标签找 ✓）；
+     *   ③ **清掉内联 transform** ✓ —— 万一 DSH 收起之后那一层还在 DOM 里 ✗，
+     *      留着 `translateX(264px)` 就等于把它永久推到屏幕外 ✓
+     *      （现象是"下次打开什么都没显示"✗ —— 与自家面板那个坑一模一样 ✓）。
+     */
+    var pushBackDshPreview = function () {
+      var surface =
+        lastDragSurface !== null && lastDragSurface.action === 'close-dsh-preview'
+          ? lastDragSurface
+          : surfaceOfAction('close-dsh-preview')
+      if (surface === null || surface === undefined) return false
+      var token = gestureToken
+      /**
+       * ★★ round 118 四次修正：**我们不再自己滑出** ✓ —— 与入场同一个道理 ✓
+       *   （那条已经被用户的观察证实了 ✓）。
+       *
+       * 用户这次的反馈："返回动画……**返回的略微二次感还是存在**" ✗。
+       * 真因：**DSH 自己会做关闭动画** ✓（把那一列收回去 ✓），
+       * 我先前又在它前面补了一段 150ms 的 `translateX(→右边栏宽度)` ✗ ⇒ 两段运动 ✓。
+       *
+       * 所以这里只做一件事：**立刻点「关闭 / 收起右侧边栏」** ✓，
+       * 剩下的一律交给 DSH 自己的动画 ✓。
+       * 保留重试 ✓ —— 手势刚结束时那一行可能正在重渲染 ✓（实测会点空 ✓）。
+       */
+      var attempt = 0
+      var tryClose = function () {
+        if (token !== gestureToken) return
+        var clicked = clickDshCollapseControl()
+        attempt += 1
+        if (clicked === '' || clicked.indexOf('(无匹配') === 0) {
+          if (attempt < 6) {
+            setTimeout(tryClose, 150)
+            return
+          }
+        }
+        dshmLastCloseResult = clicked
+        debugBoxLine('[dsh-preview] 右滑返回 → ' + (clicked !== '' ? '已点「' + clicked + '」✓（第 ' + attempt + ' 次）' : '没找到可点的键 ✗'))
+        /**
+         * ★ 点完**立刻**结束"预览开着"状态 ✓ —— 用户："退出时**顶栏不加载**" ✗，
+         *   根因就是那条 180ms 宽限期让顶栏多隐身了一会儿 ✓（见 finishPreviewCloseNow ✓）。
+         */
+        if (clicked !== '' && clicked.indexOf('(无匹配') !== 0) finishPreviewCloseNow()
+      }
+      tryClose()
+      return true
+    }
+
+    /** 收掉"预览可见"态（延迟一点，让动画走完 ✓；带令牌校验，新手势不受影响 ✓）。 */
+    var clearPreviewLater = function (surface, delay) {
+      if (surface === null || surface.kind !== 'files') return
+      var token = gestureToken
+      setTimeout(function () {
+        if (token !== gestureToken) return
+        if (sheet.root !== undefined && sheet.root.dataset !== undefined) sheet.root.dataset.dshmPreview = '0'
+        /**
+         * ★ 收预览态的**同时**必须把内联位移清掉 ✗ ——
+         *   否则那个 `translateX(288px)` 会一直挂着 ✓，下次打开时把面板又顶到屏幕外 ✓
+         *   （"打开一次之后再也打不开"那种怪故障 ✓）。此时状态已经定了，
+         *   交给 CSS（开=无位移 / 关=102% ✓）才是对的 ✓。
+         */
+        applyFrame(surface, 0, false)
+      }, delay)
+    }
+
+    var flushFrame = function () {
+      frameHandle = null
+      if (drag === null) return
+      applyFrame(drag.surface, drag.offset, true)
+    }
+
+    var scheduleFrame = function () {
+      if (frameHandle !== null) return
+      frameHandle = rafOf(flushFrame)
+    }
+
+    /**
+     * 位移量语义（两种模式共用同一个 `offset` = "这个表面被推出屏幕多少" ✓）：
+     *   · `close`：手指往外推 → `offset = |dx|`（0 = 完全打开、width = 完全出去 ✓）；
+     *   · `open`：手指往里拉 → `offset = width − |dx|`（从屏外拉进来 ✓）。
+     *
+     * ★ 打开也要跟手，这是用户第三次反馈定下来的："侧滑打开边栏顶栏仍然会动…
+     *   侧滑打开 + 侧滑关闭快速做能看到顶栏移动" ✓ ——
+     *   原因是打开时我只切了状态 ✓，于是顶栏(.22s)、内容(.24s)、面板(.24s)
+     *   各按各的过渡时长跑 ✗，快速开关就看出顶栏"自己走了一段" ✓。
+     *   现在打开与关闭走**同一个写入者、同一帧** ✓，三者不可能分家 ✓。
+     */
+    var offsetForMode = function (surface, dx, mode) {
+      var distance = Math.abs(dx)
+      if (mode === 'open') return Math.max(0, surface.width - distance)
+      return Math.min(distance, surface.width + 24)
+    }
+
+    var beginDrag = function (action, dx, startX, mode) {
+      // ★ `null` 绝不进跟手 ✓（区域不明时由 run() 的兜底决定 ✓）——
+      //   以前这里会落到 surfaceOfAction 的兜底 ✓，把**主界面**按"关闭"语义推走 ✗。
+      if (action === null || action === 'none') return
+      /**
+       * ★ 双保险（见 `decide` 的长注释 ✓）：**要"打开"的那一侧已经开着**时，
+       *   绝不允许进入跟手 ✗ —— 否则面板会以"打开"的语义往外走 ✓，
+       *   松手再弹回来 ✓，正是用户说的"边栏动而不返回" ✗。
+       *   这一层的意义是：以后无论谁再改区域判定，都不会把这条规则漏掉 ✓。
+       */
+      if (
+        (action === 'open-files' || action === 'open-drawer') &&
+        document.body !== null &&
+        document.body !== undefined &&
+        document.body.dataset !== undefined
+      ) {
+        var alreadyOpen =
+          action === 'open-files'
+            ? document.body.dataset.dshmFiles === 'open'
+            : document.body.dataset.dshMobileDrawer === 'open'
+        if (alreadyOpen) {
+          debugBoxLine('[swipe] 这一侧已经开着 → 同方向不做任何事（不跟手、不返回）✓')
+          return
+        }
+      }
+      var surface = surfaceOfAction(action)
+      if (surface === null) {
+        // 拿不到元素（理论上不会）→ 宁可立刻执行，也不要"滑了没反应" ✗
+        run(action, mode === 'open' ? '滑动打开（无跟手）' : '滑动返回（无跟手）', dx)
+        return
+      }
+      var offset = offsetForMode(surface, dx, mode)
+      /**
+       * ★ 打开跟手时，文件面板还是 `display:none`（`data-open` 仍是 0 ✓）——
+       *   不处理的话，手滑的那一段只有内容在动、**面板自己看不见** ✗
+       *   （旧版是"瞬间打开"，所以这个缺口只有改成跟手之后才暴露 ✓）。
+       *   这里只开"预览可见" ✓，不碰 `data-open` ✓（状态机不许被提前骗 ✗）。
+       */
+      if (mode === 'open' && surface.kind === 'files' && sheet.root !== undefined && sheet.root.dataset !== undefined) {
+        sheet.root.dataset.dshmPreview = '1'
+      }
+      lastDragSurface = surface
+      drag = {
+        action: action,
+        mode: mode,
+        surface: surface,
+        /**
+         * ★★ DSH 预览**不做跟手位移**（round 118，用户真机反馈：
+         *   "返回的时候**文字和边栏有一些错位**" ✗）。
+         *
+         * 为什么：这一层里 DSH 自己的 chrome 可能是 `position: fixed/sticky` ✓ ——
+         * 给它加 `transform` 会让它们**换一个参照系** ✗，于是拖动过程中
+         * "文字与边栏"各自按不同的基准走 ✓ ⇒ 看起来就是错位 ✓✓。
+         * 所以：手势照收（判定逻辑不变 ✓），但拖动期间**不动这一层** ✓ ——
+         * 提交后由 `pushBackDshPreview()` 做那 150ms 的一次性滑出 ✓（那时已经不需要跟手了 ✓）。
+         *
+         * ★ round 137：整屏设置弹窗**同样静音** ✓，但理由多一条 ✗ —— 它是 DSH 的 React DOM ✓，
+         *   给它逐帧改 transform 就是和它的重渲染抢同一份内联样式 ✓；而且它本来就是整屏 ✓，
+         *   "跟手推出屏幕"没有任何叙事 ✓（用户要的是"右滑=返回上一层"这个**语义** ✓）。
+         */
+        silent: surface.kind === 'dsh-preview' || surface.kind === 'settings',
+        startX: startX,
+        offset: offset,
+        lastOffset: offset,
+        lastAt: Date.now(),
+        velocity: 0,
+        token: gestureToken,
+      }
+      swipeNavigationState.dragging = action
+      if (drag.silent !== true) applyFrame(surface, offset, true)
+    }
+
+    var updateDrag = function (dx) {
+      if (drag === null) return
+      var offset = offsetForMode(drag.surface, dx, drag.mode)
+      var now = Date.now()
+      if (now > drag.lastAt) drag.velocity = (offset - drag.lastOffset) / (now - drag.lastAt)
+      drag.lastOffset = offset
+      drag.lastAt = now
+      drag.offset = offset
+      // ★ silent（DSH 预览）不写帧：见 beginDrag 里那段"错位"的注释 ✓
+      if (drag.silent === true) return
+      // 多个 touchmove 落到同一帧时只写一次 ✓（这也是"偶尔抖一下"的来源之一 ✗）
+      scheduleFrame()
+    }
+
+    /** 松手：推到位 / 甩得够快 → 关；否则回弹 ✓。 */
+    var finishDrag = function (detail) {
+      if (drag === null) return
+      var current = drag
+      drag = null
+      swipeNavigationState.dragging = null
+      cancelRafOf(frameHandle)
+      frameHandle = null
+      var threshold = Math.max(COMMIT_MIN_PX, Math.round(current.surface.width * COMMIT_RATIO))
+      /** 两种模式的"推进量"：关闭 = 已经推出去多少 ✓；打开 = 已经拉进来多少 ✓。 */
+      var progress = current.mode === 'open' ? current.surface.width - current.offset : current.offset
+      /**
+       * ★ 甩动必须**朝着提交方向**才算数 ✗ —— 这里原来用的是 `Math.abs(velocity)` ✓，
+       *   于是"快速往回拖一下再松手"也被当成甩到位，直接把面板关掉 ✓
+       *   （单元测试抓到的真 bug：那条用例的本意是"推不到位→回弹"，结果面板关了 ✗）。
+       *   close 模式要看"往外"的速度（正 ✓）；open 模式要看"往里"的速度（负 ✓）。
+       */
+      var flickSpeed = current.mode === 'open' ? -current.velocity : current.velocity
+      var flicked = flickSpeed > FLICK_VELOCITY && progress >= FLICK_MIN_PX
+      var commit = progress >= threshold || flicked
+      swipeNavigationState.lastRelease = {
+        action: current.action,
+        mode: current.mode,
+        offset: Math.round(current.offset),
+        progress: Math.round(progress),
+        threshold: threshold,
+        flicked: flicked,
+        commit: commit,
+      }
+      debugBoxLine(
+        '[swipe] 松手（' + current.mode + '）：推了 ' + String(Math.round(progress)) + 'px（阈值 ' +
+          String(threshold) + 'px' + (flicked ? '，且有甩动' : '') + '）→ ' +
+          (commit ? (current.mode === 'open' ? '打开 ✓' : '关闭 ✓') : '回弹 ✓'),
+      )
+      if (commit && current.mode === 'open') {
+        /**
+         * 打开提交：**先切状态、再清内联**（都在同一 tick ✓，中间值不会上屏 ✓）。
+         * 状态先变 → 根变量变成"整块让位" ✓；清内联后三个跟随者从**当前位置**
+         * 一次动画到位 ✓（不会先动画到旧值再跳 ✗）。
+         */
+        run(current.action, detail, 0)
+        applyFrame(current.surface, 0, false)
+        // 预览态交给 `data-open` 接手（稍等一拍：openFilesSheet 是异步的 ✓）
+        clearPreviewLater(current.surface, 80)
+        return
+      }
+      if (commit) {
+        /**
+         * ★ 收尾不再等 220ms 再切状态 ✓ —— 那 220ms 就是一个竞态窗口 ✗：
+         *   用户手快，在这段时间里开始的新拖动会被"延迟回调"覆盖掉 ✓。
+         *   现在：**先把面板推出去（带动画 ✓）**，**立刻**切状态 ✓，
+         *   等过渡走完再清内联样式（带令牌校验 ✓ —— 新手势开始后这次清理直接放弃 ✓）。
+         */
+        applyFrame(current.surface, current.surface.width + 24, false)
+        run(current.action, detail, 0)
+        var token = current.token
+        setTimeout(function () {
+          if (token !== gestureToken) return // 期间又滑了一笔 → 这次清理作废 ✓
+          applyFrame(current.surface, 0, false)
+        }, 260)
+        return
+      }
+      // 回弹：松手时恢复过渡（动画弹回 ✓），并把让位量交还给状态 ✓
+      if (current.mode === 'open' && current.surface.kind === 'files') {
+        /**
+         * 打开手势没到位：面板要**滑回去**再消失 ✓ ——
+         * 直接清掉预览态会"啪"地不见（没有过渡 ✗）。先把位移放到屏外（带动画 ✓），
+         * 等动画走完（约 260ms ✓）再收掉预览态 ✓，期间带令牌校验 ✓。
+         */
+        applyFrame(current.surface, current.surface.width + 24, false)
+        clearPreviewLater(current.surface, 280)
+        return
+      }
+      applyFrame(current.surface, 0, false)
+    }
+
+    /**
+     * 手势 → 动作（**严格反向** ✓；方向不对就 `null` = 什么也不做 ✓）。
+     *
+     * ★ 用户反馈："打开边栏另一个滑动方向的返回逻辑没删干净，会导致**边栏动而不返回**" ✗。
+     *   机制：面板开着时手指落在**内容区** ✓，而这里只按"起点区域"判 ✗ →
+     *   左滑仍被判成 `open-files` ✓ → 以**打开模式**跟手 ✓
+     *   （`offset = 宽 − |dx|` ✓ = 面板反而往外走 ✓）→ 松手又弹回来 ✓
+     *   = "动了但不返回" ✓✓。
+     *
+     * 所以判据必须**把当前开着什么算进去** ✓：
+     *   · 某一侧开着时，内容区上只有**反向**才是动作 ✓（右面板右滑 ✓ / 左抽屉左滑 ✓），
+     *     同方向一律 `null` ✓（连跟手都不给 ✗ —— 用户要的就是"同方向什么也不做" ✓）；
+     *   · 都没开时，才是"左滑开面板 / 右滑开抽屉" ✓。
+     */
+    var decide = function (area, dx) {
+      var openState = function (key) {
+        return (
+          document.body !== null &&
+          document.body !== undefined &&
+          document.body.dataset !== undefined &&
+          document.body.dataset[key] === 'open'
+        )
+      }
+      var filesOpen = openState('dshmFiles')
+      var drawerOpen = openState('dshMobileDrawer')
+      /**
+       * ★★ 这里必须区分两种"没动作"，否则就是用户报的那个 bug ✗✗：
+       *
+       *   · `'none'` = **区域认得、只是方向不对** → 整笔**什么也不做** ✓
+       *     （既不跟手 ✗，也不让别的分支接手 ✗）；
+       *   · `null`   = **区域不明** → 交给 `run()` 的兜底按"当前开着什么"推断 ✓。
+       *
+       * 用户原话："右滑再右滑依旧没修复，左滑再左滑边栏不会返回，但**主界面会动**，
+       * 和右滑再右滑的反过来了，但这都不是我们想要的" ✗。
+       * 机制：`decide` 返回 `null` 后 ✗，touchmove 那一步**仍然调用了
+       * `beginDrag(null, dx, …)`** ✗ → `surfaceOfAction(null)` 落到兜底 ✓ →
+       * 以**关闭**模式跟手 ✓ → 面板没返回 ✓，**主界面却被推走了** ✓✓ 正是这个现象 ✓。
+       */
+      if (area === 'content') {
+        if (filesOpen) return dx > 0 ? 'close-files' : 'none'
+        if (drawerOpen) return dx < 0 ? 'close-drawer' : 'none'
+        return dx < 0 ? 'open-files' : 'open-drawer'
+      }
+      if (area === 'files' || area === 'backdrop') return dx > 0 ? 'close-files' : 'none'
+      if (area === 'drawer' || area === 'scrim') return dx < 0 ? 'close-drawer' : 'none'
+      /**
+       * ★ round 138：整屏设置弹窗上，**左滑 = 返回上一层**（关掉设置页 ✓）。
+       *
+       * ★ 方向是**用户拍板的** ✓（原话见 round 138 的记录）：round 137 我先做成右滑 ✗
+       *   —— 当时的理由是"它从左边拉出来、就往右边推回去"（上面那段物理直觉 ✓），
+       *   但用户真机上要的是**左滑** ✗。以用户的判定为准 ✓。
+       *
+       * ★ 只改这一支 ✗：`files` / `drawer` / `dsh-preview` 三支的方向**一个字不动** ✓
+       *   （它们各自的方向是各自的语义 ✓ —— 尤其 `dsh-preview` 的右滑是 round 117
+       *   由用户另一句反馈定下来的 ✓，别被这一轮的东西带偏 ✗）。
+       * 反方向一律 `'none'` ✓（**同方向再滑一次什么也不做** ✓ —— 这条是用户第二次真机
+       * 反馈定下来的 ✓，不许在这里改成"两个方向都能关"✗）。
+       */
+      if (area === 'settings') return dx < 0 ? 'close-settings' : 'none'
+      /**
+       * ★ round 117：DSH 预览开着时，**右滑 = 把它推回右边栏** ✓（用户："不能右滑返回" ✗）。
+       * 左滑走不到这里（在 touchmove 那一步就已经**整笔让给 DSH** ✓，见那里的注释 ✓）。
+       */
+      if (area === 'dsh-preview') return dx > 0 ? 'close-dsh-preview' : 'none'
+      return null
+    }
+
+    swipeNavigationState.areaOf = areaOf
+    swipeNavigationState.territoryOf = horizontalTerritory
+
+    var run = function (action, detail, dx) {
+      /**
+       * ★ 归一化（两条兜底规则，都是真机反馈逼出来的）。
+       *
+       * 判定原本只看"手指起点落在哪个区域"，一旦区域失手，屏幕上就是**"滑了没反应"** ✗
+       * —— 而用户不知道世界上还有"区域"这回事。实测那笔手势的原始事件全都收到了
+       * （`starts:10 moves:30 cancels:0`、`dx=94` ✓），只是命中的元素没被任何已知区域认领 ✓。
+       * 所以规则改成**以"当前开着什么"为准**：
+       *
+       *   ① 要"打开"的那一侧已经开着 → 这一笔其实是**返回**（再滑一次就收起 ✓）；
+       *   ② 命中了没识别的元素、而某一侧正开着 → 同样是**返回** ✓
+       *      （面板开着时，那一笔横滑不可能有别的意思 ✓）。
+       */
+      var filesOpen = document.body !== null && document.body !== undefined && document.body.dataset.dshmFiles === 'open'
+      var drawerOpen =
+        document.body !== null && document.body !== undefined && document.body.dataset.dshMobileDrawer === 'open'
+      /**
+       * 兜底只处理"**没认出区域**"这一种情况，而且**仍然遵守严格反向** ✓：
+       * 真机上出现过命中元素是 `html`（拿不到区域 ✗）的情形 —— 那时按
+       * "当前开着什么 + 你往哪边滑"推断：右面板右滑、左抽屉左滑 = 往回推 ✓。
+       * 注意这里**不再**做"打开已经开着的那一侧 = 返回"的翻转 ✗ ——
+       * 那正是用户说"不符合直觉"的那条（同方向第二次滑动不该变意思 ✓）。
+       */
+      if (action === null) {
+        /**
+         * ★ round 137：设置弹窗开着时它**就是最上面那一层** ✓ ⇒ 兜底必须先问它 ✗，
+         *   而且只认**右滑**（语义与 `decide` 里那条完全一致 ✓）。
+         *   为什么左滑这里**什么都不推断** ✗：设置页盖着左抽屉 ✓，而抽屉这时也还开着 ✓ ——
+         *   若照旧走 `drawerOpen && dx < 0 ⇒ close-drawer` ✓，用户"在设置页上左滑"就会
+         *   悄悄把**背后**的抽屉关掉 ✓（屏幕上毫无变化，却吃掉了一次手势 ✗）。
+         *   所以：设置页开着时，这一层是**终点** ✓ —— 只有**左滑**一个意思，其余一律不动 ✓。
+         *   （方向与 `decide` 里那一支必须**逐字一致** ✗ —— 两处不一致就会出现
+         *     "起点命中面板时能关、起点落在 html 上时关不掉"这种最难查的偶发 ✓。）
+         */
+        if (settingsOverlayOpen()) {
+          if (dx < 0) action = 'close-settings'
+        } else if (filesOpen && dx > 0) action = 'close-files'
+        else if (drawerOpen && dx < 0) action = 'close-drawer'
+      }
+      if (action === null) return
+      if (action === 'open-files') {
+        setDrawer(false)
+        /**
+         * ★ 必须走**与文件夹按钮同一条**路径（`openFilesSheet`）。
+         *
+         * 真机反馈（用户原话）："右滑进入工作目录以后，工作目录内容无法正常渲染（直接点击没有问题）"
+         * —— 这里原来只调了 `sheet.setOpen(true)`：面板滑进来了，但**没有任何人去加载数据** ✗，
+         * 于是是一块空面板；而按钮那条路会先 `openFilesSheet()` 拉工作区列表再渲染 ✓。
+         *
+         * 教训：**"打开一个面板"是两步（把面板推上来 + 把内容装进去）**，
+         * 只做第一步在屏幕上看起来就是"坏了但不知道坏在哪" ✗。
+         * 同类错误在验收脚本里也犯了：我当时断言的是 `body[data-dshm-files]=open` ✓，
+         * 却没断言"屏幕上真的有内容" ✗ —— 断言缺口与代码缺口是同一个 ✗（已补断言）。
+         */
+        openFiles()
+      } else if (action === 'close-files') {
+        /**
+         * ★★ round 142：文件面板里现在可能有**子视图**（`'capabilities'` ✓）——
+         *   所以"反向滑动"要先退子视图、再轮到关面板 ✓。
+         *
+         * ★ 为什么这一支**不**像 `close-settings` 那样直接借 `dshmBack()` ✗：
+         *   `dshmBack` 是顶层函数 ✓，它依赖一大串别的东西（DSH 设置弹窗、预览…✓），
+         *   而 `swipe-navigation.test.ts` 的切片测试只把 `installSwipeNavigation`
+         *   那一小段切进 `new Function` ✓ —— 切不进 `dshmBack` ✗（真的红过 ✓）。
+         *   ⇒ 把"退一层子视图"做成**面板自己的方法** ✓（`sheet.backOutOfView()` ✓）：
+         *     返回键那条路（`dshmBack` → `backOutOfFiles` ✓）与这里调的是
+         *     **同一个函数** ✓ —— 层级逻辑仍然只有一份 ✗（不是两份实现 ✓）；
+         *     而测试里那个 `sheet` 桩没有这个方法 ⇒ 照旧走"关面板"✓
+         *     （切片测试的语义一个字没变 ✓）。
+         * ★ 关面板那一支仍是 `setOpen(false)` ✓（它自己会 `reportBackAvailable()` ✓）。
+         */
+        /**
+         * ★★ round 145：**侧滑 = 一键关面板** ✓（用户："侧滑就是关闭工作栏，
+         *   **不需要做这个一次一次返回**"✓）。
+         *   ⇒ 这一支**不经过** `sheet.backOutOfView()` ✗（那是**返回键**的逐级语义 ✓）。
+         *   两者在**同一块面板上刻意不同** ✓ —— 详见 `sheet.backOutOfView` 的说明 ✓，
+         *   后人别把这里改成"也逐级返回"✗。
+         *   ★ 关面板那一支仍是 `setOpen(false)` ✓（它自己会 `reportBackAvailable()` ✓）。
+         */
+        sheet.setOpen(false)
+      } else if (action === 'open-drawer') {
+        setDrawer(true)
+      } else if (action === 'close-drawer') {
+        setDrawer(false)
+      } else if (action === 'close-settings') {
+        /**
+         * ★ round 137：**不在这里再写一份"关设置页"** ✗ —— 直接借 `dshmBack()` ✓。
+         *
+         * 理由：关闭动作的**层级顺序**（设置页 → 文件面板 → 左抽屉 → 预览 ✓）已经在
+         * `dshmBack()` 里写死了 ✓，那一份还同时负责"关掉之后上报给壳"✓。
+         * 侧滑再抄一遍就等于**同一个概念两份实现** ✗（本项目对这条零容忍 ✗）——
+         * 而且两份一定会漂：加第 5 层时总有一边被忘掉 ✓。
+         */
+        dshmBack()
+      } else if (action === 'close-dsh-preview') {
+        pushBackDshPreview()
+      }
+      swipeNavigationState.last = action
+      swipeNavigationState.count += 1
+      debugBoxLine('[swipe] ' + detail + ' → ' + action + ' ✓')
+    }
+
+    /**
+     * ★ 监听必须挂在**捕获阶段**（`capture: true`）。
+     *
+     * 真机/验收都出现过"抽屉里右滑毫无反应，其它方向却正常" ✗ ——
+     * 诊断显示那个坐标的区域判定是对的（`area: "drawer"` ✓），
+     * 但手势**根本没产生判定** ✓：触摸序列在冒泡阶段就被吃掉了。
+     * 谁吃的很可能是 DSH 自己的行内手势（会话行上的横滑动作之类 ✓）——
+     * 它 `stopPropagation()` 之后，挂在 document 上的冒泡监听永远收不到 ✓。
+     *
+     * 捕获阶段是**先手**：我们先看到这一笔，认领了就 `stopPropagation()` 把它截下来 ✓，
+     * 不认领就放它继续冒泡（DSH 该干嘛干嘛 ✓）。这也是处理手势冲突的标准做法：
+     * **要嘛完全让开，要嘛整笔拿走**，绝不"两边都做一半" ✗。
+     */
+    document.addEventListener(
+      'touchstart',
+      function (event) {
+        swipeNavigationState.raw.starts += 1
+        // 每笔手势一个令牌：上一笔的异步收尾（清理定时器）由此作废 ✓
+        gestureToken += 1
+        if (event.touches === undefined || event.touches.length !== 1) {
+          start = null
+          return
+        }
+        var touch = event.touches[0]
+        var target = event.target
+        start = {
+          x: touch.clientX,
+          y: touch.clientY,
+          area: areaOf(target),
+          blocked: false,
+          blockedReason: '',
+          blockedNode: '',
+        }
+        /**
+         * ★ DSH 自带预览开着时怎么办（round 117 改）。
+         *
+         * 旧行为：**整笔让开** ✗ —— 于是"右滑返回"永远不可能 ✓（用户："不能右滑返回" ✗）。
+         * 新行为：**只有右滑归我们** ✓（把预览推回右边栏 ✓ —— 与自家预览的操作逻辑一致 ✓），
+         *   其余方向（尤其左滑、以及预览里的横向滚动 ✓）仍然**整笔让给 DSH** ✓：
+         *   在 touchmove 里**提前 return**，**不 preventDefault、不 stopPropagation** ✓
+         *   —— 这一条很要紧：一旦拦了，DSH 自己的手势就全废 ✗。
+         */
+        var previewOpen = syncDshPreviewState()
+        if (previewOpen) start.area = 'dsh-preview'
+        // 「谁吞了这笔手势」要记清楚：手机上只能靠这一行排障 ✓
+        var verdict = horizontalTerritory(target)
+        swipeNavigationState.raw.lastArea = start.area
+        swipeNavigationState.raw.lastNode = describeNode(target)
+        start.blocked = verdict !== null
+        if (verdict !== null) {
+          start.blockedReason = verdict.reason
+          start.blockedNode = verdict.node
+        }
+      },
+      { passive: true, capture: true },
+    )
+
+    document.addEventListener(
+      'touchmove',
+      function (event) {
+        swipeNavigationState.raw.moves += 1
+        // ★ `start !== null` 这个判空是测试逼出来的：拖动分支里读 `start.x`，
+        //   一旦某条路径先把 start 清了（例如竖向守卫）而 drag 还在，这里就 TypeError ✗
+        //   —— 监听器里抛错在手机上是**完全静默**的（只表现为"滑了没反应"）✗。
+        if (drag !== null && event.touches !== undefined && event.touches.length === 1) {
+          // 正在跟手拖动：只更新位移，不再重新判定 ✓（起点用 drag.startX，见 beginDrag 注释）
+          updateDrag(event.touches[0].clientX - drag.startX)
+          if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+          if (event.stopPropagation !== undefined) event.stopPropagation()
+          return
+        }
+        if (start === null || event.touches === undefined || event.touches.length !== 1) return
+        var touch = event.touches[0]
+        var dx = touch.clientX - start.x
+        var dy = touch.clientY - start.y
+        /**
+         * ★ DSH 预览开着时，**非右滑整笔让开** ✓ —— 而且必须在任何
+         *   `preventDefault`/`stopPropagation` **之前**就让 ✓：
+         *   拦了就等于把 DSH 自己的手势（左滑、画布横移、选字…）全废掉 ✗。
+         */
+        if (start.area === 'dsh-preview' && dx <= 0) {
+          start = null
+          return
+        }
+        swipeNavigationState.raw.lastDx = Math.round(dx)
+        swipeNavigationState.raw.lastDy = Math.round(dy)
+        // 规则 1：竖向已经明显漂移 → 这是滚动，不是滑动 ✓
+        if (Math.abs(dy) > MAX_DY) {
+          // 变成竖向滚动（拖动中=用户改主意了）→ 回弹 ✓，而不是把面板留在半路 ✗
+          finishDrag('竖向滚动打断')
+          start = null
+          return
+        }
+        if (Math.abs(dx) < MIN_DX) return
+        // 规则 2：横向必须主导 ✓
+        if (Math.abs(dx) < Math.abs(dy) * 1.5) return
+        var pending = start
+        start = null // 规则 4：一笔只处理一次 ✓
+        var action = decide(pending.area, dx)
+        var detail = pending.area + ' ' + (dx < 0 ? '左滑' : '右滑') + ' ' + String(Math.round(Math.abs(dx))) + 'px'
+        if (pending.blocked) {
+          swipeNavigationState.lastBlocked = { detail: detail, reason: pending.blockedReason, node: pending.blockedNode }
+          debugBoxLine('[swipe] ' + detail + ' 被忽略（' + pending.blockedReason + '：' + pending.blockedNode + '）')
+          return
+        }
+        /**
+         * ★ 认领之后必须 `preventDefault()`：这一笔横滑是我们的动作，
+         *   绝不能让浏览器再把它当成**后退手势**（Android Chrome 的横向 overscroll）✗。
+         *
+         * 这就是"抽屉里右滑关不掉"的真凶 ✓：手势本身没问题，是 Chrome 中途
+         * 发来 `touchcancel` 把序列掐了（验收里表现为"没有判定、也没有被吞"）。
+         * 真机上更糟 —— 用户右滑想关抽屉，结果**浏览器后退**了 ✗。
+         *
+         * 代价与边界：这个监听因此不能是 `passive` ✓。但只要守住两条，滚动手感不受影响：
+         *   · **竖向滚动的判定在更前面**（`|dy| > MAX_DY` 直接放弃 ✓），那种情况绝不 preventDefault；
+         *   · 只有"已经确定要执行某个动作"的这一笔才 preventDefault ✓。
+         */
+        /**
+         * ★ 方向不对（`'none'`）：**整笔吞掉，但绝不跟手、绝不推主界面** ✓。
+         *
+         * 用户要的就是"同方向什么也不做" ✓ —— 所以这里只 preventDefault
+         * （免得浏览器把它当成后退手势 ✗），然后立刻收工 ✓。
+         */
+        if (action === 'none') {
+          if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+          if (event.stopPropagation !== undefined) event.stopPropagation()
+          debugBoxLine('[swipe] ' + detail + ' → 同方向不做任何事（边栏与主界面都不动 ✓）')
+          return
+        }
+        if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+        // 整笔拿走：不让 DSH/其它监听再对同一笔手势做第二件事 ✓
+        if (event.stopPropagation !== undefined) event.stopPropagation()
+        /**
+         * ★ 只有 `null`（区域不明）才交给 `run()` 的兜底 ✓；
+         *   有动作时进入跟手拖动 ✓ —— 三者（面板/内容/顶栏）由同一帧写入者驱动 ✓。
+         */
+        if (action === null) {
+          run(null, detail, dx)
+          return
+        }
+        beginDrag(action, dx, pending.x, action === 'open-files' || action === 'open-drawer' ? 'open' : 'close')
+        return
+      },
+      { passive: false, capture: true },
+    )
+
+    document.addEventListener(
+      'touchend',
+      function () {
+        swipeNavigationState.raw.ends += 1
+        finishDrag('滑动返回')
+        start = null
+      },
+      { passive: true, capture: true },
+    )
+    document.addEventListener(
+      'touchcancel',
+      function () {
+        /**
+         * 浏览器把触摸序列掐掉了（最常见的原因就是它把那笔横滑当成了**后退手势** ✓）。
+         * 手机上没有控制台，所以这条必须记进诊断：不记的话，屏幕上只有
+         * "滑了没反应" ✗ —— 本轮就为这三个字多跑了一轮验收 ✓。
+         */
+        swipeNavigationState.raw.cancels += 1
+        // 被浏览器取消（多半被当成了后退手势）→ 面板回弹，不留半路状态 ✓
+        finishDrag('被浏览器取消')
+        if (start !== null) {
+          swipeNavigationState.lastCancelled = { area: start.area, at: Date.now() }
+          debugBoxLine('[swipe] 手势被浏览器取消（touchcancel，多半被当成后退手势）area=' + start.area)
+        }
+        start = null
+      },
+      { passive: true },
+    )
+  }
+
+  function installShell(getTunnel) {
+    if (document.getElementById('dsh-mobile-style') !== null) {
+      return globalThis.__DSH_MOBILE_BOOT__.shell
+    }
+
+    /**
+     * PWA 自证诊断（只在 `?debug=1` 时上屏）。
+     *
+     * 为什么需要：用户在真机上点「安装」，看到的是"仍在添加先前的页面"，
+     * 而最终结论是**网络慢**（用户原话："确实是网络问题，安装成功了" ✓）——
+     * Android 的"安装应用"要把 manifest 拿去 Google 的 WebAPK 铸造服务器换一个真正的 App，
+     * 那一步慢起来就像卡住 ✗，跟页面本身没关系。
+     *
+     * 教训：手机上既没有控制台、也看不到 Chrome 的判断过程，于是"我们这一页到底可不可安装"
+     * 只能靠猜 ✗。所以这里把它变成屏幕上的几行字：**在哪一页 / manifest 指向哪 / 装成没装成 /
+     * Chrome 认不认可** ✓ —— 下次同类反馈，一张截图就能定性，不用来回问。
+     *
+     * 另有一条仍然成立、排查时有用的事实：Chrome 装的是**当前标签页** ——
+     * 只有 `/mobile/app` 会被注入我们的 manifest，配对页 `/mobile` 与桌面控制台都没有 ✗，
+     * 从那些页面"添加到主屏幕"，装出来的就是那一页本身 ✓。
+     */
+    var sawInstallPrompt = false
+    globalThis.addEventListener('beforeinstallprompt', function () {
+      sawInstallPrompt = true
+      debugBoxLine('[pwa] 收到 beforeinstallprompt → Chrome 认为这一页可安装 ✓')
+    })
+    var logPwa = function () {
+      var link = document.querySelector('link[rel="manifest"]')
+      var href = link === null ? '(无)' : String(link.getAttribute('href') || '')
+      debugBoxLine('[pwa] 当前页面=' + location.pathname + ' manifest=' + href)
+      /**
+       * 「打开方式」是判定"到底装成没装成"的唯一硬证据 ✓：
+       * 从桌面图标启动的 PWA 跑在**独立窗口**里（没有地址栏 ✓），
+       * 浏览器标签则会报 false ✗。用户报"装不上"时，先看这一行就分流了。
+       */
+      var standalone = false
+      try {
+        standalone = globalThis.matchMedia('(display-mode: standalone)').matches === true
+      } catch (error) {
+        standalone = false
+      }
+      var sw = '不可用'
+      try {
+        sw = navigator.serviceWorker === undefined ? '不可用' : navigator.serviceWorker.controller === null ? '未接管（首次加载正常）' : '已接管'
+      } catch (error) {
+        sw = '不可用'
+      }
+      debugBoxLine('[pwa] 打开方式=' + (standalone ? '独立窗口（从桌面图标启动 ✓）' : '浏览器标签（地址栏还在）') + ' 安全上下文=' + location.protocol + ' SW=' + sw)
+      /**
+       * `beforeinstallprompt` 是 **Chrome 自己**说"这一页可安装"的信号 ✓。
+       * 没收到有两种可能，必须区别对待（所以文案要写全，不能只报"失败"）：
+       *   · 已经装过了 → 不会再触发 ✓ 属正常；
+       *   · 证书不受信任 / 图标或 SW 不达标 → 也不会触发 ✗ 那是环境或我们的问题。
+       * 手机上装 WebAPK 还要联系 Google 的铸造服务器，网络不通时会**长时间挂着** ✗
+       * （用户真实反馈"安装很慢"就是这一步），与页面本身无关 ✓。
+       */
+      setTimeout(function () {
+        debugBoxLine(
+          '[pwa] 可安装信号=' +
+            (sawInstallPrompt
+              ? '收到 ✓（Chrome 认可这页可安装）'
+              : '未收到（已装过属正常；否则查证书是否受信任、图标与 SW 是否达标）'),
+        )
+      }, 1500)
+      if (link === null) {
+        debugBoxLine('[pwa] 这一页没有 manifest → 从这页「添加到主屏幕」装的就是这一页 ✗（请到 /mobile/app）')
+        return
+      }
+      void fetch(href)
+        .then(function (response) { return response.json() })
+        .then(function (json) {
+          debugBoxLine(
+            '[pwa] name=' + String(json.name) + ' start_url=' + String(json.start_url) +
+              ' display=' + String(json.display) + ' 图标=' + String((json.icons || []).length) + ' 个',
+          )
+        })
+        .catch(function (error) {
+          debugBoxLine('[pwa] manifest 取不到 ✗ ' + String(error && error.message ? error.message : error))
+        })
+    }
+    /**
+     * ★ 触发方式**不能盯 `load`**：`load` 事件的 target 是 **window**，
+     *   `document.addEventListener('load', …)` 在现代浏览器里**永远不触发** ✗ ——
+     *   本轮第一版就是这么写的，结果三条断言全红、调试框里一行 `[pwa]` 都没有 ✓
+     *   （自己踩的坑，记在这里；此类"监听挂错对象"的哑失败最难查）。
+     *   改用 DOMContentLoaded：它确实派发到 document ✓；那 600ms 延时是留给
+     *   `beforeinstallprompt` 的（Chrome 解析完 manifest 之后才发它）。
+     */
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { setTimeout(logPwa, 600) }, { once: true })
+    } else {
+      setTimeout(logPwa, 600)
+    }
+
+    // 先把 DSH 的 token 桥过来（面板/顶栏/状态栏的配色全靠它，晚了会先闪一帧兜底色 ✗）
+    startThemeBridge()
+
+    var style = document.createElement('style')
+    style.id = 'dsh-mobile-style'
+    style.textContent = [
+      // ★ 文件面板与左侧抽屉**同宽**（同一个变量）。
+      //   我一度把它单独放宽到 88vw 想多放几个字，用户当即指出"宽度又和左边不一致了" ——
+      //   左右两个抽屉一宽一窄，来回切换时观感是"抖动"，比文件名多显示几个字重要得多。
+      //   要更宽就**两个一起改**（只改这一个变量的取值即可）。
+      //   另注：验收脚本有一条"面板不盖满整屏（<95% 视口）"的断言，这是既定设计。
+      /**
+       * ★ 滑动的过渡**必须只有一个来源**。
+       *
+       * 用户反馈："快速开关滑动仍然有顶栏滑动" ✓ ——
+       * 根因不是跟手逻辑 ✓（那条已经修好了 ✓），而是这四个元素**天生参数不一致** ✗：
+       *   顶栏 `.22s` / 抽屉 `.22s` / 内容 `.24s` / 文件面板 `.24s`，
+       *   缓动还分两套（`.22,.61,.36,1` vs `.2,.8,.2,1`）✗。
+       * 于是**只要控制权交回状态机**（快速开关、点按钮、点遮罩 ✓），
+       * 它们就按各自的时长跑 ✓ —— 顶栏总是早到 20ms，看起来就是"顶栏自己滑了一下" ✓。
+       * 抽成一个变量之后，"同一帧写入"与"同一时长动画"两条合起来才真正同步 ✓。
+       */
+      ':root { --dshm-top-h: ' + TOPBAR_HEIGHT + 'px; --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: var(--dshm-drawer-w); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }',
+
+      /* ── 点按反馈里两样"外来物"一起去掉（round 160，用户 B ✓）──────────────
+         用户原文："点击的时候会出现蓝色框框住字（我注意到点击对话，轨迹也会有），
+         把这个东西去掉"✓。他特意点明「对话/轨迹也有」✓ ⇒ 不是我们那颗控件的问题 ✓，
+         是**全页**都有的两样默认反馈 ✓：
+
+         ① `-webkit-tap-highlight-color`：Android / WebView 给可点元素糊的那层高亮 ✓。
+            它是**可继承**属性 ⇒ 在根上关掉就全页生效 ✓（本项目此前只在自己那两颗按钮上
+            单独关过 ✓，所以 DSH 那一大片一直是默认值 ✓）。
+         ② `outline`：DSH 的 `[role="tab"]` 是**裸 `<button>`** ✓，作者样式里
+            **查不到任何 focus 规则**（通篇只有 `._switch_*` / `._copyable_*` /
+            `._tableScroll_*` 那几条 ✓）⇒ 点按后画的是**浏览器默认焦点环** ✓
+            （Chrome 的 `-webkit-focus-ring-color` 在深色下就是浅蓝 ✓ = 用户说的"蓝色框"✓）。
+            这条同时治好我们自己的按钮 ✓（round 159 只写了 `:focus-visible{background:none}` ✗，
+            漏掉了 `outline` ✓）。
+
+         两条都**只在手机表面注入** ✓（这段样式只在 `isMobileSurface()` 时装 ✓）
+         ⇒ 电脑端的 DSH 一个像素都不动 ✓，也没碰 DSH 源码 ✓。
+         ⚠️ 刻意**不碰 `box-shadow`** ✗ —— tab 的下划线、浮层阴影都用它 ✓，
+           一起关掉会误伤 ✓（真需要时按元素单独处理 ✓）。 */
+      '  html, html body * { -webkit-tap-highlight-color: transparent; }',
+      '  html body *:focus { outline: none !important; }',
+
+      /* ── 自建顶栏：三区 flex，纵向天然对齐 ───────────────────────── */
+      '#dsh-mobile-top {',
+      '  position: fixed; top: 0; left: 0; right: 0; z-index: 70;',
+      /**
+       * ★ 安全区只有一个事实来源：`max(env(…), var(--dshm-safe-top))` ✓。
+       *
+       * 原先这里只写 `env(safe-area-inset-top)` ✗ —— 而壳量出来的值写在
+       * `--dshm-safe-top` 上 ✓，于是**同一个页面里有两套安全区**：
+       * 我们自己的顶栏听 env() ✓、DSH 预览听变量 ✓。
+       * 在 WebView 里 `env()` 到底是不是非零取决于实现 ✗ —— 那就等于"顶栏在不在状态栏
+       * 下面"全靠运气 ✓（用户报的那条本来就是这么来的 ✗）。
+       * 取两者的**较大值**：壳说了算 ✓，壳没装时 env() 兜底 ✓，一个都不写就是 0 ✓。
+       */
+      '  height: calc(var(--dshm-top-h) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px)));',
+      '  padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px));',
+      '  box-sizing: border-box;',
+      '  display: flex; align-items: center; gap: 2px;',
+      '  transition: transform var(--dshm-slide);',
+      '  background: var(--dsw-alias-bg-base, #15171a);',
+      '  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '}',
+      '#dsh-mobile-top > button {',
+      '  flex: 0 0 auto; width: 44px; height: 44px; padding: 0;',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  border: 0; background: transparent; cursor: pointer;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  font-size: 17px; line-height: 1; user-select: none;',
+      '  -webkit-tap-highlight-color: transparent;',
+      '}',
+      '#dsh-mobile-top > button:active { opacity: .55; }',
+      /* 打开抽屉时顶栏跟着主页面一起右移（推挤式）。
+         顶栏是我们自己的元素、且没有 fixed 后代，所以这里用 transform 是安全的
+         （DSH 的内容列不能用 transform——那会成为其 fixed 浮层的包含块）。 */
+      '#dsh-mobile-top { transform: translateX(var(--dshm-push)); }',
+      '#dsh-mobile-top > button[disabled] { opacity: .3; }',
+      /* 标题：flex:1 + text-align:center → 相对**可用宽度**居中（两侧各 44px 按钮，
+         所以视觉上真的居中，而不是被按钮挤偏）。 */
+      '#dsh-mobile-title {',
+      '  flex: 1 1 auto; min-width: 0; height: 44px; line-height: 44px;',
+      '  text-align: center; font-size: 15px; font-weight: 500;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;',
+      '}',
+      '#dsh-mobile-title[data-empty="1"] { opacity: .55; font-weight: 400; }',
+
+      /* ── 抽屉蒙层 ─────────────────────────────────────────────── */
+      '#dsh-mobile-scrim {',
+      /* 透明蒙层：用户要求"点一旁主页面就能返回"，所以这里**不压暗**，
+         只负责接住那次点击。它只盖住让位后的那块主页面（left 由打开态设定）。 */
+      '  position: fixed; inset: 0; z-index: 80;',
+      '  background: transparent;',
+      '  opacity: 0; pointer-events: none; transition: opacity .2s ease;',
+      '}',
+      'body[data-dsh-mobile-drawer="open"] #dsh-mobile-scrim { opacity: 1; pointer-events: auto; left: var(--dshm-drawer-w); }',
+
+      /* ── 电脑文件目录面板 ─────────────────────────────────────────
+         布局：粘性头部（标题 + 副标题）/ 可滚动主体 / **固定底部区**。
+         底部区放端侧通道开关 —— 它原先在主体工具栏里，会随内容滚走，
+         而且浮动的授权条还会盖住它（用户反馈"授权条压住面板"）。 */
+      '#dsh-mobile-sheet { position: fixed; inset: 0; z-index: 85; display: none; }',
+      '#dsh-mobile-sheet[data-open="1"] { display: block; }',
+      /* ★ 打开跟手期间要让面板**看得见**，但**不能**翻 `data-open`（那会让状态机以为已经开了 ✗）。
+         所以另开一个"预览可见"态：只负责渲染 ✓，且不吃触摸（pointer-events: none ✓）。*/
+      '#dsh-mobile-sheet[data-dshm-preview="1"] { display: block; pointer-events: none; }',
+      /* ★★ round 156（C ✓）：**关闭过渡态** —— 同一个先例（保留渲染 ✓、但不吃触摸 ✓）。
+         为什么要它 ✗：`data-open` 一翻 0 就 `display:none` 是**硬切** ✗，而主页面让位
+         `--dshm-push` 要滑 `var(--dshm-slide)`（.24s ✓）⇒ 观感"慢半拍、一顿一顿" ✗。
+         现在关闭时先挂上本属性 ✓：面板**继续渲染** ✓、位移（`translateX(102%)` ✓，由下面那条
+         默认规则接手 ✓）与主页面**同一时长、同一缓动** ✓（两个都用 `var(--dshm-slide)` ✓）；
+         动画结束（`transitionend` ✓ + 超时兜底 ✓，见 `setOpen` / `finishClose` ✓）才真正隐藏 ✓。
+         ★ 不吃触摸（`pointer-events: none` ✓）—— 过渡期间那一下点击必须穿透到主页面 ✓。
+         ★ 用**独立的**属性而不是复用 `data-dshm-preview` ✗：那个属性归"跟手打开"的令牌逻辑管 ✓
+           （`clearPreviewLater` 到点会把它写回 0 ✓）⇒ 复用会被它中途清掉、动画当场断掉 ✗。 */
+      '#dsh-mobile-sheet[data-dshm-closing="1"] { display: block; pointer-events: none; }',
+      /* 透明背板：只负责接住"点主页面返回"的那次点击（用户要求不压暗）。
+         宽度 = 视口 − 面板宽度，所以面板**不盖满整屏**时仍然有地方可点。 */
+      '#dsh-mobile-sheet-backdrop { position: absolute; inset: 0 var(--dshm-files-w) 0 0; background: transparent; }',
+      '#dsh-mobile-sheet-panel {',
+      '  position: absolute; top: 0; right: 0; bottom: 0;',
+      '  width: var(--dshm-files-w); display: flex; flex-direction: column;',
+      /* ★ 底色与**聊天记录边栏**（DSH 原生侧栏）统一（用户明确要求"颜色一致"）：
+         这里原本是 `bg-elevated`（#1e2126），比侧栏的 `bg-base`（#15171a）**亮一档** ✗ ——
+         两个抽屉一左一右、同一个应用，底色不同看起来就是"两块拼起来的东西"。
+         统一之后，两者的区分只剩圆角与阴影（那才是我们希望被看见的层次）✓。 */
+      '  background: var(--dshm-surface-sidebar, var(--dsw-alias-bg-base, #15171a));',
+      '  border-radius: 18px 0 0 18px;',
+      '  padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px));',
+      /**
+       * ★ 底部同理 ✓（round 115）：edge-to-edge 下**导航栏也盖住页面** ✓ ——
+       *   这个面板的底部就是「端侧通道」那一排开关 ✓，不让位就会被导航栏压住 ✗。
+       *   只有 `--dshm-safe-bottom` 非 0 时才有影响 ✓（没开 edge-to-edge 的机器上是 0 ✓）。
+       */
+      '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
+      '  box-shadow: -18px 0 44px rgba(0,0,0,.6);',
+      '  transform: translateX(102%);',
+      '  transition: transform var(--dshm-slide);',
+      '  will-change: transform; overflow: hidden;',
+      '}',
+      '#dsh-mobile-sheet[data-open="1"] #dsh-mobile-sheet-panel { transform: none; }',
+      /* 头部：两行网格，关闭键跨两行居中 */
+      '#dsh-mobile-sheet-head {',
+      '  flex: 0 0 auto; display: grid; grid-template-columns: minmax(0,1fr) auto;',
+      '  align-items: center; gap: 3px 10px; padding: 15px 12px 13px 16px;',
+      '  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '}',
+      '.dshm-sheet-title {',
+      // ★ 显式行列，**不能靠自动放置**：CSS Grid 会先摆放"行已确定"的元素
+      //   （关闭键有 grid-row: 1 / span 2），它于是先占了第 1 列，
+      //   标题被挤到第 2 列 —— 真实现象是"关闭键跑到左边、标题跑到右边"。
+      //   实测 headColumns = 227px / 97px，而标题宽度正好 97px，一眼可证。
+      '  grid-column: 1; grid-row: 1;',
+      '  font-size: 16px; font-weight: 600; letter-spacing: .01em;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '}',
+      '.dshm-sheet-sub {',
+      '  grid-column: 1; grid-row: 2; font-size: 11.5px; line-height: 15px;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '.dshm-sheet-sub:empty { display: none; }',
+      '#dsh-mobile-sheet-close { grid-column: 2; }',
+      '#dsh-mobile-sheet-head button {',
+      // ★ 跨两行 → 在**右侧栏里竖向居中**（用户明确要的形态）。
+      //   走过一段弯路：用户报"齿轮和中心错位了"，真因是**图标自己画偏**
+      //   （实测 getBBox() 中心 (11,11) ≠ viewBox 中心 (12,12)），我却顺手把按钮
+      //   改成"与标题行对齐"——那是多余的改动，用户随后纠正：按钮应当在右栏居中 ✓。
+      //   教训：报"错位"时先量**是谁**偏了（容器 / 图标 / 文字基线），别一次改两层。
+      //   '  grid-row: 1 / span 2; width: 34px; height: 34px; border: 0; border-radius: 10px;',
+      // ★ F-3：34 → 32 ✓（基准值 = 行内小动作档 ✓）；**手指环境**下由下面那条
+      //   `@media (pointer: coarse)` 抬到 40 ✓（它们是"独立主控件"档 ✓）
+      '  grid-row: 1 / span 2; width: 32px; height: 32px; border: 0; border-radius: 10px;',
+      '  background: rgba(255,255,255,.06); cursor: pointer;',
+      '  color: var(--dsw-alias-label-secondary, #a9b0b8); font-size: 15px; line-height: 1;',
+      '  display: grid; place-items: center;',
+      '}',
+      '#dsh-mobile-sheet-head button:active { background: rgba(255,255,255,.14); }',
+      // 设置页打开时把齿轮点亮：它是**开关**（再点一次返回文件视图），点亮才看得出来
+      /* 主体：唯一可滚动的区域 */
+      '#dsh-mobile-sheet-body {',
+      '  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;',
+      '  -webkit-overflow-scrolling: touch; padding: 10px 10px 14px;',
+      '}',
+      /* 固定底部区：提示行 + 端侧通道开关 */
+      '#dsh-mobile-sheet-foot {',
+      '  flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px;',
+      '  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));',
+      '  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '  background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.14));',
+      '}',
+      '#dsh-mobile-sheet-note {',
+      '  font-size: 11.5px; line-height: 16px;',
+      '  color: var(--dsw-alias-label-secondary, #a9b0b8);',
+      // 剪贴板 API 不可用时，这一行就是"手动复制"的兜底入口，必须能选中
+      '  user-select: text; -webkit-user-select: text; word-break: break-all;',
+      '}',
+      '#dsh-mobile-sheet-note:empty { display: none; }',
+      /* ★★ round 138：「端侧能力」入口（文件面板底部那一行 ✓）——
+         5 颗胶囊搬进设置页之后，这里是文件面板那侧的**唯一入口** ✓。
+         几何照 `.dshm-tool` 那一类胶囊按钮抄（36px 高、10px 圆角 ✓），
+         整行可点、右端一个 chevron 暗示"点了会进去" ✓。
+         ★ 高度 36 ≥ 32 ✓（比胶囊原先的 32 略高一点 ✓ —— 它现在承载"进设置"这个动作，
+           点空一次的代价比点空一颗开关大 ✓）。 */
+      '.dshm-conn-entry {',
+      '  display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;',
+      // ★ F-3：36 → **32**（基准 = 行内小动作档 ✓），手指环境下抬到 40 ✓（独立主控件 ✓）
+      '  min-height: 32px; padding: 0 12px; border-radius: 10px; cursor: pointer;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '  background: rgba(255,255,255,.05); color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  font-family: inherit; font-size: 13px; text-align: left;',
+      '}',
+      '.dshm-conn-entry:active { background: rgba(255,255,255,.12); }',
+      '.dshm-conn-entry-label { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }',
+      '.dshm-conn-entry-chevron {',
+      '  flex: 0 0 auto; display: grid; place-items: center;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '.dshm-caps { display: flex; flex-direction: column; gap: 0; }',
+      /**
+       * ★★ round 141（F-2 的第二半）：那行**重复的 caption 不再显示** ✓（用户拍板 ✓）。
+       *
+       * 原来组标题是「端侧能力」✓、组里第一行又是「端侧通道」✓ —— 两个 11px tertiary
+       * 叠在一起 ✗（截图里一眼可见 ✓）。现在组标题已经是**真正的标题**（12px/500/secondary ✓），
+       * 这一行纯属重复 ⇒ **不再显示** ✗。
+       * ★ 元素**保留** ✓（`data-dshm-caps-caption="1"` ✓，验收要能问"它还占不占地方"✓）——
+       *   与"收起但不删"这套既有做法一致 ✓；文字也一并清空 ✓（`buildCapabilitySwitches` 里 ✓），
+       *   所以 DOM 里不会留一句看不见的重复文案 ✓。
+       * 判据用 `:empty` ✓ —— 这样"哪天有人把文字加回来"会**当场重新占地方** ✓，
+       * 而不是悄悄藏起来 ✗（那种"藏起来的重复"最难发现 ✓）。
+       */
+      '.dshm-caps-caption {',
+      '  font-size: 11px; letter-spacing: .03em; padding: 0;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '[data-dshm-caps-caption="1"]:empty { display: none; }',
+      /**
+       * ★★ round 142（本轮第 2 条）：端侧能力从**胶囊**改成**设置页那种长横条** ✓ ——
+       *   左标题 + 右侧开关 ✓，与「连接与设备」里的行**同一套类** ✓（`.dshm-set-row` / `.dshm-set-label` ✓）。
+       *
+       * ★ 原来那套 `.dshm-cap-row` / `.dshm-cap-chip`（一排可换行的小胶囊 ✓）
+       *   **整块删掉** ✗ —— 留着就是"新旧两套同时存在"✗（那正是本轮要避免的假绿来源 ✓：
+       *   验收要是只量"开关在不在"，旧胶囊还在也照样绿 ✗）。
+       *
+       * 开关本体（`role="switch"` ✓）：
+       *   · 轨道 44×26 ✓（**宽度 ≥44** ✓ ⇒ 手指点得中 ✓），圆角 999 ✓；
+       *   · 关 = 透明底 + 描边 + 灰色圆点 ✓；开 = 主题色底 + 白色圆点 ✓
+       *     （颜色全部走 `--dsw-alias-*` ✓ —— 与 DSH 自己的开关同一个色系 ✓）。
+       *   ★ 只动"长相"✗ —— `role="switch"` / `aria-checked` / `aria-label` 与那 12 处反馈都在 ✓。
+       */
+      '.dshm-cap-row-item { align-items: center; }',
+      '.dshm-cap-row-item .dshm-set-label { flex: 1 1 auto; min-width: 0; }',
+      '.dshm-cap-switch {',
+      '  flex: 0 0 auto; margin-left: auto; position: relative; cursor: pointer;',
+      '  width: 44px; height: 26px; padding: 0; border-radius: 999px;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.16));',
+      '  background: transparent;',
+      '  transition: background .15s ease, border-color .15s ease;',
+      '}',
+      '.dshm-cap-switch[data-on="1"] {',
+      '  border-color: transparent;',
+      '  background: var(--dsw-alias-state-business-primary, #4c8dff);',
+      '}',
+      '.dshm-cap-knob {',
+      '  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;',
+      '  background: var(--dsw-alias-label-secondary, #a9b0b8);',
+      '  transition: transform .15s ease, background .15s ease;',
+      '}',
+      '.dshm-cap-switch[data-on="1"] .dshm-cap-knob { transform: translateX(18px); background: #fff; }',
+      /* 工作区行：整行可点，标题 + 路径两行，右侧箭头 */
+      '.dshm-ws {',
+      '  display: flex; align-items: center; gap: 12px; width: 100%; box-sizing: border-box;',
+      '  padding: 11px 10px; border: 0; border-radius: 12px; background: transparent;',
+      '  cursor: pointer; text-align: left; font: inherit; color: inherit;',
+      '}',
+      '.dshm-ws:active { background: rgba(255,255,255,.07); }',
+      '.dshm-ws-icon {',
+      '  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;',
+      '  display: grid; place-items: center;',
+      '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #6aa9ff) 16%, transparent);',
+      '  color: var(--dsw-alias-state-business-primary, #6aa9ff);',
+      '}',
+      '.dshm-ws-main { flex: 1 1 auto; min-width: 0; }',
+      '.dshm-ws-title {',
+      '  display: flex; align-items: center; gap: 6px;',
+      '  font-size: 14.5px; font-weight: 500;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed);',
+      '}',
+      '.dshm-ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.dshm-ws-badge {',
+      '  flex: 0 0 auto; font-size: 10.5px; font-weight: 400; padding: 1px 7px; border-radius: 999px;',
+      '  color: var(--dsw-alias-state-business-primary, #6aa9ff);',
+      '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #6aa9ff) 16%, transparent);',
+      '}',
+      '.dshm-ws-path {',
+      '  margin-top: 3px; font-size: 11.5px; line-height: 15px;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '}',
+      '.dshm-ws-chevron { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary, #7d858e); display: grid; place-items: center; }',
+      /* 设置视图：分组 + 标签/值两列 */
+      '.dshm-set-group { padding: 6px 4px 10px; }',
+      '.dshm-set-group + .dshm-set-group { border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07)); margin-top: 4px; }',
+      /**
+       * ★★ round 141（F-2）：分组标题从"**比正文还轻**"改成真正的标题 ✓。
+       *
+       * 原来 11px + `label-tertiary` ✓ —— 而下面每行正文是 12.5px + `label-secondary` ✓ ⇒
+       * 标题**又小又淡** ✗（截图里「端侧能力」明显压不住内容 ✓，用户第 2 条反馈 ✓）。
+       * 现在：**12px + font-weight:500 + `label-secondary`** ✓ ——
+       * 与 DSH 自己的分组标题同一套语言 ✓（`--dsw-alias-label-secondary` ✓ 是设计变量，不是我们编的颜色 ✓）。
+       * ★ 顺带把 F-5 一起收敛了 ✓：设置页字号现在是
+       *   **11.5（提示行）/ 12（组标题）/ 12.5（行文本）/ 13.5（危险按钮）** ✓ ——
+       *   相邻至少差 0.5px ✓ ⇒ 肉眼能分 ✓，不再有"两种 11px 标题叠在一起"✗。
+       */
+      '.dshm-set-title {',
+      '  font-size: 12px; font-weight: 500; letter-spacing: .04em; padding: 6px 0 8px;',
+      '  color: var(--dsw-alias-label-secondary, #a9b0b8);',
+      '}',
+      '.dshm-set-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; }',
+      '.dshm-set-label { flex: 0 0 auto; font-size: 12.5px; color: var(--dsw-alias-label-secondary, #a9b0b8); }',
+      '.dshm-set-value {',
+      '  flex: 1 1 auto; min-width: 0; text-align: right; font-size: 12.5px;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;',
+      '}',
+      /**
+       * ★★ round 141（F-1）：**长值行改两行式（值另起一行、左对齐）** ✓ —— 用户拍板 ✓。
+       *
+       * 原来长值在右列**折行** ✓（`text-align: right` + `overflow-wrap: anywhere` ✓）：
+       * 400px 的面板只有 256px 宽 ✓ ⇒ 截图里 4 处右对齐折行 ✗ ——
+       * `切换阈值` 第二行只剩「校）」✗、`学校` 三行参差 ✓、`电脑指纹` 两行 ✓，
+       * 左边缘全是锯齿 ✓（用户第 1 条反馈 ✓：值列过密、读起来像一坨数字 ✓）。
+       * 现在：**标签一行、值另起一行左对齐** ✓（判据是 JS 打的 `data-dshm-long-value` ✓，
+       * 见 `settingsRow` ✓）—— 短值行（`隧道` / `访问范围` 等 ✓）**一个字不变** ✗：
+       * 仍是"标签左 / 值右"那一行 ✓（用户明确要求"只影响长值行"✓）。
+       * ★ 为什么由 JS 打属性而不是纯 CSS ✗：CSS **没有**"文字多长"这个选择器 ✓ ——
+       *   只能由生成行的地方判断 ✓（一处判断 ✓，与"分段器"同一个地方 ✓）。
+       */
+      '.dshm-set-row[data-dshm-long-value="1"] { flex-direction: column; align-items: flex-start; gap: 2px; }',
+      '.dshm-set-row[data-dshm-long-value="1"] .dshm-set-value { text-align: left; }',
+      '.dshm-set-value[data-tone="warn"] { color: #ffb454; }',
+      '.dshm-set-value[data-tone="ok"] { color: #5fd08a; }',
+      '.dshm-set-danger {',
+      '  width: 100%; min-height: 42px; margin-top: 8px; border-radius: 10px; cursor: pointer;',
+      '  border: 1px solid rgba(255,110,110,.42); background: rgba(255,90,90,.10);',
+      '  color: #ff8f8f; font-size: 13.5px;',
+      '}',
+      '.dshm-set-danger:active { background: rgba(255,90,90,.2); }',
+      '.dshm-set-hint { font-size: 11.5px; line-height: 16px; padding: 6px 0 0; color: var(--dsw-alias-label-tertiary, #7d858e); }',
+      /* ★ round 138：能力分组的反馈行空着时**不要占地方** ✓（`.dshm-set-hint` 自带 6px 上内边距 ✓，
+         空元素会凭空多一道缝 ✗ —— 与 `#dsh-mobile-sheet-note:empty` 同一个写法 ✓）。 */
+      '[data-dshm-caps-note="1"]:empty { display: none; }',
+      /* 文件面板工具栏：胶囊按钮
+         ★★ round 146（用户："删掉他，让其他按键在一行"✓）：**不许换行** ✓ ——
+            原来 `flex-wrap: wrap` ✓，264px 宽下必然折成两行 ✓（截图里一眼可见 ✗）。
+            现在 `nowrap` ✓ + 兜底 `overflow-x: auto` ✓（某台设备字更大 ⇒ 横着拖 ✓，
+            不折行、也不裁掉任何一颗 ✓）。★ 圆角/边框/配色 token 一个字没改 ✓。 */
+      '.dshm-files-toolbar { display: flex; flex-wrap: nowrap; gap: 6px; padding: 0 0 10px; overflow-x: auto; }',
+      /**
+       * ★★ round 141（F-3 / N1）：胶囊按钮 → **小动作档 32px** ✓，并把"不许换行"钉死 ✓。
+       *
+       * **N1（纯 bug）**：设置页「学校」那一行里也塞着一颗 `.dshm-tool`（「复制」✓）——
+       *   那一行是 `display:flex` 的标签/值两列 ✓，胶囊既不收缩也不禁止换行 ✗ ⇒
+       *   在 256px 宽的面板里被挤成**竖向两个字**（上「复」下「制」✗，截图里一眼可见 ✓）。
+       *   `white-space: nowrap` + `flex: 0 0 auto` 两个一起才够 ✓ ——
+       *   只写 nowrap 的话它仍会被压缩到内容宽度以下 → 文字溢出 ✗。
+       */
+      '.dshm-tool {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  min-height: 32px; padding: 0 13px; border-radius: 999px; cursor: pointer;',
+      '  white-space: nowrap; flex: 0 0 auto;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '  background: rgba(255,255,255,.05);',
+      '  color: var(--dsw-alias-label-primary, #e8eaed); font-size: 12.5px;',
+      '}',
+      '.dshm-tool:active { background: rgba(255,255,255,.12); }',
+      '.dshm-tool[disabled] { opacity: .4; }',
+      '.dshm-tool-icon { display: grid; place-items: center; }',
+      /* 面包屑 + 右侧图标动作 */
+      '.dshm-crumb {',
+      '  display: flex; align-items: center; gap: 8px; padding: 0 2px 9px;',
+      '  font-size: 12px; color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '  margin-bottom: 4px;',
+      '}',
+      '.dshm-crumb-up {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;',
+      // ★ F-3：28 → 32 ✓（行内小动作档 ✓，与 `.dshm-icon-btn` / `.dshm-file-more` / 胶囊同档 ✓）
+      '  min-height: 32px; padding: 0 10px; border-radius: 999px; cursor: pointer;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '  background: transparent; color: var(--dsw-alias-label-secondary, #a9b0b8); font-size: 12px;',
+      '}',
+      '.dshm-crumb-path {',
+      '  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      // 它现在是个 button（可点复制），必须清掉默认外观，否则会变成一块灰底按钮
+      '  border: 0; background: transparent; padding: 0; text-align: left; font: inherit;',
+      '  color: inherit; cursor: pointer;',
+      '}',
+      '.dshm-crumb-path:active { opacity: .6; }',
+      '.dshm-icon-btn {',
+      // ★ F-3：30 → 32 ✓（行内小动作档 ✓ —— 圆角保持 9 ✓，F-4 的圆角收敛**不做** ✗）
+      '  flex: 0 0 auto; width: 32px; height: 32px; border-radius: 9px; cursor: pointer;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '  background: transparent; color: var(--dsw-alias-label-secondary, #a9b0b8);',
+      '  display: grid; place-items: center;',
+      '}',
+      '.dshm-icon-btn:active { background: rgba(255,255,255,.12); }',
+      /* 大目录的加载态：秒表 + 骨架（"在传"与"死了"必须一眼分得开） */
+      /* 预览整屏（用户要求："文件预览的时候左移直到占据全屏"）：
+         只对**预览态**生效 —— 浏览目录时仍然保留抽屉宽度（要能看到主页面作参照 ✓）。 */
+      '#dsh-mobile-sheet[data-full="1"] #dsh-mobile-sheet-panel { width: 100vw; border-radius: 0; }',
+      /* markdown 排版：手机上只要能读顺，不做花哨样式 ✓ */
+      '.dshm-md { font-size: 13.5px; line-height: 1.7; color: var(--dsw-alias-label-primary, #f5f6f7); }',
+      '.dshm-md h1, .dshm-md h2, .dshm-md h3, .dshm-md h4, .dshm-md h5, .dshm-md h6 {',
+      '  margin: 14px 0 6px; line-height: 1.35; font-weight: 600;',
+      '}',
+      '.dshm-md h1 { font-size: 19px; } .dshm-md h2 { font-size: 17px; } .dshm-md h3 { font-size: 15px; }',
+      '.dshm-md p { margin: 8px 0; }',
+      '.dshm-md ul, .dshm-md ol { margin: 8px 0; padding-left: 22px; }',
+      '.dshm-md li { margin: 3px 0; }',
+      '.dshm-md code {',
+      '  padding: 1px 5px; border-radius: 5px; font-size: 12.5px;',
+      '  background: rgba(255,255,255,.08); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
+      '}',
+      '.dshm-md pre.dshm-md-code {',
+      '  position: relative; margin: 10px 0; padding: 10px; border-radius: 10px; overflow-x: auto;',
+      '  background: rgba(255,255,255,.04); border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '}',
+      '.dshm-md pre.dshm-md-code code { padding: 0; background: transparent; font-size: 12px; line-height: 1.6; }',
+      '.dshm-md-lang {',
+      '  position: absolute; top: 6px; right: 8px; font-size: 10px; letter-spacing: .04em;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '.dshm-md blockquote {',
+      '  margin: 8px 0; padding: 2px 0 2px 10px;',
+      '  border-left: 3px solid var(--dsw-alias-border-l2, rgba(255,255,255,.16));',
+      '  color: var(--dsw-alias-label-secondary, #cfd3d6);',
+      '}',
+      '.dshm-md hr { margin: 14px 0; border: 0; border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07)); }',
+      '.dshm-md a { color: var(--dsw-alias-state-business-primary, #679efe); text-decoration: none; }',
+      '.dshm-md-image { color: var(--dsw-alias-label-tertiary, #7d858e); }',
+      '.dshm-md-task { color: var(--dsw-alias-state-business-primary, #679efe); }',
+      '.dshm-md-table { border-collapse: collapse; margin: 10px 0; font-size: 12.5px; width: 100%; }',
+      '.dshm-md-table th, .dshm-md-table td {',
+      '  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '  padding: 5px 8px; text-align: left;',
+      '}',
+      '.dshm-md-table th { background: rgba(255,255,255,.04); font-weight: 600; }',
+      /* 公式：交给 Temml 渲染成 MathML 后由 Chrome 原生绘制 ✓（无字体无 CSS ✓）；
+         还没加载完 / 取不到时按**原样 TeX** 显示（等宽小字 ✓）——不吞内容、也不套 markdown 规则 ✓ */
+      /**
+       * ★ DSH 自带预览：**给它让出状态栏的安全区** ✓。
+       *
+       * 用户反馈："使用 dsh 渲染的全面屏适配问题，它的所有控件都在最上面，
+       * 小窗时能点击，但**全屏时会跑到上面状态栏**，导致不能点击" ✗。
+       * 机制：APK 用 targetSdk 35 ✓ → 系统**强制 edge-to-edge** ✓ →
+       * 页面从屏幕最顶端开始画 ✓，而 DSH 预览的头部是最顶上那一行 ✗ → 正好被状态栏盖住 ✓。
+       * 这里给它加一个等于安全区的上内边距 ✓；`--dshm-safe-top` 是**可覆盖的**
+       * （验收里直接把它设成 24px 来断言 ✓ —— `env()` 在无头浏览器里恒为 0 ✗，测不了 ✓）。
+       */
+      ':root { --dshm-safe-top: env(safe-area-inset-top, 0px); --dshm-safe-bottom: env(safe-area-inset-bottom, 0px); --dshm-keyboard: 0px; }',
+      /**
+       * ★ 输入法弹出时，整块布局**整体抬起来** ✓（用户反馈："弹出输入法以后
+       *   聊天框不会自动跑到输入法上面" ✗）。
+       * 值由壳实测写入 ✓（edge-to-edge 下 `adjustResize` 不生效 ✗，见 MainActivity 注释 ✓）。
+       * 加在中间列上 ✓ —— 聊天记录与输入框一起上移 ✓，正是手机上该有的行为 ✓。
+       */
+      /**
+       * ★★ 退回原样（round 118 五次修正，用户真机反馈）✗→✓：
+       *   "附件的添加文件功能又不可用了……这也导致了在新对话下**输入框展示错乱**" ✗，
+       *   用户要求"保证新对话的输入框正常展示（**就像之前一样**）" ✓。
+       *
+       * 真因：我在 round 115 把这里改成了
+       *   `max(键盘高度, --dshm-safe-bottom, env(safe-area-inset-bottom))` ✗ ——
+       *   在 APK 里键盘**收起**时 `env()` 也是 ~48px ✓ ⇒ 中间列凭空多出 48px 下内边距 ✗
+       *   ⇒ 输入区被顶歪、附件入口的位置也跟着错 ✓。
+       *
+       * ★ 为什么验收没拦住：无头 Chrome 里 `env()` **恒为 0** ✓ ⇒ 这条规则在验收里
+       *   是个空操作 ✓，改坏也看不出来 ✗ —— 又一个"只在真机现形"的坑 ✓。
+       *   **结论：与 `env()` 有关的让位，不要用在输入区这种"必须和以前一模一样"的地方** ✓。
+       *   键盘让位只认 `--dshm-keyboard`（壳实测写入 ✓）就够了 ✓。
+       *
+       * ★★ round 142（本轮第 ④ 条）：在它前面又插了**一层** `--dshm-keyboard-pad` ✓ ——
+       *   "系统已经把 WebView 变矮过"时不再叠第二遍 ✓（真因与实测见
+       *   `syncKeyboardPad` 那段说明 ✓）。★ 兜底值仍然是 `--dshm-keyboard` ✓：
+       *   不需要修正时我们**删掉**那个变量 ✓ ⇒ 这一条与 round 118 的行为**逐像素相同** ✓
+       *   （验收里几节"直接 setProperty('--dshm-keyboard', …)"模拟键盘的写法也一个字不用改 ✓）。
+       */
+      '[class*="centerCol"] { padding-bottom: var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px)); }',
+      /* ★ 这里也必须用**同一个** max(env, 变量) ✓ —— 只写变量的话，
+         当壳报 0 而 env() 非 0（或反过来）时，CSS 与 JS 会让位不一致 ✗（round 116 修 ✓）。
+         ★ `--dshm-preview-pad` 是**给 JS 留的通道**：JS 量完之后会写一个"还差多少"的值 ✓
+         （可能是 0px ✓ —— 见 tuneDshPreviewSafeArea 的注释：顶部那条工具行
+          如果和预览层在同一个流里，它已经把预览层推下去了，再补内边距就是空档 ✗）。
+         没写这个变量时（JS 还没跑到 / 出错），`var()` 的兜底值仍然是完整的 max(...) ✓ ——
+         即"先按 48px 顶上，JS 跑完再精确修正"✓，任何一帧都不会让它压在状态栏里 ✓。 */
+      /**
+       * ★★ round 175（用户："我们之前是怎么处理这个部分的"✓ —— 查 §4.2 后**照当年那条对齐** ✓）：
+       *   当年（round 115/116 ✓、**2026-09-21 真机确认"顶栏没问题了"** ✓）这条写的是
+       *   `[class*="_preview"] { padding-top: var(--dshm-safe-top) }` ✓。
+       *   round 162 为了"别误伤排队消息那一行"把它收窄成 `div[...]` ✗ —— **`div` 这个限制是多余的** ✗：
+       *   真正需要的那半已经由 `:not([data-queue-dock] *)` 单独承担了 ✓
+       *   （排队行那颗是 `span._7yHdaG_preview` 且在 `[data-queue-dock]` 里 ✓）。
+       *   ⇒ **恢复成当年的宽度** ✓、只保留"排除队列面板"这一条 ✓ ——
+       *   万一真预览层不是 `div`（我们只在一个文件的预览上量过 ✓），收窄就会让它**完全没有内边距** ✗，
+       *   而症状恰好就是"预览顶栏钻到状态栏里" ✓。
+       */
+      '[class*="_preview"]:not([data-queue-dock] *) { padding-top: var(--dshm-preview-pad, max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      /**
+       * ★★ round 162（B ✓）：上面那条**选择器又写宽了一次** ✗✗ —— 用户真机截图：
+       *   "我在你工作的时候发送消息，dsh 会给我安排一个排队消息，目前我们的排队消息
+       *    会有概率往下错一行，像截图这样"✓。
+       *
+       * 真因：它原来写的是 `[class*="_preview"]` ✓ —— 而 DSH 排队消息那一行的预览文本
+       *   正是 `<span class="_7yHdaG_preview">` ✓（`QueueDock.module.css` ✓），
+       *   **类名后缀就带 `_preview`** ✓ ⇒ 那颗 span 也被塞进一个"安全区那么大"的
+       *   上内边距 ✗。
+       *   偏移量与"内边距 ÷ 2"**完全吻合** ✓：那一行是 `display:flex; align-items:center`
+       *   的 36px 行 ✓ ⇒ 内边距把 span 撑高、居中之后**整体下沉一半** ✓。
+       *   截图实测（1200×2608，dpr 3）：文字中心比该行中心低 **9.3 CSS px**
+       *   ⇒ 实际内边距 ≈ **18–19px** ✓（= `max(env(safe-area-inset-top), var(--dshm-safe-top))`
+       *   在这台机器上的真实值 ✓）。
+       *   "有概率"也解释得通 ✓：DSH 预览开过之后 JS 会把 `--dshm-preview-pad` 写成 0px ✓，
+       *   没开过预览（本页会话里）走的就是上面那个 `var()` 兜底 ✓ ——
+       *   两种状态随使用过程交替 ⇒ 看起来就是"有时错一行、有时正常"✓。
+       *
+       * ⇒ 两条**互相独立**的收口（少一条都不够 ✗）：
+       *   · `div[...]`：真预览层全是 div ✓，而那条排队消息是一颗 **span** ✓；
+       *   · `:not([data-queue-dock] *)`：DSH 给队列面板留了**稳定的** `data-queue-dock` ✓
+       *     （不是哈希类名 ✓）⇒ 以后它就算把 span 换成 div 也不会再中 ✗。
+       *
+       * ★ 这是本项目**第四次**栽在"选择器写太宽"上 ✓（前三次：`[class*="collapsed"]`
+       *   把 frame 宽度改坏 ✓、`[class*="header"]` 把面板顶下去 52px ✓、
+       *   `[class*="_root"]` 误命中 ✓）。真预览层**应该**像 `tagTopHeader` 那样由 JS
+       *   打标记再选 ✓ —— 但那要动 `dshPreviewSurface` 整条链路（哈希、多候选、兜底 ✓），
+       *   本轮风险大于收益 ✗ ⇒ 先收口 ✓，并在 `check-mobile-layout` 里补一条断言盯着 ✓
+       *   （排队行不得被加内边距 ✓ / 真预览层仍必须有 ✓）。
+       */
+      /* DSH 自带预览盖住整屏时：我们的顶栏让开 ✓（免得两条栏叠在一起 ✗），让位量归零 ✓ */
+      /**
+       * ★ 预览打开时把**我们自己的顶栏**让开 ✓（免得两条栏叠在一起 ✗）。
+       *
+       * ★★ round 118 三次尝试的结论（很重要，别再走一遍 ✗）：
+       *   ① 行内给预览层写 `z-index: 75` ✗ —— 被 DSH 重渲染冲掉 ✓；
+       *   ② 样式表 `!important` 写 `z-index: 75` ✗ —— **验收绿了、真机红了**：
+       *      用户原话"打开文件预览**顶栏盖住文件了**" ✗。
+       *      原因是预览那一层处在一个**父级堆叠上下文**里 ✓ ——
+       *      给它自己写 z-index 根本逃不出那个上下文 ✗，而我们顶栏在另一个上下文里 ✓。
+       *      更糟的是：验收当时只比了 `computed z-index === 75` ✗ ——
+       *      那是**手段**，不是"谁盖住谁" ✓（假绿的经典形态 ✓，现已改成命中测试 ✓）。
+       *   ③ 结论：**"藏顶栏"这条路是对的** ✓（它不依赖堆叠上下文 ✓）。
+       *      顶栏"空一下"的问题另行解决 ✓（不能用 z-index ✗）。
+       */
+      /**
+       * ★★ round 172（**用户要求** ✓）：这里原来有一条
+       *   `body[data-dshm-dsh-preview="1"] #dsh-mobile-top { visibility: hidden; }` ✗ —— **撤回** ✓。
+       *   理由：round 167 起，预览那一整列被抬到 `z-index: 190` ✓，而我们的顶栏是 70 ✓
+       *   ⇒ **预览本来就盖住顶栏** ✓ ⇒ 再用 `visibility` 去藏它**纯属多余** ✗。
+       *   而多余的规则只会变成下一个坑 ✓ —— 上一轮那个"`:has()` 粘性把顶栏永久藏起来、
+       *   连 ☰ 都点不到"✗ 就是这么来的 ✓。
+       */
+      /**
+       * ★★ round 170：这里 round 169 曾用 `body:has(预览层)` 来**即时**藏顶栏 ✗ ——
+       *   **撤回** ✓，因为 `:has()` 是**粘的** ✗：DSH 的预览层"被隐藏/最小化"时**仍然留在 DOM 里** ✓
+       *   （round 157 实测 ✓）⇒ `:has()` 恒真 ⇒ **顶栏永远藏着** ✓ ⇒ 我们的 ☰ 按钮
+       *   `visibility:hidden` 之后**点不到** ✓ ⇒ 验收里"抽屉已滑入"当场变红 ✓（本轮实测 ✓）。
+       * ⇒ 顶栏的即时隐藏改由**我们请求预览那一瞬间**的 `pending` 标记负责 ✓（下面那条 ✓）——
+       *   它精确 ✓（只在"我们点了文件、预览还没出现"这段窗口里成立 ✓）、且一定会被清掉 ✓。
+      /**
+       * ★★ round 172（**用户要求** ✓）：这里 round 170 曾用 `body[data-dshm-preview-pending="1"]`
+       *   提前把**我们的顶栏与子代理入口**藏起来 ✗ —— **撤回** ✓，理由同上：
+       *   预览那一列（190）本来就盖住它们（70 / 60）✓，藏是多余的 ✗；
+       *   而"我们请求预览的那一瞬间"这个信号**只留给抬 z-index 用** ✓（下面那条 ✓）——
+       *   它精确、且四条路都会被清掉 ✓，不再承担任何隐藏职责 ✓。
+       */
+      /**
+       * ★★ round 170：这里原来有一条 `body[data-dshm-dsh-preview="1"] { --dshm-push: 0px !important; }` ✗ ——
+       *   用户实拍："预览返回……**主界面仍然是从右往左到目标位置**"✗：预览开着时让位量被清零 ✓，
+       *   预览一关这条规则失效 ⇒ 让位量**弹回**"面板开着"的 `-264px` ✓ ⇒ 主页面又滑了一下 ✗。
+       *   ★ 而 round 169 起，预览期间**面板状态一个字都没变** ✓（它只是被压在底下 ✓）⇒
+       *   让位量本来就**不该变** ✗：预览是**整屏**的 ✓，它底下主页面在哪儿**根本看不见** ✓
+       *   ⇒ 保持原值 ⇒ 预览一关**零位移** ✓（用户要的"平滑" ✓）。
+       */
+      /**
+       * ★★ round 165（用户 B ✓）：**DSH 预览开着时，子代理入口也必须让开** ✗✗ ——
+       *   用户原话："打开文件预览以后，文件目录居然在文件预览的上方，而且**我们新加的那个
+       *   子代理也在文件预览的上方**"✓。
+       *
+       * 为什么它会跑到预览上面 ✗：它是我们挂在 `body` 下的 `position: fixed` 元素 ✓，
+       * `z-index: 60` ✓ —— 而 DSH 预览那一层所在的那一列**只有 `z-index: 25`** ✓
+       * （round 158 实测：面板 85 能盖住预览 25 ✓，同一个道理 ✓）⇒ 谁都没挡住它 ✗。
+       * ★ round 159 把它做成自绘控件时，**只写了"怎么摆"和"长什么样"，没写"预览开着时让开"** ✗
+       *   —— 顶栏（70）与文件面板（85）各有各的让开规则 ✓，它漏了 ✓。
+       *
+       * 用 `opacity: 0` 而**不是** `display: none` ✗：`placeLineageEntry` 的闭环要**量它的 rect** ✓
+       * （`display:none` 会量到 0×0 ⇒ 走"量不到尺寸"那一支 ⇒ 打上 `blocked` ✓ ——
+       * 虽然预览关掉后能自己恢复 ✓，但那一轮会白记一行日志、也白白绕一圈 ✓）；
+       * `opacity: 0` 保留盒子 ⇒ 几何一帧都不动 ✓、预览一关立刻回来 ✓。
+       * `pointer-events: none` 保证它**不吃触摸** ✓（透明但仍然能点的坑不能留 ✓）。
+       */
+      /**
+       * ★★ round 173（用户实拍："打开返回过程中**子代理的控件会闪烁**（打开时消失 ✓、
+       *   关闭时**一段时间后才出现** ✗）"）：这里原来还有最后一条"藏我们的东西"——
+       *   预览开着时把子代理入口 `opacity:0` ✗。**撤回** ✓，理由与 round 172 撤顶栏那条**完全一样** ✓：
+       *   · 预览那一列已经是 `z-index: 190` ✓，而入口是 60 ✓ ⇒ **预览本来就压住它** ✓（不需要藏 ✓）；
+       *   · 而"藏"依赖 marker ✓ —— marker 有关闭宽限 180ms + 200ms 轮询 ✓
+       *     ⇒ **预览一关，它要等 200~400ms 才回来** ✓ = 用户看到的"关闭时一段时间后才出现" ✗。
+       * ⇒ 撤掉之后：预览开着时它在**底下**（看不见 ✓），预览一关它**立刻就在** ✓（同一个节点 ✓）。
+       * ★ 到这里，"靠隐藏躲预览"这条路**全部退场** ✓（顶栏 round 172 ✓、入口 round 173 ✓）——
+       *   只剩一条**层序**规则（预览那一列抬到 190 ✓）在承担这件事 ✓，这既简单又不会闪烁 ✓。
+       */
+      /**
+       * ★★ round 158（B1 ✓）：DSH 预览开着时，**我们的文件面板一个像素都不画** ✗，
+       *   但**状态照旧是 `open`** ✓（`data-dshm-files` 不动 ✓）。
+       *
+       * 为什么必须补这一条 ✗（真机实测，见 round 158 报告）：
+       *   · 预览那一层是 `div.dhJKeW_preview`，`0,38 → 412,915` ✓ **盖住整屏** ✓，
+       *     但它 `position: static` ✓、整列只有 `z-index: 25` ✓；
+       *   · 我们面板是 `position: fixed; z-index: 85` ✓
+       *   ⇒ 面板**画在预览上面** ✗（实测把面板强开：x 148–412 那 264px 全盖住预览 ✓）。
+       *   所以"面板留在底下不会被看见"这句**不成立** ✗ —— 不能只靠"DSH 预览盖住它"✓。
+       *
+       * 这一条同时**正是用户要的观感** ✓：
+       *   · 状态全程 `open` ✓ ⇒ **没有"先回主页面、文件目录再跳出来"那一帧** ✓；
+       *   · 预览一关，这条规则立刻不再命中 ✓ ⇒ 面板**本来就在**（同一个目录、同一份滚动位置 ✓）
+       *     —— 一步到位、零闪烁 ✓。
+       * `!important` 与"body[attr] + #id"的特异度都压得过 `#dsh-mobile-sheet[data-open="1"]` ✓。
+       */
+      /**
+       * ★★ round 169（**用户拍板后的最终形态** ✓）：这里原来有一条
+       *   `body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important; }` ✗ ——
+       *   round 158 用它实现"预览开着时**不画**面板" ✓（当时的理由：面板 z-index 85 > 右栏 25 ⇒
+       *   面板会盖在预览上 ✗）。**那条理由已经被 round 167 的"把右栏抬到 190"解决掉了** ✓
+       *   ⇒ 面板再也不需要在**显示**上做手脚 ✗。
+       * 而它留着反而制造了用户实拍的"**一起把文件面板返回，然后再拉起**"✗：
+       *   面板在预览期间被 `display:none` ✓ ⇒ 预览一关，它**重新出现**（还往往伴随
+       *   `restoreFilesAfterDshPreview` 里那次重开/重画 ✓）= 屏幕上就是"消失 → 再出现" ✗。
+       * ⇒ 现在：**面板一直画着**（被预览压在底下 ✓，用户看不见 ✓）、**状态一直 open** ✓、
+       *   预览一关**它本来就在** ✓（同一个节点、同一个目录、同一份滚动位置 ✓）——
+       *   这才是用户要的"**平滑回到打开前**" ✓（round 167/168 两轮下来，最后缺的就是这一条 ✓）。
+       */
+      '.dshm-md-math { display: inline-block; vertical-align: baseline; }',
+      '.dshm-md-math[data-display="1"] { display: block; margin: 10px 0; overflow-x: auto; text-align: center; }',
+      '.dshm-md-math[data-dshm-math="pending"], .dshm-md-math[data-dshm-math="failed"] {',
+      '  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
+      '  padding: 1px 5px; border-radius: 5px; background: rgba(255,255,255,.05);',
+      '  color: var(--dsw-alias-label-secondary, #cfd3d6); white-space: pre-wrap; word-break: break-word;',
+      '}',
+      '.dshm-md-math[data-dshm-math="failed"] { border: 1px dashed var(--dsw-alias-state-warn-primary, #f59e0b); }',
+      /* 预览视图：工具行 + 元信息行 + 内容（文本/图片） */
+      '.dshm-preview-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }',
+      '.dshm-preview-meta {',
+      '  font-size: 11.5px; line-height: 16px; padding: 0 2px 8px;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e); font-variant-numeric: tabular-nums;',
+      '}',
+      '.dshm-preview-text {',
+      '  margin: 0; padding: 10px; border-radius: 10px;',
+      '  background: rgba(255,255,255,.03);',
+      '  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      /* 代码长行不折行、要能横向滚 —— 而"真的能横向滚"正是横滑手势不该抢的区域 ✓
+         （两条规则是配套的：手势那边判 scrollWidth > clientWidth ✓） */
+      '  overflow-x: auto; white-space: pre; tab-size: 2;',
+      '  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
+      '  color: var(--dsw-alias-label-primary, #f5f6f7);',
+      '  user-select: text; -webkit-user-select: text;',
+      '}',
+      '.dshm-preview-image { display: block; max-width: 100%; height: auto; border-radius: 10px; }',
+      '.dshm-preview-image[data-zoom="1"] { max-width: none; }',
+      '.dshm-preview-fallback {',
+      '  font-size: 12.5px; line-height: 18px; padding: 8px 2px;',
+      '  color: var(--dsw-alias-label-secondary, #cfd3d6);',
+      '}',
+      '.dshm-loading { padding: 2px 0 0; }',
+      '.dshm-loading-line {',
+      '  font-size: 12.5px; line-height: 18px; padding: 6px 2px 8px;',
+      '  color: var(--dsw-alias-label-secondary, #a9b0b8); font-variant-numeric: tabular-nums;',
+      '}',
+      '.dshm-loading-hint {',
+      '  font-size: 11.5px; line-height: 16px; padding: 0 2px 10px;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '.dshm-skel { display: flex; align-items: center; gap: 11px; height: 44px; padding: 0 2px; }',
+      '.dshm-skel i {',
+      '  display: block; height: 10px; border-radius: 5px; background: rgba(255,255,255,.07);',
+      '  animation: dshm-skel-pulse 1.2s ease-in-out infinite;',
+      '}',
+      '.dshm-skel i:nth-child(1) { width: 18px; height: 18px; border-radius: 6px; flex: 0 0 auto; }',
+      '.dshm-skel i:nth-child(2) { flex: 1 1 auto; }',
+      '.dshm-skel i:nth-child(3) { width: 34px; flex: 0 0 auto; }',
+      '@keyframes dshm-skel-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }',
+      /* 大目录底部：统计 + 继续显示 */
+      '.dshm-more {',
+      '  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;',
+      '  padding: 10px 2px 4px; margin-top: 4px;',
+      '  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '}',
+      '.dshm-more-info {',
+      '  font-size: 11.5px; line-height: 16px; font-variant-numeric: tabular-nums;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      /* 文件条目 */
+      '.dshm-file-list { padding: 0; }',
+      '.dshm-file + .dshm-file { border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.05)); }',
+      '.dshm-file-head {',
+      '  display: flex; align-items: center; gap: 11px; width: 100%;',
+      '  min-height: 48px; padding: 0 2px; border: 0; background: transparent; cursor: pointer;',
+      '  color: var(--dsw-alias-label-primary, #e8eaed); text-align: left; font-size: 14px;',
+      '}',
+      '.dshm-file-head:active { opacity: .6; }',
+      '.dshm-file-icon { flex: 0 0 auto; width: 22px; display: grid; place-items: center; color: var(--dsw-alias-label-tertiary, #7d858e); }',
+      '.dshm-file-icon[data-kind="directory"] { color: var(--dsw-alias-state-business-primary, #6aa9ff); }',
+      '.dshm-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.dshm-file-meta { flex: 0 0 auto; font-size: 11.5px; color: var(--dsw-alias-label-tertiary, #7d858e); font-variant-numeric: tabular-nums; }',
+      '.dshm-file-more {',
+      '  flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 9px;',
+      '  background: transparent; cursor: pointer;',
+      '  color: var(--dsw-alias-label-secondary, #a9b0b8); font-size: 17px; line-height: 1;',
+      '}',
+      '.dshm-file-more:active { background: rgba(255,255,255,.1); }',
+      '.dshm-file-actions { display: none; flex-wrap: wrap; gap: 6px; padding: 0 0 10px 33px; }',
+      '.dshm-file-actions[data-open="1"] { display: flex; }',
+      /* ── 多选态 ─────────────────────────────────────────────────────
+         勾选圈常驻在行首、只由 `data-selecting` 决定显示：切进/切出多选态时
+         **不重建列表**（重建会丢掉滚动位置，而手机上"我勾到哪儿了"全靠位置感）。 */
+      '.dshm-file-check {',
+      '  flex: 0 0 auto; display: none; width: 20px; height: 20px; border-radius: 50%;',
+      '  border: 1.5px solid var(--dsw-alias-border-l2, rgba(255,255,255,.28));',
+      // 勾号只靠颜色区分：未选中时不显示字形（圆环本身就是"可勾"的提示）
+      '  color: transparent; font-size: 12px; line-height: 1; place-items: center;',
+      '}',
+      '.dshm-file[data-selecting="1"] .dshm-file-check { display: grid; }',
+      '.dshm-file[data-selected="1"] .dshm-file-check {',
+      '  border-color: transparent;',
+      '  background: var(--dsw-alias-state-business-primary, #4c8dff); color: #fff;',
+      '}',
+      '.dshm-file[data-selected="1"] {',
+      '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #6aa9ff) 14%, transparent);',
+      '}',
+      // 多选态下 `⋯`（展开单项操作）收起：那时整行点击已经是勾选，留着它只会打架
+      '.dshm-file[data-selecting="1"] .dshm-file-more { display: none; }',
+      '.dshm-file[data-selecting="1"] .dshm-file-actions { display: none !important; }',
+      /* 底部多选操作栏：临时顶掉端侧通道开关的位置（隐藏，**不删除**） */
+      '#dsh-mobile-sheet-select { display: flex; flex-direction: column; gap: 8px; }',
+      '#dsh-mobile-sheet-select[hidden] { display: none; }',
+      /* ★ round 146：选择模式那一排（全选/删除/移动/取消 ✓）同样**不许换行** ✓（用户点名 ✓）。 */
+      '.dshm-select-row { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; overflow-x: auto; }',
+      '.dshm-select-count { font-size: 12.5px; color: var(--dsw-alias-label-primary, #e8eaed); }',
+      '.dshm-tool[data-tone="danger"] { border-color: rgba(255,110,110,.42); color: #ff8f8f; }',
+      // 「再点一次确认」时整颗按钮变红：文案会变，但颜色才是扫一眼就能看见的那个信号
+      '.dshm-tool[data-confirm="1"] {',
+      '  border-color: transparent; background: rgba(255,90,90,.88); color: #fff;',
+      '}',
+      /* ── 底部状态栏（DSH 的 `StatsPills`：`N 轮 M 步` / `token 用量`）──
+         ★ 只能**寄生**：那是 DSH 的 React 组件，boot.js 是注入的经典脚本、拿不到它的 store。
+         原元素**保留在 DOM 里**、只收起几何：它既是 React 的挂载点，也是那两个统计对话框的
+         **定位锚点**（`useAnchoredPosition` 量的是它的 rect）——移除它等于把宿主弄崩。
+         这里 `height:0 + overflow:hidden + visibility:hidden`：
+           · 锚点仍然按原样布局（rect 有效）→ 对话框位置与 DSH 原生**完全一致**；
+           · 但不再占位、不再绘制、也不可聚焦（visibility:hidden 会把按钮移出 tab 序）。
+         度量事实（412×915 实测）：原来那行 26px 高、两段文字在手机上**已经被省略号截断**
+         （`28.9M tok · 缓…`），所以"紧凑化"同时也在修一个真实的排版问题。 */
+      /**
+       * ★ 输入区**限高 + 内部滚动** ✓。
+       *
+       * 用户反馈："输入框输很多行，输入框变高，但聊天记录的上下滑动依旧可以进行，
+       * 这很滑稽，我觉得输入栏可选变大，然后默认为上下滑输入栏更合适一些" ✗。
+       * 做法：给它一个上限（约 4–5 行 ✓），超出部分**在输入框内部滚动** ✓，
+       * 于是聊天记录不会被挤没 ✓，也不会出现"输入框长到半屏、聊天还能滑"的怪状态 ✓。
+       */
+      /**
+       * ★★ round 119：这两条**已经删掉** ✓（用户真机反馈，量出来的真凶就在这 ✗）。
+       *
+       * 原先这里是：
+       *   `[class*="composerSeat"], [class*="composerStack"] { max-height: min(26vh,190px) !important;
+       *                                                     overflow-y: auto !important; }`
+       * 而 `composerSeat/Stack` **恰好包含底部那些行**（上下文容量提示 / token 提示 ✓）✗ ⇒
+       *   内容比盒子高 ⇒ **文本框外多出一条滚动条** ✓（用户原话 ✓），
+       *   顺带把工具栏（含「添加文件」）挤到可点区域之外 ✗（附件点不到就是这个 ✓）。
+       *
+       * 现在**上限只留在真正滚动的那一层**（文本框自己的 `overflow-y:auto` 层 ✓，
+       * 由 `tuneComposerScroll` 写 `min(20vh,140px)` ✓）：
+       *   文字到顶在**框内**滚 ✓，外层随内容自然增高 ✓ —— 正是用户要的 ✓
+       *   （"我想要的只是文本框内的滑动，文本框到上限了就不再增加即可" ✓）。
+       */
+      '[data-composer-stats] {',
+      '  height: 0 !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important;',
+      '  overflow: hidden !important; visibility: hidden !important;',
+      '}',
+      /* 自绘的紧凑条：一条细进度条 + 一行小字；两段都可点，分别转发到 DSH 自己的对话框 */
+      '#dshm-stats {',
+      '  display: none; align-items: center; justify-content: center; gap: 6px;',
+      '  box-sizing: border-box; width: 100%; min-height: 21px; padding: 1px 16px 2px;',
+      // 12px：11px 三段并排时读起来太挤（用户反馈「很挤」）。段数从 2 段变 3 段，
+      // 但每段都更短了（去掉了 tok/s 与缓存命中），所以反而更宽松 ✓
+      '  font-size: 12px; line-height: 15px; font-variant-numeric: tabular-nums;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
+      '#dshm-stats[data-on="1"] { display: flex; }',
+      /**
+       * ★★ DSH 0.17 把插槽包装层写成了**内联 `display: contents`** ✗ ⇒ 那个元素
+       *   **不生成盒子** ⇒ 写在它身上的 `width / max-width / box-sizing` **一律无效** ✗
+       *   （规则确实命中 ✓、`matches: true` ✓，但 `getBoundingClientRect()` 恒 `0×0` ✓）。
+       *   症状（用户原话）：输入框下方那条状态栏比输入框宽、左右不齐 ✓。
+       *   ⇒ 必须先把包装层变回**真实盒子**（`display: block !important` ✓），下面三条才有意义 ✓。
+       *   真机实测：状态栏与输入卡片都归到 `336 @32..368` ✓（左差 0 / 右差 0 ✓），
+       *   且输入卡片与隐藏宿主行的几何**一字未动** ✓。
+       */
+      'div[data-slot="conversation.composer.dock"] {',
+      '  display: block !important;',
+      '  box-sizing: border-box !important;',
+      '  max-width: 100% !important;',
+      '  width: 100% !important;',
+      '}',
+      /**
+       * ★★ 0.17 的输入区**保 0.15 风格** ✓（用户原话："输入框要保 0.15 风格"✓）。
+       *
+       * ## 怎么量的（可复现 ✓，别再靠眼睛猜 ✗）
+       *
+       * `node scripts/probe-composer.mjs --url <实例> --token <t> --label <名>` ✓ ——
+       * 同一个视口（390×844 ✓）、同一套采集代码、**同一个状态**（新对话 + 同一个工作区 ✓），
+       * 唯一变量就是 DSH 版本 ✓；两份 JSON 用 `--diff` 并排：
+       *
+       *   node scripts/probe-composer.mjs --diff /tmp/composer-probe/dsh015.json /tmp/composer-probe/dsh017.json
+       *
+       * 顺带出两张 3× 放大图（只框住输入区 ✓）：`dsh015-composer.png` / `dsh017-composer.png` ✓。
+       * ★ 状态必须对齐 ✗：第一版拿**全新 DSH_HOME** 去量 0.15 ✓，那边一个工作区都没有 ⇒
+       *   输入卡片压根没渲染（占位语是「选择一个工作区开始」✓）⇒ 量到的"差异"全是状态差 ✗。
+       *   给临时实例补上**与 0.17 同名同路径**的工作区之后，两边才真的可比 ✓。
+       *
+       * ## 量出来的**净差异**（0.15 → 0.17；输入区这一块**全在这张表里** ✓）
+       *
+       * | 件 | 值 |
+       * |---|---|
+       * | 输入卡片圆角 | `22px` → **`28px`** ✗ |
+       * | 发送键底色 | `rgb(103,158,254)` → **`rgb(122,170,255)`** ✗ |
+       * | 「工作区」「Agent 预设」两个 chip 圆角 | `16px` → **`8px`** ✗ |
+       * | 卡片内两个控件（访问模式 / 选择模型）圆角 | `24px` → **`8px`** ✗ |
+       * | 「选择模型」那个控件的字重 | `500` → `400`（**不动** ✗，见下） |
+       * | 卡片宽度 | `292px` → `295px`（**不动** ✗，见下） |
+       *
+       * ★ 前四条**都是纯样式** ⇒ 照 0.15 的值覆盖回去 ✓；后两条**故意不动** ✗：
+       *   · 宽度那 3px 出在上游的 `scrollBody`（`324 → 327` ✓）——
+       *     那是**布局**不是输入框自己的样式 ✗，写死会把上游以后的自适应一起钉死 ✗；
+       *     且 3 / 324 ≈ 0.9% ⇒ 肉眼不可见 ✓（放大图里也看不出来 ✓）。
+       *   · 字重属于「选择模型」这个 **0.17 才有的新控件** ✓ —— 0.15 那个位置只有一个图标、
+       *     **压根没有文字** ✗ ⇒ 不存在"0.15 的值"可保 ✓，硬凑一个 500 是**发明**新样式 ✗。
+       *
+       * ★ chip / 控件那两条**静止时看不见** ✓（它们底色本来是透明的 ✓，只有按下/悬停才上底色 ✓）
+       *   ⇒ 这两条保的是"**按下去那一下**"的样子 ✓，静止态一个像素都不动 ✓。
+       *
+       * ★ 发送键那条**只认输入卡片里的那一个** ✓（`[data-composer-card="true"]` 打头 ✓）——
+       *   页面别处的主按钮（各种对话框 ✓）**一个都不碰** ✓。
+       * ★ 类名里的 `uV2eYG_` / `pXSMma_` / `cubgiG_` 是 DSH 的构建哈希 ✓（0.15 与 0.17 实测**同名** ✓）——
+       *   上游换构建就会失配 ⇒ 规则**静默失效、退回 DSH 原样** ✓（不会改坏 ✗），
+       *   与仓库里 `bottom: 53.8333px` / `.JObwrW_panel` 那两处的处置一致 ✓。
+       *   `[data-composer-card="true"]` 是**语义标记** ✓，比哈希稳，优先用它 ✓。
+       */
+      '[data-composer-card="true"] { border-radius: 22px !important; }',
+      '[data-composer-card="true"] button.uV2eYG_primary { background-color: rgb(103, 158, 254) !important; }',
+      'button.pXSMma_workspace, button.cubgiG_seat { border-radius: 16px !important; }',
+      '[data-composer-card="true"] button[class*="_trigger"] { border-radius: 24px !important; }',
+      /* ★★ round 125：底部**手势小白条**会压住输入区最底下那一行 ——
+         也就是这条自绘状态栏（「上下文用量」那一行）✗（用户真机反馈，约 40% 字高被盖 ✓）。
+         真机实测：navigationBars.bottom = systemGestures.bottom =
+         mandatorySystemGestures.bottom = 20px ✓（三个量**同值** ✓）；
+         没有小白条的设备上它们天然为 0 ✓（壳只在 edge-to-edge 时读这三个量 ✓）。
+         做法：**只给这一行**加补偿 ✓，加在 #dshm-stats 自己身上 ✓ ——
+         它是这一段里**唯一属于我们**的元素 ✓，选择器是一个 id ⇒ 不可能命中别处 ✓：
+           · 值用 var(--dshm-safe-bottom, 0px) ✓（不用固定 px ✗、也不用 env() ✗ ——
+             无头环境里 env() 恒为 0，那样这条改动在验收里根本不可见 ✗，
+             而 --dshm-safe-bottom 可以在验收里用 setProperty 直接设 ✓ ⇒ 可测 ✓）；
+           · 与本色值**相加**而不是替换 ✓：0px 时 calc(2px + 0px) = 2px = 原本的下内边距 ✓
+             ⇒ **没有小白条的设备一个像素都不动** ✓（1px/16px 水平与上内边距也一律不动 ✓）；
+           · 绝不碰 centerCol 的 padding-bottom ✓（那条只认 --dshm-keyboard ✓，
+             round 118/119 的验收正钉着它 ✓ —— 这里一个字都没改 ✓）。
+         ★ 把代价写清楚（免得后人以为它"只动了那一行" ✗）：这一行是 composer 里**最后一块内容** ✓，
+           给它加下内边距 = 把整块 composer（含输入框卡片 ✓）往上抬同样的量 ✓ ——
+           底部那 20px 本来就被系统手势条盖着、是**不可用**的一条 ✓，
+           所以抬起来不损失任何可见内容 ✓；输入框自己的内边距与高度都没被改 ✓。
+         验收：check-mobile-layout 里三条断言（无小白条不动 / 有小白条真的上移 / 不误伤输入框 ✓）。 */
+      /* ★★ round 127：上面那条补偿**量过头了** ✗（用户真机反馈："现在确实不遮挡了，
+         但抬高的有点太多了，导致字体距离输入框的距离和距离小白条的距离不一样" ✓）。
+         实测依据（412×915，inset 模拟 20px，把下内边距**扫了一遍** ✓ —— 每次都读三个量：
+         那一行底边 / 输入卡片底边 / 小白条顶边 ✓）：
+           · 本色 2px：文字底边 908、卡片底边 890、小白条顶边 895
+             ⇒ 真实重叠只有 13px（不是 20px ✓）—— 文字离视口底本来就有 7px ✓：
+               状态条盒子在文字底下留着约 3.5px 空档、盒子底下还有约 3.5px ✓；
+           · padding-bottom 22px（上一轮那条 inset+2 ✓）：文字底边 889 ⇒ 下间隙 6px ✗，
+             而上间隙（卡片底边 873 → 文字顶边 874）只有 1px ✗ ⇒ 一多一少 ✓ 正是用户说的那件事；
+           · padding-bottom 18px：文字底边 893、卡片底边 877、小白条顶边 895
+             ⇒ **上间隙 1px / 下间隙 2px**（差 1px ✓）⇒ 这就是实测出来的均衡点 ✓。
+         所以这一版是 inset **减 2px**（不是加 ✓）——"2"就是上面 20 与 18 这两个数之差 ✓：
+         上间隙被布局钉死在 1px（那一行是整块 composer 的最后一块 ✓，给它加下内边距只会把
+         整块一起抬 ✓ ⇒ 上间隙恒定 ✓），于是"均衡"就是"下间隙也做到 1–2px" ✓；
+         而每加 1px 下内边距只把文字抬 1px ✓、且 5px 以内先吃掉 min-height 里的对称空档 ✓
+         ⇒ 想留 2px 下间隙就得"inset 减 2px" ✓，照抄 inset 会多留 4px ✗。
+         max(2px, ...) 保证 inset=0（没有小白条的设备 ✓）时仍是本色 2px ✓
+         —— 一个像素都不动 ✓（硬要求 ✓）；也**没有**用固定 px 顶掉变量 ✗、没有用 env() ✗。 */
+      /* ★★ round 129：**上间隙**的旋钮 ✓ —— 本轮用户新反馈只有一句：
+         "我实际看到没有区别，要不然这样改：把上下文那行和输入框之间距离拉大" ✓。
+         round 125/127 折腾的是**下面**那 2px 余量 ✗，真机上用户看不出区别 ✗，
+         所以口径改成"把那一行与上方输入框之间的空隙明显拉开" ✓ —— 下面那条
+         padding-bottom 的补偿逻辑**一个字都没改** ✓（它管的是小白条那件事 ✓）。
+         为什么这么改一定成立（输入区是**底部锚定**的 ✓，那一行是 composer 流里
+         **最后一块内容** ✓）：给它加上边距 ⇒ composer 总高变大、**向上**生长 ✓
+         ⇒ 输入框被顶上去 ✓，而这一行自己相对屏幕底部的位置**不动** ✓
+         （它到小白条的余量仍是 2px ✓）⇒ 用户要的"两者之间拉开"就是这一条 ✓。
+         取值 8px（实测 412×915、真机 inset=20px；逐档扫描写在 check-mobile-layout 的诊断里 ✓）：
+           上间隙（那一行文字顶边 − 输入卡片底边）从 **1px → 9px** ✓，
+           下间隙（小白条顶边 895 − 那一行底边）仍是 **2px** ✓ —— 也就是
+           文字与输入框之间终于有一段肉眼可见的空白 ✓，而 8px 仍小于这一行
+           自己的盒高 21px ⇒ 不会被读成一个独立区块 ✗，属于"明显但不夸张" ✓。
+         这个数**只对"上方空隙"负责** ✓：以后想调就改这一个数 ✓（它就是那个旋钮 ✓）。
+         三条不许动的底线（逐条守住 ✓）：
+           · 不用固定 px 顶掉 --dshm-safe-bottom ✗、不用 env() ✗（无头环境里 env() 恒 0 ✗，
+             那样这条改动在验收里根本看不见 ✓）；
+           · 这个上间距**对所有人一视同仁** ✓（有没有小白条都加 ✓）—— 它管的是
+             "上下留白观感" ✓，不是小白条补偿 ✓，所以不该只对带手势条的设备生效 ✓；
+             也因此 inset=0（没有小白条的设备 ✓）时这一行的**底部**仍然一个像素不动 ✓
+             （margin-top 只动上方 ✓，认变量的那条 max(2px, ...) 才是管下面的 ✓）。
+         验收：check-mobile-layout 里 round 129 那五条断言（上间隙真的变大 ✓ /
+         下方余量不变 ✓ / inset=0 时底部不动 ✓ / 不误伤输入框 ✓ / 有没有小白条都拉开 ✓）。 */
+      '#dshm-stats { margin-top: 8px; padding-bottom: max(2px, calc(var(--dshm-safe-bottom, 0px) - 2px)); }',
+      /* ★★ round 148（用户："滚动条是没有了，但是**距离还是远**"✓）：**键盘弹起时把那笔补偿收掉** ✓。
+         真机实测（`--dshm-safe-bottom: 20px` 那一档 ✓）：
+           · 键盘收起 ⇒ `padding-bottom = max(2px, 20−2) = **18px**` ✓（round 127/129 为小白条加的那笔 ✓）；
+           · 键盘弹起 ⇒ **仍然是 18px** ✗ —— 而那一刻**小白条早被键盘盖住** ✓，这笔补偿纯属多余 ✓；
+             它全部体现在那一行的高度上（`h: 21 → 34` ✓）⇒ 里面的**文字被抬高约 16px** ✓，
+             也就是用户眼里"离键盘还是远" ✓（只量盒底会看成"没变"✗ —— 得量内容底边 ✓）。
+         ⇒ 键盘弹起时只留最小值 2px ✓；收起时**原口径一字不改** ✓（round 127/129 的账不能弄坏 ✗）。
+         ★ `margin-top: 8px` 那个"上方间隙"旋钮**不动** ✗（本期没有任何读数指向它是主因 ✓）。
+         ★ 判据用 `html[data-dshm-kb="1"]` ✓（由 `syncKeyboardPad` 按"壳报的 IME > 0"写 ✓ ——
+           可观察、可断言 ✓，而不是靠猜键盘状态 ✓）。 */
+      'html[data-dshm-kb="1"] #dshm-stats { padding-bottom: 2px !important; }',
+      '.dshm-stats-seg {',
+      '  display: inline-flex; align-items: center; gap: 6px; min-width: 0;',
+      '  border: 0; background: transparent; padding: 0 2px; cursor: pointer;',
+      '  color: inherit; font: inherit; border-radius: 8px;',
+      '}',
+      '.dshm-stats-seg:active { background: rgba(255,255,255,.10); }',
+      '.dshm-stats-seg[aria-expanded="true"] { color: var(--dsw-alias-label-secondary, #a9b0b8); }',
+      '.dshm-stats-track {',
+      '  flex: 0 0 auto; width: 56px; height: 6px; border-radius: 3px;',
+      '  background: rgba(255,255,255,.16); overflow: hidden;',
+      '}',
+      '.dshm-stats-fill {',
+      // ★ 必须显式 block：`span` 默认是 inline，而**百分比宽度对非替换行内元素无效** ——
+      //   实测抓到的：`width:99%` 写进去了，几何却是 `w:0 h:0`，进度条整条不显示 ✗
+      '  display: block; height: 100%; width: 0%; border-radius: 3px;',
+      '  background: var(--dsw-alias-state-business-primary, #4c8dff);',
+      '  transition: width .25s ease, background .25s ease;',
+      '}',
+      // 上下文快满时换色：不是装饰，而是「该清上下文了」最省字的提示 ✓
+      '.dshm-stats-fill[data-tone="warn"] { background: var(--dsw-alias-state-warn-primary, #ffb454); }',
+      '.dshm-stats-fill[data-tone="danger"] { background: #ff6b6b; }',
+      '.dshm-stats-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      /* ★ 原来用的是 `--dsw-alias-separator-primary`，实测 **DSH 主题里根本没有这个 token** ✗
+         （桥接时 8/9 个 token 有值，唯独它是空的）—— 也就是说这个分隔符一直在吃我们的兜底色。
+         换成 DSH 真有、语义也对的 `border-l2` ✓（这类"抄了个不存在的 token"只有比计算值才抓得到）。 */
+      '.dshm-stats-sep { color: var(--dsw-alias-border-l2, rgba(255,255,255,.2)); }',
+      '.dshm-prompt { padding: 10px 2px; }',
+      '.dshm-prompt-label { font-size: 13px; color: var(--dsw-alias-label-secondary, #a9b0b8); margin-bottom: 8px; }',
+      '.dshm-prompt-input {',
+      '  width: 100%; box-sizing: border-box; min-height: 42px; padding: 0 12px; border-radius: 10px;',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '  background: rgba(255,255,255,.05);',
+      '  color: var(--dsw-alias-label-primary, #e8eaed); font-size: 16px;',
+      '}',
+      '.dshm-prompt-actions { display: flex; gap: 8px; margin-top: 10px; }',
+
+      /* ── 窄屏布局改写：只在窄屏生效，桌面窗口不受影响 ─────────────── */
+      '@media (max-width: 1023px) {',
+      /**
+       * ★★ 底部状态栏三段各自弹的那个 DSH 面板里，**只有「上下文」那个矮一截、低一截** ✗
+       *   （用户原话："那三个控件点开以后的页面只有上下文的沉下去了"✓）。
+       *   真机自然值是"内容少 16px、位置低 21px、宽度窄 36px、横向还偏右 56px"✗
+       *   —— 它的锚点是输入框里那颗**被我们隐身的环** ✓，DSH 给的是**一次性算好的内联坐标** ✓
+       *   （不是 CSS anchor positioning ✗ ⇒ 搬锚点没用 ✓，实测纹丝不动 ✓）。
+       *   ⇒ 只能从面板自己身上纠：补高、同宽、`top: auto` 关掉内联 top、`bottom` 抄
+       *     另外两个面板的**计算值** `53.8333px`（不是"锚点到视口底"✗ —— 那会把它抬到上半屏 ✗）。
+       *   ★ 选择器**只认这一个组件的类** ✗ —— 用 `[class*="_panel"]` 会把 panelList/panelRow/… 全钉死 ✗
+       *     （真机上用户立刻反馈"全都变得特别高"✗）。构建哈希会随 DSH 改版变 ⇒ 退化为原样 ✓
+       *     （宁可失效、不可误伤 ✓）。
+       *   真机实测：三个面板都 `h158 w300`、底边同为 `b816`、上下文 `l32` ✓。
+       */
+      '  .JObwrW_panel {',
+      '    min-height: 158px !important;',
+      '    width: min(300px, 100vw - 24px) !important;',
+      '    top: auto !important;',
+      '    bottom: 53.8333px !important;',
+      '    left: 32px !important;',
+      '  }',
+      /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
+             必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
+             浏览器会把中栏自动放进第 1 条轨道（0px）→ 主体宽度变 0（真实回归）。 */
+      '  [class*="frame"] {',
+      '    grid-template-columns: 0 1fr 0 !important;',
+      '    grid-template-areas: "sidebar center rightbar" !important;',
+      '  }',
+      '  [class*="sidebarCol"] { grid-area: sidebar !important; }',
+      '  [class*="centerCol"] { grid-area: center !important; }',
+      '  [class*="rightbarCol"] { grid-area: rightbar !important; }',
+
+      /* ② 侧栏 = 覆盖式抽屉。宽度**必须落在 sidebarCol 上**：旧版把宽度写在内层
+             root 上，而 root 又被 DSH 的折叠规则压成 0 → 抽屉"滑进来了但是空的"。 */
+      '  [class*="sidebarCol"] {',
+      '    position: fixed !important; top: 0; bottom: 0;',
+      /* 用 left 位移，**绝不能用 transform**：
+         transform（以及 will-change: transform）会让本元素成为 position:fixed
+         后代的包含块，而 DSH 的设置面板正是渲染在本列内部的 fixed 浮层——
+         实测它的宽度被压成 263px（= 抽屉宽度），设置界面完全不可用。
+         left 位移不创建包含块，代价是不能走 GPU 合成，但 264px 的面板无所谓。 */
+      '    left: calc(-1 * var(--dshm-drawer-w) - 8px);',
+      '    width: var(--dshm-drawer-w) !important;',
+      // 顶部只留安全区：关闭键已移除，不需要再给顶栏让位
+      '    padding-top: calc(max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px)) + 8px) !important;',
+      // 底部同理（edge-to-edge 下导航栏盖住页面 ✓，会话列表最后一行不该被压住 ✓）
+      '    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px)) !important;',
+          /* 层级：蒙层(80) > 顶栏(70) > 内容；抽屉(90) 在最上，
+       这样它是**整块从左边钻出来**、盖住顶栏，而不是从顶栏下面露出来。 */
+'    box-sizing: border-box; z-index: 90;',
+      '    overflow: hidden !important;',
+      '    background: var(--dsw-alias-bg-base, #15171a);',
+      /* 用户要求：聊天记录边栏**右缘**也要有工作目录面板那样的圆角 ✓。
+         两块抽屉一左一右，圆角必须成对出现 —— 只有一侧圆角时，
+         从中间往两边看像是"一边是卡片、一边是贴边条" ✗。
+         半径与文件面板的左缘共用同一个值（验收里有等式断言盯着，改一处必须改两处 ✓）。
+         `overflow: hidden` 本来就在，所以圆角能真的裁掉子元素 ✓。 */
+      '    border-radius: 0 18px 18px 0;',
+      /**
+       * ★★ round 160（A ✓）：**过渡属性从 `left` 改成 `transform`** ——
+       *   用户原文："你之前好像改动过文件面板和主页面的滑动动画，
+       *   照这个改法再改一下左侧聊天面板和主页面的动画"✓。
+       *
+       * 面板那套（`#dsh-mobile-sheet-panel` ✓）用的是
+       * `transform: translateX(102%) → none` + `transition: transform var(--dshm-slide)` ✓
+       * —— 合成层移动，每帧**不重排** ✓。抽屉原来走的是 `left` ✓：
+       * 每帧重排整棵会话列表 + 重画那条 36px 阴影 ⇒ 手机上就是"卡顿" ✗。
+       *
+       * ⚠️ **但不能把这列长期挂上 transform** ✗✗：DSH 的设置弹窗是渲染在**侧栏列内部**的
+       *   `position: fixed` 浮层 ✓ —— 一旦这一列有 transform（或 `will-change: transform` ✓），
+       *   它就成了那些 fixed 后代的**包含块** ✓，实测把设置面板压成 263px（= 抽屉宽度）、
+       *   设置界面完全不可用 ✗（见 `tagSettingsOverlay` 的注释 ✓）。
+       *   ⇒ 所以走 **FLIP**：位置照旧由 `left` 一步到位 ✓（静止态**没有** transform ✓ ⇒
+       *     对任何 fixed 后代都没有影响 ✓），屏幕上那 240ms 由**内联 transform**补间 ✓
+       *     （见 `flipDrawerMotion` ✓）。过渡声明挂在这里，是因为"补间那一下"要的就是它 ✓。
+       */
+      '    transition: transform var(--dshm-slide);',
+      '  }',
+      '  body[data-dsh-mobile-drawer="open"] [class*="sidebarCol"] {',
+      '    left: 0 !important;',
+      // 阴影投向**右侧**（盖在让位后的主页面上），这是"纵深"的来源
+      '    box-shadow: 14px 0 36px rgba(0,0,0,.55);',
+      '  }',
+      /**
+       * ★★ round 164（用户 B ✓）：**触屏上 `:hover` 是"粘"的** —— 用户原话：
+       *   "设置没问题，目前点击设置再返回，**设置键那里还是高亮聚焦**，这点不好"✓。
+       *
+       * ## 真因（源码 + 真触摸实测，两半都查了 ✓）
+       *   ① DSH 的「设置」触发键（`dsh-client-ui-settings-general` 的 `.…_trigger` ✓）
+       *      **只有 `:hover{background:var(--dsw-alias-interactive-bg-hover)}`** ✓、
+       *      底色是透明的（`background:0 0` ✓）—— 没有 `:focus` 规则 ✓；
+       *      ★ 而且它**故意**在弹窗关闭时把焦点还给这颗按钮 ✓
+       *      （源码：`if (wasOpen.current && !open) triggerButton.current?.focus()` ✓，
+       *       桌面端的无障碍惯例 ✓）—— 手机上这颗因此又"亮"又"聚焦" ✓。
+       *   ② 但真正**画出来**的那一层是 `:hover` ✓ —— 用真触摸事件（CDP）在探针页量到：
+       *      点过之后**连焦点都丢了，`:hover` 依然是 `true`** ✓，而且
+       *      `blur()` / `pointer-events` 关一帧 / `display:none` 一帧 **三种复位都清不掉** ✗
+       *      （只有"下一次在别处真触摸"才清 ✓）⇒ **没法用 JS 撤销** ✗，只能在样式上盖掉 ✓。
+       *      ★ 同一支探针也量到：加上下面这条规则之后，松手瞬间 `background-color`
+       *      就是 `rgba(0, 0, 0, 0)` ✓（粘住的 `:hover` 还在，但不再上色 ✓）。
+       *
+       * ## 为什么敢对"侧栏这一片"一刀切 ✓
+       * 实测这一片的底座**本来就是透明的** ✓：侧栏行 `.hHd-Xa_panelRow{background:0 0}` ✓、
+       * 设置触发键 `.…_trigger{background:0 0}` ✓ ⇒ 把 hover 那层淡色盖成"透明"
+       * 就等于**回到它本来的样子** ✓。
+       * ⚠️ **绝不能推广到全页** ✗✗：填充色按钮（那颗蓝色发送键 ✓）hover 用的是**另一个**变量 ✓，
+       *   一刀切会把它清成透明 ✓（比"亮着"难看得多 ✗）。
+       *
+       * ## 为什么必须是 `:hover:not(:active)` ✗✗
+       * 只写 `:hover` 会把**按下时**的反馈也一起抹掉 ✓ —— 而 round 160 已经关掉了
+       * 浏览器自带的点按高亮 ✓ ⇒ 那样就一点反馈都没有了 ✗。下面那条 `:active` 兜底
+       * 保证"按下去一定有反馈" ✓（这一片的行本来只有 `:hover`、没有自己的 `:active` ✓，
+       * 所以给它补一个同色的按下态 ✓）；松手后 `:active` 立刻结束 ⇒ 底色立刻消失 ✓✓。
+       *
+       * ⚠️ 只收 `background-color`，**不写 `background` 简写** ✗（简写会把 `background-image`
+       *   一起清掉 ✓ —— 我们的进度条与 DSH 的渐变都在用 ✓）。
+       */
+      '  @media (pointer: coarse) {',
+      '    [class*="sidebarCol"] button:hover:not(:active):not(:disabled),',
+      '    [class*="sidebarCol"] [role="button"]:hover:not(:active),',
+      '    [class*="sidebarCol"] a:hover:not(:active),',
+      '    .dshm-set-navcell:hover:not(:active) { background-color: transparent !important; }',
+      '    [class*="sidebarCol"] button:active:not(:disabled),',
+      '    [class*="sidebarCol"] [role="button"]:active {',
+      '      background-color: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08)) !important;',
+      '    }',
+      '  }',
+      /* ── 推挤：主页面右移让出边栏宽度 ──────────────────────────────
+         用 **transform**（GPU 合成，不逐帧布局）——之前用 left 位移，那是每帧重排，
+         在 DSH 这种重 DOM 上会明显卡顿（用户反馈"卡顿不顺滑"）。
+         transform 的代价是会让元素成为 position:fixed 后代的包含块，所以：
+           · 只在**打开态**加（关着时 transform: none，没有包含块）；
+           · **只动 centerCol**，绝不动 rightbarCol —— 右侧栏面板
+             （[_surface_]/[_pane_] 那套）是 fixed 且就渲染在 rightbarCol 里，
+             给它加 transform 会把它困成 0 宽（和设置弹窗被压坏是同一类问题）。
+         centerCol 里目前没有 fixed 浮层，所以这样做是安全的。 */
+      /* 位移量由 JS 写进 --dshm-push（左抽屉 = +边栏宽，右侧文件面板 = −面板宽）。
+         左右两套规则若各写各的，后写的那条会覆盖前一条——共用一个变量就没有这个问题，
+         而且"到底该往哪边让位"只有一个事实来源。 */
+      '  [class*="centerCol"] {',
+      '    transform: translateX(var(--dshm-push));',
+      '    transition: transform var(--dshm-slide);',
+      '    will-change: transform;',
+      '  }',
+      /* 内层内容列撑满抽屉（DSH 折叠时把它压到 20px 宽）。
+             只作用于列的直接子层，避免误命中深层同名类。 */
+      '  [class*="sidebarCol"] > *,',
+      '  [class*="sidebarCol"] > * > * {',
+      '    width: 100% !important; min-width: 0 !important; max-width: none !important;',
+      '  }',
+      '  [class*="rightbarCol"] { z-index: 25 !important; }',
+      /**
+       * ★★ round 167（**用户拍板的改法** ✓）：DSH 预览开着时，**把预览那一整列抬到我们所有浮层之上** ✓
+       *   —— 用户原话："我理解你的改法，**只需要文件预览在最上面**，然后返回键就能平滑回到打开前了"✓。
+       *
+       * ## 为什么这比"把我们的面板藏起来"更稳 ✓
+       * round 158 的做法是"状态照旧 open ✓、但**不画面板**"（`body[data-dshm-dsh-preview="1"]
+       * #dsh-mobile-sheet{display:none}` ✓）—— 它依赖**我们那条 JS 探测链**（`dshPreviewSurface()` ✓）
+       * 判得准 ✗；**探测一旦漏判**（用户截图里就是这种情况：预览明明开着 ✓、面板却还画在上面 ✗），
+       * 面板就盖住了预览 ✗，而且"顶栏藏没藏"这个读数还会互相打架 ✓（截图里顶栏是藏着的 ✗）。
+       * ⇒ 改成**纯 CSS 的结构判据** ✓：`body:has(预览层)` ✓ —— 只要 DOM 里真有那一层 ✓，
+       *   不管是哪条路打开的、我们的 JS 有没有认出来 ✓，**预览都压在我们上面** ✓✓。
+       *
+       * ## 判据为什么与 round 162 一致 ✓
+       *   · `div[class*="_preview"]`、`div[class*="_document"]` ✓ —— 真预览层都是 **div** ✓
+       *     （`div.dhJKeW_preview` ✓、`div._0RKuNG_document` ✓，都是实测值 ✓）；
+       *   · `:not([data-queue-dock] *)` ✓ —— 排除"排队消息那一行的预览文本" ✓
+       *     （它是 `span._7yHdaG_preview` ✓，round 162 就是被它咬的 ✓）；两条一起才安全 ✓。
+       * ★ `:has()` 在本机和 DSH 自己的样式里都在用（`.uV2eYG_root:has([data-composer-stats])` ✓）⇒ 可放心用 ✓。
+       *
+       * ## 抬到 200 的取舍 ✓
+       *   · 必须 **> 85**（我们面板 ✓）—— 这样"面板盖住预览"这件事**结构上不可能** ✓；
+       *   · 必须 **< 200**（我们的瞬时提示条 `#dshm-shell-toast` ✓ 也是 200）—— 它要能压在预览上 ✓
+       *     （"连上了/失败"这类提示必须看得见 ✓）；同值 200 时后声明的赢 ✗（不可预期 ✓）⇒ 取 190 ✓。
+       *   · **返回键的层次不受影响** ✓：`dshmBack()` 的梯子里"DSH 预览"本来就排在"文件面板"**之前** ✓
+       *     （round 158 ✓）⇒ 按返回**先关预览** ✓、面板状态原封不动 ✓ ⇒ 预览一关、面板**立刻就在**
+       *     （同一个目录、同一份滚动位置 ✓）= 用户要的"平滑回到打开前" ✓✓。
+       */
+      /**
+       * ★★ round 170：这条原来也是 `body:has(预览层)` ✗ —— 同一个粘性问题 ✓（预览层被隐藏后仍在 DOM 里 ✓
+       *   ⇒ 右栏永远抬在 190 ⇒ 我们面板永远被它压着 ✗）。改成**两个精确信号取或** ✓：
+       *   · `data-dshm-preview-pending`（我们请求预览的那一瞬间 ✓，见 `openFileInDshPreview` ✓）；
+       *   · `data-dshm-dsh-preview`（探测链认出来的"真的开着" ✓，它会在关闭/最小化时被清掉 ✓）。
+       */
+      '  body[data-dshm-preview-pending="1"] [class*="rightbarCol"],',
+      '  body[data-dshm-dsh-preview="1"] [class*="rightbarCol"] {',
+      '    z-index: 190 !important;',
+      '  }',
+      '  [class*="handle"] { display: none !important; }',
+
+      /* ③ 藏起 DSH 自带的侧栏开关：它的位置被侧栏位移牵连，改样式会一起被推走。
+             我们用自己的汉堡，并**程序化点击它**来驱动 DSH 的展开状态。 */
+      '  [class*="sidebarCol"] button[aria-label*="侧边栏"],',
+      '  [class*="sidebarCol"] button[aria-label*="侧栏"] { display: none !important; }',
+
+      /* ④ 藏起 DSH 顶栏的标题行：**保留结构、零高度**（round 155 改的，见下）。
+             会话页那一行就是"纵向不对齐"的来源（同排 top 分别是 11/14/18），
+             而欢迎页根本没有顶栏。标题改由我们居中显示；"对话/轨迹"标签行保留，
+             下移到我们顶栏之下。
+             ★★ round 155：这里原来写的是 `display: none !important` ✗ ——
+             那会连着 DSH 自己的**子智能体血统入口**一起藏掉 ✓（它就长在这一行里 ✓，
+             见 `tagLineageEntry` 的说明 ✓）⇒ 用户："电脑上的子智能体页面在标题旁边，
+             于是手机看不到，我希望你放在手机的『轨迹』右边" ✓。
+             改法：**高度归零**（布局上仍等于不存在 ✓ —— 它后面那行标签的位置一个像素不变 ✓），
+             但盒子留在 DOM 里，好让那一个入口能被 CSS 拎到标签行右端 ✓。 */
+      '  [class*="titleRow"] {',
+      '    height: 0 !important; min-height: 0 !important; overflow: visible !important;',
+      '    padding: 0 !important; margin: 0 !important; border: 0 !important;',
+      '  }',
+      /* ★ 标题行里的**非子代理部分照旧藏掉** ✓（标题文字 / 面包屑按钮 / headerActions…）：
+         整棵子树先默认隐身 ✓，只有被我们打了 `data-dshm-lineage` 的那一个入口再显回来 ✓
+         （`visibility` 能被后代翻回来 ✓ —— `display:none` 不行 ✗，所以不能用它当默认）。 */
+      '  [class*="titleRow"] * { visibility: hidden !important; }',
+      /* 有入口时：链上每一层**只留"通往入口的那一个孩子"**✓，其余 `display:none` ✓ ——
+         它们虽然隐身，**盒子还在**，而下面那条把 `overflow` 放开了（必须放开，否则入口被裁 ✗）
+         ⇒ 不收干净就会把内容撑出可视区 ✗（"页面能左右拖"那类问题 ✓）。 */
+      '  [data-dshm-topheader] [class*="titleRow"] > *:not([data-dshm-lineage-chain]) { display: none !important; }',
+      '  [data-dshm-lineage-chain] > *:not([data-dshm-lineage-chain]):not([data-dshm-lineage-dsh]) { display: none !important; }',
+      /* ★ 裁剪必须放开：入口的**包含块在 `.crumbs` 之外** ✓（`offsetParent` ✓），
+         而 `.crumbs{overflow:hidden}` 正好夹在两者中间 ⇒ 不放开就会被裁得一点不剩 ✗
+         （绝对定位后代**越不过**夹在它与包含块之间的 `overflow:hidden` ✓）。 */
+      '  [data-dshm-lineage-chain] { overflow: visible !important; }',
+      /**
+       * ★★ round 159（A ✓）：**DSH 那颗触发键整颗隐身，但盒子必须留在原地** ✓✗
+       *   （用户拍板："能不能自己写一个控件"✓ —— 外观不再由它承担 ✓）。
+       *
+       * ## 为什么"留盒子"不是顺手，而是**必须** ✗
+       * 它弹出的那棵树**不长在它旁边** ✓，而是 `createPortal(…, document.body)` 的另一棵子树 ✓，
+       * 坐标由 DSH 自己算（`@deepseek-ai/dsh-client-ui-subagent/lib/client.js` ✓）：
+       *     `catalogMenuPosition(trigger) = { top: trigger.rect.bottom + 5, left: clamp(trigger.rect.left, 16, …) }`
+       * ⇒ 用 `display:none` 会把 `rect` 变成 `0×0` ⇒ 菜单弹到屏幕**左上角** ✗✗；
+       *    `visibility:hidden` **保留盒子** ⇒ 菜单仍弹在 round 158 那个位置（= 我们控件正下方 ✓）。
+       *
+       * ## 拿掉的两件事
+       *   · **绘制** ✗ —— `/` 分隔符、状态点、`∨` 箭头都在这棵子树里 ✓，一起不再出现 ✓；
+       *   · **命中测试** ✗ —— `visibility:hidden` 与 `pointer-events:none` 都拿掉它 ✓
+       *     ⇒ 它不会与**我们自己的控件**抢点击 ✓（我们控件就在它正上方 ✓）。
+       *
+       * 定位沿用**同一套变量**（与我们控件 ✓，见 `placeLineageEntry`）——
+       * 所以它在哪，菜单就弹在哪个正下方 ✓，与"我们控件在哪"自动一致 ✓。
+       */
+      '  [data-dshm-lineage-dsh] {',
+      '    visibility: hidden !important; pointer-events: none !important;',
+      '    position: fixed !important;',
+      '    right: var(--dshm-lineage-right, 0px) !important;',
+      '    top: var(--dshm-lineage-top, 0px) !important;',
+      '    max-width: var(--dshm-lineage-max, 240px) !important;',
+      '  }',
+      '  [data-dshm-lineage-dsh] * { visibility: hidden !important; pointer-events: none !important; }',
+      /**
+       * ★★ round 159（A ✓）：**我们自己的控件** ✓。
+       *
+       * ## 为什么不再覆盖 DSH 那颗 ✗
+       * 它的外观是它自己的 JSX 拼的 ✓：前导 `/` 是**触发键的兄弟** `span.separator` ✓、
+       * "有子代理在跑"时文字前的状态点是 `span.activitySlot > StateDot` ✓、
+       * 尾部 `∨` 是 `IconChevronDownOutline14` ✓ —— 三件都在它那一层里 ✓，
+       * 盖掉一件还会长出下一件 ✗。自己写 ⇒ 这三件**天然不存在** ✓（不需要任何隐藏规则 ✓）。
+       *
+       * ## 挂在哪
+       * 宿主挂在 `document.body` 下 ✓ —— **绝不进 DSH 的 React 树** ✓
+       * （本项目铁律：DSH 渲染的节点一个字节都不碰 ✓）。
+       * `position: fixed` ⇒ "不被祖先裁剪"是**结构性成立**的 ✓
+       * （round 157/158 那一串"把祖先 `overflow` 逐一放开"的补丁因此不再需要 ✓）。
+       */
+      '  [data-dshm-lineage-host] {',
+      '    position: fixed !important; left: 0 !important; top: 0 !important;',
+      '    width: 0 !important; height: 0 !important; overflow: visible !important;',
+      '    z-index: 60 !important;',
+      '  }',
+      /* ★ 三个变量由 `placeLineageEntry` 按**当下量到的 rect** 现算 ✓，
+         写在 `document.documentElement` 上 ✓ —— 我们控件与那颗隐形锚点读的是**同一套** ✓。 */
+      '  [data-dshm-lineage] {',
+      '    position: fixed !important; z-index: 60 !important;',
+      '    right: var(--dshm-lineage-right, 0px) !important;',
+      '    top: var(--dshm-lineage-top, 0px) !important;',
+      /**
+       * ★★ round 160（A ✓）：**跟着让位量一起动** —— 用户原文：
+       *   "目前切页面这行字没法和对话轨迹他们一起动，会有很明显的卡顿"✓。
+       *
+       * 根因是**结构**的、不是算法 ✗：我们挂在 `document.body` 下、而且是 `position:fixed`
+       * ⇒ 抽屉/文件面板推挤时动的是 `[class*="centerCol"]`（`transform: translateX(--dshm-push)` ✓），
+       * 我们**不在那一列里** ⇒ 整段动画里「对话/轨迹」在滑、这行字**钉在原地** ✓，
+       * 动画结束、下一个 120ms 去抖 / 1s 对账才"啪"地归位 ⇒ 用户看到的"很明显的卡顿"✓✓。
+       * ⇒ 用**同一个变量、同一条时长**让它跟着滑 ✓：与 centerCol 同帧、同速、零 JS 成本 ✓
+       * （GPU 合成，不逐帧布局 ✓ —— 这正是当年把 `left` 换成 `transform` 的同一条理由 ✓）。
+       *
+       * ⚠️ **不许加 `!important`** ✗：拖动跟手那一路要给跟随者写**内联** transform
+       *   （见 `pushFollowers` ✓），而带 `!important` 的样式表规则**盖得过内联** ✗
+       *   ⇒ 跟手拖动时会脱节 ✓（`[class*="centerCol"]` 与 `#dsh-mobile-top` 那两条
+       *   同样都没写 `!important` ✓）。
+       */
+      '    transform: translateX(var(--dshm-push, 0px));',
+      '    transition: transform var(--dshm-slide);',
+      '    max-width: var(--dshm-lineage-max, 240px) !important;',
+      /* ★ 必须是 `flex`（不是 `block` ✗）：`block` 里那颗 `inline-flex` 按钮会落在**行盒**里 ✓
+         ⇒ 容器比按钮高 2px（行高留白 ✓），而闭环对齐的是**容器**中心 ⇒ 文字**低 1px** ✗
+         （探针实测：容器 27px / 按钮 25px ✓）。改成 `flex` ⇒ 容器高 = 按钮高 ✓，文字与 tab 齐平 ✓。 */
+      '    display: flex !important;',
+      /* 摆好之前**不画** ✓（`visibility` 连命中测试一起拿掉 ✓ ⇒ 半卡的控件也抢不走点击 ✓）。
+         `tagLineageEntry` 先打 `blocked` ✓、同一帧里 `reflowLineageEntry()` 摆好再摘掉 ✓
+         ⇒ 浏览器没有机会画中间那一帧 ✓。 */
+      '    visibility: hidden !important;',
+      '  }',
+      '  [data-dshm-lineage]:not([data-dshm-lineage-blocked="1"]) { visibility: visible !important; }',
+      /**
+       * ★★ round 157（A ✓）：**摆不好就不许露出来** ✗✗（用户 A1 的硬要求：
+       *   "宁可看不见，也不许压住 tab 或半卡"✓）。
+       *
+       * 时序上没有闪烁 ✓：`tagLineageEntry` 先打 `blocked` ✓、**同一帧里**紧接着
+       * `reflowLineageEntry()` 量到位再摘掉 ✓ —— 浏览器根本没有机会画那一帧 ✓。
+       * 特异度必须**压过**上面那条 `[data-dshm-lineage] *` ✗（两条都是 `!important`，
+       * 所以用"两个属性选择器"取胜 ✓）；连子树一起藏 ✓（状态点在子树里 ✓）。
+       * `visibility:hidden` 同时**拿掉命中测试** ✓ ⇒ 半卡住的入口也不会抢走点击 ✓。
+       */
+      '  [data-dshm-lineage][data-dshm-lineage-blocked="1"],',
+      '  [data-dshm-lineage][data-dshm-lineage-blocked="1"] * { visibility: hidden !important; }',
+      /**
+       * ★★ round 159（A ✓）：我们那颗按钮的**兜底样式** ✓ —— 与「对话 | 轨迹」里
+       * **未选中那一颗 tab** 同档 ✓（`font-size:13px / font-weight:500 / line-height:16px /
+       * color: label-tertiary / padding: 0 0 9px` ✓；`padding-bottom:9px` 正是 tab 给
+       * 下划线留的那条带子 ✓ —— 让**文字**与 tab 文字落在同一条基线上 ✓）。
+       *
+       * ★ 真正的值**不靠这里** ✗：`applyLineageTabStyle` 每轮把**真 tab 的计算样式**
+       *   逐项抄过来（内联 ✓）⇒ "一致"是**构造出来的** ✓，不是手调的 ✓ ——
+       *   DSH 以后改字号/配色，我们自动跟着走 ✓。这一组只在"抄不到"时兜底 ✓。
+       * ★ 只作用于**我们自己那一层**（`[data-dshm-lineage]` ✓，挂在 body 下 ✓）；
+       *   DSH 点开后的那棵树（portal 到 body / `role="tree"` ✓）一个字节不碰 ✓
+       *   —— 它既不在这个选择器里、也不在这棵子树里 ✓。
+       */
+      '  [data-dshm-lineage] > button {',
+      '    display: inline-flex !important; align-items: center !important; gap: 4px !important;',
+      '    font-family: inherit !important;',
+      '    font-size: 13px !important;',
+      '    font-weight: 500 !important;',
+      '    line-height: 16px !important;',
+      '    color: var(--dsw-alias-label-tertiary, #8a9199) !important;',
+      '    background: none !important;',
+      '    border: 0 !important;',
+      '    border-radius: 0 !important;',
+      '    padding: 0 0 9px !important;',
+      '    min-height: 0 !important;',
+      '    box-shadow: none !important;',
+      '    text-decoration: none !important;',
+      '    cursor: pointer !important;',
+      '    max-width: 100% !important;',
+      /* `min-width: 0`：让它在 flex 容器里**真的能被压窄** ✓（否则 `min-width:auto` 顶着内容宽 ⇒
+         切换器那种长名字会把容器顶出 `--dshm-lineage-max` ✗）。 */
+      '    min-width: 0 !important;',
+      '  }',
+      /* 悬停/键盘聚焦也别长出胶囊底来 ✓（DSH 自己那两个 tab 也没有 ✓）。 */
+      '  [data-dshm-lineage] > button:hover,',
+      '  [data-dshm-lineage] > button:focus-visible { background: none !important; }',
+      /* 文字：切换器形态显示的是**当前子代理的名字**（可能很长 ✓）⇒ 截断 ✓；
+         计数形态本来就短 ✓，不受影响 ✓。宽度上限由 `--dshm-lineage-max` 兜着 ✓。 */
+      '  [data-dshm-lineage] [data-dshm-lineage-label] {',
+      '    display: block !important; overflow: hidden !important; min-width: 0 !important;',
+      '    text-overflow: ellipsis !important; white-space: nowrap !important;',
+      '  }',
+      /**
+       * ★★ round 159（A ✓）：状态点 —— **我们自己的**一个 8px 小圆点 ✓，
+       * 颜色取 `currentColor`（= 与文字同色系 ✓）、`opacity: 0.7`（比文字更淡 ✓），
+       * **只在"有子代理在跑"时**才由 JS 挂进来 ✓。
+       *
+       * ★ 判断依据（用户问"它到底是不是有信息"✓，答案：**是** ✓）：
+       *   DSH 的源码里它就是 `descendants.runningCount > 0 && <span class="activitySlot">
+       *   <StateDot state="ongoing"/></span>` ✓ —— **条件渲染** ✓，实测同一个真会话
+       *   （31 个子代理、当时**没有**在跑的）里它**根本不存在** ✓
+       *   （探针读数：`<button><span>31 个子代理</span><svg …/></button>` ✓）。
+       *   ⇒ 它承载"有活在跑"这条信息 ✓ ⇒ **保留，但自己做小做淡** ✓；
+       *   而 `/` 分隔符与 `∨` 箭头是**常驻的纯装饰** ✗ ⇒ 一个都不留 ✓。
+       */
+      '  [data-dshm-lineage] [data-dshm-lineage-dot] {',
+      '    flex: none !important; width: 8px !important; height: 8px !important;',
+      '    border-radius: 50% !important; background: currentColor !important; opacity: 0.7 !important;',
+      '  }',
+      /**
+       * ★★ round 160（A ✓）：状态点**分成两态上色** —— 用户原文：
+       *   "目前有一个子代理在跑，但左边的那个标是灰色的，我认为这样设计比较好，
+       *    在跑的时候蓝色，跑完了绿色"✓。
+       *
+       * 所以点**常驻**（只要入口在就画 ✓，见 `tagLineageEntry` ✓），颜色由状态决定 ✓：
+       *   · `running` = DSH 那颗按钮里多了"空的非 svg 孩子" ✓（= 有活在跑 ✓）⇒ 蓝 ✓；
+       *   · `idle`    = 其余（已经有子代理、但都跑完了 ✓）⇒ 绿 ✓。
+       * 两色都优先用 DSH 自己的语义色 ✓（跟着主题走 ✓），拿不到才用深色主题的兜底值 ✓。
+       * ⚠️ 刻意不写死 `opacity` ✗：基础态那 0.7 是"与文字同色系、比文字淡"用的 ✓，
+       *   而蓝/绿两态要**一眼可辨** ⇒ 这里给回 1 ✓。
+       */
+      '  [data-dshm-lineage][data-dshm-lineage-state="running"] [data-dshm-lineage-dot] {',
+      '    background: var(--dsw-alias-state-business-primary, #4d9cff) !important; opacity: 1 !important;',
+      '  }',
+      '  [data-dshm-lineage][data-dshm-lineage-state="idle"] [data-dshm-lineage-dot] {',
+      '    background: var(--dsw-alias-state-success-primary, #3ecf8e) !important; opacity: 1 !important;',
+      '  }',
+      /* ★ 只认我们打好的标记（见 tagTopHeader）：**绝不能**写成 `[class*="header"]` ——
+         那会把面板里的 `…_header`（例如上下文面板的 JObwrW_header）一起推下去 52px，
+         表现为"点开面板顶上多一块空白" ✗（用户实测报上来的就是这个）。 */
+      '  [data-dshm-topheader] { padding-top: calc(var(--dshm-top-h) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      /* 输入框里那个上下文环：**只隐身、不拆除** ——
+         它是那块面板的定位锚点，而且面板就渲染在它的父节点里，
+         用 `display:none` 会把面板一起干掉（表现为"点了没反应"）✗。
+         `visibility:hidden` 保留盒子 → 锚点仍然有效、面板照旧弹在原位 ✓。 */
+      '  [data-dshm-meter="hidden"] { visibility: hidden !important; }',
+      /* 连它占的那 28px 一起收掉：把**容器**移出文档流 ✓。
+         ★ 两条不能踩的线：
+           · 不能对容器用 `visibility:hidden` —— 那块面板是它的子节点，会跟着一起隐形 ✗；
+           · 不能 `display:none` —— 子节点同样不渲染 ✗（表现是"点了没反应"）。
+         所以是 `position:absolute` + 0×0 + `overflow:visible`：不在流里（不占位）、
+         但子树照旧绘制 ✓（面板位置由它的静态位置算，仍在输入框上方 ✓）。 */
+      '  [data-dshm-meter-root="hidden"] {',
+      '    position: absolute !important; width: 0 !important; height: 0 !important;',
+      '    overflow: visible !important;',
+      '  }',
+
+      /* ⑤ 弹出层（DSH 的"更多操作"等）不要占满屏幕 */
+      '  [role="menu"] { max-width: min(92vw, 340px) !important; }',
+
+      /* ⑥ 藏起段头右侧的「视图选项 / 添加工作区」（60px），让**搜索键成为最右元素**。
+             用户的要求是"抽屉边界与搜索键对齐"——这两个按钮在搜索键右侧占了 60px，
+             只要它们在，右边界就永远对不齐搜索键。
+             ★ 必须限定在侧栏内：会话页顶栏也有一个 headerActions（那是「标准模式」），
+             不带作用域的 [class*="headerActions"] 会把它一起藏掉，那是另一个功能的入口。 */
+      '  [class*="sidebarCol"] [class*="headerActions"] { display: none !important; }',
+
+      /* ⑦ 设置弹窗：窄屏下把"左导航 + 右内容"改为**上下叠放**。
+             DSH 的面板宽度会自适应（412 屏上是 364），但**始终是两栏**，
+             内容列只剩 176px → 中文逐字换行，完全没法用（实测 176px）。
+             选择器用我们自己打的标记属性，不用 DSH 的类名哈希（VOzbGW_… 会随构建变）。 */
+      /* ★ 整屏（用户第 5 点："窄屏强行放进电脑端的 ui 放不下"）：
+         实测原来只有 364×800、居中两栏，内容列被挤到 176px、中文逐字换行 ✗。
+         手机上不跟桌面比"窗口感"——直接占满，把宽度还给内容 ✓。
+         `100dvh` 带上 `100vh` 兜底（旧内核不认 dvh，但认 vh ✓）。 */
+      '  [data-dshm-settings="1"] { padding: 0 !important; }',
+      '  [data-dshm-panel] {',
+      '    display: flex !important; flex-direction: column !important;',
+      '    position: fixed !important; inset: 0 !important;',
+      '    width: 100vw !important; min-width: 0 !important; max-width: none !important;',
+      '    height: 100vh !important; height: 100dvh !important; max-height: none !important;',
+      '    margin: 0 !important; border-radius: 0 !important;',
+      '    padding: 0 !important; padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px)) !important;',
+      '    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px)) !important;',
+      /* ★ 层级必须**高于**浮动条（授权/提醒条用的是 z-index 200）：
+         两者同为 200 时后插入的那条赢 —— 实测授权条正好盖住原生设置的导航行 ✗
+         （截图里一眼可见）。整屏对话框在语义上就该压住浮动横幅 ✓。 */
+      '    box-sizing: border-box !important; z-index: 260 !important;',
+      '  }',
+      /* ★ 入场：**只做 opacity** ✗ —— 不给 DSH 的层加 transform ✓
+         （round 118 的教训：给 DSH 的层加 transform 会换参照系 ⇒ 文字/侧栏错位 ✗）。
+         而"先电脑端形态、再跳成我们的全屏"那一跳已在 JS 侧根治 ✓（见 settingsWatch ✓）——
+         所以这里的淡入只是收尾润色，不需要"从哪边滑进来"的叙事 ✓（它本来就是整屏 ✓）。 */
+      '  [data-dshm-panel] { animation: dshm-settings-in .16s ease-out both; }',
+      '  @keyframes dshm-settings-in { from { opacity: .55; } to { opacity: 1; } }',
+      /* ★ 导航回到 **DSH 自己的竖排形态** ✓（用户拍板："要纵排"✓）。
+         我们此前那条 `flex-direction: row + overflow-x: auto` 把竖排 rail 改成了横向标签条 ✗ ——
+         在 400px 上装不下 4~5 个分组 ⇒ **必须横滑才看得全** ✗✗（用户："我不喜欢设置页面
+         侧滑滚动才能显示全"✓，且"模型/通用设置"那排正是它 ✓）。
+         这里**直接删掉**那条改写即可 ✓：DSH 原样式就是 `.VOzbGW_navList{flex-direction:column;
+         gap:4px}` ✓，配上下面的 `width: 100%` 就是"整宽竖排" ✓ ——
+         纵排天生不会被截断，也就不需要"奇数项占整行"那类补丁 ✓。 */
+      '  [data-dshm-panel] > nav { width: 100% !important; flex: 0 0 auto !important; }',
+      /* ★★ round 138：导航**紧凑化** ✓（用户："竖排导航确实有点太长了，需要美化一下"✗）。
+         真机量的数（见验收输出）：原来 5 项 ×40px + 标题 + 间距 ≈ **280px** ✓ ——
+         在 869px 的屏上占近三分之一 ✓，而它只是 5 行文字标签 ✓。
+         做法：**行高 40 → 34px、行距 4 → 3px、标题行 24 → 20px、导航上内边距 22 → 10px** ✓ ——
+         整体节奏跟着 DSH 自己的 navCell 等比收一点 ✓（圆角/配色/字号层级都不动 ✓，
+         所以看起来仍是**同一套控件**，只是紧了 ✓）。
+         ★ 只在壳里 ✗（改的是 DSH 的元素 ✓，与"电脑端浏览器原样"那条底线一致 ✓）。
+         ★ 为什么不用 2 列网格（也想过 ✓）：那要再补一条"末项独占整行"的补丁 ✓、
+         要重新排 5 项的视线动线 ✓，而紧凑竖排**省下来的就够**（实测见验收 ✓）且
+         与 DSH 原生形态最贴 ✓ —— 用户先要纵排 ✓，这里只在它内部收紧 ✓。
+         ★ 触控高度的取舍 ✓：34px 低于 44px 那条通行的建议值 ✗ ——
+         但每行是**整宽 388px** ✓（误触不会打到邻项 ✓），且这是用户点名要"短一点" ✓；
+         DSH 自己的 navCell 也才 40px ✓。 */
+      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav { gap: 8px !important; padding-top: 10px !important; }',
+      /* ★★ round 145：**壳里隐藏滚动条** ✓（用户拍板："手机端滚动条无法拖动，没有啥意义"✓）。
+       *
+       * ## ⚠️ 这**不是**"用 CSS 掩盖布局 bug" ✗ —— 请先读完这段再决定要不要删它 ✗
+       *   本项目明确禁止过 `::-webkit-scrollbar{display:none}` 那一类写法 ✓ ——
+       *   但禁的是**拿它掩症状** ✗（例如"算不清谁在溢出，干脆把滚动条藏了"✓）。
+       *   这一次是**用户看着屏幕拍板的视觉决定** ✓：手机上滚动条**拖不动** ✓、
+       *   触屏本来就能直接拖内容 ✓ ⇒ 它只是一条占 8px 宽、还经常压在圆角上的噪声 ✓。
+       *   两条的区别很好验 ✓：**让位那笔账已经算准了** ✓（`行→键盘=4px` ✓、
+       *   `--dshm-keyboard-pad` 与系统 resize 都不再叠 ✓，见 `syncKeyboardPad` ✓）——
+       *   也就是说"本来就该藏"的那类 bug 在别处已经修完了 ✓，这里只是观感 ✓。
+       *
+       * ## 三条不许破的底线（对应验收里那几条断言 ✓）
+       *   · **只在壳里** ✓（`html[data-dshm-shell="android"]` 前缀 ✓ —— 电脑端浏览器一个字都不变 ✗）；
+       *   · `overflow` 语义**一个字不动** ✗：不写 `overflow:hidden` ✓、
+       *     也不碰 `-webkit-overflow-scrolling`/`overscroll-behavior` ✓ ⇒ **照样能滚** ✓
+       *     （验收里用"设 `scrollTop` 之后读数真的变了"钉住 ✓）；
+       *   · **横向**能滚的地方（长代码块 ✓）也照旧能拖 ✓ —— 宽高两个方向的滚动条一起隐 ✓，
+       *     隐的是**条**不是**能力** ✓（验收里用 `scrollLeft` 同样钉住 ✓）。
+       */
+      '  html[data-dshm-shell="android"] ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }',
+      '  html[data-dshm-shell="android"] { scrollbar-width: none !important; }',
+      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:first-child {',
+      '    padding: 0 12px 0 10px !important; font-size: 15px !important; line-height: 20px !important;',
+      '  }',
+      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:last-child { gap: 3px !important; }',
+      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:last-child > button {',
+      '    height: 34px !important; padding: 5px 14px 5px 10px !important;',
+      '    font-size: 13.5px !important; line-height: 20px !important;',
+      '  }',
+      /* ★ 壳里：把 DSH 的内容头（「打开配置文件」+ 那个 × ）**整条藏掉** ✓
+         （用户："打开配置文件那个地方手机上删掉…它右边的那个关闭键也不要"✓）。
+         为什么整条藏而不是只藏两个子节点：`.VOzbGW_header` 自己是 `height:54px` 的 flex ✓，
+         只藏子节点会留 54px 空档 ✗。
+         为什么只在壳里 ✓：电脑端浏览器必须保持原样 ✓ —— 判据 `html[data-dshm-shell="android"]`
+         在 boot **首帧**就设好了 ✓（见文件开头"立刻拉一次"那段的下一行 ✓），零竞态 ✓。 */
+      '  html[data-dshm-shell="android"] [data-dshm-settings-header] { display: none !important; }',
+      /* 藏掉 header 之后正文顶上补一点留白，否则第一行分组标题贴着导航 ✓。 */
+      '  html[data-dshm-shell="android"] [data-dshm-settings-options] { padding-top: 8px !important; }',
+      /* ★ 我们注入的第 5 个导航项「连接与设备」（见 ensureConnSettings ✓）：
+         几何照 DSH 的 navCell 抄 ✓（`height:40px; border-radius:12px;
+         padding:9px 16px 9px 12px; gap:8px; font-size:14px`）—— 它的类名是**构建哈希** ✗
+         （`VOzbGW_navCell`），所以抄不得、只能自己写一份 ✓。
+         ★ round 138 起与上面那条紧凑规则**同值** ✓（34px / 5px 5px / 13.5px ✓）——
+         两处必须一起改 ✗，否则我们这一项会比 DSH 那四项高出一截 ✓（那种"一行不齐"
+         是手机上一眼就看得出来的 ✗）。 */
+      '.dshm-set-navcell {',
+      '  box-sizing: border-box; cursor: pointer; width: 100%; height: 34px;',
+      '  color: var(--dsw-alias-label-primary, #f5f6f7); text-align: left;',
+      '  background: 0 0; border: none; border-radius: 12px;',
+      '  align-items: center; gap: 8px; padding: 5px 14px 5px 10px;',
+      '  font-family: inherit; font-size: 13.5px; font-weight: 400; line-height: 20px; display: flex;',
+      '}',
+      '.dshm-set-navcell:hover { background: var(--dsw-specific-sidebar-nav-item-hover, rgba(255,255,255,.06)); }',
+      '.dshm-set-navcell-label { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }',
+      /* 选中态由**我们自己打在面板上的属性**驱动 ✓（DSH 的 `active` 同样是哈希类名 ✗）。 */
+      '[data-dshm-panel][data-dshm-conn-active="1"] .dshm-set-navcell {',
+      '  background: var(--dsw-specific-sidebar-nav-item-active, rgba(255,255,255,.10));',
+      '}',
+      /* ★ 我们选中时，DSH 自己那份高亮必须**压掉** ✗ —— 它的 active 由 React state 决定 ✓，
+         我们点自己的项改不了那个 state ✓。判据用 `aria-current="true"`：那是 React 写在
+         **属性**上的 ✓（不是哈希类名 ✓），所以这条规则不会随 DSH 构建而失效 ✓。 */
+      '  html[data-dshm-shell="android"] [data-dshm-panel][data-dshm-conn-active="1"] nav [aria-current="true"] {',
+      '    background: transparent !important;',
+      '  }',
+      /* ★ 我们的正文：几何照 DSH 的 `.VOzbGW_options` 抄 ✓
+         （`flex:1; min-height:0; padding:0 24px 24px; overflow-y:auto` —— 同样是哈希类名 ✗）。
+         `min-height: 0` 是 flex 子项能真正收缩的前提 ✓，少了它 `overflow-y:auto` 形同虚设 ✓。 */
+      '.dshm-conn-body {',
+      '  flex: 1 1 auto !important; min-height: 0 !important;',
+      '  overflow-y: auto !important; -webkit-overflow-scrolling: touch;',
+      '  padding: 8px 24px 24px !important; box-sizing: border-box !important;',
+      '}',
+      /* 我们选中时把 DSH 自己那份正文**藏**掉 ✓ —— 只 `display:none`、**不删** ✗：
+         它还在 DOM 里、还归 React 管 ✓，删了下次重渲染还会建回来 ✓（而藏是幂等的 ✓）。 */
+      '  html[data-dshm-shell="android"] [data-dshm-panel][data-dshm-conn-active="1"] [data-dshm-settings-options] {',
+      '    display: none !important;',
+      '  }',
+      /* ★★ round 138：我们那份正文的**显示与否同样只由那一个属性决定** ✓ ——
+         这是"选了连接与设备之后还能切回其它四个分组"的关键 ✗（真 bug，用户报的 ✓）。
+         原先它**没有**被门控 ✗：只要挂上过一次就一直在 ✓ ⇒ 用户点 DSH 的分组时
+         `options` 被上面那条压着 ✓、我们这份又照旧显示 ✓ ⇒ 看着像"切不过去"✗✓。
+         现在两边都由 `data-dshm-conn-active` 一个开关驱动 ✓：
+           · 交还 active（= 删掉那个属性 ✓）⇒ 我们的正文**自动**消失 ✓、DSH 的正文**自动**回来 ✓；
+           · 不需要 remove 节点 ✓（少一层"删了又被 React 建回来"的来回 ✓，
+             也不会因为"删早了/删晚了"闪一下 ✓）。 */
+      '  html[data-dshm-shell="android"] [data-dshm-panel] [data-dshm-conn="1"] { display: none !important; }',
+      '  html[data-dshm-shell="android"] [data-dshm-panel][data-dshm-conn-active="1"] [data-dshm-conn="1"] {',
+      '    display: block !important;',
+      '  }',
+      '  [data-dshm-panel] > div:last-child {',
+      '    width: 100% !important; flex: 1 1 auto !important; min-width: 0 !important;',
+      /* 整屏之后内容必须**自己滚**：实测内容列高 857px 而屏幕只有 915px 减去导航与标题栏，
+         不给它滚动就会溢出到屏幕外（底部控件点不到 ✗）。`min-height: 0` 是 flex 子项
+         能真正收缩的前提 —— 少了它，`overflow-y: auto` 形同虚设 ✓。 */
+      '    min-height: 0 !important; overflow-y: auto !important; -webkit-overflow-scrolling: touch;',
+      '  }',
+
+      /* ⑧ 收窄正文两侧留白：DSH 按桌面阅读宽度给了 16~24px
+             （实测 .pXSMma_root 24px、.uV2eYG_root 16px、heroWorkspaceRow 20/16px），
+             而内层的 max-width:712px 在手机上根本不起作用 —— 于是 412px 的屏幕
+             正文只剩约 354px，用户反馈"字显示的内容宽度有点窄"。
+             这里统一收到 8px：手机上多出的这 30~40px 是实打实的正文宽度。 */
+      '  [class*="centerCol"] [class*="scrollBody"],',
+      '  [class*="centerCol"] [class*="composerSeat"],',
+      '  [class*="centerCol"] [class*="composerStack"],',
+      '  [class*="centerCol"] [class*="heroWorkspaceRow"] {',
+      '    padding-left: 8px !important; padding-right: 8px !important;',
+      '  }',
+      /* 滚动体的直接子层（消息行）自带水平内边距，一并去掉；
+         只作用于直接子层，所以代码块/引用块内部的内边距不受影响。 */
+      '  [class*="centerCol"] [class*="scrollBody"] > * {',
+      '    padding-left: 0 !important; padding-right: 0 !important;',
+      '  }',
+      /* ★ 真正的主因：消息列外面还套了一层 **32px** 水平内边距（.EvIC1a_scroll）。
+         412px 屏幕上消息列因此只剩 322px（左右各空 40/50px，实测）。
+         收到 8px 后消息列约 370px —— 正文宽度 +15%，这才是用户说的"字太窄"。 */
+      '  [class*="centerCol"] [class*="scrollBody"] [class*="_scroll"] {',
+      '    padding-left: 8px !important;',
+      /* 右侧归零：消息列右缘实测比容器少 8px（容器自己分配宽度留下的空隙），
+         那块本来就是空白。归零后左右留白 16 / 18，视觉上对称（用户反馈右侧偏大）。 */
+      '    padding-right: 0 !important;',
+      '  }',
+      '  [class*="centerCol"] [class*="scrollBody"] { margin-right: 0 !important; }',
+      /**
+       * ★★ round 119：欢迎页「**预览版**」徽标在真机上被**拉高变形** ✗
+       *   （用户截图：蓝框变竖、文字掉到框下 ✓）。
+       *
+       * 量到的事实（无头 412 宽）：`span.pXSMma_previewBadge`
+       *   `display:block` ✓、`width:36px`（内容驱动 ✓）、圆角 24px ✓、`white-space:nowrap` ✓、
+       *   深蓝 `rgb(52,65,91)` ✓，父层 `titleGroup` = flex row + `align-items:center` ✓ ——
+       *   在这里它量出来是 **52×20 的正常小胶囊** ✓ ⇒ 真机那个"被拉高"**复现不了** ✗
+       *   （今天第三次遇到"只在真机现形"✓，所以不再靠猜根因 ✗）。
+       *
+       * 做法：**把它的几何钉死** ✓ —— 这是个极小的装饰徽标 ✓，钉死不可能伤到别处 ✓：
+       *   不许被拉伸 ✓（`align-self:center`）、高度与行高固定 ✓、
+       *   `inline-flex + align-items:center` ✓（文字永远居中 ✓）。
+       */
+      '  [class*="previewBadge"] {',
+      '    display: inline-flex !important; align-items: center !important;',
+      '    align-self: center !important;',
+      '    height: 20px !important; max-height: 20px !important; min-height: 20px !important;',
+      '    line-height: 18px !important; white-space: nowrap !important;',
+      '  }',
+      /* 右侧比左侧多出的那 ~10px 是**滚动条占位**（实测：消息列 [16..386]，
+         右留白 26 vs 左 16）。手机上不需要常驻滚动条——滚动时系统会短暂显示——
+         隐藏它，占位就还给了正文，左右也就对称了。 */
+      '  [class*="centerCol"] [class*="scrollBody"] [class*="_scroll"] {',
+      '    scrollbar-width: none !important;',
+      '  }',
+      '  [class*="centerCol"] [class*="scrollBody"] [class*="_scroll"]::-webkit-scrollbar {',
+      '    width: 0 !important; height: 0 !important;',
+      '  }',
+      /* 同理：会话列表与文件面板的滚动条一并在手机上隐藏（它们同样会挤掉内容） */
+      '  [class*="sidebarCol"] ::-webkit-scrollbar,',
+      '  #dsh-mobile-sheet ::-webkit-scrollbar { width: 0 !important; height: 0 !important; }',
+
+      /**
+       * ★★ A3：交付文件卡片上方那条「无法读取主机桌面信息 / 重试」横幅，
+       *   在**手机外壳**里一律不显示 ✓（这段样式只随 installShell 装 ✓ ⇒ 桌面端一个字都不变 ✓）。
+       *
+       * 为什么它必然出现、而且点了也没用：它由 `GET /api/present.host` 的结果驱动 ✓，
+       *   而手机页在 DSH 自己的信任栅栏**之外**（401 ✓，与 `/open-in-app/*` 同一条 ✓）⇒
+       *   `host="error"` ⇒ 每轮带交付文件的消息都挂一条错误横幅 ✓；
+       *   点「重试」只是再打一次同一个 401 ⇒ 屏幕上**毫无变化** ✗（这才是真·静默 ✗）。
+       * 它描述的是"**电脑**桌面"这个能力 ✓ —— 手机上本来就没有 ✓ ⇒ 这不是"藏起一个错误"，
+       *   而是别把一个手机上做不到的能力报成故障 ✓（预览按钮本来就能用 ✓）。
+       *
+       * 判据用 `div` 而不是 `span`：同一个类名还有一条 `span`（"主机不支持"那种静态说明 ✓），
+       *   带「重试」按钮的那一条是 `div` ✓（见 deliverables 的 PresentedFileCard ✓）。
+       */
+      '  div[class*="hostStatus"] { display: none !important; }',
+
+      /**
+       * ★★ round 130（A 方案）：卡片右侧那个 chevron（下拉「v」）**恢复显示** ✓
+       *   —— 本条取代 round 123 那条 display:none ✓
+       *   （用户原话："改好了，但很丑，**我不是说收纳进 dsh 的原生控件吗**？" ⇒ A 方案 ✓）。
+       *
+       * round 123 收它的两个理由，本轮**各解掉一个** ✓：
+       *   ① 它恒为 disabled ✗（DSH 的判据是 menuDisabled = phase 忙 || host === null ||
+       *      !host.available ✓，而 present.host 在手机页上 401 ✗）⇒ 本轮网页侧给
+       *      present.host 一条**兜底应答** ✓（见 installPresentedHostShim ✓）⇒ host 不再为 null
+       *      ⇒ **DSH 自己就会把这个下拉渲染成可点的** ✓（判据仍在它手里 ✓，我们没动它的
+       *      React 属性 ✗ —— 摘 disabled 那种做法会在它下次渲染时打架 ✗）；
+       *   ② 展开的两项都走 POST /api/present.open ⇒ 401 ✗ ⇒ 本轮在捕获阶段**接管那两项** ✓
+       *      （见 installPresentedMenuBridge 那一段 ✓：一项变成下载到手机 ✓，
+       *      一项变成在文件面板中打开 ✓，文案一并改准 ✓）。
+       *
+       * 这一条只管**外观**：DSH 万一仍把它标成 disabled（旧版 DSH / 别处复用这张卡 ✓），
+       *   也要让那个「v」看起来是能点的 ✓ —— 因为轻点它**确实有反应** ✓
+       *   （那一支由同一段代码里的**兜底菜单**接住 ✓，绝不留下"点了没反应" ✗）。
+       *
+       * 仍然是**窄规则** ✓（卡片内部 + 类名后缀 _chevron ✓）：铺满整张卡的 _cardPreview
+       *   与左下那颗 _open 一个字都不动 ✓（round 123 量过的清单仍然管用 ✓）。
+       * 桌面端不受影响：这段样式**只随 installShell 装** ✓（与上面 hostStatus 那条同一条路子 ✓），
+       *   由 check-mobile-layout 末尾的桌面端回归断言盯着 ✓（电脑上「v」与「打开」照常显示 ✓）。
+       */
+      '  [data-presented-file] button[class*="_chevron"]:disabled {',
+      '    color: var(--dsw-alias-label-secondary, #a9b0b8); cursor: pointer;',
+      '  }',
+
+      /* ⑦ iOS 聚焦输入框时不允许自动放大 */
+      '  textarea, input[type="text"] { font-size: 16px !important; }',
+
+      /* ── ★★ round 130：那颗 v 打不开时的**兜底菜单** ────────────────────────
+            它只在"DSH 自己的菜单根本渲染不出来"时才出现 ✓，判据不是猜的 ✗：
+            DSH 的 Menu 是 open: menuOpen && !menuDisabled ✓，而 menuDisabled 含
+            host === null ✓ ⇒ v 一旦是 disabled，它自己的菜单**永远不会**被渲染 ✓。
+            形状照 DSH 的菜单来 ✓（圆角浮层 + 左图标 + 13px 文案 ✓），
+            颜色一律走 DSH 的设计 token ✓（--dsw-alias-* ✓ —— 卡片本来就在 DSH 的根里 ✓）。
+            它必须是**固定定位的 body 浮层** ✓：卡片自己 overflow:hidden ✗，
+            放在卡片里必然被裁掉 ✗（round 128 那段注释量过这件事 ✓）。 */
+      '#dshm-presented-menu {',
+      '    position: fixed; z-index: 260; min-width: 172px; padding: 4px;',
+      '    border-radius: 10px; border: .5px solid var(--dsw-alias-border-l3, rgba(255,255,255,.14));',
+      '    background: var(--dsw-alias-bg-layer-2, #24272c);',
+      '    box-shadow: 0 12px 30px rgba(0,0,0,.45);',
+      '  }',
+      '#dshm-presented-menu button {',
+      '    display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px;',
+      '    border: 0; border-radius: 8px; background: transparent; font: inherit;',
+      '    font-size: 13px; line-height: 18px; text-align: left;',
+      '    color: var(--dsw-alias-label-primary, #e8eaed); -webkit-tap-highlight-color: transparent;',
+      '  }',
+      '#dshm-presented-menu button:active { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08)); }',
+      '#dshm-presented-menu span[data-dshm-menu-icon] { display: inline-flex; width: 16px; height: 16px; flex: none; color: var(--dsw-alias-label-secondary, #a9b0b8); }',
+      '  @media (pointer: coarse) { #dshm-presented-menu button { min-height: 40px; } }',
+      /**
+       * ★★ round 141（F-3）：**触控尺寸只留两档**，而且用**这一条**媒体查询统一表达 ✓。
+       *
+       * 用户拍板的契约（实测 6 种高度 ✗ ⇒ 收敛成两档 ✓）：
+       *   · **行内小动作 = 32px** ✓：`.dshm-crumb-up`（28→32 ✓）、`.dshm-icon-btn`（30→32 ✓）、
+       *     `.dshm-file-more`（本来就 32 ✓）—— 端侧能力那一组**从胶囊改成横条开关**之后 ✓
+       *     （round 142 ✓），它已经不在这一档里了 ✗（开关是 44×26 的轨道 ✓，见那边的注释 ✓）。
+       *     它们都在**一行之内**、旁边还有整行热区兜底 ✓ ⇒ 32 够用 ✓（**不随手指环境变大** ✗）；
+       *   · **独立主控件 = 40px** ✓：`.dshm-tool`（32→40 ✓）、`.dshm-conn-entry`（32→40 ✓）、
+       *     面板头部的齿轮/关闭（32→40 ✓）—— 它们要**单独被手指命中** ✓ ⇒
+       *     只在 `pointer: coarse`（触屏）下抬到 40 ✓；`.dshm-set-danger`（42 ✓）本来就够 ✓ 不动。
+       * ★ 为什么用**一条**媒体查询而不是逐个写死 ✗：这样"哪些属于主控件"是**一份名单** ✓，
+       *   以后加按钮时要么进名单、要么留在小动作档 ✓，不会再出现第 7 种高度 ✗。
+       * ★ 为什么基准值取 32 而不是 40 ✓：桌面/细指针（鼠标）上 40px 的按钮偏笨重 ✗，
+       *   而**手机上**（`pointer: coarse` ✓）自动拿到 40 ✓ —— 两边都合适 ✓。
+       */
+      '  @media (pointer: coarse) {',
+      '    .dshm-tool, .dshm-conn-entry { min-height: 40px !important; }',
+      '    #dsh-mobile-sheet-head button { width: 40px !important; height: 40px !important; }',
+      '  }',
+
+      /* 「打开所在目录」落到的那一行：高亮一下，用户一眼看到"就是它" ✓。 */
+      '  [data-dshm-fs-entry][data-dshm-focus="1"] {',
+      '    box-shadow: inset 0 0 0 1px var(--dsw-alias-state-business-primary, #4c8dff);',
+      '    border-radius: 10px;',
+      '  }',
+
+      /* ── ★★ round 128：**存到哪了**的提示条 ──────────────────────────────
+            卡片上点「下载」时文件面板可能根本没开 ✓ —— 只写面板那一行等于什么都没说 ✗。
+            位置抬到底部固定区之上（不让位给小白条的话会被它压住 ✓，那条教训在 round 125 ✓）。 */
+      '#dshm-shell-toast {',
+      '    position: fixed; left: 8px; right: 8px; z-index: 200;',
+      '    bottom: calc(max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px)) + 64px);',
+      '    padding: 10px 12px; border-radius: 10px;',
+      '    background: var(--dsw-alias-bg-layer-3, #232427);',
+      '    color: var(--dsw-alias-label-primary, #e8eaed);',
+      '    border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
+      '    box-shadow: 0 10px 30px rgba(0,0,0,.5);',
+      '    font-size: 12.5px; line-height: 17px;',
+      '    opacity: 0; transform: translateY(6px); pointer-events: none;',
+      '    transition: opacity .18s ease, transform .18s ease;',
+      '  }',
+      '  #dshm-shell-toast[data-open="1"] { opacity: 1; transform: translateY(0); }',
+      '}',
+    ].join('\n')
+    // 脚本在 <head> 中执行，此时 document.head/body 可能还是 null。
+    // 这里只挂样式（挂 <html> 也生效）；**元素**必须等到 body 存在（见 mount）。
+    ensureDomRoot().appendChild(style)
+
+    var nav = shellIconButton('dsh-mobile-nav', '会话列表', '\u2630')
+    var titleElement = document.createElement('div')
+    titleElement.id = 'dsh-mobile-title'
+    titleElement.setAttribute('role', 'heading')
+    titleElement.setAttribute('aria-level', '1')
+    var files = shellIconButton('dsh-mobile-files', '电脑文件目录', ICON_FOLDER)
+
+    var bar = document.createElement('header')
+    bar.id = 'dsh-mobile-top'
+    /**
+     * ★ 顶栏也要跟着让位量一起动（用户反馈："滑动的时候顶栏是脱节的" ✗）。
+     *   带上这个属性就自动进 `pushFollowers()` 的名单 ✓ —— 别再靠手写选择器 ✗。
+     */
+    bar.setAttribute('data-dshm-push-follower', '1')
+    bar.appendChild(nav)
+    bar.appendChild(titleElement)
+    bar.appendChild(files)
+
+    var scrim = document.createElement('div')
+    scrim.id = 'dsh-mobile-scrim'
+
+    var sheet = buildFilesSheet()
+
+    /**
+     * 把 DSH 的展开状态**镜像**到 `body[data-dsh-mobile-drawer]`，并同步汉堡图标。
+     *
+     * 必须判空：本函数会在 `<head>` 阶段被同步调用，此时 document.body 还是 null，
+     * 直接读 `document.body.dataset` 会抛 TypeError 并**中断整个 boot.js**
+     * （表现为"汉堡按钮完全不见了"——真实事故）。凡是这个时机会跑的代码都要判空。
+     */
+    /**
+     * 确保 DSH 侧栏处于**展开**态。
+     *
+     * ★ 抽屉的开关**不再驱动 DSH 的展开/收起**，而是我们自己维护
+     * `body[data-dsh-mobile-drawer]`。原因是 DSH 在收起态会**卸载侧栏内容**：
+     * 关闭抽屉时内容瞬间消失、只剩一个空面板滑出去，动画非常突兀（用户反馈）。
+     * 让 DSH 永远保持展开，内容就一直在 DOM 里，滑动动画两头都完整。
+     *
+     * 代价是侧栏内容常驻内存（几十个会话行，可忽略）；换来的是动画正确。
+     */
+    function ensureSidebarExpanded() {
+      if (dshSidebarExpanded()) return
+      dshToggleSidebar()
+    }
+
+    /**
+     * 重算主页面位移量，写进 `--dshm-push`。
+     *
+     * 左抽屉打开 → 右移 `+边栏宽`；右侧文件面板打开 → 左移 `−面板宽`；都关着 → 0。
+     * 用一个变量表达，左右两套规则就不会互相覆盖（各写各的时后写的会赢），
+     * 而且"该往哪边让位"只有一个事实来源。
+     *
+     * 只在值真的变了才写样式：观察者每 120ms 就可能触发一次，
+     * 无条件改样式会让浏览器反复失效重算——那正是"控件闪烁"的来源。
+     */
+    function applyPush() {
+      if (document.body === null || document.body === undefined) return
+      var drawer = document.body.dataset.dshMobileDrawer === 'open'
+      var files = document.body.dataset.dshmFiles === 'open'
+      var next = drawer ? 'var(--dshm-drawer-w)' : files ? 'calc(-1 * var(--dshm-files-w))' : '0px'
+      var root = document.documentElement
+      if (root.style.getPropertyValue('--dshm-push') !== next) root.style.setProperty('--dshm-push', next)
+    }
+    refreshPush = applyPush
+
+    /**
+     * DSH **自带预览**是不是正开着（盖住视口的那一层 ✓）。
+     *
+     * ## 为什么外壳必须知道这件事（用户反馈）
+     *
+     * 用户原话："这样打开默认是 dsh 原生渲染，但这个页面有个问题，它默认为主页面，
+     * 而不是我们之前设置的那种边栏打开的全页面，因此会出现**侧滑失效和侧滑 ui 错误**" ✗。
+     *
+     * 根因：DSH 的文档预览在窄屏上是**整屏覆盖**的一层 ✓，而我们的外壳**不知道它在** ✗ ——
+     * 于是横向手势照旧被我们认领 ✓：把主页面推歪、拉起我们自己的面板 ✗
+     * （而用户看到的是"预览页面上滑出了边栏" ✓ = 侧滑 ui 错误 ✓）。
+     *
+     * ## 判据为什么这么写
+     *
+     * 判据用**结构**，不用 DSH 的 hash 类名 ✗（会变 ✓）。
+     * ★ 第一版我把条件写成"必须在 `[class*="rightbarCol"]` 里" ✗ —— 实测错了 ✓：
+     *   预览正文其实是挂在 `body` 下的整屏层 ✓
+     *   （验收实测：`div.dhJKeW_body.dhJKeW_wrap`，宽 412 ✓），根本不在那一列里 ✗。
+     * 现在用两条更本质的判据 ✓：
+     *   ① **含渲染公式**（`.katex` ✓）的、盖住视口的层 ✓，且**不在对话列里** ✓
+     *      （聊天里的公式也在 `.katex` 里 ✓ —— 但它在 `centerCol` 内 ✓，用这一条把它排除 ✓）；
+     *   ② 兜底：DSH 自己的**整屏面板** ✓（挂在 body 下、盖住视口、不是我们的元素 ✓，
+     *      且里面有图片/画布/内嵌页或大段文本 ✓）—— PDF 与图片预览没有 `.katex` ✓，
+     *      靠这一条也能识别 ✓。
+     */
+    dshPreviewSurface = function () {
+      try {
+        var covers = function (rect) {
+          return rect.width >= window.innerWidth * 0.8 && rect.height >= window.innerHeight * 0.5
+        }
+        /**
+         * ★ 还要**真的在前台看得见** ✓ —— 用户反馈："你加了个最小化，最小化完了以后
+         *   无法进入边栏，顶栏消失" ✗。
+         *   机制：只判"盖住视口" ✗ 时，DSH 预览**被最小化/藏起来之后**，
+         *   那一层仍然占着原来的位置 ✓ → 我们一直以为"预览开着" ✗ →
+         *   侧滑永远让开 ✗（进不去边栏 ✓）、顶栏永远隐藏 ✗。
+         * 判据：`display/visibility/opacity` 正常 ✓ **且** 视口中心点命中的元素
+         *   落在这层里面 ✓（= 它确实在最上面 ✓）。藏起来的那层过不了这一关 ✓。
+         */
+        var visible = function (node) {
+          var cs = getComputedStyle(node)
+          if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false
+          try {
+            var hit = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2))
+            if (hit === null) return false
+            if (hit === node || node.contains(hit)) return true
+            /**
+             * ★ 命中的是**我们自己的层**（顶栏 / 面板 / 抽屉 / 蒙层 ✓）时，仍算"预览可见" ✓。
+             *   验收实测抓到过这一条 ✗：量的时候我们的面板正开着 ✓，
+             *   视口中心命中的是面板 ✓ → 于是被判成"预览不在前台" ✗ →
+             *   标记不写 ✓ → 顶栏不消失 ✓（"预览开着却叠了两条栏" ✗）。
+             *   预览被我们自己的浮层遮住一点 ✗ 不代表它关了 ✓。
+             *
+             * ★★ round 168（**真机实拍的真根** ✓）：上面那条判据原来只看**命中元素自己**
+             *   有没有我们的 id ✗ —— 而面板里**列表行**（`button` ✓）是**没有 id** 的 ✓，
+             *   面板一开、列表正好盖住视口中心 ⇒ `hit` 是一颗无名按钮 ⇒ 判据不成立 ✗
+             *   ⇒ `visible()` 返回 false ✗ ⇒ **预览压根认不出来** ✗ ⇒ 标记不写 ✗。
+             *   用户实拍的两个症状都从这一条来 ✓：
+             *     · "文件目录居然在文件预览的上方" ✓（面板没被藏 ✓ —— 也是 round 167 之前那一态 ✓）；
+             *     · "返回键还是会一起把文件面板返回" ✗（标记没写 ⇒ 返回键落到"关文件面板"那一支 ✗）
+             *       + "文件预览一开始的顶栏又跑到手机状态栏一段时间" ✓（顶栏回来了 ✓，
+             *       而壳的 insets 还没到 ⇒ 它先挤进状态栏 ✓，过一会 insets 到了才复位 ✓）。
+             *   ⇒ 改成**沿祖先链找我们的层** ✓（`closest` 那种语义 ✓，但这里手写循环以免依赖
+             *     选择器字符串 ✓）：命中面板里的一颗按钮 ⇒ 它属于面板 ⇒ 仍算"预览被我们的层遮住" ✓。
+             */
+            var cursor = hit
+            for (var depth = 0; depth < 12 && cursor !== null && cursor !== undefined; depth++) {
+              var hitId = String(cursor.id || '')
+              if (hitId.indexOf('dsh-mobile') === 0 || hitId.indexOf('dshm-') === 0) return true
+              if (cursor === document.body) break
+              cursor = cursor.parentElement
+            }
+            return false
+          } catch (error) {
+            return true
+          }
+        }
+        /** 我们的元素一律不算 ✓（顶栏 / 面板 / 抽屉 / 蒙层 ✓）。 */
+        var ours = function (node) {
+          var id = String(node.id || '')
+          if (id.indexOf('dsh-mobile') === 0 || id.indexOf('dshm-') === 0) return true
+          return node.dataset !== undefined && node.dataset.dshmPushFollower !== undefined
+        }
+        /**
+         * ★ 判据是**类名后缀** `_preview` / `_document` ✓ —— 这是**实测**出来的，不是猜的 ✓。
+         *
+         * 两次猜错的过程（都记在这里，省得下次再猜 ✗）：
+         *   ① 先写"必须在 `[class*="rightbarCol"]` 里" ✗ —— 实测那层**不在**右侧栏里 ✗
+         *      （验收输出：`div.dhJKeW_body.dhJKeW_wrap` ✓）；
+         *   ② 又写"必须是 `position: fixed` 的整屏层" ✗ —— 把祖先链打出来一看 ✓：
+         *      `span.katex → p → div._markdown_… → div._0RKuNG_document(412×187) → div →`
+         *      `div.dhJKeW_body(412×839, relative) → div.dhJKeW_preview(412×877, static)` ✓
+         *      —— **一层 fixed 都没有** ✗，它是靠布局撑满的 ✓。
+         * 所以：匹配**类名后缀**（与项目里既有的 `centerCol` / `rightbarCol` 同一种做法 ✓）
+         *   + 它必须**盖住视口** ✓ + 不是我们的元素 ✓。
+         * 若将来 DSH 改了类名 ✗ → 现象是"顶栏又叠在预览上" ✓，
+         * 验收里那两条断言会立刻报红 ✓（这就是它们存在的意义 ✓）。
+         */
+        var looksLikePreview = function (node) {
+          var cls = String(node.className || '')
+          return cls.indexOf('_preview') >= 0 || cls.indexOf('_document') >= 0 || cls.indexOf('documentPreview') >= 0
+        }
+        // ① 含渲染公式的那一层 ✓（= DSH 的 Markdown 预览 ✓）
+        var maths = document.querySelectorAll('.katex')
+        for (var i = 0; i < maths.length; i++) {
+          var cursor = maths[i]
+          while (cursor !== null && cursor !== document.body) {
+            if (
+              looksLikePreview(cursor) &&
+              covers(cursor.getBoundingClientRect()) &&
+              visible(cursor) &&
+              !ours(cursor)
+            ) {
+              return cursor
+            }
+            cursor = cursor.parentElement
+          }
+        }
+        // ② 兜底：不带公式的预览 ✓（PDF / 图片 ✓ —— 直接从类名找 ✓）
+        var candidates = document.querySelectorAll('[class*="_preview"], [class*="_document"]')
+        for (var c = 0; c < candidates.length; c++) {
+          var node = candidates[c]
+          if (ours(node)) continue
+          if (covers(node.getBoundingClientRect()) && visible(node)) return node
+        }
+        /**
+         * ★★ round 176 诊断（**照抄 round 158 解决 katex 那一版的手法** ✓）：
+         *   两条路都没认出来时，把"现场"记一行进调试框 ✓ ——
+         *   用户实拍：**PDF 预览**开着 ✓，而这行却写"还没有预览层"✗ ⇒ 我只有拿到真实 DOM 才能写出
+         *   **精确**判据 ✓（这条我已经猜了好几轮 ✗，这一手正是当年一次就解决的那一手 ✓）。
+         *   记录两样：
+         *     · **中心命中的祖先链**（tag.类名(宽×高) ✓，最多 8 层 ✓）—— 真预览层就在这条链上 ✓；
+         *     · **类名候选清单**（`[class*="_preview"]/[class*="_document"]` 扫到的 ✓ 各带 rect ✓）——
+         *       它为空 = "类名根本不同"✓；非空但没选中 = "是 covers/visible 把它挡了"✓，两者修法不同 ✗。
+         *   ★ 节流：本函数每 200ms 跑一次 ✗ ⇒ 最多 6 秒记一行 ✓，且**链路签名不变就不重复记** ✓。
+         */
+        try {
+          var midEl = document.elementFromPoint(
+            Math.round(window.innerWidth / 2),
+            Math.round(window.innerHeight / 2),
+          )
+          var chainText = []
+          var walker = midEl
+          for (var cd = 0; cd < 8 && walker !== null && walker !== undefined; cd++) {
+            var cwr = walker.getBoundingClientRect()
+            chainText.push(
+              String(walker.tagName || '').toLowerCase() + '.' +
+                String(walker.className || '').split(' ')[0] +
+                '(' + Math.round(cwr.width) + '×' + Math.round(cwr.height) + ')',
+            )
+            if (walker === document.body) break
+            walker = walker.parentElement
+          }
+          var candText = []
+          var allCands = document.querySelectorAll('[class*="_preview"], [class*="_document"]')
+          for (var cc = 0; cc < allCands.length && candText.length < 6; cc++) {
+            var ccr = allCands[cc].getBoundingClientRect()
+            candText.push(
+              String(allCands[cc].tagName || '').toLowerCase() + '.' +
+                String(allCands[cc].className || '').split(' ')[0] +
+                '(' + Math.round(ccr.width) + '×' + Math.round(ccr.height) + ')',
+            )
+          }
+          var missSig = chainText.join(' < ') + '||' + candText.join(',')
+          if (missSig !== dshmPreviewMissSig && Date.now() - dshmPreviewMissAt > 6000) {
+            dshmPreviewMissSig = missSig
+            dshmPreviewMissAt = Date.now()
+            debugBoxLine(
+              '[preview] 认不出预览层｜中心命中链=' + (chainText.length > 0 ? chainText.join(' < ') : '(空)') +
+                '｜类名候选=' + (candText.length > 0 ? candText.join('、') : '无'),
+            )
+          }
+        } catch (error) {
+          void error
+        }
+        return null
+      } catch (error) {
+        return null
+      }
+    }
+
+    var dshPreviewLogged = null
+    /** 从什么时候开始"量不到预览"（0 = 现在量得到 ✓；宽限 600ms ✓ 见上 ✓）。 */
+    var dshPreviewAbsentSince = 0
+    /**
+     * 同步"DSH 预览开着"这个状态到 `body[data-dshm-dsh-preview]` ✓。
+     *
+     * 它带来三件事 ✓：① 侧滑**不认领**手势 ✓（让 DSH 自己处理 ✓）；
+     * ② 顶栏让开 ✓（CSS 里 `visibility: hidden` ✓，避免"两条栏叠在一起"✗）；
+     * ③ 让位量归零 ✓（`--dshm-push: 0` ✓，主页面不被推歪 ✓）。
+     * 变化时写一行调试日志 ✓ —— 手机上排障只能靠它 ✓（不静默 ✗）。
+     */
+    /**
+     * 把 DSH 原生预览里**用户明确说没用**的控件收起来 ✓。
+     *
+     * 用户原话："按文件界面刷新会弹出一个控件'重新读取文件'，这个好像**没啥用**" ✗。
+     *
+     * 为什么按**可读标签**匹配 ✓ 而不是 CSS 类名 ✗：
+     * DSH 的类名是带哈希的（实测 `dhJKeW_tool` ✓），升级就可能变 ✗；
+     * 而 `aria-label` / `title` 是用户看得见的文案 ✓，要变也是跟着语言变 ✓
+     * （所以中英文两种写法都匹配 ✓）。找不到就什么也不做 ✓（不报错、不误伤 ✓）。
+     */
+    var hideUselessPreviewControls = function (layer) {
+      /**
+       * ★ 搜索范围必须**扩到祖先** ✓ —— 实测「重新读取文件」在预览层**里面** ✓，
+       *   而「退出全屏」「收起右侧边栏」在层**外面**的侧栏上 ✓（类名 `P3OORG_iconButton` ✓）。
+       *   只查层内会漏掉一半 ✗（本轮就漏了 ✓）。
+       */
+      var scope = layer
+      // ★ round 117：3 层 → **5 层** ✓ —— 标签条（`_tabStrip_…`，分栏/收起那一行 ✓）
+      //   比预览层高不止 3 层 ✓，只走 3 层会"看得见它、却够不到它"✗。
+      for (var up = 0; up < 5 && scope.parentElement !== null; up++) scope = scope.parentElement
+      /**
+       * 要收起来的控件（按**可读标签**匹配 ✓，中英文都写 ✓）：
+       *
+       * · `重新读取文件` ✓ —— 用户："这个好像**没啥用**" ✗；
+       * · `退出全屏` ✓ —— 用户："目前的两个键：**缩小**和**边栏**似乎功能是一样的，都是关掉文件，
+       *   那只需要保留一个就行了" ✗。
+       *   实测这两个键就是侧栏上的 `退出全屏` 与 `收起右侧边栏` ✓（都在预览层**外面** ✓，
+       *   类名 `P3OORG_iconButton` ✓）。手机上"退出全屏"没有别的用处 ✗，
+       *   按用户的意思**保留「收起右侧边栏」** ✓（那才是明确的"关掉这个文件视图" ✓）。
+       */
+      var HIDDEN_LABELS = [
+        /重新读取文件/,
+        /reload file/i,
+        /退出全屏/,
+        /进入全屏/,
+        /exit fullscreen/i,
+        /enter fullscreen/i,
+        /**
+         * ★ round 117：**「分栏」也收起来** ✓ —— 用户反馈："右上角两个控件似乎都是一个功能，
+         *   都是收回" ✗。DSh 的 `split()` 在窄屏上本来就**分不开** ✓
+         *   （它自己的规则：预算用完、或者"两半放不下"就不分 ✓ —— 400px 的手机必然如此 ✓），
+         *   于是那颗键按下去**什么都不发生** ✓，摆在「收起右侧边栏」旁边只会让人当成第二个关闭键 ✗。
+         * ★ 以后真要做手机上的分屏时，把这一条去掉即可 ✓（DSH 那套 split/dock/float 是完整的 ✓）。
+         */
+        /^分栏$/,
+        /^split( view| pane)?$/i,
+      ]
+      var nodes = scope.querySelectorAll('button, [role="button"]')
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i]
+        var label = String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '')
+        for (var h = 0; h < HIDDEN_LABELS.length; h++) {
+          if (HIDDEN_LABELS[h].test(label)) {
+            if (node.dataset !== undefined && node.dataset.dshmHiddenTool !== '1') {
+              node.dataset.dshmHiddenTool = '1'
+              node.style.display = 'none'
+              debugBoxLine('[dsh-preview] 收起原生预览里没用的控件：' + label.trim() + ' ✓')
+            }
+            break
+          }
+        }
+      }
+    }
+
+    syncDshPreviewState = function () {
+      /**
+       * ★ round 157（B ✓）：那一层要**留住节点** ✓ —— "关掉了"与"只是被藏起来/最小化"
+       *   靠它区分（见 `dshPreviewMinimizedNotClosed` ✓，护栏②）。
+       */
+      var surface = dshPreviewSurface()
+      var open = surface !== null
+      if (surface !== null) dshmPreviewLastLayer = surface
+      var was = document.body.dataset.dshmDshPreview === '1'
+      /**
+       * ★ 「关掉」要**连续缺席一小会儿**才算 ✓。
+       *
+       * 实测：预览自己重渲染的那一瞬间量不到那一层 ✗ → 标记被清掉 ✓ → 顶栏闪回来 ✓
+       * → 下一帧又写上 ✓（验收里就抓到了这一闪：同一段里一处读到 `null`、一处读到 `1` ✗）。
+       * 这正是本项目的老教训：**状态别跟着单帧抖动走** ✓（与滑动那条"等一帧再采样"同源 ✓）。
+       */
+      if (open) {
+        dshPreviewAbsentSince = 0
+        document.body.dataset.dshmDshPreview = '1'
+        /**
+         * ★★ round 171（用户实拍："**（文件预览的顶栏）依旧一开始往状态栏跑**"✗）：
+         *   `--dshm-preview-pad` 是**给 JS 留的通道** ✓（`tuneDshPreviewSafeArea` 量完写进去 ✓）——
+         *   而它是**上一次预览**留下的值 ✗，常常正是 `0px` ✓（那一次预览量出来"不需要补"✓）。
+         *   ⇒ 新预览的**第一帧**就按 0 上内边距画 ✓ ⇒ **预览自己的那条顶栏**钻进状态栏 ✓，
+         *   等下一次测量（最多 200ms 之后 ✓）才复位 ✓ = 用户看到的"一开始往状态栏跑、过一会复位" ✗。
+         * ★ 为什么以前没暴露 ✗：本页会话里**第一次**开预览时这个变量是**空的** ✓
+         *   ⇒ 走 CSS 那条兜底 `max(env(), --dshm-safe-top)` ✓（= 完整的 48px ✓，安全 ✓）；
+         *   只有**开过至少一次之后**才会拿到那个过期的 0 ✓ —— 正是用户连着试几次才报上来的形状 ✓。
+         * ⇒ 升沿这一下：**先把变量写成安全区**（宁可先多留一点 ✗，也绝不先压在状态栏里 ✓），
+         *   紧接着**在同一个 tick 里当场重算一次** ✓（`tuneDshPreviewSafeArea()` 会按实测收窄 ✓）
+         *   ⇒ 浏览器只会画"收窄之后"的那一帧 ✓，中间那一步不会上屏 ✓。
+         */
+        if (!was) {
+          try {
+            var safeTopNow = safeTopPx()
+            document.documentElement.style.setProperty(
+              '--dshm-preview-pad',
+              'max(env(safe-area-inset-top, 0px), ' + String(safeTopNow) + 'px)',
+            )
+          } catch (error) {
+            void error
+          }
+          /**
+           * ★★ round 174（用户实拍："**还是偶发会有跑到状态栏上去**"✗）：光在同一 tick 里
+           *   重算**还不够** ✗ —— 预览自己的那条顶栏是 `fixed/sticky` 的 ✓（round 118 的注释里
+           *   就写着"内边距推不动它们，只能改 `top`"✓），而那条修正（`tuneDshTopChrome` ✓）
+           *   挂在 **200ms 心跳**上 ✓ ⇒ "**哪一帧轮到它，就哪一帧才复位**" ✓ = 用户说的"偶发" ✓✓。
+           *   `tuneDshPreviewSafeArea()` 内部**第一件事**就是调 `tuneDshTopChrome` ✓
+           *   ⇒ 只要它跑得够早、够多次，这条就补上 ✓。
+           * ⇒ 这里打**一串连发**（同一 tick ✓、下一帧 rAF ✓、+80ms ✓、+250ms ✓）：
+           *   预览层进来之后布局可能还在动（DSH 自己的入场动画 ✓、工具行被插进流里 ✓），
+           *   单发有可能量在"还没到位"的那一瞬间 ✓ ⇒ 连发把窗口压到 1~2 帧 ✓。
+           *   ★ 每一发都幂等 ✓（它只按**当下量到的** rect 写内边距与 `top` ✓），多发不会叠加位移 ✗。
+           */
+          var tuneBurst = function () {
+            try {
+              if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+            } catch (error) {
+              void error
+            }
+          }
+          /**
+           * ★★ round 177（用户实拍 + 我加的升沿诊断，两条读数合起来才看明白 ✓）：
+           *   `[preview] 升沿：pad=10px｜safeTop=48｜layerTop=38｜层内 fixed/sticky=无` ✓
+           *   ⇒ **预览层本身在升沿那一刻是对的** ✓（38 + 10 = 48 = 安全区下沿 ✓）、
+           *     而且**层内当时没有任何 `fixed/sticky`** ✓。
+           *   ⇒ 会跑到状态栏里的那一条，是**稍后才出现**的 ✗（PDF 渲染完才插入的工具行 / 预览层之外的标签条 ✓）——
+           *     它出现时**没人推它** ✓，只能等下一个 200ms 心跳 ✗ = 用户说的"打开瞬间才到标准位置" ✓✓。
+           * ⇒ 固定几发（rAF/80/250 ✓）抓不到"晚到的那一件" ✗ ⇒ 改成**短轮询**：
+           *   升沿后头 **2.5 秒**里每 **60ms** 跑一次 ✓（`tuneBurst` 幂等 ✓、只按当下量到的 rect 写 ✓，
+           *   成本是几次命中测试 ✓，与 DOM 大小无关 ✓ —— 这正是 `tuneDshTopChrome` 当初特意改用命中测试的理由 ✓）。
+           *   2.5 秒之后交还给原有的 200ms 心跳 ✓（不在稳态里增加任何负担 ✓）。
+           */
+          var tuneBurst = function () {
+            try {
+              if (typeof tuneDshPreviewSafeArea === 'function') tuneDshPreviewSafeArea()
+            } catch (error) {
+              void error
+            }
+          }
+          tuneBurst()
+          try {
+            var burstUntil = Date.now() + 2500
+            var burstTimer = globalThis.setInterval(function () {
+              // 预览已经关了 / 窗口过了 ⇒ 收工 ✓（绝不留一个永久的 interval ✗）
+              if (Date.now() > burstUntil || document.body.dataset.dshmDshPreview !== '1') {
+                globalThis.clearInterval(burstTimer)
+                return
+              }
+              tuneBurst()
+            }, 60)
+          } catch (error) {
+            void error
+          }
+          /**
+           * ★★ round 174 诊断（**如实留痕** ✗）：把"升沿那一刻"的真实几何写一行进调试框 ✓ ——
+           *   这一条我已经连着猜了三轮 ✗（内边距 / 标记 / 过期值 ✓），而手机上我看不到 DOM ✗。
+           *   有这一行，用户打开 `?debug=1` 就能直接报出：
+           *     · `pad` = 那一刻给预览层留的上内边距 ✓；
+           *     · `layerTop` = 预览层自己的 top ✓；
+           *     · 层内 `fixed/sticky` 的细头部各自在哪 ✓（**它们才是"内边距推不动"的那一族** ✓）。
+           *   ⇒ 下一次要是还闪，读数会直接指出"是内边距不够 ✓"还是"是某个 fixed 头部没被改 top ✓"。
+           */
+          try {
+            var diagLayer = dshPreviewSurface()
+            if (diagLayer !== null && diagLayer !== undefined && typeof debugBoxLine === 'function') {
+              var diagPad = document.documentElement.style.getPropertyValue('--dshm-preview-pad')
+              var diagTop = Math.round(diagLayer.getBoundingClientRect().top)
+              var diagKids = []
+              var diagNodes = diagLayer.querySelectorAll('*')
+              for (var di = 0; di < diagNodes.length && diagKids.length < 4; di++) {
+                var dpos = getComputedStyle(diagNodes[di]).position
+                if (dpos !== 'fixed' && dpos !== 'sticky') continue
+                var dr = diagNodes[di].getBoundingClientRect()
+                diagKids.push(
+                  String(diagNodes[di].tagName || '').toLowerCase() + '.' +
+                    String(diagNodes[di].className || '').split(' ')[0] +
+                    '@' + Math.round(dr.top) + 'h' + Math.round(dr.height) + ':' + dpos,
+                )
+              }
+              /**
+               * ★ round 178：再带上"**状态栏那一条带子里当下是谁**" ✓（两个 x 各取最上面 2 个 ✓）。
+               *   这一条是给"万一还闪"准备的 ✓ —— 那时这张图能直接点出**是哪一层**在状态栏里 ✗
+               *   （是预览层之外的工具行 ✓、还是别的 ✓），我就不用再猜 ✓。
+               */
+              var diagBand = []
+              try {
+                var diagY = Math.max(1, Math.min(Math.round(safeTopPx() / 2), safeTopPx() - 2))
+                var diagXs = [Math.round(window.innerWidth * 0.4), Math.round(window.innerWidth * 0.6)]
+                for (var dx = 0; dx < diagXs.length; dx++) {
+                  var dstack = document.elementsFromPoint(diagXs[dx], diagY) || []
+                  for (var ds = 0; ds < dstack.length && ds < 2; ds++) {
+                    var dnode = dstack[ds]
+                    var dr2 = dnode.getBoundingClientRect()
+                    diagBand.push(
+                      String(dnode.tagName || '').toLowerCase() + '.' +
+                        String(dnode.className || '').split(' ')[0] +
+                        '(' + Math.round(dr2.width) + '×' + Math.round(dr2.height) + ',top' + Math.round(dr2.top) +
+                        ',' + getComputedStyle(dnode).position + ')',
+                    )
+                  }
+                }
+              } catch (error) {
+                void error
+              }
+              debugBoxLine(
+                '[preview] 升沿：pad=' + (diagPad === '' ? '(空)' : diagPad) +
+                  '｜safeTop=' + String(safeTopPx()) + '｜layerTop=' + String(diagTop) +
+                  '｜层内 fixed/sticky=' + (diagKids.length === 0 ? '无' : diagKids.join('、')) +
+                  '｜状态栏那条带子里=' + (diagBand.length === 0 ? '空' : diagBand.join(' / ')),
+              )
+            }
+          } catch (error) {
+            void error
+          }
+        }
+        // ★ round 170：真的认出来了 ⇒ pending 这一笔可以收了 ✓（见 openFileInDshPreview ✓）
+        try {
+          if (document.body.dataset.dshmPreviewPending !== undefined) delete document.body.dataset.dshmPreviewPending
+        } catch (error) {
+          void error
+        }
+        // ★ "DSH 预览开着"也算一层 ✓ —— 上报给壳，系统返回先关它 ✓（见 dshmBack ✓）
+        reportBackAvailable()
+        /**
+         * ★★ round 157（B ✓）：**护栏①** —— 这次预览**不是**"刚刚为它收起了文件面板"
+         *   的那一次 ⇒ 那笔记忆**当场作废** ✗（典型：用户点的是**聊天里的文件链接** ✓）。
+         *   不判这一下的后果：他从聊天里开预览、关掉 ⇒ 我们的文件面板**凭空弹出来** ✗✗。
+         *   判据取**佩戴时刻** ✓（`at` ✓）：刚收起面板那一下，桥 `open` 之后几百毫秒内
+         *   预览就会进 DOM ✓；隔着很久才开的另一次预览与那笔记忆毫无关系 ✗。
+         */
+        if (
+          !was &&
+          dshmFilesReturnAfterPreview !== null &&
+          Date.now() - dshmFilesReturnAfterPreview.at > DSH_PREVIEW_ARM_MS
+        ) {
+          /**
+           * ★★ round 158（B2 ✓）：**先看令牌** —— 这一次预览就是我们从文件面板请求出来的
+           *   （`bridge.open` 已回 `{ok:true}` ✓）时，**不管它到得多慢都保留** ✓
+           *   （真机上大文件晚到 3 秒以上是常态 ✓，round 157 就是在这里把返回点丢掉的 ✗）。
+           *   令牌**消费掉** ✓（一次请求只认一次 ✓，不粘滞 —— 不然下一次从聊天里开预览
+           *   也会被算成"从面板来的"✗，护栏①就漏了 ✓）。
+           */
+          if (dshmPreviewOpenRequested) {
+            dshmPreviewOpenRequested = false
+            debugBoxLine(
+              '[files] 这次 DSH 预览就是刚从文件面板点开的那一次（迟了 ' +
+                String(Date.now() - dshmFilesReturnAfterPreview.at) + 'ms 也算 ✓）⇒ 保留返回点 ✓',
+            )
+          } else {
+            dshmFilesReturnAfterPreview = null
+            debugBoxLine('[files] 这次 DSH 预览不是刚从文件面板点开的 ⇒ 不记返回点 ✓')
+          }
+        } else if (!was && dshmPreviewOpenRequested) {
+          // 在窗口内（或没有记忆）也把令牌消费掉 ✓ —— 一次请求只认一次 ✓
+          dshmPreviewOpenRequested = false
+        }
+        /**
+         * ★★ 预览打开期间**不让文档自己滚**（round 118，用户真机反馈：
+         *   "上滑往下翻的时候会出现**两个滚动条**，页面来回上下晃动" ✗）。
+         *
+         * 机制：DSH 的预览正文本身是可滚的 ✓，而它那一层往往比视口**略高一点点** ✓
+         * （实测 877 vs 915 ✓ 视口留白）⇒ 文档也变成可滚的 ✗ ⇒ 手机上出现第二条滚动条 ✓，
+         * 两根滚动条抢同一笔上滑 ⇒ 内容上下**互相抵消/回弹** ⇒ "来回晃" ✓✓。
+         * 关掉文档这一层的滚动条即可 ✓（预览自己的滚动条照旧 ✓）。
+         */
+        try {
+          if (dshmPrevDocOverflow === null) {
+            dshmPrevDocOverflow = String(document.documentElement.style.overflow || '')
+          }
+          document.documentElement.style.overflow = 'hidden'
+          // ★ 顺手把文档滚回顶部 ✓ —— 预览层是"从屏幕顶端开始画"的 ✓，
+          //   带着旧滚动位置进来的话，它一上来就是偏的 ✗（也是上面那个正反馈的入口 ✓）。
+          if ((window.scrollY || window.pageYOffset || 0) > 0) window.scrollTo(0, 0)
+        } catch (error) {
+          void error
+        }
+        /**
+         * ★ round 117：刚打开时放一次**入场动画** ✓ —— 用户："点开文件是直接文件全屏，
+         *   如果有一个**从右边栏向左拓展**的动画就更好了" ✓。
+         * 只在**真正从关到开**的那一次放 ✓（重渲染/切换文件时不重放 ✗ —— 否则每 200ms
+         * 的轮询都可能重放一次，屏幕上就是"一直在抖"✗）。
+         */
+        if (!was) playDshPreviewEnter()
+      } else if (was) {
+        // 按**时间**算宽限 ✓（比按帧数稳 ✓：驱动它的可能既是观察器也是轮询 ✓）
+        var now = Date.now()
+        if (dshPreviewAbsentSince === 0) dshPreviewAbsentSince = now
+        // ★ 600ms → 180ms：用户反馈"最小化回到聊天界面**等待一段时间**才会显示顶栏" ✗
+        //   —— 宽限只是为了防止重渲染造成的单帧抖动 ✓，180ms（≈ 两次轮询）足够 ✓。
+        if (now - dshPreviewAbsentSince < 180) return true
+        delete document.body.dataset.dshmDshPreview
+        dshPreviewAbsentSince = 0
+        // ★ 预览关掉了 ⇒ 可返回的东西少了一层 ✓（这条与 finishPreviewCloseNow 是同一个事实 ✓）
+        reportBackAvailable()
+        /**
+         * ★ 关掉之后要**在同一帧里一次性复位** ✓（round 118，用户真机反馈：
+         *   "回到主界面的时候有的时候顶栏内容会消失，并且整体下移，并短暂恢复" ✗）。
+         *
+         * 三笔账都要当场清 ✓，否则它们会被下一次 200ms 的轮询"补"上 ✗ ——
+         * 屏幕上就是"先错一下、再跳回来" ✓：
+         *   ① 文档滚动条还原 ✓；
+         *   ② 预览层内边距缓存与变量清零 ✓（否则下一次打开会带着旧值先用一帧 ✗）；
+         *   ③ 顶栏/内容的让位量立刻重算 ✓（`refreshPush` ✓）。
+         */
+        try {
+          if (dshmPrevDocOverflow !== null) {
+            document.documentElement.style.overflow = dshmPrevDocOverflow
+            dshmPrevDocOverflow = null
+          }
+        } catch (error) {
+          void error
+        }
+        dshmPreviewPadCache = { layer: null, safeTop: -1, need: 0 }
+        // ★ 同一帧把被推下去的顶部工具行还回去 ✓（否则"下沉"要等到下一轮轮询 ✗）
+        try {
+          restoreTopChrome()
+        } catch (error) {
+          void error
+        }
+        // ★ 入场动画的旗标复位 ✓ —— 下一次打开才允许再放一遍 ✓（见 playDshPreviewEnter）
+        dshmPreviewEnterPlayed = false
+        try {
+          /**
+       * ★★ round 173（用户实拍："**偶尔**文件预览的顶栏一开始还在状态栏位置，打开的瞬间才到标准位置"）：
+       *   这里原来在**关预览时**把变量清成 `0px` ✗ ⇒ 下一次预览的**第一帧**就按 0 上内边距画 ✓
+       *   ⇒ 它自己的顶栏又出现在状态栏位置 ✓，等 JS 量完才复位 ✓（"偶尔"= 只在"上一次也量出 0"时才复现 ✓）。
+       * ⇒ 空闲时把它留在**安全区**（= CSS 那条兜底值 ✓）：
+       *   · 预览出现的第一帧就已经留足了安全区 ✓（**结构上不可能**再压在状态栏里 ✓）；
+       *   · JS 量完若发现"其实不用这么多"（顶部工具行与预览层在同一个流里那种 ✓），
+       *     会在**同一个 tick 里**收窄 ✓（round 171 ✓）⇒ 屏幕上不会出现中间帧 ✓。
+       */
+      document.documentElement.style.setProperty(
+        '--dshm-preview-pad',
+        'max(env(safe-area-inset-top, 0px), ' + String(safeTopPx()) + 'px)',
+      )
+        } catch (error) {
+          void error
+        }
+        /**
+         * ★★ round 157（B ✓）：**用户报到的那一条** —— 从文件面板点开的 DSH 预览关掉之后，
+         *   把为此收起的文件面板**还回去**（并落回原目录 ✓）。与 `finishPreviewCloseNow`
+         *   调的是**同一个函数** ✓（只还一次 ✓；"最小化"那一支由它自己挡掉 ✓）。
+         * ★ 放在这一支的**最后** ✓：三笔复位都做完了再拉面板 ✓（否则会闪一下 ✗）。
+         */
+        restoreFilesAfterDshPreview('预览层已消失')
+      }
+      if (open) {
+        try {
+          hideUselessPreviewControls(dshPreviewSurface())
+        } catch (error) {
+          /* 隐藏失败不影响主流程 ✓（但也不静默 ✗：写一行日志 ✓） */
+          debugBoxLine('[dsh-preview] 收起控件失败：' + String(error && error.message ? error.message : error))
+        }
+      }
+      if (open !== was || (open && dshPreviewLogged !== 'open')) {
+        dshPreviewLogged = open ? 'open' : 'closed'
+        debugBoxLine(
+          open
+            ? '[dsh-preview] DSH 自带预览已打开 → 外壳让位（侧滑交给它 ✓、顶栏让开 ✓）'
+            : '[dsh-preview] DSH 自带预览已关闭 → 外壳恢复 ✓',
+        )
+        /**
+         * ★ 原生预览一打开，就**收起我们自己的抽屉** ✓。
+         *
+         * 用户反馈："ui 和原生框的复制冲突，建议**风格一致**嵌入原生框里" ✗ ——
+         * 原生预览是整屏的 ✓，我们的工具行（返回文件/下载/看源码 ✓）如果还浮在上面，
+         * 就会和它自己的控件（换行 ✓、打开方式 ✓、重新读取 ✓）挤在一起 ✓。
+         * 收起来之后，屏幕上只剩原生那一套 ✓ = 风格一致 ✓。
+         *
+         * ★★ round 158（B1 ✓）：**文件面板不再在这里被收起** ✗✗（这里原来是
+         *   `sheet.setOpen(false)` ✓）—— 它就是用户 B1 抱怨的那条"先回主页面、
+         *   文件目录再跳出来"的另一半 ✗（`openFileInDshPreview` 那头也删了 ✓）。
+         *   现在改成"**状态保持 open、但预览开着时不画它**" ✓ —— 见那条 CSS ✓。
+         *   左抽屉（`setDrawer(false)`）**不动** ✓：它不是"返回落点"，
+         *   留着只会和预览的控件挤在一起 ✗（老行为 ✓）。
+         */
+        if (open) {
+          try {
+            if (typeof setDrawer !== 'undefined' && setDrawer !== null) setDrawer(false)
+          } catch (error) {
+            /* 面板还没装好就算了 ✓ */
+          }
+        }
+        try {
+          refreshPush()
+        } catch (error) {
+          /* 还没装好就算了 ✓（首次调用发生在安装之前 ✓） */
+        }
+      }
+      return open
+    }
+
+    /**
+     * 两条驱动 ✓：**观察器**（快 ✓）+ **轻量轮询**（稳 ✓）。
+     *
+     * ★ 为什么两条都要：第一版只有观察器 ✗ —— 实测它**根本没生效** ✗
+     *   （验收里同一段：探针读到 `null` ✓，而滑动（touchstart 里会判一次）之后读到 `1` ✓
+     *   —— 说明只有手势那条路径在工作 ✓），而我当时的 `catch` 还把错误**吞了** ✗
+     *   —— 那正是本项目最忌讳的"静默失败" ✗。
+     *   现在：观察器失败会写进调试框 ✓（不静默 ✗），
+     *   并且每 400ms 兜一次 ✓（一次 `querySelector` + 两个 `getBoundingClientRect` ✓，
+     *   开销可忽略 ✓，却让"外壳知道预览开着"这件事不依赖观察器是否好用 ✓）。
+     */
+    var previewWatchQueued = false
+    var runPreviewWatch = function () {
+      if (previewWatchQueued) return
+      previewWatchQueued = true
+      requestAnimationFrame(function () {
+        previewWatchQueued = false
+        syncDshPreviewState()
+      })
+    }
+    try {
+      new MutationObserver(runPreviewWatch).observe(document.body, { childList: true, subtree: true })
+    } catch (error) {
+      debugBoxLine('[dsh-preview] 观察器不可用（' + String(error && error.message ? error.message : error) + '）→ 靠轮询 ✓')
+    }
+    try {
+      // ★ 400ms → 200ms：同上 ✓（"顶栏回来得太慢" ✗）；一次查询的开销可忽略 ✓
+      setInterval(syncDshPreviewState, 200)
+      // 输入区的滚动封装也要跟着 DOM 变化重跑 ✓（composer 会被 DSH 重渲染 ✓；很便宜 ✓）
+      setInterval(tuneComposerScroll, 200)
+      // 预览头部的安全区让位也要跟着重跑 ✓（预览可能刚被打开 ✓、也可能被重渲染 ✓）
+      setInterval(tuneDshPreviewSafeArea, 200)
+      /**
+       * ★ 壳 insets 的**兜底对账**（round 115）✓：壳那条"推"的路可能被漏掉
+       *   （页面刚被换掉、事件正好落在导航中间 ✓）—— 每秒问一次就能收敛 ✓。
+       *   没壳时是一次 `undefined` 判断 ✓，开销可忽略 ✓。
+       * ★ round 155：安全区一变，**顶栏的内边距就变** ⇒ 「对话/轨迹」那一行会上下移动 ✓，
+       *   而那是 `padding` 变化（既没有 DOM 变动 ✗、也不一定有 resize 事件 ✗）——
+       *   子智能体那个入口的位置就悬在半空 ✗。所以这条每秒的对账里**顺手把它重摆一次** ✓
+       *   （只查一个属性、读几个 rect ✓，比同处那三条 200ms 轮询便宜 ✓）。
+       */
+      if (shellBridge() !== undefined) {
+        setInterval(function () {
+          /**
+           * ★★ round 157（A ✓）：两件事**各自兜住** ✓ —— 这里原来是裸的两句 ✗：
+           *   `pullShellInsets()` 一旦抛（壳那条桥在导航中间被换掉过 ✓），
+           *   后面的 `reflowLineageEntry()` 就**每次都被跳过** ✗✗，
+           *   而且 `setInterval` 里的异常是**完全静默**的 ✗ ⇒
+           *   真机上就是"入口一直停在一个错误的位置、日志里一个字都没有"✓✓。
+           * 这正是怀疑③的形状 ✓（吞掉的异常伪装成"按钮坏了"✓）。
+           */
+          try {
+            pullShellInsets()
+          } catch (error) {
+            noteLineageOnce('拉壳 insets 失败：' + String(error && error.message ? error.message : error))
+          }
+          try {
+            reflowLineageEntry()
+          } catch (error) {
+            noteLineageOnce('每秒对账时定位失败：' + String(error && error.message ? error.message : error))
+          }
+        }, 1000)
+      }
+    } catch (error) {
+      debugBoxLine('[dsh-preview] 轮询装不上（' + String(error && error.message ? error.message : error) + '）✗')
+    }
+
+    function syncDrawer() {
+      if (document.body === null || document.body === undefined) return
+      var open = document.body.dataset.dshMobileDrawer === 'open'
+      // 内容常驻：即使抽屉关着也让 DSH 保持展开（否则关闭动画会突然变空）
+      ensureSidebarExpanded()
+      applyPush()
+      // 图标恒为 ☰：用户明确不要"汉堡变叉号"。
+      // 关闭方式保持不变（点主页面 / 点会话行 / 再点一次汉堡）。
+      // aria-expanded 仍随状态更新，读屏用户能知道当前是开是关。
+      var expanded = open ? 'true' : 'false'
+      if (nav.getAttribute('aria-expanded') !== expanded) nav.setAttribute('aria-expanded', expanded)
+    }
+
+    /**
+     * 给 DSH 的设置弹窗打标记，供窄屏布局改写使用。
+     *
+     * 为什么不直接写类名：DSH 的类名是**构建哈希**（`VOzbGW_panel` 之类），
+     * 升级一次就全变；而"body 下的 role=presentation 浮层里有一个 nav 和一个内容列"
+     * 这个**结构**是语义稳定的。标记后 CSS 用 [data-dshm-panel] 选择，不受哈希影响。
+     *
+     * 这也解释了为什么之前设置界面完全不可用：面板是渲染在**侧栏列内部**的
+     * fixed 浮层，而我们给侧栏列加了 transform（会让它成为 fixed 后代的包含块），
+     * 于是面板宽度被压成 263px。改用 left 位移后已恢复整屏宽。
+     */
+    function tagSettingsOverlay() {
+      // 不限定必须是 body 的直接子元素：DSH 把它 portal 到哪一层是实现细节，
+      // 实测按 `body > [role=presentation]` 找不到它（标记没生效、布局照旧）。
+      // 改为全文档找 + 结构特征（有一个 nav 子元素）来确认是设置弹窗。
+      var overlays = document.querySelectorAll('[role="presentation"]')
+      for (var i = 0; i < overlays.length; i++) {
+        var overlay = overlays[i]
+        var panel = overlay.querySelector(':scope > div:not([class*="mask"])')
+        if (panel === null || panel === undefined) continue
+        if (panel.querySelector('nav') === null) continue
+        /**
+         * ★ 一次性的那几件事（打标记 / 收掉授权条）**只在第一次**做 ✓。
+         */
+        if (overlay.dataset.dshmSettings !== '1') {
+          overlay.dataset.dshmSettings = '1'
+          panel.dataset.dshmPanel = '1'
+          // 已经画在屏幕上的授权条要**当场收掉**：它盖住的正是导航行 ✗
+          // （关掉设置后 4 秒一轮的轮询会重新征询，不会因此丢掉这次提问 ✓）
+          var asking = document.querySelector('[data-dshm-askbar]')
+          if (asking !== null && asking !== undefined) asking.remove()
+        }
+        /**
+         * ★★ 这两件必须**每一轮都跑** ✗✗（不能塞进上面那个 `if` 里 ✗）。
+         *
+         * 为什么：它们**改的是 DSH 的渲染结果** ✓ —— 而 `nav` / `options` 都归 React 管 ✓，
+         * 它一重渲染就会把我们的节点冲掉 ✓（第 5 个导航项、我们那份正文 ✓）。
+         * 放进 `if (还没标记过)` 里就等于"只在刚打开那一瞬间补一次" ✓ ——
+         * 面板开着的时候只要 React 再渲染一次（分组数据到达 ✓、连接状态变化 ✓），
+         * 我们的项就**永久消失** ✗，而屏幕上表现为"这一页有时在、有时不在"✓✓
+         * （这类"偶发"最难查 ✓）。
+         * 两个函数都是**幂等**的 ✓（按 `data-dshm-*` 认出自己 ✓），所以每轮跑是安全的 ✓，
+         * 而且都很轻（就是几个 querySelector ✓）。
+         */
+        tagSettingsChrome(panel)
+        // ★ 把我们的「连接与设备」挂成第 5 个导航项 ✓（只在壳里 ✓，见 ensureConnSettings ✓）
+        ensureConnSettings(panel)
+      }
+    }
+
+    /**
+     * 给设置弹窗里的**结构位置**打我们自己的属性 ✓（CSS 只认属性，不认哈希类名 ✓）。
+     *
+     * DSH 的结构（来自它的 `SettingsPanel` ✓，实测一致 ✓）：
+     *   panel            = `.VOzbGW_panel`       （调用方已打 `data-dshm-panel` ✓）
+     *   panel.children   = [nav, content]
+     *   content.children = [header, options]
+     *   header.children  = [actions（`settings.action` 槽 =「打开配置文件」）, close（那个 × ）]
+     *
+     * 为什么按**子节点顺序**认而不是按类名：类名是构建哈希 ✗（见 tagSettingsOverlay ✓）。
+     * 这个顺序假设与既有 CSS（`> nav` / `> div:last-child` ✓）和验收脚本
+     * （`panel.children[panel.children.length - 1]` ✓）**完全一致** ⇒ 没有新增一类风险 ✓。
+     *
+     * ★ 为什么用 `children[1]` 而不是 `lastElementChild` ✗：我们自己的正文
+     *   （`.dshm-conn-body` ✓）就追加在 `content` 末尾 ✓ —— 用 lastElementChild 会在
+     *   "我们选中过之后再跑一轮"时把我们的正文误认成 options ✗（这一轮就会自己踩到 ✓）。
+     */
+    function tagSettingsChrome(panel) {
+      var content = panel.children[1]
+      if (content === undefined || content === null) return
+      var header = content.children[0]
+      var options = content.children[1]
+      if (options !== undefined && options !== null) options.setAttribute('data-dshm-settings-options', '1')
+      if (header === undefined || header === null) return
+      header.setAttribute('data-dshm-settings-header', '1')
+      var actions = header.children[0]
+      if (actions !== undefined && actions !== null) actions.setAttribute('data-dshm-settings-actions', '1')
+      var close = header.children[1]
+      if (close !== undefined && close !== null && close.tagName === 'BUTTON') {
+        close.setAttribute('data-dshm-settings-close', '1')
+      }
+    }
+
+    /**
+     * 关闭 DSH 原生设置弹窗。
+     *
+     * 三条路径依次尝试，**每一步都要说得出来**（调试框里写清用了哪条 ✓）：
+     *   ① 我们**自己标记过的**那个关闭键 ✓（最"正"的一条：走 DSH 的内部状态 ✓）；
+     *   ② Escape（DSH 的 `SettingsPanel` 自己监听着 document 级的 Escape ✓，实测这条**必定**可用 ✓）；
+     *   ③ 蒙层（最后兜底 ✓）。
+     * 为什么不只留一条：DSH 换一版实现就可能换掉关闭键 ✗，
+     * 而"手机上关不掉一个全屏弹窗"是能把人困住的那种故障 ✓。
+     *
+     * ★ 为什么改成"点我们标记过的那个"而不再是"按 aria-label 找" ✗：
+     *   实测（见 settings-general 的 `SettingsPanel` ✓）那个 × 的可读名只在
+     *   **视觉隐藏的 `<span>`** 里 ✓，它**没有 `aria-label`、也没有 `title`** ✗ ——
+     *   于是原来那套 `/关闭|Close/` 匹配**从来没匹配到它** ✓（真正生效的一直是 ② Escape ✓）。
+     *   现在我们在 `tagSettingsChrome` 里认出了那个 button ✓，① 才第一次真的走通 ✓。
+     *   注意壳里它被 CSS 藏了（`display:none` ✓），但 `.click()` 对隐藏元素依然有效 ✓。
+     */
+    function closeSettingsOverlay(overlay, panel) {
+      var tagged = panel.querySelector('[data-dshm-settings-close="1"]')
+      if (tagged !== null && tagged !== undefined) {
+        tagged.click()
+        debugBoxLine('[settings] 已用 DSH 自己的关闭键退出')
+        return
+      }
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      } catch (error) {
+        void error
+      }
+      var mask = overlay.firstElementChild
+      if (mask !== null && mask !== undefined && mask !== panel) mask.click()
+      debugBoxLine('[settings] 已用 Escape / 蒙层退出')
+    }
+
+    /**
+     * ★ 把我们的「连接与设备」挂成 DSH 设置弹窗里的**第 5 个导航项** ✓
+     *   （用户第 5 点："把右边的设置集成到左边来" ✓；左边 = DSH 原生设置 ✓）。
+     *
+     * ## 为什么必须合并
+     * 在此之前手机上**有两处都叫"设置"**：左边 DSH 原生那一套（通用/模型/插件/预设 ✓）
+     * 与右边我们文件面板齿轮里那一页（配对/隧道/端侧能力 ✓）。用户点错一次就要在原生
+     * 界面里迷路一轮 ✗（我们自己那页顶上原来还专门写了一行字去解释这件事 ✗）。
+     * 合并之后：**一个设置面**，我们那一页就是它的第 5 个分组 ✓。
+     *
+     * ## 三个必须说清的机制
+     *   ① **只在壳里注入** ✓（判据 `shellBridge() !== undefined` ✓ —— 与文件里其它处
+     *      "只在壳里"的写法完全一致 ✓）。电脑端浏览器里 DSH 的设置必须**原样** ✓；
+     *   ② **DSH 会把我们的节点冲掉** ✗ —— `nav` / `options` 都归 React 管 ✓，它一重渲染
+     *      我们的节点就没了 ✓。所以这里每一轮观察者都跑一遍，靠 `data-dshm-conn-nav`
+     *      幂等补回 ✓（与 `tagSettingsOverlay` 同一套"认出/补回"的思路 ✓）；
+     *   ③ **它那份 active 高亮我们改不了** ✗（那是 React 的 state ✓）—— 于是：
+     *      点我们的项时 `stopPropagation` ✗（别让 DSH 的处理器把 activeId 也换掉 ✓）；
+     *      再用 CSS 按 `aria-current="true"` 把**它**的高亮压掉 ✓、
+     *      按面板上的 `data-dshm-conn-active` 点亮**我们**这一项 ✓。
+     *
+     * ## ★★ round 138：**active 是双向的**（真 bug：选了我们就切不回其它四个 ✗）
+     *
+     * 用户原话："如果选择了连接与设备，就无法切到其他四个选项"✗。
+     * 根因：`data-dshm-conn-active` 一旦置上**再没人清** ✗ ⇒
+     *   · 我们那份正文一直显示 ✓（那时它还没被门控 ✗）；
+     *   · `[data-dshm-conn-active="1"] [data-dshm-settings-options] { display:none }` 一直压着 DSH 的正文 ✓
+     * ⇒ 点 DSH 的「通用设置」时 React **确实**换了 activeId ✓、`options` 里**确实**换了内容 ✓，
+     *   但屏幕上什么都没变 ✓✓（用户看到的就是"切不过去"✗）。
+     * 修法：在 `navList` 上挂一个**捕获阶段**的点击监听 ✓ —— 只要点的不是我们那一项 ✓，
+     *   就把 active **交还**给 DSH ✓（`releaseConnActive` ✓）。
+     *
+     * 为什么用**捕获**而不是冒泡 ✗：DSH 的处理器可能 `stopPropagation` ✓，
+     *   冒泡阶段我们就收不到那一下了 ✓；捕获先手 ✓（而且要"要嘛完全让开、要嘛整笔拿走" ✓ ——
+     *   我们**不** preventDefault / stopPropagation ✓，DSH 该怎么切还怎么切 ✓）。
+     * 为什么挂在 `navList` 上而**不是**每个 DSH 项上 ✗：那些项归 React 管 ✓、
+     *   每次重渲染都可能换新节点 ✓，逐个挂必然漏 ✓；`navList` 是它们**稳定的父节点** ✓
+     *   （位置在树里固定 ✓，React 会复用 ✓），一次挂上就够 ✓。
+     * 为什么不会与 React 重渲染打架 ✓：我们只改**自己的一个属性** ✓、
+     *   不做 DOM 增删 ✓（正文的显示与否也由同一个属性驱动 ✓，见 CSS ✓）——
+     *   React 重渲染多少次都不会把"我们藏起来的那份"弄乱 ✓；反过来，
+     *   万一 `navList` 真被换掉 ✓，下面那个幂等标记会在**下一轮**（≤120ms ✓）重新挂上 ✓。
+     *
+     * ## 我们**不**做的
+     *   · 不删 DSH 的正文 ✗（只 `display:none` ✓）：React 下次重渲染还会建回来 ✓；
+     *   · **绝不动那 5 个端侧能力胶囊** ✗✗ —— `scripts/check-device-channel.mjs` 写着硬约束：
+     *     它是端上唯一的授权入口 ✓。
+     */
+    function ensureConnSettings(panel) {
+      if (shellBridge() === undefined) return
+      var nav = panel.querySelector('nav')
+      if (nav === null || nav === undefined) return
+      var navList = nav.lastElementChild
+      if (navList === null || navList === undefined) return
+      var content = panel.children[1]
+      if (content === undefined || content === null) return
+      var cell = navList.querySelector('[data-dshm-conn-nav="1"]')
+      if (cell === null || cell === undefined) {
+        cell = document.createElement('button')
+        cell.type = 'button'
+        cell.className = 'dshm-set-navcell'
+        cell.setAttribute('data-dshm-conn-nav', '1')
+        cell.setAttribute('data-dshm-action', 'open-conn-settings')
+        cell.innerHTML = ICON_PLUG_16
+        var label = document.createElement('span')
+        label.className = 'dshm-set-navcell-label'
+        label.textContent = '连接与设备'
+        cell.appendChild(label)
+        cell.addEventListener('click', function (event) {
+          if (event !== undefined) {
+            if (typeof event.stopPropagation === 'function') event.stopPropagation()
+            if (typeof event.preventDefault === 'function') event.preventDefault()
+          }
+          panel.dataset.dshmConnActive = '1'
+          // ★ 刚点进来 ⇒ **重画一遍** ✓（否则会看到上次挂载时的数字 ✓，可能是几分钟前的 ✓）
+          mountConnBody(panel, true)
+        })
+        navList.appendChild(cell)
+      }
+      /**
+       * ★★ round 138：把 active **交还**的监听（见上面那段 ✓）——
+       *   幂等标记挂在 `navList` **自己身上** ✓，所以 `navList` 换新节点时会自动重挂 ✓。
+       */
+      if (navList.getAttribute('data-dshm-conn-handback') !== '1') {
+        navList.setAttribute('data-dshm-conn-handback', '1')
+        navList.addEventListener(
+          'click',
+          function (event) {
+            var target = event === undefined ? undefined : event.target
+            if (target === null || target === undefined || typeof target.closest !== 'function') return
+            // 点的是我们那一项 ⇒ 不交还 ✓（那一项的处理器在冒泡阶段负责"抢过来" ✓）
+            if (target.closest('[data-dshm-conn-nav="1"]') !== null) return
+            releaseConnActive(panel)
+          },
+          true,
+        )
+      }
+      // 切到我们这一页之后，React 每次重渲染都可能把我们那份正文冲掉 ⇒ 每一轮补一次 ✓
+      if (panel.dataset.dshmConnActive === '1') mountConnBody(panel)
+    }
+
+    /**
+     * 把我们那一页的正文挂进 `content` 的**末尾** ✓（幂等 ✓ —— 被 React 冲掉之后
+     * 下一轮观察者就补回来 ✓）。
+     *
+     * 为什么挂在 `content` 而不是 DSH 的 `options` 里 ✗：`options` 是 React 直接管的
+     * 容器 ✓（它每次都把 active section 渲染进去 ✓），往里塞节点等于和它的重渲染抢地盘 ✓；
+     * 挂在 `content`（flex 列）里则是**并排的一个兄弟** ✓ —— 再用一条
+     * `[data-dshm-conn-active="1"] [data-dshm-settings-options] { display: none }` ✓
+     * 把 DSH 那份藏掉 ✓，两边互不写对方的地盘 ✓。
+     */
+    function mountConnBody(panel, fresh) {
+      var content = panel.children[1]
+      if (content === undefined || content === null) return
+      var body = content.querySelector('[data-dshm-conn="1"]')
+      if (body === null || body === undefined) {
+        body = document.createElement('div')
+        body.className = 'dshm-conn-body'
+        body.setAttribute('data-dshm-conn', '1')
+        content.appendChild(body)
+        fillConnSettings(body, getTunnel)
+        return
+      }
+      /**
+       * ★ round 138：两件事都要**重画** ✓ ——
+       *   · `fresh === true`：用户**刚点进来**（我们那一项被点 ✓）⇒ 数字/开关状态都取当下 ✓
+       *     （否则看到的是上次挂载那一刻的快照 ✓，可能是几分钟前的 ✗）；
+       *   · 子节点为空：React 有时只清空子节点、留着容器 ✓。
+       * 其余情况**什么都不做** ✓ —— 这个函数每轮观察者都会跑（≤120ms ✓），
+       * 无条件重画会把整页翻来覆去地重建 ✗（也正是"面板看着在抖"那类问题的来源 ✓）。
+       */
+      if (fresh === true || body.childNodes.length === 0) {
+        body.replaceChildren()
+        fillConnSettings(body, getTunnel)
+      }
+    }
+
+    /**
+     * ★★ round 138：把 active **交还**给 DSH ✓（用户点它自己的分组时 ✓）。
+     *
+     * 只做一件事：删掉 `data-dshm-conn-active` ✓ —— 这一个属性同时驱动三处 CSS ✓：
+     *   · 我们的正文 `[data-dshm-conn]` 显示 / 隐藏 ✓；
+     *   · DSH 的正文 `[data-dshm-settings-options]` 隐藏 / 显示 ✓（与上面正好相反 ✓）；
+     *   · 我们那一项与 DSH 那一项的**高亮** ✓。
+     * ⇒ 一个开关翻面，两边同时换 ✓（**没有第二份状态** ✓ —— 本项目对"同一个概念
+     * 两个事实来源"零容忍 ✗，这里是一条）。
+     *
+     * @returns true = 确实交还了（原先是我们这一页 ✓）；false = 本来就不在我们这一页 ✓。
+     */
+    function releaseConnActive(panel) {
+      if (panel.dataset.dshmConnActive === undefined || panel.dataset.dshmConnActive === null) return false
+      delete panel.dataset.dshmConnActive
+      return true
+    }
+
+    /**
+     * 给 DSH 的**顶栏本体**打标记，供 CSS 让出我们自建顶栏的高度。
+     *
+     * ★ 原先 CSS 直接写 `[class*="header"] { padding-top: … !important }` —— **太宽了**：
+     *   它会把**任何**类名含 header 的元素都往下推 52px，包括上下文面板里的
+     *   `JObwrW_header`，于是那个面板顶上凭空多出一大块空白 ✗（用户报的
+     *   "点开上下文比例多了一块空白区域"就是它 —— 是本项目**第二次**栽在
+     *   "选择器写太宽"上，第一次是 `[class*="collapsed"]` 把 frame 宽度改坏）。
+     *
+     * 改法与 `tagSettingsOverlay` 同一套：**认出那个元素、打我们自己的属性**，
+     * CSS 只认属性 ✓。主路径是结构关系（实测 DSH 是 `header > titleRow`），
+     * 兜底再按"整屏宽 + 有高度 + 不在任何对话框里"找一次。
+     */
+    function tagTopHeader() {
+      if (document.body === null || document.body === undefined) return
+      var titleRow = document.querySelector('[class*="titleRow"]')
+      var header = titleRow === null || titleRow.parentElement === null ? null : titleRow.parentElement
+      if (header === null || header === undefined) {
+        var all = document.querySelectorAll('[class*="header"]')
+        for (var i = 0; i < all.length; i++) {
+          // 面板/弹窗里的 header 一律排除（这正是上一版闯祸的地方）
+          if (all[i].closest('[role="dialog"]') !== null) continue
+          var rect = all[i].getBoundingClientRect()
+          if (rect.height > 24 && rect.width >= window.innerWidth * 0.6) {
+            header = all[i]
+            break
+          }
+        }
+      }
+      if (header === null || header === undefined) return
+      if (header.dataset === undefined) return
+      if (header.dataset.dshmTopheader !== '1') header.dataset.dshmTopheader = '1'
+    }
+
+    /**
+     * ★★ round 158（A ✓）：这个节点**自己会不会生成盒子** ✓。
+     *
+     * `display: contents` 的元素**不生成盒子** ⇒ `getBoundingClientRect()` 恒 `0×0` ✓、
+     * `position / right / top / max-width` 一律无效 ✓ —— DSH 的插槽包装层就是它 ✓
+     * （真机读数：`crumbSeg > div[display:contents] > div.ZKlsPq_root > button` ✓）。
+     * 认错这一层的后果见 `tagLineageEntry` 那段说明 ✓（一句话：真机上入口"完全没有"✓✗）。
+     *
+     * 读不到计算样式时按"有盒子"处理 ✓ —— 宁可多认一层（最坏也只是回到 round 157 的行为 ✗），
+     * 也不要因为一次异常把入口整个丢掉 ✗。
+     */
+    function lineageGeneratesBox(node) {
+      if (node === null || node === undefined) return false
+      try {
+        return getComputedStyle(node).display !== 'contents'
+      } catch (error) {
+        void error
+        return true
+      }
+    }
+
+    /** ★★ round 158（A ✓）：只为**日志**用 —— 把计算 `display` 读成一句话 ✓（读不到就 `?` ✓）。 */
+    function lineageDisplayOf(node) {
+      try {
+        return String(getComputedStyle(node).display || '?')
+      } catch (error) {
+        void error
+        return '?'
+      }
+    }
+
+    /**
+     * ★★ round 158（A ✓）：**只给日志用** —— 把入口往上 4 层串成一行 ✓：
+     * `tag.class(display,visibility,WxH) < …`。
+     *
+     * 为什么值得写 ✗：真机上**没有控制台** ✓，用户只会照着调试框念那一行 ✓；
+     * 而"到底是哪一层没有盒子"必须**一眼可辨** ✓ —— 本轮就是靠
+     * "包装层 `display:contents` ⇒ `0×0`"这一条定的案 ✓（见 `tagLineageEntry` ✓）。
+     * 只读计算样式 + rect ✓，而且只在"量不到尺寸"这条**异常路径**上调用 ✓（平时一次都不跑 ✓）。
+     */
+    function lineageAncestorChainOf(node) {
+      var parts = []
+      var walk = node
+      for (var i = 0; i < 4 && walk !== null && walk !== undefined; i++) {
+        try {
+          var cs = getComputedStyle(walk)
+          var r = walk.getBoundingClientRect()
+          parts.push(
+            String(walk.tagName || '').toLowerCase() + '.' + String(walk.className || '').split(' ')[0] +
+              '(' + cs.display + ',' + cs.visibility + ',' + Math.round(r.width) + '×' + Math.round(r.height) + ')',
+          )
+        } catch (error) {
+          void error
+        }
+        walk = walk.parentElement
+      }
+      return parts.join(' < ')
+    }
+
+    /**
+     * ★★ round 155：把 DSH 自己的「**子智能体**」入口从标题行搬到「轨迹」右边 ✓。
+     *
+     * ## 用户原话与它落到哪一行
+     * "电脑上的子智能体页面在标题旁边，于是手机看不到，我希望你放在手机的『轨迹』右边"✓。
+     * 那个入口是 DSH 的插件 `@deepseek-ai/dsh-client-ui-subagent` ✓（槽
+     * `conversation.session.header.lineage` ✓），渲染在
+     * `header > titleRow > titleCluster > nav.crumbs > span.crumbSeg` 里、紧挨会话标题 ✓；
+     * 而我们把**整行**藏了（见样式里 ④ 那条 ✓）⇒ 手机上它一点都看不见 ✗。
+     *
+     * ## 为什么不把节点搬过去 ✗
+     * 那块地是 `renderSlot` 管的 ✓ —— **物理搬家会跟 React 的 reconciliation 打架** ✗
+     * （本项目的老规矩：绝不动 DSH 渲染的节点 ✓）。
+     * 沿用 `tagTopHeader` 那套：**认出元素 → 打我们自己的属性 → CSS 只认属性** ✓；
+     * 位置不写死 ✗，而是**每轮按当下的 rect 现算三个变量** ✓（观察者里幂等重放 ✓）。
+     *
+     * ## 认出它靠什么 ✓
+     * 触发键上的 `aria-haspopup="tree"` ✓ —— 那是**语义属性**（用户/无障碍可见 ✓），
+     * 不是构建哈希类名 ✓（`ZKlsPq_…` 会随 DSH 版本变 ✗）。两种形态都有它 ✓：
+     *   · 普通会话（有子代理）= 小胶囊 ✓；· 子代理会话里 = 切换器 ✓。
+     *
+     * ## 没有子代理时 ✗
+     * 那个槽**什么都不渲染** ✓（插件里 `if (!visible) return null` ✓）⇒ 这里认不到入口 ✓
+     * ⇒ 只做一件事：把上一轮打的标记**收干净** ✓ —— 标签行右端不留空白、
+     *   高度与布局一个像素都不变 ✓（这一条验收里有断言盯着 ✓）。
+     */
+    /**
+     * ★★ round 159（A ✓）：**状态的唯一来源** = DSH 那颗触发键（`trigger` ✓）——
+     * 它虽然不画了 ✗，但仍然是**真值来源**（文本/计数/在跑与否/展开与否 ✓）
+     * 与**行为代理的目标**（点击/悬停转发过去 ✓）。每一轮由 `tagLineageEntry` 刷新 ✓。
+     */
+    var lineageTriggerNode = null
+
+    /**
+     * ★★ round 159（A ✓）：造**我们自己的**入口控件 ✓（只造一次 ✓，之后每轮只改内容 ✓）。
+     *
+     * 结构：`<div data-dshm-lineage="count|switcher"><button data-dshm-lineage-btn="1">
+     *        [<span data-dshm-lineage-dot="1">]<span data-dshm-lineage-label="1">文案</span>
+     *        </button></div>`
+     *
+     * ★ 里面**没有** `svg` ✓（那根 `∨` 不存在 ✓）、**没有**前导 `/` ✓、
+     *   **没有** DSH 的 `StateDot` ✓ —— 用户说的那三件外来物从此**根本不存在** ✓
+     *   （不需要任何"隐藏它们"的规则 ✓）。
+     */
+    function lineageBuildWidget(host) {
+      if (host === null || host === undefined) return null
+      var widget = document.createElement('div')
+      widget.setAttribute('data-dshm-lineage', 'count')
+      /**
+       * ★★ round 160（A ✓）：进"跟着让位量走"的名单 ✓（见 `pushFollowers` ✓）——
+       *   拖抽屉/文件面板**跟手**那一路是给名单里的元素写**内联** transform ✓，
+       *   名单外的元素在拖的那 200ms 里就是**钉住的** ✗（用户："很明显的卡顿"✓）。
+       *   状态机那一路不靠它 ✓（靠 `[data-dshm-lineage]` 那条 CSS 规则里的
+       *   `translateX(var(--dshm-push))` ✓），两条合起来才覆盖"跟手 + 收尾"全流程 ✓。
+       */
+      widget.setAttribute('data-dshm-push-follower', '1')
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('data-dshm-lineage-btn', '1')
+      button.setAttribute('aria-expanded', 'false')
+      /**
+       * ★ 代理：真机上"点一下"实际发生两件事 ✓ ——
+       *   ① `pointerdown` 时浏览器会合成 `mouseover`/`mouseenter` ⇒ DSH 的树**靠这条打开** ✓；
+       *   ② `click` 那一下（切换器形态靠它导航 ✓）。
+       *   ⇒ 两条都照原样转给 DSH 那颗按钮 ✓（见 `lineageForwardPointer` / `lineageForwardClick` ✓）。
+       */
+      button.addEventListener('pointerdown', function () { lineageForwardPointer() })
+      button.addEventListener('click', function () { lineageForwardClick() })
+      var label = document.createElement('span')
+      label.setAttribute('data-dshm-lineage-label', '1')
+      button.appendChild(label)
+      widget.appendChild(button)
+      host.appendChild(widget)
+      return widget
+    }
+
+    /** ★★ round 159（A ✓）：我们自己的控件挂在这个宿主下 ✓（`document.body` 直挂 ✓，不进 DSH 的 React 树 ✓）。 */
+    function lineageHost() {
+      var host = document.querySelector('[data-dshm-lineage-host]')
+      if (host !== null && host !== undefined) return host
+      if (document.body === null || document.body === undefined) return null
+      host = document.createElement('div')
+      host.setAttribute('data-dshm-lineage-host', '1')
+      document.body.appendChild(host)
+      return host
+    }
+
+    /**
+     * ★★ round 159（A ✓）：**没在跑就不画点** —— 判据直接照着 DSH 的源码来 ✓。
+     *
+     * DSH 那边是条件渲染 ✓：`descendants.runningCount > 0 && <span class="activitySlot">
+     * <StateDot state="ongoing"/></span>` ⇒ "跑着"这件事只表现为触发键里**多了一个
+     * 空的、非 `svg` 的孩子** ✓（计数/名字那两颗都带文字 ✓、`∨` 那颗是 `svg` ✓）。
+     * ⇒ 认它靠**结构 + 有没有文字** ✓，不碰哈希类名 ✗。
+     */
+    function lineageTriggerRunning(trigger) {
+      var kids = trigger.children
+      for (var i = 0; i < kids.length; i++) {
+        if (String(kids[i].tagName || '').toLowerCase() === 'svg') continue
+        if (String(kids[i].textContent || '').trim() !== '') continue
+        return true
+      }
+      return false
+    }
+
+    /** 抄过来的那几项 ✓（正是用户点名要"逐项相等"的那一组 ✓）。 */
+    var LINEAGE_STYLE_KEYS = [
+      'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'color', 'letterSpacing',
+      'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'height', 'boxSizing', 'textTransform',
+    ]
+
+    /**
+     * ★★ round 159（A ✓）：把**真 tab**（「对话 | 轨迹」里**未选中**那一颗 ✓）的计算样式
+     * **逐项抄到我们自己的按钮上** ✓（内联 ✓ ⇒ 优先级最高、也最好被断言量到 ✓）。
+     *
+     * ## 为什么抄、而不是写死 ✗
+     * 用户要的是"**风格和那两个保持一致**"✓ —— 写死一份数值只是"今天像"✗；
+     * 抄真 tab 是让一致**由构造保证** ✓：DSH 换主题/改字号，我们下一轮就跟着变 ✓。
+     *
+     * ## 为什么取**未选中**那一颗 ✓
+     * 选中的那颗字色是 `label-primary`（更亮 ✓）—— 拿它当基准会把**正确**的实现判红 ✗
+     * （round 157 差点自己踩 ✓）。
+     *
+     * ## 抄了 `padding-bottom` 与 `height` 会不会"看着偏低" ✗
+     * 不会 ✓：tab 的 `padding: 0 0 9px` 正是给它自己那条下划线留的带子 ✓
+     * ⇒ 把**同一个盒模型**搬过来，**文字**就落在与 tab 文字**同一条基线**上 ✓
+     * （`placeLineageEntry` 对齐的是整条带子的中心 ✓，两边盒高相同 ⇒ 文字自然齐平 ✓）。
+     *
+     * @returns true = 抄到了 ✓；false = 量不到 tab（这一轮用 CSS 里的兜底值 ✓）。
+     */
+    function applyLineageTabStyle(header, button) {
+      if (button === null || button === undefined) return false
+      var row = lineageTabRow(header)
+      if (row === null) return false
+      var tab = null
+      for (var i = 0; i < row.buttons.length; i++) {
+        if (row.buttons[i].getAttribute('aria-selected') !== 'true') { tab = row.buttons[i]; break }
+      }
+      if (tab === null && row.buttons.length > 0) tab = row.buttons[row.buttons.length - 1]
+      if (tab === null) return false
+      var computed
+      try {
+        computed = getComputedStyle(tab)
+      } catch (error) {
+        noteLineageOnce('读不到 tab 的计算样式（这一轮用兜底样式 ✓）：' + String(error && error.message ? error.message : error))
+        return false
+      }
+      for (var k = 0; k < LINEAGE_STYLE_KEYS.length; k++) {
+        var key = LINEAGE_STYLE_KEYS[k]
+        var value = computed[key]
+        if (value === undefined || value === null || value === '') continue
+        // `paddingTop` → `padding-top` ✓（内联样式只能用带横杠的属性名 ✓）
+        var prop = key.replace(/[A-Z]/g, function (letter) { return '-' + letter.toLowerCase() })
+        if (button.style.getPropertyValue(prop) !== String(value)) button.style.setProperty(prop, String(value))
+      }
+      return true
+    }
+
+    /**
+     * ★★ round 159（A ✓）：**点击代理** —— 把点击原样交给 DSH 那颗按钮 ✓。
+     *
+     * ★ 实测（探针，真 DSH ✓）：**计数形态下 `click()` 打不开那棵树** ✗ ——
+     *   DSH 的 `onClick` 只在 `openTitle !== undefined` 时才挂 ✓
+     *   （`onClick: openTitle === void 0 ? void 0 : () => {...}` ✓），而计数形态没传 ✓
+     *   ⇒ 真机上一次"点"打开树，靠的是浏览器顺手合成的 **`mouseover`/`mouseenter`**
+     *   （根节点上挂着 `onMouseEnter: scheduleHoverOpen` ✓，150ms 后 `changeOpen(true)` ✓）。
+     *   所以**两条都要转** ✓ —— 这正是"真点一下"在真机上发生的全部事情 ✓。
+     */
+    function lineageForwardPointer() {
+      var trigger = lineageTriggerNode
+      if (trigger === null || trigger === undefined) return
+      // 树已经开着 ⇒ **不转**这一步 ✓：让 DSH 自己的 `closeOutside` 把它关掉 ✓
+      // （"再点一下收起"就成立了 ✓；照旧转发会把它 150ms 后又打开 ✗）。
+      if (String(trigger.getAttribute('aria-expanded')) === 'true') return
+      var root = trigger.parentElement
+      if (root === null || root === undefined) return
+      try {
+        root.dispatchEvent(
+          new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window, relatedTarget: null }),
+        )
+      } catch (error) {
+        noteLineageOnce('代理悬停失败：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    /** ★★ round 159（A ✓）：点击那一下照样转给 DSH 那颗按钮 ✓（切换器形态靠它导航 ✓）。 */
+    function lineageForwardClick() {
+      var trigger = lineageTriggerNode
+      if (trigger === null || trigger === undefined) return
+      try {
+        trigger.click()
+      } catch (error) {
+        noteLineageOnce('代理点击失败：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    /**
+     * ★★ round 159（A ✓）：三个定位变量写在**文档根**上 ✓ ——
+     * 我们控件（`[data-dshm-lineage]` ✓）与 DSH 那颗**隐形锚点**（`[data-dshm-lineage-dsh]` ✓）
+     * 读的是同一套 ✓ ⇒ "控件在哪，树菜单就弹在它正下方" ✓（见那条 CSS 的说明 ✓）。
+     */
+    function setLineageVars(name, value) {
+      var root = document.documentElement
+      if (root === null || root === undefined || root.style === undefined) return
+      if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value)
+    }
+
+    function tagLineageEntry() {
+      if (document.body === null || document.body === undefined) return
+      var header = document.querySelector('[data-dshm-topheader]')
+      var entry = null
+      var trigger = null
+      if (header !== null && header !== undefined) {
+        /**
+         * ★ 取**最后一个**（不是第一个 ✗）：面包屑是一层一层排下来的 ✓，
+         *   而"当前就在子代理会话里"时，**最靠后那一段**才是当前会话的切换器 ✓
+         *   （链更深时前面那些是各级祖先的切换器 ✓ —— 手机上只要当前这一个 ✓）。
+         *   普通会话（根会话有子代理）本来就只有一枚 ✓，取哪个都一样 ✓。
+         */
+        var triggers = header.querySelectorAll('button[aria-haspopup="tree"]')
+        if (triggers.length > 0) trigger = triggers[triggers.length - 1]
+        if (trigger !== null && trigger !== undefined) {
+          /**
+           * 入口的"根" = 从触发键往上、直到**父元素是面包屑那一段**（`*_crumbSeg`）✓。
+           * 那一层就是 DSH 插槽的挂载点 ✓（`span.crumbSeg > div.root > button` ✓）。
+           * 找不到就不动手 ✓（宁可什么都不做，也不要瞎定位一个别的元素 ✗）。
+           *
+           * ★★ round 158（A ✓）：**只认"真的有盒子"的那一层** ✗✗ —— 真机复现（真 DSH +
+           * 移动视口，读数见 round 158 报告）量到的真实结构是
+           *   `span.wSkVaW_crumbSeg > div[display:contents] > div.ZKlsPq_root > button`
+           * —— DSH 的**插槽包装层**是 `display: contents`（**不生成盒子** ✓、宽高恒 0 ✓），
+           * 而 round 155/157 认的正是它 ✗ ⇒
+           *   · `getBoundingClientRect()` 恒为 `0×0` ✓ ⇒ 闭环每一轮都在"量不到尺寸"那关退出 ✓
+           *     ⇒ `data-dshm-lineage-blocked="1"` **永远摘不掉** ⇒ 真机上"完全没有"✓✓；
+           *   · 就算硬显示，`position/right/top/max-width` 写在 `display:contents` 上**等于没写**✗
+           *     ⇒ 入口退回自然位置 ⇒ 这正是 round 155 那次"位置错、上半被顶栏裁掉"的形状 ✓。
+           * 判据取**语义计算值** `display !== 'contents'` ✓（不是哈希类名 ✗ ——
+           * `ZKlsPq_` 会随 DSH 版本变 ✓，包装层换个名字也照样跳得掉 ✓）；
+           * 从触发键一路往上取**最外层那个有盒子的**（`boxed`）⇒ 既不依赖"包装层刚好一层"✗，
+           * 也不依赖"根 div 的类名"✗。万一整条路径都没有盒子，`boxed` 兜底是触发键自己 ✓
+           * （按钮一定是个盒子 ✓）。
+           */
+          var node = trigger
+          var boxed = trigger
+          while (node !== null && node !== undefined && node.parentElement !== null && node.parentElement !== header) {
+            if (classHasSuffix(node.parentElement, '_crumbSeg')) { entry = boxed; break }
+            node = node.parentElement
+            if (lineageGeneratesBox(node)) boxed = node
+          }
+        }
+      }
+
+      /** 这一轮该打标记的祖先链（从入口的父节点一直到标题行 ✓）。 */
+      var chain = []
+      if (entry !== null && entry !== undefined) {
+        var walk = entry.parentElement
+        while (walk !== null && walk !== undefined) {
+          chain.push(walk)
+          if (walk === header || classHasSuffix(walk, '_titleRow')) break
+          walk = walk.parentElement
+        }
+      }
+      /**
+       * ★ 幂等重放：**先收干净上一轮的** ✓ —— DSH 一重渲染，入口节点就换了一个 ✓；
+       *   聊天流式输出时这个函数每 120ms 就会跑一遍 ✓，不清理就会越挂越多 ✗
+       *   （残留的链标记会一直让标题行"留着一个孩子"，而那个孩子早就不在了 ✗）。
+       */
+      var staleChain = document.querySelectorAll('[data-dshm-lineage-chain]')
+      for (var i = 0; i < staleChain.length; i++) {
+        if (chain.indexOf(staleChain[i]) < 0 && staleChain[i].dataset !== undefined) delete staleChain[i].dataset.dshmLineageChain
+      }
+      var staleEntry = document.querySelectorAll('[data-dshm-lineage-dsh]')
+      for (var j = 0; j < staleEntry.length; j++) {
+        if (staleEntry[j] !== entry && staleEntry[j].dataset !== undefined) delete staleEntry[j].dataset.dshmLineageDsh
+      }
+      /**
+       * ★★ round 159（A ✓）：**我们自己的控件**（一个 ✓，多出来的当场摘掉 ✓）。
+       * 它挂在**我们自己的宿主**下 ✓ ⇒ DSH 重渲染**不会**把它换掉 ✓
+       * （round 155/157 那套"每轮重新认一遍入口节点"的清理因此只剩幂等作用 ✓）。
+       */
+      var host = lineageHost()
+      var widgets = host === null ? [] : host.querySelectorAll('[data-dshm-lineage]')
+      var widget = widgets.length > 0 ? widgets[0] : null
+      for (var d = 1; d < widgets.length; d++) {
+        if (widgets[d].parentElement !== null) widgets[d].parentElement.removeChild(widgets[d])
+      }
+      /**
+       * ★★ round 159（A ✓）：**没有子代理 ⇒ 右端一个像素都不多** ✓ ——
+       *   把控件**整个摘掉** ✓（不是"藏起来" ✗：藏起来的盒子仍在布局里 ✓，
+       *   而且"没有入口"与"入口被藏了"就再也分不开了 ✗）。
+       *   触发键与锚点都认不到时（DSH 那个槽什么都不渲染 ✓）走到这里 ✓。
+       */
+      if (entry === null || entry === undefined || trigger === null || trigger === undefined) {
+        lineageTriggerNode = null
+        if (widget !== null && widget.parentElement !== null) widget.parentElement.removeChild(widget)
+        return
+      }
+
+      for (var k = 0; k < chain.length; k++) {
+        if (chain[k].dataset !== undefined && chain[k].dataset.dshmLineageChain !== '1') chain[k].dataset.dshmLineageChain = '1'
+      }
+      /** ★ 锚点 = DSH 那颗触发键的根 ✓（**不画、不可点** ✓，只负责"树菜单弹在哪儿"✓）。 */
+      if (entry.dataset !== undefined && entry.dataset.dshmLineageDsh !== '1') entry.dataset.dshmLineageDsh = '1'
+      lineageTriggerNode = trigger
+      if (widget === null || widget === undefined) widget = lineageBuildWidget(host)
+      if (widget === null || widget === undefined) return
+      /**
+       * 形态：**切换器**（当前就在子代理会话里 ✓）还是**计数胶囊** ✓。
+       * 判据用触发键/根的类名后缀里的 `switcher` ✓ —— DSH 那边叫
+       * `*_switcherTrigger` / `*_switcherRoot` ✓（哈希前缀会变，这半截不会 ✓）。
+       */
+      var variant = /switcher/i.test(String(entry.className) + ' ' + String(trigger.className)) ? 'switcher' : 'count'
+      if (widget.dataset !== undefined && widget.dataset.dshmLineage !== variant) widget.dataset.dshmLineage = variant
+      var button = widget.querySelector('[data-dshm-lineage-btn]')
+      var labelNode = widget.querySelector('[data-dshm-lineage-label]')
+      if (button === null || button === undefined || labelNode === null || labelNode === undefined) return
+      /**
+       * ★ 文案**镜像** DSH 那颗按钮的**可见文本** ✓（普通形态 =「N 个子代理」✓、
+       *   子代理会话里 = 当前子代理的名字 ✓）—— **一个字都不自己编** ✓
+       *   （用户明确说过：文字内容不用改 ✓）。兜底用它自己的 `aria-label` ✓。
+       */
+      var mirrored = String(trigger.textContent || '').replace(/\s+/g, ' ').trim()
+      if (mirrored === '') mirrored = String(trigger.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()
+      if (labelNode.textContent !== mirrored) labelNode.textContent = mirrored
+      if (button.getAttribute('aria-label') !== mirrored) button.setAttribute('aria-label', mirrored)
+      var expandedNow = String(trigger.getAttribute('aria-expanded')) === 'true'
+      if (button.getAttribute('aria-expanded') !== String(expandedNow)) button.setAttribute('aria-expanded', String(expandedNow))
+      /**
+       * ★ 状态点：**常驻** ✓，颜色分两态（round 160，用户 B ✓）——
+       *   原文："目前有一个子代理在跑，但左边的那个标是灰色的，我认为这样设计比较好，
+       *         在跑的时候蓝色，跑完了绿色"✓。
+       *   round 159 的写法是"只在跑的时候才画" ✗ ⇒ 用户看到的那颗一直是灰的 ✓
+       *   （`currentColor` + 0.7 ⇒ 与文字同色的灰 ✓），"跑完了"反而**没有点** ✗。
+       *   判据仍是 `lineageTriggerRunning` ✓（= DSH 那颗按钮里多了"空的非 svg 孩子"✓）。
+       *   （整颗入口在没有子代理时仍然**整个摘掉** ✓ ⇒ "没有子代理 ⇒ 右端一个像素都不多"不变 ✓。）
+       */
+      var running = lineageTriggerRunning(trigger)
+      var stateName = running === true ? 'running' : 'idle'
+      if (widget.dataset !== undefined && widget.dataset.dshmLineageState !== stateName) {
+        widget.dataset.dshmLineageState = stateName
+      }
+      var dotNode = widget.querySelector('[data-dshm-lineage-dot]')
+      if (dotNode === null || dotNode === undefined) {
+        dotNode = document.createElement('span')
+        dotNode.setAttribute('data-dshm-lineage-dot', '1')
+        // 纯装饰 ✓：信息已经在按钮的 `aria-label`（= DSH 那串文字 ✓）里了 ✓
+        dotNode.setAttribute('aria-hidden', 'true')
+        button.insertBefore(dotNode, labelNode)
+      }
+      /** ★ 外观：**每轮从真 tab 现抄** ✓（DSH 换主题/换字号就自动跟着走 ✓）。 */
+      applyLineageTabStyle(header, button)
+      /**
+       * ★★ round 157（A ✓）：**先按"不许露出来"待命** ✓ —— 紧接着的 `reflowLineageEntry()`
+       * 会在**同一帧里**量好、摆好、再把标记摘掉 ✓ ⇒ 浏览器根本没有机会画出"半卡"的那一帧 ✓
+       * （同一帧内先加属性再删属性，不会产生中间绘制 ✓）。
+       * 摆不好就一直留着这个标记 ✓（用户看到的是"没有入口"✓，而不是"压在轨迹上"✗✗）。
+       */
+      if (widget.dataset.dshmLineageBlocked !== '1') widget.dataset.dshmLineageBlocked = '1'
+      if (reflowLineageEntry() !== true) {
+        /**
+         * ★ 怀疑①的正面修法 ✓：**入口一出现就算一次** ✓ —— 上面那一次同步算可能太早
+         * （入口刚进 DOM、标签行还没排好 / 面板正在切换 ✓）⇒ 补一帧再量一次 ✓
+         * （一次性 ✓、带令牌 ✓，见 `scheduleLineageReflow` ✓）。
+         */
+        scheduleLineageReflow()
+      }
+    }
+
+    /**
+     * ★★ round 157（A ✓）：**量了再放、放完复量** —— 把入口摆到标签行右端 ✓。
+     *
+     * ## 真机为什么是错的（用户截图：native 1200×2608 / dpr≈3）
+     * 顶栏底边 y≈276 ✓；入口只有下半截露在 y≈280–310、x≈150–380（CSS ≈ x 50–127）✗；
+     * 标签行「对话 轨迹」在 y≈320–370 ✓。⇒ **横向在左边、纵向被顶栏裁掉上半** ✗✗。
+     * 那个组合恰好是"**定位那一步在真机上根本没生效**"的形状 ✓：
+     * `titleRow` 现在是"零高度 + `overflow:visible`" ✓ ⇒ 入口退回**自然位置**渲染 ✓
+     * —— 它自己的包含块很窄（右缘 ≈ 127px ✓），于是 `right:0 / top:0` 的**兜底值**
+     * 正好把它放在 50–127 / 紧贴顶栏下沿 ✓（与截图逐点吻合 ✓）。
+     *
+     * ## round 155 那套算法错在哪 ✗（本轮逐个排掉，见下 ✓）
+     * ① **只算一次、而且只跟着 120ms 去抖的观察者** ✗ —— 入口出现得比"第一次算"晚时，
+     *    算的那一下对象还不存在 ⇒ 只能靠后面的 DOM 变动再触发 ✓；而"入口一出现"这件事
+     *    本身是**属性/节点变动**，我们必须**自己主动补一次** ✓（见 `scheduleLineageReflow` ✓）。
+     * ② **三个变量写到了没被 `[data-dshm-lineage]` 命中的那一层** —— 排除 ✓：
+     *    变量写在 `entry.style` 上 ✓，而 `entry` 就是被打了 `data-dshm-lineage` 的那个节点 ✓
+     *    （`dataset` 与 `style` 同一层 ✓）⇒ **不是**这一条 ✓（但还是加了断言盯着 ✓）。
+     * ③ **`try/catch` 把异常吞了** ✗ —— 本轮修掉 ✓：`reflowLineageEntry` /
+     *    那条 1s 对账 / resize 那条路，凡是 catch 都**留一行日志** ✓
+     *    （本项目明文纪律：静默的失败在手机上只表现为"按钮坏了"✗）。
+     * ④ **`offsetParent` 不是真正的包含块** ✗✗ —— 这条**最可能**：`position:absolute` 的
+     *    偏移语义是"相对**最近的定位祖先**（或最近带 `transform`/`filter`/`contain` 的祖先 ✓）"，
+     *    而 `offsetParent` **跳过**那些"没定位但带 transform"的祖先 ✗ ⇒ 两者不是一回事 ✓。
+     *    旧代码拿 `offsetParent` 的 padding box 去算 ✓ ⇒ 一旦真包含块是**另一个盒子**
+     *    （入口挂在 `.crumbs` / `titleCluster` 那一串里 ✓），整块就**整体错位** ✓✓。
+     *
+     * ## 本轮的算法：**不猜包含块，改成闭环** ✓
+     * 先按老办法给一个**初值** ✓（只当起点 ✓），然后
+     * **写 → 量 → 修**，最多 3 轮 ✓：
+     *   · 目标：`中心 y == 标签行中心` ✓、`右缘 == 标签行右缘` ✓（各 ≤1px ✓）；
+     *   · 修正量 = **屏幕上量到的偏差** ✓ —— 偏移量（`right`/`top`）与屏幕位移
+     *     互为**反向的平移** ✓ ⇒ "右缘还差 dx" 就是 "`right` 再减 dx" ✓，
+     *     与包含块是谁**完全无关** ✓✓（这正是它能治④的原因 ✓）。
+     *   · 读完 `getBoundingClientRect()` 会强制布局 ✓ ⇒ 量到的就是刚写下的结果 ✓，不需要等帧 ✓。
+     *   · 3 轮之后**再量一次**：仍不齐 ⇒ 返回 false ⇒ 调用方把它藏起来 ✓
+     *     （"宁可看不见，也不许压住 tab 或半卡"✓）。
+     * ★ 另外**永远压不到「对话/轨迹」** ✓：`max-width` 就是"最右那个 tab 的右缘
+     *   到标签行右缘那点空地 − 10px" ✓，并且收敛后再做一次**零相交**检查 ✓（几何兜底 ✓）。
+     */
+    function placeLineageEntry(header, entry) {
+      var row = lineageTabRow(header)
+      if (row === null) {
+        noteLineageOnce('找不到「对话 | 轨迹」标签行 ⇒ 这一轮先不显示入口')
+        return false
+      }
+      var tabsRect = row.rect
+      /**
+       * ★ 横向：右缘贴齐标签行右缘 ✓；宽度上限 = 从**最右那个 tab** 的右缘
+       * 到标签行右缘再留 10px 空气 ✓ ⇒ 入口再长也只在自己那块空地里截断 ✓。
+       */
+      var maxWidth = Math.round(tabsRect.right - row.rightMost - 10)
+      if (!(maxWidth > 24)) {
+        // 那块空地连一个入口都放不下（标签行太窄 / 太挤 ✓）⇒ 宁可什么都不显示 ✗
+        noteLineageOnce('标签行右端没有放得下入口的空地（' + maxWidth + 'px）⇒ 不显示')
+        return false
+      }
+      setLineageVars('--dshm-lineage-max', maxWidth + 'px')
+      /**
+       * 纵向的目标是「对话 | 轨迹」**那两个字标签**的中心 ✓（不是整行盒子的中心 ✗ ——
+       * tab 自带 9px 下内边距是给下划线留的 ✓，按盒子对齐会看着偏低 ✓）。
+       */
+      var targetCenterY = (row.tabTop + row.tabBottom) / 2
+      /**
+       * 初值：老办法（`offsetParent` 的 padding box ✓）—— **只当起点** ✓。
+       * ★★ round 159（A ✓）：控件现在是 `position: fixed` ✓ ⇒ `offsetParent` 恒为 `null` ✓、
+       *   于是初值退化成"右缘 = 视口右缘 ✓、上边 = 标签行中心 − 半个盒高 ✓"。
+       *   这**不影响正确性** ✗：下面那 3 轮闭环按**屏幕上量到的偏差**修正 ✓，
+       *   与包含块是谁完全无关 ✓（对 `fixed` 元素，`right` 变大 = 往左移 ✓、符号照样对 ✓）。
+       *   而且"不被祖先裁剪"从此是**结构性成立**的 ✓（`fixed` 的包含块就是视口 ✓）。
+       */
+      var anchor = entry.offsetParent
+      var cbTop = 0
+      var cbRight = tabsRect.right
+      if (anchor !== null && anchor !== undefined) {
+        var anchorRect = anchor.getBoundingClientRect()
+        cbTop = anchorRect.top + anchor.clientTop
+        cbRight = anchorRect.left + anchor.clientLeft + anchor.clientWidth
+      }
+      var box0 = entry.getBoundingClientRect()
+      var right = cbRight - tabsRect.right
+      var top = targetCenterY - box0.height / 2 - cbTop
+      var latest = box0
+      for (var attempt = 0; attempt < 3; attempt++) {
+        setLineageVars('--dshm-lineage-right', Math.round(right) + 'px')
+        setLineageVars('--dshm-lineage-top', Math.round(top) + 'px')
+        // 读 rect = 强制布局 ✓ ⇒ 拿到的是**刚写下**的结果 ✓（所以不需要等帧 ✓）
+        latest = entry.getBoundingClientRect()
+        if (!(latest.width > 0) || !(latest.height > 0)) {
+          /**
+           * ★★ round 158（A ✓）：这条日志原来只说"量不到尺寸" ✗ —— 真机排障时最关键的
+           *   那半个字（**为什么**量不到）反而没写 ✓。补上计算 `display` ✓：
+           *   `display=contents` 就是"认到了插槽包装层、没认到真正的根"✓（见 `tagLineageEntry` ✓）。
+           *   （判据修好之后这一支理论上不可达 ✓ —— 留着是为了下次 DSH 换结构时**一眼可辨**✓。）
+           */
+          noteLineageOnce(
+            '入口量不到尺寸（' + Math.round(latest.width) + '×' + Math.round(latest.height) +
+              '，display=' + String(lineageDisplayOf(entry)) + '）｜祖先链：' + lineageAncestorChainOf(entry) +
+              ' ⇒ 不显示（没有盒子，物理上摆不了）',
+          )
+          return false
+        }
+        var dy = targetCenterY - (latest.top + latest.height / 2)
+        var dx = tabsRect.right - latest.right
+        if (Math.abs(dy) <= 1 && Math.abs(dx) <= 1) break
+        right -= dx
+        top += dy
+      }
+      var dyFinal = targetCenterY - (latest.top + latest.height / 2)
+      var dxFinal = tabsRect.right - latest.right
+      var offTarget = Math.abs(dyFinal) > 1 || Math.abs(dxFinal) > 1
+      /**
+       * ★★ round 158（A ✓）：**闭环收敛不了，也不许"藏起来"当结论** ✗✗
+       *   （用户对 round 157 的"真机上完全没有"明确说过不可接受 ✓）。
+       *   就地显示 ✓、并留**一行**日志说明偏差 ✓ —— 去重仍走 `noteLineageOnce` ✓
+       *   （它按整句去重 ⇒ 不会每 120ms 刷一行把调试框淹掉 ✗）。
+       *   它**压不到**「对话 / 轨迹」✓：这是**结构性**保证 ✓ —— 上面那句
+       *   `--dshm-lineage-max = 标签行右缘 − 最右那颗 tab − 10px` 已经把盒子的宽度封死 ✓
+       *   （`max-width` 是硬上限 ✓，`right` 又贴齐标签行右缘 ✓）⇒ 左缘恒在最右 tab 右侧 ✓。
+       *   只有两件**物理上放不下**的事才允许不显示 ✓：
+       *     · 标签行自己都挤没了（`maxWidth ≤ 24` ✓，见上面的闸 ✓）；
+       *     · 入口**根本没有盒子**（上面那条 `0×0` ✓）。
+       */
+      if (offTarget) {
+        noteLineageOnce(
+          '入口没摆齐（中心差 ' + Math.round(dyFinal) + 'px / 右缘差 ' + Math.round(dxFinal) +
+            'px）⇒ 就地显示 ✓（不藏 ✗；两枚 tab 仍零相交 ✓）',
+        )
+      }
+      /**
+       * ★ 零相交兜底 ✓：即便对齐了，只要**真的压到**某颗 tab 上就不显示 ✓
+       *   （与 `max-width` 那条是两道独立的闸 ✓ —— 它管"宽度"，这条管"事实"✓）。
+       * ★★ round 158（A ✓）：先**尽力摆一次**再认输 ✗ —— 标签行可能在这儿轮里重排过 ✓
+       *   （DSH 重渲染 / 顶栏内边距变 ✓）⇒ 按**现在**的空地重新封一次宽度再量 ✓；
+       *   还相交 = 那块空地**真的放不下**（物理）⇒ 才不显示 ✓。
+       */
+      var overlap = lineageTabOverlap(latest, row)
+      if (overlap !== null) {
+        var freshRow = lineageTabRow(header)
+        if (freshRow !== null) {
+          var freshMax = Math.round(freshRow.rect.right - freshRow.rightMost - 10)
+          if (freshMax > 24) {
+            setLineageVars('--dshm-lineage-max', freshMax + 'px')
+            latest = entry.getBoundingClientRect()
+            overlap = lineageTabOverlap(latest, freshRow)
+          }
+        }
+      }
+      if (overlap !== null) {
+        noteLineageOnce('入口与「' + String(overlap) + '」重叠（右端空地真放不下）⇒ 不显示')
+        return false
+      }
+      /**
+       * ★ 完全摆齐了才**复位**那句去重提示 ✓ —— 摆不齐时上面那句留着 ✓，
+       *   `noteLineageOnce` 按整句去重 ⇒ 同一句不会再刷 ✓（复位了就会每 120ms 刷一遍 ✗）。
+       */
+      if (!offTarget) noteLineageOnce('')
+      return true
+    }
+
+    /**
+     * ★★ round 158（A ✓）：入口**压到了哪颗 tab** ✓（压不到返回 `null` ✓）。
+     *
+     * 与 `max-width` 那道闸是两回事 ✓：那个管"宽度上限"（结构性 ✓），
+     * 这个管"事实上有没有相交"✓（兜底 ✓ —— 布局真出意外时至少不会盖住「对话/轨迹」✗）。
+     *
+     * @returns 被压住那颗 tab 的标签文字，或 `null` ✓。
+     */
+    function lineageTabOverlap(box, row) {
+      for (var t = 0; t < row.buttons.length; t++) {
+        var tabRect = row.buttons[t].getBoundingClientRect()
+        if (
+          box.left < tabRect.right &&
+          box.right > tabRect.left &&
+          box.top < tabRect.bottom &&
+          box.bottom > tabRect.top
+        ) {
+          return String(row.labels[t] || '') || '那颗 tab'
+        }
+      }
+      return null
+    }
+
+    /**
+     * ★★ round 157（A ✓）：把标签行**连它那两个 tab 的带子**一起量出来 ✓。
+     *
+     * 判据用 `[role="tablist"]` ✓（**语义属性** ✓，不是构建哈希类名 ✗）。
+     * 实测 DSH 那两行就是同一个节点 ✓：`ConversationRoot_module_css_default.tabs`
+     * 上同时挂着 `role="tablist"` ✓ —— `display:flex` / 无 `width` ⇒ **撑满顶栏内容宽** ✓，
+     * 所以"它的右缘"才是用户说的"右端" ✓（`[class*="tabs"]` 只作旧版本的兜底 ✓）。
+     *
+     * @returns `{node, rect, buttons, labels, rightMost, tabTop, tabBottom}` 或 `null` ✓
+     *   （量不到就返回 null ✓ —— 调用方按"这一轮不显示"处理 ✓，绝不瞎定位 ✗）。
+     */
+    function lineageTabRow(header) {
+      var row = header.querySelector('[role="tablist"]')
+      if (row === null || row === undefined) row = header.querySelector('[class*="tabs"]')
+      if (row === null || row === undefined) return null
+      var rect = row.getBoundingClientRect()
+      if (!(rect.width > 0) || !(rect.height > 0)) return null
+      var buttons = row.querySelectorAll('[role="tab"]')
+      /**
+       * ★ 纵向必须量**那两个字标签**的带子 ✓（见 `placeLineageEntry` 里的说明 ✓）；
+       *   一个 tab 都没有（旧版本 / 结构变了 ✓）就退回整行盒子 ✓（宁可差一点，也不要崩 ✗）。
+       */
+      var tabTop = rect.top
+      var tabBottom = rect.bottom
+      var rightMost = rect.left
+      var labels = []
+      for (var i = 0; i < buttons.length; i++) {
+        var b = buttons[i].getBoundingClientRect()
+        if (i === 0) {
+          tabTop = b.top
+          tabBottom = b.bottom
+        } else {
+          if (b.top < tabTop) tabTop = b.top
+          if (b.bottom > tabBottom) tabBottom = b.bottom
+        }
+        if (b.right > rightMost) rightMost = b.right
+        labels.push(String(buttons[i].textContent || '').trim().slice(0, 12))
+      }
+      return {
+        node: row,
+        rect: rect,
+        buttons: buttons,
+        labels: labels,
+        rightMost: rightMost,
+        tabTop: tabTop,
+        tabBottom: tabBottom,
+      }
+    }
+
+    /**
+     * ★★ round 157（A ✓）：**同一条提示只记一行** ✓（观察者每 120ms 就可能跑一遍 ✗ ——
+     *   流式输出时把同一句错刷满调试框，等于把真正有用的那几行挤掉 ✓）。
+     * 传空串 = 复位 ✓（下一次失败会重新记一行 ✓，不会因为"记过就不记了"而漏掉新问题 ✗）。
+     */
+    var lineageLastNote = ''
+    function noteLineageOnce(message) {
+      if (message === '' || message === lineageLastNote) {
+        if (message === '') lineageLastNote = ''
+        return
+      }
+      lineageLastNote = message
+      try {
+        debugBoxLine('[lineage] ' + message)
+      } catch (error) {
+        void error
+      }
+    }
+
+    /**
+     * ★★ round 157（A ✓）：**入口一出现就算一次** ✓（怀疑①的正面修法 ✓）。
+     * 一次性、带令牌 ✓ —— 流式输出时 `schedule()` 每 120ms 就会调我们 ✗，
+     * 不加令牌就会排出一长串 0ms 任务把主线程占住 ✗。
+     */
+    var lineageReflowQueued = false
+    function scheduleLineageReflow() {
+      if (lineageReflowQueued) return
+      lineageReflowQueued = true
+      setTimeout(function () {
+        lineageReflowQueued = false
+        try {
+          reflowLineageEntry()
+        } catch (error) {
+          noteLineageOnce('补一次定位失败：' + String(error && error.message ? error.message : error))
+        }
+      }, 0)
+    }
+
+    /**
+     * 只把**已经标记好的**入口重新摆一次 ✓（round 155；round 157 加"摆不好就藏起来" ✓）。
+     *
+     * 与 `tagLineageEntry` 的分工：那个负责"认出元素 + 打标记 + 清理" ✓（走观察者 ✓），
+     * 这个只做几何 ✓ + **显/隐的裁决** ✓ —— 给"**布局变了但 DOM 没变**"的那两条路用：
+     *   · `resize` / 转屏 ✓；
+     *   · 壳报安全区 ⇒ 顶栏 `padding-top` 变 ⇒ 标签行整体上下移动 ✓（见那条 1s 对账 ✓）。
+     * 认不到就什么都不做 ✓（没有子代理时这里恒为 no-op ✓，一个像素都不动 ✓）。
+     *
+     * ★★ round 157（A ✓）两条纪律都在这里落地 ✗：
+     *   · **摆不齐 ⇒ 藏起来** ✓（`data-dshm-lineage-blocked` ✓ —— 宁可看不见，
+     *     也不许压住 tab 或半卡 ✓）；
+     *   · **catch 必须留一行日志** ✓（本项目明文纪律 ✓ —— 静默的失败在手机上
+     *     只表现为"那个按钮坏了"✗，本轮就是带着这条怀疑来的 ✓）。
+     *
+     * @returns true = 摆好了并且**正显示着** ✓；false = 没入口 / 没摆好（已藏起 ✓）。
+     */
+    function reflowLineageEntry() {
+      var entry = document.querySelector('[data-dshm-lineage]')
+      if (entry === null || entry === undefined) return false
+      /**
+       * ★★ round 159（A ✓）：控件挂在 `document.body` 下 ✓ ⇒ 不能再靠 `closest` 往上找 ✗ ——
+       * 顶栏标记（`tagTopHeader` 打的）**全页唯一** ✓，直接查它 ✓。
+       */
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return false
+      var placed = false
+      try {
+        placed = placeLineageEntry(header, entry) === true
+      } catch (error) {
+        // ★ 绝不静默 ✗：这条异常以前会被吞掉，屏幕上只表现为"入口不见了"✗
+        noteLineageOnce('定位时出错（这一轮不显示入口 ✓）：' + String(error && error.message ? error.message : error))
+        placed = false
+      }
+      if (placed === true) {
+        if (entry.dataset !== undefined && entry.dataset.dshmLineageBlocked !== undefined) {
+          delete entry.dataset.dshmLineageBlocked
+        }
+        return true
+      }
+      if (entry.dataset !== undefined && entry.dataset.dshmLineageBlocked !== '1') {
+        entry.dataset.dshmLineageBlocked = '1'
+      }
+      return false
+    }
+
+    function syncTitle() {
+      var text = conversationTitle()
+      var shown = text === '' ? 'DeepSeek Harness' : text
+      // ★ 只在**真的变了**的时候写 DOM。观察者每 120ms 就可能触发一次，
+      //   而 DSH 流式输出时几乎一直在触发——无条件重写 textContent 会让标题
+      //   （以及它所触及的层）不断重绘，看起来就是"控件在闪"（用户反馈）。
+      if (titleElement.textContent !== shown) titleElement.textContent = shown
+      var isEmpty = text === ''
+      if (isEmpty && titleElement.dataset.empty !== '1') titleElement.dataset.empty = '1'
+      else if (!isEmpty && titleElement.dataset.empty !== undefined) delete titleElement.dataset.empty
+      // 说明：「电脑文件目录」**不随会话开关而禁用**。它列的是电脑上的工作区
+      // （workspace/follow 的真实数据），没有打开会话时同样有意义——用户想看的是
+      // 电脑上的目录，而不是"当前会话的目录"。早期按有无会话禁用，结果欢迎页上
+      // 那颗按钮点不动，看起来像坏了。
+    }
+
+    /**
+     * 手机上"输入法自己弹出来"的根因在宿主那边，而且是对桌面**有意为之**的行为：
+     * `ui-conversation` 里有一段
+     *
+     * ```js
+     * useEffect(() => { editor.getRootElement()?.focus({ preventScroll: true }) }, [locked, sessionId, …])
+     * ```
+     *
+     * —— 依赖数组里带着 `sessionId` ✓，也就是**每次切会话/切工作区，composer 都会被重新聚焦一次**。
+     * 桌面端这是对的（切完就能直接打字）；手机上就是键盘无缘无故弹出来挡住半屏 ✗
+     * （用户报的"切不同工作目录、不同聊天会自动弹出输入法"就是它）。
+     *
+     * `boot.js` 注入的是经典脚本、拿不到 React 的 store，改不了那段 effect ✗ ——
+     * 但"聚焦"这件事**在 DOM 层一定能拦**：没有指向该输入框的用户手势时，把程序化聚焦撤销掉 ✓。
+     *
+     * 放行规则（宁可少拦，不可误伤）：
+     *   1. 手势点的是这个输入框本身 / 它的祖先 / 它的后代 → 放行 ✓（用户就是想打字）；
+     *   2. 手势之后 250ms 内的聚焦 → 放行 ✓（点「编辑」后弹出的小编辑器、我们自己面板里的输入框
+     *      都是"点一下、紧接着聚焦"）；
+     *   3. **我们自己的 DOM 一律放行**（文件面板的输入框是我们有意聚焦的）✓；
+     *   4. 其余（切会话、切工作区、首屏挂载）→ 立刻 `blur()` ✓。
+     */
+    var lastGestureAt = 0
+    /** 手势落点（视口坐标）。★ 判"用户点的是这个输入框"必须用**坐标**，不能用 DOM 祖先：
+     *  手势目标常常是个大容器（`body` / 中栏），`contains()` 对任何元素都成立 →
+     *  守卫会整条失效 ✗（第一版就是这么失效的，契约测试当场抓到）。 */
+    var lastGesturePoint = null
+    /** 最近一笔手势落在哪个"区域"：`sidebar`（抽屉/会话与工作区行）/ `topbar` / `content`。 */
+    var areaOf = function (node) {
+      if (node === null || node === undefined || node.closest === undefined) return 'content'
+      if (node.closest('[class*="sidebarCol"]') !== null) return 'sidebar'
+      if (node.closest('#dsh-mobile-top, [data-dshm-topheader]') !== null) return 'topbar'
+      return 'content'
+    }
+    var lastGestureArea = 'content'
+    /** 最近一笔"切上下文"的手势（点了抽屉/顶栏）——**它不得授权任何内容区编辑器的聚焦** ✗。
+     *  真机复现：点会话行 → DSH 立刻（远快于旧规则的 250ms 窗口）聚焦 composer → 输入法弹出 ✓
+     *  所以"时间窗口"这条规则对"切会话"是**结构性无效**的，必须按**区域**判 ✓。 */
+    var lastGestureTarget = null
+    var rememberGesture = function (event) {
+      lastGestureAt = Date.now()
+      var point = null
+      if (typeof event.clientX === 'number') point = { x: event.clientX, y: event.clientY }
+      else if (event.touches !== undefined && event.touches !== null && event.touches.length > 0) {
+        point = { x: event.touches[0].clientX, y: event.touches[0].clientY }
+      }
+      lastGesturePoint = point
+      lastGestureTarget = event.target === undefined ? null : event.target
+      lastGestureArea = areaOf(lastGestureTarget)
+    }
+    var GESTURE_EVENTS = ['pointerdown', 'touchstart', 'mousedown', 'keydown']
+    for (var gestureIndex = 0; gestureIndex < GESTURE_EVENTS.length; gestureIndex++) {
+      document.addEventListener(GESTURE_EVENTS[gestureIndex], rememberGesture, true)
+    }
+    /**
+     * 安装标记：验收脚本要能**一个属性**问出"这条守卫在不在" ✓。
+     * ★ 必须等 body 存在（installShell 会在 `<head>` 阶段被同步调用，那时 body 还是 null）；
+     *   第一版就写在安装处 → 标记恒为 null，反而把排查带偏了一轮 ✗。
+     */
+    var markKeyboardGuard = function () {
+      if (document.body === null || document.body === undefined) return false
+      document.body.dataset.dshmKeyboardGuard = '1'
+      return true
+    }
+
+    /**
+     * 把"这一笔聚焦为什么被拦/被放行"写到**屏幕上**（调试框）。
+     *
+     * 真机上没有控制台 —— 用户说"输入法还是会弹出"时，我需要的不是再猜一轮，
+     * 而是**手机自己说出它放行了哪一笔** ✓（本项目的硬约束：绝不静默失败，
+     * 一切证据要么上屏、要么落审计）。开法：地址后面加 `?debug=1`。
+     */
+    var logFocusDecision = function (verb, element, reason) {
+      var tag = element !== null && element !== undefined && element.tagName !== undefined ? String(element.tagName).toLowerCase() : '?'
+      var cls = element !== null && element !== undefined && element.className !== undefined ? String(element.className).slice(0, 24) : ''
+      var line = '[focus] ' + verb + ' ' + tag + (cls === '' ? '' : '.' + cls) + ' ← ' + reason
+      debugBoxLine(line)
+      try {
+        if (document.body !== null && document.body !== undefined) document.body.dataset.dshmFocusLast = line.slice(0, 120)
+      } catch (error) {
+        void error
+      }
+    }
+
+    /** 这个元素聚焦后会不会**弹出输入法**（text/search/… 输入框，或可编辑的 contenteditable）。 */
+    function opensKeyboard(element) {
+      if (element === null || element === undefined || element.tagName === undefined) return false
+      var tag = String(element.tagName).toLowerCase()
+      if (tag === 'textarea') return true
+      if (tag === 'input') {
+        var type = String(element.getAttribute('type') || 'text').toLowerCase()
+        return ['text', 'search', 'url', 'email', 'password', 'tel', 'number', ''].indexOf(type) >= 0
+      }
+      // 托管的富文本编辑器（DSH 的 composer 就是 `div[contenteditable]`）：
+      // 只认"当前真的可编辑"的 —— `contenteditable="false"` 的只读态聚焦也不会弹键盘 ✓
+      return element.isContentEditable === true
+    }
+
+    document.addEventListener(
+      'focusin',
+      function (event) {
+        var element = event.target
+        if (opensKeyboard(element) === false) return
+        // 我们自己的面板/提示条：聚焦是我们有意做的，别拦 ✓
+        if (element.closest !== undefined && element.closest('#dsh-mobile-sheet, [data-dshm-askbar]') !== null) return
+        // ★★ 最关键的一条：最近这笔手势是在**切上下文**（点抽屉里的会话/工作区行、点顶栏），
+        //    而要被聚焦的是**内容区**里的编辑器 —— 一律拦下 ✓。
+        //    为什么不用时间窗口：真机上 DSH 是在点完会话行后**立刻**聚焦 composer 的，
+        //    24 小时窗口都拦不住（上一版的 250ms 窗口就是这么失效的 ✗）。
+        //    注意"同区域内"要放行：侧栏自己的搜索框、重命名输入框就是"点侧栏 → 聚焦侧栏里的东西" ✓
+        if (lastGestureArea !== 'content' && areaOf(element) === 'content') {
+          try {
+            element.blur()
+          } catch (error) {
+            void error
+          }
+          logFocusDecision('拦下', element, '上一笔手势在' + lastGestureArea + '（切上下文），焦点却在内容区')
+          return
+        }
+        // ★ 触点落在"这个输入框附近"就放行：从它自己往上最多 3 层祖先，
+        //   任一层矩形包含触点（含 8px 容差）就算 —— 覆盖"点输入框本身"与
+        //   "点 composer 的空白处/边框"两种真实打法 ✓，而抽屉里的会话行、工作区行
+        //   都在这块区域之外 → 切会话不会误判成"用户想打字" ✓
+        var point = lastGesturePoint
+        if (point !== null && point !== undefined) {
+          var node = element
+          for (var depth = 0; depth < 3 && node !== null && node !== undefined; depth++) {
+            var rect = node.getBoundingClientRect()
+            if (
+              point.x >= rect.left - 8 &&
+              point.x <= rect.right + 8 &&
+              point.y >= rect.top - 8 &&
+              point.y <= rect.bottom + 8
+            ) {
+              return
+            }
+            node = node.parentElement
+          }
+        }
+        // 手势之后 400ms 内的聚焦也放行：点「编辑」弹出的小编辑器、我们自己面板里的输入框
+        // 都是"点一下、紧接着聚焦" ✓（真机上"点会话行→聚焦 composer"那条已经被上面的
+        // **区域规则**拦掉了，所以这里放宽到 400ms 也不会再放进它 ✓）
+        if (Date.now() - lastGestureAt < 400) return
+        try {
+          element.blur()
+        } catch (error) {
+          void error
+        }
+        logFocusDecision('拦下', element, '没有指向它的手势（Δ=' + String(Date.now() - lastGestureAt) + 'ms）')
+      },
+      true,
+    )
+
+    /**
+     * 开/关左侧「聊天记录」抽屉。
+     *
+     * 汉堡、遮罩、**滑动导航**三条入口共用这一份实现 —— 各写一份的话，
+     * "打开时要不要先关右边的文件面板"这类规则迟早只改到一处 ✗
+     * （本项目已经在"抽屉宽度/推挤量"上吃过一次同源分叉的亏）。
+     */
+    var setDrawer = function (open) {
+      if (document.body === null || document.body === undefined) return
+      var isOpen = document.body.dataset.dshMobileDrawer === 'open'
+      /**
+       * ★ 互斥必须**无条件**执行，不能塞在早退之后。
+       *
+       * 原来 `if (isOpen === open) return` 排在最前面 ✓ —— 于是"抽屉已经开着、又要求打开"
+       * 这一支会**跳过** `sheet.setOpen(false)` ✗，两个抽屉就可能同时开着：
+       * 位移互相抵消（看起来没动）、而且滑动判定分不清"该返回哪一个" ✗
+       * （验收里那条标签对不上的红就是它引出来的 ✓）。
+       */
+      if (open) sheet.setOpen(false)
+      if (isOpen === open) {
+        if (open) syncDrawer()
+        // 状态没变也要对一次账 ✓（便宜 ✓，且能兜住"标记被别处改过"这种异常 ✓）
+        reportBackAvailable()
+        return
+      }
+      /**
+       * ★★ round 160（A ✓）：状态那一下**包在 FLIP 里** ✓（见 `flipDrawerMotion` ✓）——
+       *   汉堡键 / 蒙层 / 点会话行自动收起 / 返回键**全走这里** ✓ ⇒ 抽屉自己那段滑行
+       *   不再走 `left` 过渡（每帧重排整棵会话列表 + 重画阴影 ✗），改成合成层移动 ✓。
+       *   紧跟着的 `syncDrawer()` → `applyPush()` 在**同一次任务**里改 `--dshm-push` ✓
+       *   ⇒ 抽屉与主页面同帧起步、共用同一条 `--dshm-slide` ✓（用户要的"一起动"✓）。
+       */
+      flipDrawerMotion(function () {
+        if (open) document.body.dataset.dshMobileDrawer = 'open'
+        else delete document.body.dataset.dshMobileDrawer
+      })
+      syncDrawer()
+      /**
+       * ★ 左抽屉也是"一层页面" ✓ —— 开/关都要上报 ✓（round 121，见 dshmBack ✓）。
+       *   ★ 这段**没有**每 200ms 轮询 ✓：写入点就这一处 + 点会话行自动收起那一处 ✓。
+       */
+      reportBackAvailable()
+    }
+
+    /**
+     * ★ 系统返回的落脚点（round 121）✓。
+     *
+     * 为什么在这里"装"、而不是在 `dshmBack` 里直接引用 `sheet` / `setDrawer` ✗：
+     * `dshmBack` 是**顶层**函数（要在 `buildFilesSheet` 的 `setOpen` 上报时也能用 ✓），
+     * 而这两个开关是 `installShell` 里的局部变量 ✓ —— 用一层运行时对象把它们递出去 ✓。
+     * 包成函数而不是存引用 ✓：`setOpen` 永远是同一个 ✓，但这样"谁关的"一眼可见 ✓
+     * （而且以后换成别的关闭语义也不用改上面 ✓）。
+     *
+     * 顺序也照 `dshmBack` 的说明 ✓：先**设置弹窗**、再文件面板、再左抽屉、最后 DSH 预览 ✓。
+     */
+    dshmBackRuntime = {
+      closeSheet: function () {
+        sheet.setOpen(false)
+      },
+      /**
+       * ★★ round 142（本轮第 1 条）：**面板内部的"退一层"** ✓。
+       *
+       * @returns true = 面板里确实停在子视图上、**已经退回文件视图** ✓（面板没关 ✓）；
+       *          false = 本来就在文件视图上 ⇒ 调用方照旧关面板 ✓。
+       *
+       * 现在只有一个子视图：`'capabilities'`（文件面板底部那行「端侧能力」✓）。
+       * ★ 为什么放在这一层运行时对象里 ✗：与上面几条同一个理由 ✓ ——
+       *   `sheet.currentView` / `sheet.restoreFiles` 是这个作用域的局部状态 ✓，
+       *   而 `dshmBack` 是顶层函数 ✓，够不着 ✓。
+       */
+      backOutOfFiles: function () {
+        /**
+         * ★ round 142：真正的实现长在**面板自己身上** ✓（`sheet.backOutOfView()` ✓）——
+         *   因为面板上的反向滑动也要走同一份 ✓（`run('close-files')` ✓，
+         *   理由见那里的说明 ✓）。这里只是把它递给够不着 `sheet` 的顶层 `dshmBack()` ✓。
+         */
+        return typeof sheet.backOutOfView === 'function' ? sheet.backOutOfView() : false
+      },
+      closeDrawer: function () {
+        setDrawer(false)
+      },
+      /**
+       * ★ round 137：关掉 DSH 原生设置弹窗 ✓（返回键 / 侧滑的落脚点 ✓）。
+       *
+       * 为什么**也**走这一层运行时对象（而不是在 `dshmBack` 里直接引用 ✗）：
+       * 与上面两条同一个理由 ✓ —— `dshmBack` 是**顶层**函数 ✓，而
+       * `closeSettingsOverlay`（它认得我们标记过的关闭键 ✓）活在这个作用域里 ✓。
+       * 关掉之后 DSH 自己会卸载那一层 ✓，所以我们**不**在这里清任何标记 ✓ ——
+       * `backAvailableNow()` 读的就是 DOM ✓，标记随 DOM 一起消失 ✓（没有第二份状态 ✓）。
+       */
+      closeSettings: function () {
+        var overlay = document.querySelector('[data-dshm-settings="1"]')
+        if (overlay === null || overlay === undefined) return false
+        var panel = overlay.querySelector('[data-dshm-panel="1"]')
+        if (panel === null || panel === undefined) return false
+        closeSettingsOverlay(overlay, panel)
+        return true
+      },
+    }
+    /**
+     * ★★ round 128：交付卡片那句「**打开所在目录**」的入口 ✓ ——
+     *   卡片是注入到 DSH 里的 ✓，够不着面板这边的局部变量 ✓，
+     *   所以只把**一个**动作递出去 ✓（真正的进目录逻辑还是 `openFilesSheet` 那一套 ✓，
+     *   不新写一份 ✗）。
+     *
+     * 只递出去、"跳哪"由调用方说 ✓ —— 目录从卡片的路径拆出来 ✓（`splitFilePath` ✓）。
+     */
+    dshmFilesRuntime = {
+      openAt: function (absolutePath) {
+        var parts = splitFilePath(absolutePath)
+        // 与顶栏那个文件夹按钮**同一条路** ✓：先关左抽屉（否则两次位移叠在一起 ✓），
+        // 再把齿轮的高亮清掉（我们进的是文件视图、不是设置页 ✓）。
+        setDrawer(false)
+        sheet.setOpen(true)
+        void openFilesSheet(sheet, getTunnel, parts.dir, parts.name)
+        return parts
+      },
+    }
+    /**
+     * ★ 只在**有壳**时把 `window.__dshmBack` 装上 ✓（与 `installShell` 同一条件 ✓）。
+     *   浏览器 / 桌面端上不装 ✓ —— 那条路上没有"系统返回"这回事 ✓。
+     */
+    installBackHook()
+
+    // 滑动的"打开文件面板"与按钮完全同路：先加载数据再推面板 ✓（见 installSwipeNavigation 注释）
+    installSwipeNavigation(
+      sheet,
+      setDrawer,
+      function () {
+        openFilesSheet(sheet, getTunnel)
+      },
+      // 拖动结束/回弹时，让位量交还给状态机（它按 data-* 重算 ✓）
+      function () {
+        refreshPush()
+      },
+    )
+
+    nav.addEventListener('click', function (event) {
+      if (event !== undefined) event.stopPropagation()
+      if (document.body === null || document.body === undefined) return
+      setDrawer(document.body.dataset.dshMobileDrawer !== 'open')
+    })
+
+    scrim.addEventListener('click', function () {
+      setDrawer(false)
+    })
+
+    files.addEventListener('click', function (event) {
+      if (event !== undefined) event.stopPropagation()
+      // 左右互斥：先把左抽屉关掉（否则两次位移叠在一起）
+      setDrawer(false)
+      openFilesSheet(sheet, getTunnel)
+    })
+
+    /**
+     * ★★ round 163（C ✓）：**内容层那两级返回的"可返回状态"要跟得上 DSH 的 DOM 变化** ✓。
+     *
+     * 为什么要单独补这一条 ✗：主观察者的 `attributeFilter` **只盯 `class`** ✓，
+     * 而"切 view"改的是 `aria-selected` ✓、"进/出子代理会话"改的是会话头子树 ✓ ——
+     * 前者可能**一整帧都不上报** ✗ ⇒ 刚点完「轨迹」立刻按返回时，壳那边还以为
+     * `backAvailable=false` ⇒ 直接 `finish()` = **退出 App** ✗✗（最难受的一种失败）。
+     * 这条**捕获阶段**的 click 监听专门覆盖那一瞬间 ✓：点在 tab 或子代理入口上就稍后重报一次 ✓
+     * （60ms：够 DSH 把状态与 DOM 落定 ✓）。
+     * ★ 判据全用**语义属性** ✓（`role="tab"` ✓ / `aria-haspopup="tree"` ✓ —— 子代理入口就是它 ✓），
+     *   不碰哈希类名 ✗、不用 `[class*=…]` 子串 ✗（本项目在这上面栽过四次 ✓）。
+     */
+    try {
+      document.addEventListener(
+        'click',
+        function (event) {
+          try {
+            var node = event === null || event === undefined ? null : event.target
+            if (node === null || node === undefined || node.closest === undefined) return
+            if (node.closest('[role="tab"], [aria-haspopup="tree"]') === null) return
+            globalThis.setTimeout(reportBackAvailable, 60)
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+    } catch (error) {
+      void error
+    }
+
+    /**
+     * ★★ round 142（本轮第 1 条）：文件面板底部那行「端侧能力」⇒ 进**只含端侧能力**的视图 ✓
+     *   （用户："点开我希望只有端侧能力，不要显示连接与设备的内容"✓）。
+     *
+     * 监听挂在这里（而不是 `buildFilesSheet` 里）✓：只有这一层拿得到 `getTunnel` ✓。
+     * ★ 它与刚被删掉的齿轮**不是**同一条路了 ✗：齿轮进的是**完整**那一页（现在已经整个删掉 ✓），
+     *   这一行进的是 `openCapabilitiesView` ✓（只画 5 颗开关 ✓）。
+     * 从这一行到 5 颗开关：**1 步** ✓（点开就是 ✓，不用滚 ✓）。
+     *
+     * ★ 它同样是**开关** ✓：在这个视图里再点一次那行入口 ⇒ 回到原来的文件视图 ✓
+     *   （回到你离开时那一屏 ✓，`openCapabilitiesView` 里那段 ✓）；返回键 / 反向滑动同理 ✓。
+     * ★★ "再点一次就回去"这一下**不在本地再写一份** ✗：直接借 `backOutOfFiles()` ✓
+     *   —— 它正是返回键/侧滑走的那一个函数 ✓（`dshmBack()` 的面板那一支 ✓），
+     *   语义是"面板里停在子视图上 ⇒ 退回文件视图 ✓、面板不关 ✓"。
+     *   在这里另写一遍就是**同一个概念两份实现** ✗（加第二个子视图时必然漏一边 ✗）。
+     */
+    sheet.connEntry.addEventListener('click', function (event) {
+      if (event !== undefined) event.stopPropagation()
+      /**
+       * ★ "再点一次就回去"与返回键调的是**同一个** `sheet.backOutOfView()` ✓ ——
+       *   不在这里另写一份 ✗（见那个方法的说明 ✓）。
+       * ★★ round 148：**只有真的停在「端侧能力」那一屏时**才走这一下 ✓。
+       *   `backOutOfView` 现在是"面板内逐级后退"（子视图 ⇒ 文件视图 ⇒ **上一级目录** ✓），
+       *   而这一行的语义是"开 / 关端侧能力"✗ —— 在**子目录**里点它必须是**打开**端侧能力 ✓，
+       *   绝不能变成"顺手退一级目录"✗（少了这句判据就会出现"点端侧能力 = 返回上级"✗）。
+       *   退那一层的实现仍然只有一份 ✓（判据在这里、动作还在 `backOutOfView` ✓）。
+       */
+      if (sheet.currentView === 'capabilities' && typeof sheet.backOutOfView === 'function' && sheet.backOutOfView() === true) {
+        reportBackAvailable()
+        return
+      }
+      openCapabilitiesView(sheet, getTunnel)
+    })
+
+    // 点会话行后收起抽屉（DSH 自己不会在窄屏收起，否则用户点完还挡着对话区）。
+    // 用冒泡阶段，保证先让 DSH 的行点击把会话打开。
+    document.addEventListener('click', function (event) {
+      if (document.body === null || document.body === undefined) return
+      if (document.body.dataset.dshMobileDrawer !== 'open') return
+      var node = event.target
+      while (node !== null && node !== undefined && node !== document.body) {
+        if (classHasSuffix(node, '_sessionRow')) {
+          setTimeout(function () {
+            if (document.body === null || document.body === undefined) return
+            delete document.body.dataset.dshMobileDrawer
+            syncDrawer()
+            // ★ 抽屉被"点会话行"这条**旁路**收掉了 ✓ —— 这里也必须上报 ✓（round 121）
+            reportBackAvailable()
+          }, 200)
+          return
+        }
+        node = node.parentNode
+      }
+    })
+
+    // DSH 的展开状态、标题、结构都是异步变化的。这里用一个**去抖**的观察者
+    // 统一同步；不去抖会在对话流式输出时每帧触发（DSH 的 DOM 变动非常频繁）。
+    //
+    // 底部状态栏（`N 轮 M 步 / token 用量`）也挂在这一套上：它由 DSH 的 React 组件
+    // 随会话渲染/卸载，文本也随轮次变化 —— 复用同一个去抖观察者，就不必再加第二个 ✓
+    // （第二个观察者会在流式输出时把回调次数翻倍，而这个页面本来就一直在变）。
+    var statsBar = buildStatsBar()
+    var pending
+    var schedule = function () {
+      if (pending !== undefined) clearTimeout(pending)
+      pending = setTimeout(function () {
+        pending = undefined
+        try {
+          syncDrawer()
+          syncTitle()
+          tagSettingsOverlay()
+          tagTopHeader()
+          // ★ round 155：子智能体入口的位置也挂在这一套上 ✓（**顺序在 tagTopHeader 之后** ✓ ——
+          //   没有那个标记就找不到顶栏 ✓）。它自己幂等 ✓，认不到入口就只做清理 ✓。
+          tagLineageEntry()
+          syncStatsBar(statsBar)
+          /**
+           * ★ 设置弹窗开/关也要**当场**报给壳（round 137 ✓）—— 它是第 4 层可返回的东西 ✓。
+           *   这里只是**兜底** ✓：真正吃紧的那条路是 `settingsWatch`（不去抖 ✓，见下 ✓），
+           *   因为"打开后 120ms 内就按返回"这一下不能落空 ✗。
+           *   不带 force ✓ —— `reportBackAvailable` 自己按值去重 ✓（同一个值不会重复推 ✓，
+           *   这条语义是 round 121 定的，**不许**在别处 force ✗）。
+           */
+          reportBackAvailable()
+        } catch (error) {
+          console.warn('[dsh-mobile] 同步外壳状态失败：', error)
+        }
+      }, 120)
+    }
+
+    /**
+     * ★★ 设置弹窗专用观察者：**不去抖** ✓（round 137 的正解 ✓）。
+     *
+     * ## 修的是什么
+     * 用户原话："点击他会**先出现电脑端的，然后再出现我们自己重写的全屏**" ✗。
+     * 真因**不是**"DSH 的处理器先跑" ✗，而是**我们晚了** ✓：
+     * DSH 一提交，弹窗就带着它自己的桌面长相进了 DOM ✓
+     * （`.VOzbGW_panel{width:800px;max-width:calc(100vw - 48px);border-radius:32px}` +
+     *  `.VOzbGW_overlay{justify-content:center;align-items:center}` ⇒ 400px 屏上是
+     *  **352×821 的居中圆角卡片** ✓），而给它打全屏标记（`tagSettingsOverlay` ✓）的
+     * 唯一入口此前是上面那个**去抖 120ms** 的 `schedule` ✓ ⇒ 中间那 8 帧左右
+     * 画的就是电脑端形态 ✓✓。
+     *
+     * ## 为什么这一条能根治（时间线，逐行可核）
+     * React 的提交发生在**一个任务**里 ⇒ 弹窗进 DOM ⇒ 我们的 MutationObserver 回调是
+     * **微任务** ✓ ⇒ 它在"任务结束、浏览器进入 style/layout/paint"**之前**执行 ✓ ⇒
+     * 标记与 CSS 在**同一帧**生效 ⇒ **用户永远看不到电脑端那 8 帧** ✓。
+     * 也就是说：不需要"先藏起来再显示"那类兜底 ✓（那类兜底会误伤壳里别的 `aria-modal`
+     * 对话框 ✗ —— 比如审批与目录选择器，它们永远拿不到我们的标记 ✓）。
+     *
+     * ## 为什么必须自己筛一遍变动（不筛会把手机卡住 ✗）
+     * 这一条挂在 `subtree: true` 上 ✓，而对话流式输出时 DOM 变动**非常频繁** ✓
+     * （正是上面那段注释不让第二个观察者乱加的原因 ✓）。所以回调先花 O(新增节点) 判一句
+     * "这批里有没有设置弹窗的外层" ✓，只有**可能有**时才去做那次全文档查询 ✓
+     * —— 平时每批只是一次很短的循环 ✓，不会像"每次变动都 querySelectorAll 全文档"那样
+     * 在流式输出时白烧 CPU ✗。
+     *
+     * @param records - MutationRecord[]（只读 addedNodes / removedNodes ✓）。
+     * @returns true = 这一批里"碰"到了设置弹窗外层（加进来 **或** 移出去 ✓）
+     */
+    var settingsOverlayTouched = function (records) {
+      /** 一个节点自己、或它的后代里，有没有 `[role="presentation"]` ✓。 */
+      var touches = function (node) {
+        if (node === null || node === undefined || node.nodeType !== 1) return false
+        if (typeof node.getAttribute === 'function' && node.getAttribute('role') === 'presentation') return true
+        if (typeof node.querySelector === 'function' && node.querySelector('[role="presentation"]') !== null) return true
+        return false
+      }
+      for (var i = 0; i < records.length; i++) {
+        var added = records[i].addedNodes
+        for (var j = 0; j < added.length; j++) if (touches(added[j])) return true
+        /**
+         * ★ 移除也要看 ✓ —— **关闭**时那一层是被 React 卸掉的 ✓，
+         *   只看"加进来"就永远收不到关闭事件 ✗ ⇒ `backAvailable` 会一直停在 true ✓
+         *   （现象：设置页关了，系统返回却还先被网页吃掉一下 ✓）。
+         */
+        var removed = records[i].removedNodes
+        for (var k = 0; k < removed.length; k++) if (touches(removed[k])) return true
+      }
+      return false
+    }
+
+    var settingsWatch = new MutationObserver(function (records) {
+      if (!settingsOverlayTouched(records)) return
+      try {
+        tagSettingsOverlay()
+      } catch (error) {
+        console.warn('[dsh-mobile] 设置弹窗打标记失败：', error)
+      }
+      // 开与关都在这一条上报 ✓（不去抖 ⇒ 打开后立刻按返回也不会落空 ✓）
+      reportBackAvailable()
+    })
+
+    var observer = new MutationObserver(schedule)
+    var startObserving = function () {
+      if (document.body === null || document.body === undefined) return false
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class'],
+      })
+      // ★ 设置弹窗那一条**独立挂** ✓（不去抖 ✓，且自己筛变动 ✓，见上面的说明 ✓）
+      settingsWatch.observe(document.body, { childList: true, subtree: true })
+      var titleTag = document.querySelector('head > title')
+      if (titleTag !== null) {
+        observer.observe(titleTag, { childList: true, characterData: true, subtree: true })
+      }
+      return true
+    }
+
+    /**
+     * ★ round 155：转屏/视口变化时，那枚入口的位置要**当场**跟着走 ✓（见 `reflowLineageEntry` ✓）。
+     * 为什么不用 `schedule()` ✗：那一条会连着把抽屉/标题/状态栏/返回上报全跑一遍 ✓，
+     * 为了挪一个小胶囊不值当 ✓；而且它去抖 120ms ✓ —— 转屏时"先错半拍"看得见 ✗。
+     */
+    try {
+      var reflowLineage = function () {
+        try {
+          reflowLineageEntry()
+        } catch (error) {
+          /**
+           * ★★ round 157（A ✓）：**这里以前是 `void error`** ✗ —— 正是那条明文纪律
+           * 说的"吞掉会伪装成按钮坏了"✓。手机上没有任何控制台 ✓，
+           * 只留一行 `noteLineageOnce` ⇒ 真机排障至少能看见"定位失败"这四个字 ✓。
+           */
+          noteLineageOnce('resize/转屏时定位失败：' + String(error && error.message ? error.message : error))
+        }
+      }
+      globalThis.addEventListener('resize', reflowLineage)
+      globalThis.addEventListener('orientationchange', reflowLineage)
+    } catch (error) {
+      // ★ 同理：装不上监听也要留一行 ✓（不然"转屏之后位置就不对了"永远查不出来 ✗）
+      noteLineageOnce('装 resize/orientationchange 监听失败：' + String(error && error.message ? error.message : error))
+    }
+
+    /**
+     * 挂到 `<body>` 里，而不是 `documentElement`。
+     *
+     * 脚本在 `<head>` 里执行，此时 `document.body` 是 null。早期为了兼容挂到
+     * `documentElement`，结果元素出现在 `<head>` 与 `<body>` 之间——渲染为
+     * 0×0 不可见（样式挂 `<html>` 没问题，**元素**必须进 body）。
+     */
+    var mount = function () {
+      if (document.body === null || document.body === undefined) return false
+      document.body.appendChild(bar)
+      document.body.appendChild(scrim)
+      document.body.appendChild(sheet.root)
+      markKeyboardGuard()
+      syncDrawer() // 挂载后同步一次（此时 body 一定存在）
+      syncTitle()
+      startObserving()
+      schedule()
+      return true
+    }
+    if (!mount()) {
+      document.addEventListener('DOMContentLoaded', mount, { once: true })
+    }
+
+    // ★ round 120：聊天正文里的文件链接（fileMention 按钮 / dsh-resource 地址）
+    //   在手机上是"点了没反应" ✗（实测：POST /api/present.open → 401 ✓）。
+    //   这里在捕获阶段接管，改用 DSH 预览打开 ✓（详见 installChatFileLinkBridge 的说明 ✓）。
+    try {
+      installChatFileLinkBridge(getTunnel)
+    } catch (error) {
+      debugBoxLine('[link] 正文文件链接接管装不上：' + String(error && error.message ? error.message : error))
+    }
+
+    // ★ round 130：给 present.host 一条兜底应答 ✓（必须在 DSH 去读它**之前**装好 ✓）——
+    //   它是"卡片那颗 v 不再恒为 disabled"的唯一前提 ✓（见 installPresentedHostShim ✓）。
+    try {
+      installPresentedHostShim()
+    } catch (error) {
+      debugBoxLine('[presented] present.host 的兜底应答没装上：' + String(error && error.message ? error.message : error))
+    }
+
+    // ★ round 130（A 方案）：交付文件卡片那条路 ✓ ——
+    //   卡片里那颗 v 的菜单两项（用默认应用打开 / 打开所在文件夹）在手机上都 401 ✗
+    //   ⇒ 捕获阶段认下来，改成"下载到手机"与"在文件面板中打开" ✓（文案一并改准 ✓），
+    //   卡片左下那颗「打开」照旧走 DSH 预览 ✓。
+    try {
+      installDeliverablesCardBridge(getTunnel)
+    } catch (error) {
+      debugBoxLine('[presented] 交付文件卡片接管装不上：' + String(error && error.message ? error.message : error))
+    }
+
+    // ★ 本轮 U1：外链（`target="_blank"`）的**网页侧兜底** ✓ ——
+    //   壳的 `onCreateWindow` 靠 hit test 取地址，取不到就 `return false`（弹窗被丢 ✗）；
+    //   网页这一侧知道那个 `<a href>` 是谁 ✓ ⇒ 走壳的 `openExternal(url)` ✓（要重装 APK ✓）。
+    try {
+      installExternalLinkBridge()
+    } catch (error) {
+      debugBoxLine('[link] 外链兜底装不上：' + String(error && error.message ? error.message : error))
+    }
+
+    // ★ round 128：Session 日志下载（普查 A4）也走**同一条桥** ✓ ——
+    //   有壳时它把 ZIP 交给 `DshmShell.saveFile` 存进手机的「下载」✓；没壳时一个字节都不动 ✓。
+    try {
+      installSessionExportBridge()
+    } catch (error) {
+      debugBoxLine('[export] Session 导出的桥接装不上：' + String(error && error.message ? error.message : error))
+    }
+
+    return {
+      sync: schedule,
+      isDrawerOpen: dshSidebarExpanded,
+      toggleSidebar: dshToggleSidebar,
+      title: conversationTitle,
+    }
+  }
+
+  /**
+   * 构造「电脑文件目录」面板（底部弹出）。
+   *
+   * 数据来自 `workspace/follow` 的 baseline（`WorkspaceView`：真实标题 + 绝对路径）。
+   * 动作用 `session/openWorkspacePath` —— 它是 RPC，**走加密隧道**，因而是手机上
+   * 少数可靠可用的"在电脑上打开"通道。
+   *
+   * 为什么不用 DSH 自带的 `/open-in-app/*` 路由：它们受 DSH 自身的信任栅栏保护，
+   * 手机侧实测 **HTTP 401**（页面在 `/mobile/app` 下没有 GUI cookie），
+   * 所以手机端的 DSH 顶栏里压根没有「在本地打开」入口——这不是我们藏掉了，
+   * 而是它本来就没渲染出来。
+   */
+  /**
+   * 端侧通道开关（提醒 / 通知）：面板**固定底部区**里那一块。
+   *
+   * ## 为什么重写
+   *
+   * 旧实现在文件面板的工具栏里，而且引用了两个**在本作用域并不存在**的名字：
+   * `log(...)` 与 `swRegistration` —— 两者都定义在 `installDeviceChannel` 内部。
+   * 而 boot.js 是 `'use strict'`，所以点「允许通知」时：
+   *
+   *   1. 先写 localStorage（客户端以为自己允许了）✓
+   *   2. 走到 `log(...)` → **抛 ReferenceError** ✗
+   *   3. 于是**永远不会申请系统通知权限**、**永远不告诉宿主**、界面也不刷新 ✗
+   *
+   * 用户当时的原话是"我在勾选通知的时候没有弹出浏览器要求通知的请求" ✓ ——
+   * 我先归因给浏览器（Via 不支持），其实根因在这里 ✗。
+   * 旧代码下面那段注释还专门警告过"引用不存在的函数"（`withTunnel` /
+   * `callTunnelEndpoint`），同一个毛病又犯了一次 ✓。
+   *
+   * 这一版的做法：**自带全部依赖**（只用模块级函数），并且
+   * 每一步的结果都写到开关下面的提示行上 —— 手机上没有控制台，
+   * "点了没反应"必须能从屏幕上区分出是"没申请权限"还是"没告诉电脑" ✓。
+   */
+  function buildCapabilitySwitches() {
+    /**
+     * ★★ round 142（本轮第 2 条）：**从"胶囊"改成设置页那种"长横条 = 一项设置"** ✓。
+     *
+     * 用户原话："把端侧能力的这个风格改为设置页的长横条是一项设置的风格"✓。
+     * 做法：每一行**复用设置页那一套类** ✓ —— `.dshm-set-row`（行）+ `.dshm-set-label`（左标题 ✓）
+     * + 右侧一颗开关 ✓ ⇒ 与「连接与设备」里的行**长得一模一样** ✓（不自创一套 ✗）。
+     *
+     * ★ 可访问性**一点没降级** ✗：开关仍然是 `role="switch"` + `aria-checked` ✓
+     *   （只是从"胶囊本身就是开关"变成"一行里的那颗开关"✓），
+     *   另外补 `aria-label`（开关自己不带文字了 ✓ ⇒ 读屏要能说出这一项是什么 ✓）。
+     * ★ 那 12 处"已允许 / 告诉电脑失败 / 权限"反馈**一个字没动** ✓
+     *   —— 它们仍然走 `setNote` ✓，而 `setNote` 会给**所有活着的**提示行各写一份 ✓
+     *   （见它的注释 ✓）⇒ 在新的展示位置里照样看得见 ✓。
+     */
+    var CAPABILITIES = [
+      { id: 'show', label: '提醒' },
+      { id: 'notify', label: '通知' },
+      { id: 'clipboard', label: '剪贴板' },
+      { id: 'vibrate', label: '震动' },
+      { id: 'open', label: '打开链接' },
+    ]
+    var element = document.createElement('div')
+    element.className = 'dshm-caps'
+    var caption = document.createElement('div')
+    caption.className = 'dshm-caps-caption'
+    /**
+     * ★ round 141（F-2）：**不再写「端侧通道」** ✗ —— 它和分组标题「端侧能力」是同一件事 ✓，
+     *   两个 11px 灰字叠在一起只会让标题更弱 ✗（用户第 2 条反馈 ✓）。
+     * 元素与属性都留着 ✓（验收要能问"它还在不在、占不占地方"✓），
+     * 而文字是空的 ⇒ CSS 的 `[data-dshm-caps-caption="1"]:empty { display:none }` 会收掉它 ✓。
+     */
+    caption.setAttribute('data-dshm-caps-caption', '1')
+    element.appendChild(caption)
+    /** 每颗开关的**行**（一行一项 ✓）与它的开关按钮 ✓ —— 供 `refresh()` 对账 ✓。 */
+    var switches = []
+
+    function enabledKey(id) {
+      return 'dsh-mobile.deviceEnabled.' + id
+    }
+    function isOn(id) {
+      return localStorage.getItem(enabledKey(id)) === 'yes'
+    }
+
+    /** 把开关状态告诉宿主：本机决定"是否执行"，宿主决定"是否投递"，两处必须一致。 */
+    function tellHost(id, on, name) {
+      void waitForTunnel().then(
+        function (transport) {
+          if (transport === undefined || transport === null || transport.placeholder === true) {
+            setNote(on ? '已允许' + name + '；尚未连上电脑，连上后会自动补报' : '已撤销' + name)
+            return undefined
+          }
+          return transport
+            .fetch('/api/mobile/device/enable', {
+              method: 'POST',
+              body: JSON.stringify({
+                type: 'client-request',
+                rpcId: 'dev-' + b64u(crypto.getRandomValues(new Uint8Array(8))),
+                method: 'mobile/device/enable',
+                payload: { args: { capability: id, enabled: on } },
+              }),
+            })
+            .then(function () {
+              setNote((on ? '已允许' : '已撤销') + name + '；本机与电脑已同步')
+            })
+        },
+        function (error) {
+          setNote('告诉电脑失败：' + String(error && error.message ? error.message : error))
+        },
+      )
+    }
+
+    for (var i = 0; i < CAPABILITIES.length; i++) {
+      ;(function (spec) {
+        /**
+         * ★★ round 142（本轮第 2 条）：**长横条 = 一项设置** ✓
+         *   （左标题 + 右侧开关 ✓，与设置页的行用**同一套类** ✓ —— 不自创一套 ✗）。
+         */
+        var row = document.createElement('div')
+        row.className = 'dshm-set-row dshm-cap-row-item'
+        row.setAttribute('data-dshm-cap-row', spec.id)
+        var label = document.createElement('span')
+        label.className = 'dshm-set-label'
+        label.textContent = spec.label
+        var control = document.createElement('button')
+        control.type = 'button'
+        control.className = 'dshm-cap-switch'
+        control.setAttribute('data-dshm-cap-switch', spec.id)
+        control.setAttribute('role', 'switch')
+        // ★ 开关自己不带文字了 ⇒ 读屏得靠 aria-label 说出"这一项是什么" ✓（可访问性不降级 ✗）
+        control.setAttribute('aria-label', spec.label)
+        var knob = document.createElement('span')
+        knob.className = 'dshm-cap-knob'
+        control.appendChild(knob)
+        row.appendChild(label)
+        row.appendChild(control)
+
+        control.addEventListener('click', function () {
+          var next = !isOn(spec.id)
+          localStorage.setItem('dsh-mobile.deviceAsk.' + spec.id, next ? 'yes' : 'no')
+          localStorage.setItem(enabledKey(spec.id), next ? 'yes' : 'no')
+          control.dataset.on = next ? '1' : '0'
+          control.setAttribute('aria-checked', next ? 'true' : 'false')
+
+          // ★ 申请系统通知权限**必须在这个用户手势里**：浏览器只允许在手势中申请。
+          //   漏掉它的后果是电脑侧显示"已允许"，而每次通知都因为 permission 仍是
+          //   default 退回页面横幅 —— 用户看到的是"通知出现在聊天框上方而不是通知栏"。
+          if (spec.id === 'notify' && next) {
+            try {
+              /**
+               * ★ 走 `requestNotifyPermission()` ✓（round 115）—— 它**有壳走原生** ✓。
+               *
+               * 原先这里直接调 `Notification.requestPermission()` ✗ —— 在 APK 里
+               * WebView 不实现这套 API ✗，于是"点允许通知"**什么都不会发生** ✓，
+               * 正是用户报的"通知权限没获取"✗。
+               * 原生那条路的对话框是异步的 ✓，结果从 `window.__dshmShellCallback` 回来 ✓
+               * （那段处理在本文件最前面 ✓）。
+               */
+              var state = notifyPermissionState()
+              if (state === 'default' || state === 'unsupported') {
+                setNote('正在申请系统通知权限…')
+                var route = requestNotifyPermission()
+                if (route === 'native') {
+                  setNote('已在系统里弹出通知授权（有结果会自动回来 ✓）')
+                } else if (route === 'unsupported') {
+                  setNote('这个环境没有通知能力（浏览器里请用 HTTPS 打开 ✓）')
+                } else if (route === 'web') {
+                  // ★ **浏览器**那条路是可以 await 的 ✓（原生那条只能等回调 ✓）——
+                  //   不接这一下，开关下面的提示会一直停在"正在申请…"上 ✗
+                  //   （用户看到的就是"点了没反应"✗，那正是这一块最早的老毛病 ✓）。
+                  void Notification.requestPermission().then(
+                    function (result) {
+                      setNote(
+                        result === 'granted'
+                          ? '系统通知权限已授予 ✓（浏览器通知）'
+                          : '系统通知权限被拒（' + String(result) + '），通知将退回页面横幅',
+                      )
+                    },
+                    function (error) {
+                      setNote('申请通知权限失败：' + String(error && error.message ? error.message : error))
+                    },
+                  )
+                } else {
+                  setNote('申请通知权限失败（' + route + '）')
+                }
+              } else if (state === 'granted') {
+                setNote('系统通知权限已授予 ✓（' + (shellBridge() !== undefined ? '原生通知' : '浏览器通知') + '）')
+              } else if (state === 'denied') {
+                setNote('系统通知已被关闭 ✗ → 到「安卓设置 → 应用 → DSH Mobile → 通知」里打开')
+              }
+            } catch (error) {
+              setNote('申请通知权限失败：' + String(error && error.message ? error.message : error))
+            }
+          }
+          tellHost(spec.id, next, spec.label)
+        })
+
+        element.appendChild(row)
+        switches.push({ spec: spec, control: control })
+      })(CAPABILITIES[i])
+    }
+
+    function refresh() {
+      for (var j = 0; j < switches.length; j++) {
+        var on = isOn(switches[j].spec.id)
+        switches[j].control.dataset.on = on ? '1' : '0'
+        switches[j].control.setAttribute('aria-checked', on ? 'true' : 'false')
+      }
+    }
+    refresh()
+    return { element: element, refresh: refresh }
+  }
+
+  function buildFilesSheet() {
+    var root = document.createElement('div')
+    root.id = 'dsh-mobile-sheet'
+
+    var backdrop = document.createElement('div')
+    backdrop.id = 'dsh-mobile-sheet-backdrop'
+
+    var panel = document.createElement('div')
+    panel.id = 'dsh-mobile-sheet-panel'
+
+    var head = document.createElement('div')
+    head.id = 'dsh-mobile-sheet-head'
+    var headText = document.createElement('span')
+    headText.className = 'dshm-sheet-title'
+    headText.textContent = '电脑文件目录'
+    var close = document.createElement('button')
+    close.type = 'button'
+    close.id = 'dsh-mobile-sheet-close'
+    close.setAttribute('aria-label', '关闭')
+    close.textContent = '\u2715'
+    /**
+     * ★★ round 142（本轮第 3 条）：**文件面板右上角那颗齿轮彻底删掉** ✗。
+     *
+     * 用户原话："把文件目录右上角的设置按钮彻底删除"✓。
+     * ★ 删掉之后**设置只有一条路** ✓：**DSH 左侧栏 → 设置 →「连接与设备」** ✓
+     *   （那一页里有连接 / 默认链接 / 这台设备 / 端侧诊断 / **解除配对** ✓）。
+     *   文件面板**不再有**通往设置 / 连接 / 解除配对的入口 ✗ ——
+     *   它自己只留底部那行「端侧能力」（那是**只含 5 颗开关**的轻视图 ✓，本轮第 1 条 ✓）。
+     * ★ 为什么连"齿轮是开关（再点一次回文件视图）"那套也一起删 ✗：
+     *   它存在的唯一理由就是"从设置页返回文件视图"✓；入口没了，这套 toggle 也就没有对象了 ✓
+     *   （留着反而会变成"改一半"✗：按钮删了、状态机还在 ✓，下次谁再加按钮就会踩到旧语义 ✗）。
+     */
+    var headSub = document.createElement('span')
+    headSub.className = 'dshm-sheet-sub'
+    // 一句话说清边界即可。原先那句"所有操作都在电脑上执行；可访问范围限 DSH 工作区。"
+    // 在 264px 宽度下折成两行，把头撑高 —— 而它要表达的其实只有后半句。
+    headSub.textContent = '可访问范围限 DSH 工作区'
+    head.appendChild(headText)
+    head.appendChild(headSub)
+    head.appendChild(close)
+
+    var body = document.createElement('div')
+    body.id = 'dsh-mobile-sheet-body'
+
+    // 固定底部区：提示行 + 「端侧能力」入口。
+    // ★ 入口放这里而不是主体工具栏里：主体会滚动，一滚入口就没了；
+    //   而且浮动的授权条原先正好盖在工具栏上（用户反馈"压住面板"）。
+    var foot = document.createElement('div')
+    foot.id = 'dsh-mobile-sheet-foot'
+    var note = document.createElement('div')
+    note.id = 'dsh-mobile-sheet-note'
+    /**
+     * 多选态的操作栏（`已选 N 项` / 全选 / 删除 / 移动 / 取消）。
+     *
+     * 为什么建在这里、内容却由文件浏览器填：底部固定区属于面板，而按钮要调的
+     * 是**当前目录**的选中集合。容器留给面板（它得和「端侧能力」入口互斥），内容由
+     * `renderSelectionBar()` 生成 —— 这样面板不必知道文件浏览器的状态。
+     */
+    var selectFoot = document.createElement('div')
+    selectFoot.id = 'dsh-mobile-sheet-select'
+    selectFoot.hidden = true
+    /**
+     * ★★ round 138：「端侧能力」**入口**（那一行 ✓）。
+     *
+     * 用户："右侧端侧通道的功能能不能也挪到设置里"✓ —— 5 颗胶囊已经搬进设置页 ✓
+     * （见 `fillConnSettings` 的「端侧能力」分组 ✓）。这里留**一行**入口 ✓。
+     *
+     * ## 为什么不干脆全搬走 ✗
+     * 用户在文件面板里**临时**想开一下震动/剪贴板 ✓ 是最常见的路径 ✓ ——
+     * 全搬走的话他得"关面板 → 开设置 → 找到那一节"（**3 步**✗）；
+     * 留这一行是 **1 步** ✓（点它直接进设置页那一节 ✓，它就在最上面 ✓）。
+     *
+     * ## 它同时**顶替**了原来那 4~5 颗胶囊在多选态里的位置 ✓
+     * `capabilityElement` 仍然指向"进多选态时要收起、退出时要还原"的那个元素 ✓ ——
+     * 于是 `setSelecting()` / `exitSelectMode()` **一个字都不用改** ✓，
+     * 而 `scripts/check-device-channel.mjs` 守的那条"只收起、绝不删"（端上是唯一授权入口 ✓）
+     * 也照旧成立 ✓（只是被守的元素从胶囊块换成了这一行 ✓，该脚本已同步 ✓）。
+     */
+    var connEntry = document.createElement('button')
+    connEntry.type = 'button'
+    connEntry.id = 'dshm-conn-entry'
+    connEntry.setAttribute('data-dshm-conn-entry', '1')
+    connEntry.className = 'dshm-conn-entry'
+    connEntry.innerHTML = ICON_PLUG_16
+    var connEntryLabel = document.createElement('span')
+    connEntryLabel.className = 'dshm-conn-entry-label'
+    connEntryLabel.textContent = '端侧能力'
+    var connEntryChevron = document.createElement('span')
+    connEntryChevron.className = 'dshm-conn-entry-chevron'
+    connEntryChevron.innerHTML = ICON_CHEVRON
+    connEntry.appendChild(connEntryLabel)
+    connEntry.appendChild(connEntryChevron)
+    connEntry.title = '提醒 / 通知 / 剪贴板 / 震动 / 打开链接'
+    foot.appendChild(note)
+    foot.appendChild(selectFoot)
+    foot.appendChild(connEntry)
+
+    panel.appendChild(head)
+    panel.appendChild(body)
+    panel.appendChild(foot)
+    root.appendChild(backdrop)
+    root.appendChild(panel)
+
+    /**
+     * ★★ round 156（C ✓，用户拍板"要同步动画"✓）：**关面板的收尾** ——
+     *   把面板真的藏起来 ✓，做那些"关了才该做"的清理 ✓。
+     *
+     * 为什么必须**推迟**到动画结束 ✗（以前一关闭就做完 ✓）：
+     *   以前 `data-open` 一翻 0 ⇒ `display:none` **硬切** ✗，而主页面让位 `--dshm-push`
+     *   要滑 `var(--dshm-slide)`（.24s ✓）⇒ 观感"慢半拍、一顿一顿"✗（用户报的那件事 ✓）。
+     *   现在：状态机**立刻**翻 ✓（见 `setOpen` ✓ —— 侧滑判定、背板点击穿透、既有断言都依赖它 ✓），
+     *   视觉态先按同一个时长/缓动走完 ✓，再到这里收尾 ✓（内容因此**不会**在滑出途中先空掉 ✓）。
+     *
+     * 两处细节（都会真的咬人 ✓）：
+     *   · `transitionend` **只认面板自己的 transform** ✓（别的属性也会冒泡到这里 ✓）；
+     *   · 另有**超时兜底** ✓（`CLOSE_FALLBACK_MS` ✓）—— 面板本来就停在屏外时 `transform` 不变
+     *     ⇒ 根本不会有 `transitionend` ✗，没有兜底就永远藏不掉 ✗✗。
+     */
+    var finishClose = function () {
+      if (closeTimer !== undefined) {
+        try {
+          clearTimeout(closeTimer)
+        } catch (error) {
+          void error
+        }
+        closeTimer = undefined
+      }
+      panel.removeEventListener('transitionend', onCloseTransitionEnd)
+      root.dataset.dshmClosing = '0'
+      // 关闭过渡期间**保留渲染** ✓ ⇒ 这些清理推迟到这里做 ✓（与以前同一批动作、同一顺序 ✓）
+      body.replaceChildren()
+      // 关面板要一并退出"整屏预览态"，否则下次打开会是整屏的 ✗
+      root.dataset.full = '0'
+      // 图片预览走的是 object URL：关面板一定要释放，否则每看一张就漏一份内存 ✓
+      releasePreviewUrl(api)
+      // 关面板 = 离开文件视图：多选态必须跟着收掉，否则下次打开会先看到一条
+      // 「已选 2 项」的底栏，而那时没有任何一行是勾上的
+      exitSelectMode(api)
+    }
+    /** `transitionend` 那一支：面板的位移走完了 ⇒ 收尾 ✓（见 `finishClose` ✓）。 */
+    var onCloseTransitionEnd = function (event) {
+      if (event === null || event === undefined) return
+      if (event.target !== panel) return
+      if (event.propertyName !== 'transform') return
+      finishClose()
+    }
+    /**
+     * 收尾的**超时兜底**：比 `var(--dshm-slide)`（.24s ✓）多留一点余量 ✓，
+     * 而且早于"约 350ms 后面板真的不可见/不可点"那条判据 ✓（`transitionend` 正常会先到 ✓）。
+     */
+    var CLOSE_FALLBACK_MS = 320
+    /** 关闭过渡的收尾定时器（`setOpen(false)` 起 ✓、`finishClose` 与"重开"停 ✓）。 */
+    var closeTimer = undefined
+
+    var setOpen = function (open) {
+      if (open) {
+        /**
+         * ★★ round 156（C ✓）：**重开 = 把上一次关闭的收尾当场做完** ✓（`finishClose` 幂等 ✓）——
+         *   只清定时器是不够的 ✗，两种情形都会咬人：
+         *     · 收尾照旧在 320ms 后触发 ⇒ 它 `body.replaceChildren()` 会把**刚打开的内容**清空 ✗
+         *       （现象："快速关掉再打开，面板是空的"✗）；
+         *     · 收尾被取消 ⇒ `releasePreviewUrl` 那一笔（图片预览的 object URL ✓）**永远不释放** ✗
+         *       （每快速开关一次就漏一份内存 ✓），`full` 那个整屏标记也会留在原地 ✓。
+         *   ★ 判据带上 `closeTimer === undefined`：**本来就没在关**（面板已经开着 ✓）时
+         *     绝不走这里 ✗ —— 否则会把一张好端端的面板内容清空 ✗。
+         */
+        if (closeTimer !== undefined || root.dataset.dshmClosing === '1') finishClose()
+      }
+      root.dataset.open = open ? '1' : '0'
+      if (document.body !== null && document.body !== undefined) {
+        /**
+         * ★★ round 156（C ✓）：**状态标志立刻翻** ✓（视觉态与状态机分离 ✓）——
+         *   侧滑"一键关面板"、背板点击穿透、以及既有断言（`body.dataset.dshmFiles` ✓）
+         *   都读它 ⇒ 它必须**当场**是新的 ✓，不能等动画（那会让 .24s 内"明明关着却像还开着"✗）。
+         *   视觉那一半交给 `data-dshm-closing` ✓（见 CSS 那条 ✓）。
+         */
+        if (open) document.body.dataset.dshmFiles = 'open'
+        else delete document.body.dataset.dshmFiles
+      }
+      refreshPush()
+      // 每次打开都对一遍"授权条"的状态（localStorage 可能被别处改过 ✓）。
+      // ★ round 138：原来这里还要 `capabilitySwitches.refresh()` ✗ —— 那颗胶囊块已经
+      //   搬进设置页 ✓，而设置页每次打开都**新建**一份胶囊（建时就按 localStorage 现读 ✓），
+      //   所以这里不再需要单独刷新 ✓（少一个"两处状态要对齐"的点 ✓）。
+      if (open) {
+        // 已经显示着的授权条要**当场收掉**：它压着面板头部，而面板里就有同样的开关
+        var asking = document.querySelector('[data-dshm-askbar]')
+        if (asking !== null) asking.remove()
+      } else {
+        /**
+         * ★★ round 156（C ✓）：先进入**关闭过渡态** ⇒ 面板继续渲染 ✓、但不吃触摸 ✓、
+         *   按 `var(--dshm-slide)` 滑出去 ✓（与主页面让位**同一时长、同一缓动** ✓，
+         *   两者都取自那一个变量 ✓）；`transitionend` / 超时兜底再真正隐藏 ✓。
+         */
+        if (closeTimer !== undefined) {
+          try {
+            clearTimeout(closeTimer)
+          } catch (error) {
+            void error
+          }
+        }
+        root.dataset.dshmClosing = '1'
+        panel.addEventListener('transitionend', onCloseTransitionEnd)
+        closeTimer = setTimeout(finishClose, CLOSE_FALLBACK_MS)
+      }
+      /**
+       * ★ 文件面板就是"一层页面" ✓ —— 开/关都要**当场**告诉壳 ✓（round 121，
+       *   系统返回要靠它决定"这一下吃掉还是退出"✓，见 dshmBack ✓）。
+       *   放在最后：`body.dataset.dshmFiles` 已经写完了 ✓，读到的一定是新状态 ✓。
+       */
+      reportBackAvailable()
+    }
+    /**
+     * 只改副标题（不动主标题）。
+     *
+     * 为什么需要：`setTitle` 是按**主标题文案**反推副标题的（那是一张"视图 → 副标题"的表 ✓），
+     * 而预览页的主标题是**文件名**（千变万化 ✗），落不进那张表 —— 于是它顶着
+     * 文件列表的「由电脑执行」出现，读起来像"这个文件由电脑执行" ✗（截图里一眼看到）。
+     * 给预览这类"标题是数据"的视图一个显式入口，比往那张表里塞正则可靠 ✓。
+     */
+    var setSubtitle = function (text) {
+      headSub.textContent = text
+    }
+    /**
+     * 整屏开关（只给预览用，见 renderFilePreview 的注释）。
+     * ★ 用属性而不是直接改宽度：离开预览时统一清掉，两条路径不会互相残留 ✓。
+     */
+    var setFull = function (on) {
+      root.dataset.full = on ? '1' : '0'
+    }
+    // 面板是两级的（工作区列表 → 打开方式），标题要跟着切
+    var setTitle = function (text) {
+      headText.textContent = text
+      /**
+       * 三个视图各有各的副标题；设置页不需要（空字符串会被 CSS 的 :empty 隐藏）
+       *
+       * ★★ round 142（第 ①② 条之后的小活）：给「端侧能力」那一屏补一句**端侧语义**的
+       *   副标题 ✓ —— 它原来落到兜底那句「由电脑执行」✗，而那一屏讲的恰恰是
+       *   "**手机**替电脑做哪几件事"✓（用户看截图时点出来的：文案与标题读起来是拧的 ✗）。
+       *   ★ 只改文案 ✗：逻辑（开关、权限、让位）一个字没动 ✓。
+       *   ★ 长度照抄隔壁那句（15 个字 ✓）—— 面板只有 264px 宽 ✓，超了会把头部撑成三行 ✗。
+       */
+      headSub.textContent =
+        text === '电脑文件目录'
+          ? '可访问范围限 DSH 工作区'
+          : text === '连接与设备'
+            ? '配对、隧道与端侧能力'
+            : text === '端侧能力'
+              ? '这些开关决定手机能替电脑做的事'
+              : '由电脑执行'
+      // 切面板时清掉上一条操作反馈，否则它会一直挂在那里
+      note.textContent = ''
+    }
+    close.addEventListener('click', function () {
+      setOpen(false)
+    })
+    backdrop.addEventListener('click', function () {
+      setOpen(false)
+    })
+
+    // `setOpen` 要在关闭时顺手收掉多选态，而那时它需要面板自己的引用：
+    // 这里先声明、最后赋值（`setOpen` 只在事件回调里被调用，那时 api 一定已经在了）。
+    var api
+    api = {
+      root: root,
+      body: body,
+      note: note,
+      foot: foot,
+      /** 多选态操作栏的容器（内容由文件浏览器填，见 `renderSelectionBar`）。 */
+      selectFoot: selectFoot,
+      /**
+       * ★ round 138：底部固定区里"进多选态时要收起、退出时要还原"的那一块 ✓ ——
+       *   原来指向 5 颗胶囊 ✗，现在指向**「端侧能力」那一行入口** ✓
+       *   （胶囊搬进了设置页 ✓）。语义没变 ✓，所以 `setSelecting` / `exitSelectMode`
+       *   一个字都不用改 ✓ —— 它们仍然是"只 `display:none`、绝不 remove" ✓。
+       */
+      capabilityElement: connEntry,
+      /**
+       * ★ round 138：底部那行「端侧能力」入口本体 ✓ —— 它的点击处理器挂在 `installShell`
+       *   里（那里才有 `getTunnel` ✓，与齿轮同一条路 ✓）。
+       */
+      connEntry: connEntry,
+      setOpen: setOpen,
+      setTitle: setTitle,
+      setSubtitle: setSubtitle,
+      setFull: setFull,
+      /**
+       * ★★ round 142（本轮第 1 条）：面板内部的"**退一层**" ✓ —— 从子视图回到文件视图 ✓
+       *   （面板**不关** ✓）。子视图现在有**两个** ✓：`'capabilities'` ✓
+       *   （文件面板底部那行「端侧能力」进来的那一屏 ✓）与 `'preview'` ✓
+       *   （round 153：自家预览那一屏 ✓，用户同意"返回回文件列表"✓）。
+       *
+       * @returns true = 确实退掉了一层 ✓；false = 本来就在文件视图上 ⇒ 调用方照旧关面板 ✓。
+       *
+       * ## 为什么做成**面板自己的方法**（而不是留在调用方那一层 ✗）
+       * 这一下现在有**两个**调用方 ✓：
+       *   ① 返回键（`dshmBack()` → `dshmBackRuntime.backOutOfFiles()` ✓）；
+       *   ② 底部那行入口自己"再点一次 = 开关"（`connEntry` 的 click ✓ —— 只在真的停在
+       *      「端侧能力」那一屏时才调它 ✓，判据见那里的说明 ✓）。
+       * ★ 反向滑动（`run('close-files')` ✓）**不是**调用方 ✗：round 145 起侧滑 = 一键关面板 ✓
+       *   （用户："侧滑就是关闭工作栏，不需要做这个一次一次返回"✓）—— 两者刻意不同 ✗✓。
+       * 各写一遍就是"同一个概念两份实现"✗（本项目对这条零容忍 ✗）——
+       * 状态（`currentView` / `restoreFiles`）本来就长在面板身上 ✓，所以实现也放这里 ✓。
+       * ★ 顺带解决了另一个真问题 ✓：滑动那一层的切片测试只切到
+       *   `installSwipeNavigation` ✓，够不着顶层那些函数 ✗ —— 而 `sheet` 是它的入参 ✓，
+       *   所以这条路在**切片**里也走得通 ✓（测试桩没有这个方法 ⇒ 走回"关面板"✓，
+       *   与切片测试原有的语义完全一致 ✓）。
+       */
+      backOutOfView: function () {
+        /**
+         * ★★ round 148（用户："给文件面板加安卓返回键逻辑（返回回到上一页，而不是回主页面）"✓）
+         *   —— **返回键**在面板里逐级后退 ✓：「端侧能力」那一屏 ⇒ 回文件视图 ✓；
+         *   **预览那一屏** ⇒ 回文件列表 ✓（round 153 ✓，见下面那一支 ✓）；
+         *   **子目录** ⇒ 上一级目录 ✓；**工作区根** ⇒ 回**工作区列表** ✓（面板仍开 ✓，
+         *   round 153 用户真机要求 ✓）；**工作区列表** ⇒ false ⇒ 交给 `dshmBack()` 关面板 ✓。
+         *
+         * ## ★★ 侧滑**刻意不同** ✗（用户随后明确更正 ✓）
+         *   "**侧滑就是关闭工作栏，不需要做这个一次一次返回**"✓ ⇒ `run('close-files')`
+         *   那一支**不经过这里** ✗，一次就把面板关掉 ✓。两者不一致是**有意为之** ✗，
+         *   后人别去"修"成一致 ✓。
+         *
+         * ## ★ 绝不抛（round 147/148 的实测教训 ✓）
+         *   上一版直接调 `api.backUpOneLevel()` ✓ —— 它在**揭示动线**上会抛
+         *   （那里 `workspace.root` 是 `undefined` ✗）⇒ 异常冒到 `dshmBack()` 的 try/catch
+         *   ⇒ **整次返回被当成"什么都没做"** ✗（现象极像"返回键坏了"✗）。这里兜住 ✓。
+         */
+        if (api.currentView === 'capabilities') {
+          api.currentView = 'files'
+          if (typeof api.restoreFiles === 'function') api.restoreFiles()
+          return true
+        }
+        /**
+         * ★★ round 153（用户："我同意，预览屏返回回到文件列表"✓）：
+         *   预览那一屏（`renderFilePreview` 写的 `currentView = 'preview'` ✓）按返回 ⇒
+         *   **回文件列表** ✓（面板**不关** ✓）—— 与上面「端侧能力」那一支**同一套做法** ✓：
+         *   退回"进预览之前那一屏"（`api.restoreFiles` ✓），不在这里另写一份渲染 ✗。
+         *
+         * ★ 预览页那颗「← 返回文件」按的就是**同一个落点** ✓（`renderFilePreview` 里 ✓）⇒
+         *   按钮与返回键从此**行为一致** ✓（以前返回键会把整块面板关掉 ✗ —— 用户报的那一点 ✓）。
+         * ★ 侧滑仍然"一键关面板"✗（见上面那段 ✓）—— 那是用户另外拍板的 ✓，故意不一致 ✓。
+         */
+        if (api.currentView === 'preview') {
+          if (typeof api.restoreFiles === 'function') api.restoreFiles()
+          return true
+        }
+        try {
+          if (typeof api.backUpOneLevel === 'function' && api.backUpOneLevel() === true) return true
+        } catch (error) {
+          debugBoxLine('[back] 上一层失败（当"没得退"处理 ✓）：' + String(error && error.message ? error.message : error))
+        }
+        return false
+      },
+    }
+    return api
+  }
+
+  // ── 底部状态栏：寄生式紧凑进度条 ─────────────────────────────────────
+  //
+  // ## 为什么是"寄生"
+  //
+  // 那行 `N 轮 M 步 / token 用量` 是 **DSH 自己的 React 组件**（`StatsPills`），
+  // 而 `boot.js` 是注入的经典脚本 —— **拿不到它的 store**，也不能 fork 它。
+  // 所以走本项目一贯的路线：观察它的 DOM → 解析文本 → 自绘一条紧凑行 →
+  // 点它**转发到 DSH 自己的面板**（上下文已用 / 会话统计 / Token 用量）。
+  // 原元素只收起、不移除（它既是 React 挂载点，也是那些面板的定位锚点）。
+  //
+  // ## 进度条画的是什么（这条最要紧，也是返工过一次的地方）
+  //
+  // 需求原文是"轮次步数、token 量的数据……做成进度条然后点开看详情"。
+  // **第一版画的是"缓存命中率"** —— 理由是"DOM 里只有这一个真实百分比"。
+  // 用户当场否掉：「完全看不出来什么意思」✓ 他是对的：那个数长期在 99% 附近，
+  // **条永远是满的**，等于什么都没说 ✗。"能画"不等于"该画" ✓。
+  //
+  // 换成**上下文占用**（`ContextMeter` 的 `usedTokens / contextWindow`）：这才是
+  // 「会走动、会满、满了要处理」的那个量，也就是用户脑子里的那个"进度"。
+  // 缓存命中退回「Token 用量」面板里 —— 那里它才有上下文 ✓。
+
+  /**
+   * 从 DSH 那两颗胶囊的文本里抠出要显示的数。`aria-label` 优先（它的分隔符最规整）。
+   *
+   * 只抠折叠态真要显示的两个数（轮次 / 步数 / 总 token）：
+   * 速度 `268 tok/s`、`缓存命中 N%`、模型用时、TTFT 这些留在**点开后的宿主面板**里 ✓ ——
+   * 摘要行每多一项，412px 宽的手机上就会多截断一处（实测）。
+   * 其中「缓存命中」还多一条理由：它长期在 99% 附近，放在摘要里等于没信息（用户原话
+   * 「完全看不出来什么意思」）✗。
+   */
+  function parseStatsText(text) {
+    var source = String(text || '')
+    var turns = /(\d[\d,]*)\s*轮/.exec(source)
+    var steps = /(\d[\d,]*)\s*步/.exec(source)
+    // ★ 必须排除 `tok/s`：时间胶囊的文本是 `3 轮 213 步 · 268 tok/s`，
+    //   第一版没排除，于是"速度"被当成了"总用量"，紧凑条上长出一个假的 `268 tok` ✗
+    //   （实测抓到的：`3 轮 213 步 268 tok/s · 268 tok · 缓存命中 99%`）。
+    var tokens = /([\d.,]+\s*[KMB]?)\s*tok(?!\/s)\b/i.exec(source)
+    var number = function (match) {
+      return match === null ? undefined : Number(String(match[1]).replace(/,/g, ''))
+    }
+    return {
+      turns: number(turns),
+      steps: number(steps),
+      tokens: tokens === null ? undefined : String(tokens[1]).replace(/\s+/g, ''),
+    }
+  }
+
+  /**
+   * 找 DSH 的 **上下文占用环**（`ContextMeter`）那颗触发按钮。
+   *
+   * 用**结构**定位，不用类名也不用文案：
+   *   · 类名是构建哈希（`JObwrW_trigger` 这种，升级一次就变）；
+   *   · `aria-label` 是本地化文案（中文"上下文已用 38%"、英文"38% of context used"）——
+   *     拿它做**选择器**会把脚本绑死在一种语言上 ✗。
+   * 稳定的特征是结构：一个 `aria-haspopup="dialog"` 的按钮，里面是一个画着**环**的 svg
+   * （两个 `circle`，其中一个带 `stroke-dasharray` 表示百分比）✓。
+   */
+  function contextMeterButton() {
+    var buttons = document.querySelectorAll('button[aria-haspopup="dialog"]')
+    for (var i = 0; i < buttons.length; i++) {
+      if (buttons[i].querySelector('svg circle[stroke-dasharray]') !== null) return buttons[i]
+    }
+    return null
+  }
+
+  /** 从任意文案里取第一个百分比（对中英文都成立，不依赖具体措辞）。 */
+  function parsePercent(text) {
+    var match = /(\d+(?:\.\d+)?)\s*%/.exec(String(text === null || text === undefined ? '' : text))
+    return match === null ? undefined : Number(match[1])
+  }
+
+  /**
+   * 构造紧凑状态栏（元素只建一次；插入位置在 `syncStatsBar` 里定）。
+   *
+   * 三段，每一段都对应 DSH 自己的一个面板，点它 = 点宿主那颗控件本身：
+   *
+   * | 段 | 显示 | 点开 |
+   * |---|---|---|
+   * | 上下文 | `[▇▇▇░░] 38%` | 「上下文已用」面板（`~375K / 1M` + 系统/工具/消息拆分） |
+   * | 轮次 | `4 轮 316 步` | 「会话统计」（模型用时/工具用时/TTFT/输出速度） |
+   * | 用量 | `66.9M tok` | 「Token 用量」（缓存命中/未缓存输入/缓存读取/输出） |
+   *
+   * ## 进度条画的是**上下文已用**，不是缓存命中
+   *
+   * 第一版画的是缓存命中率，用户当场指出"完全看不出来什么意思" ✓ —— 他是对的：
+   * 那个数长期在 99% 附近，**条永远是满的**，等于什么都没说 ✗。
+   * 上下文占用才是"会走动、会满"的那个量（DSH 自己有分子分母：`usedTokens / contextWindow`），
+   * 所以条换成它；缓存命中退回「Token 用量」面板里（那里有它的上下文）✓。
+   */
+  function buildStatsBar() {
+    var element = document.createElement('div')
+    element.id = 'dshm-stats'
+    element.setAttribute('data-dshm-stats', '1')
+
+    // 用 button 而不是 div：手机上只有真正的可点元素才有正确的点击反馈 ✓
+    var context = document.createElement('button')
+    context.type = 'button'
+    context.id = 'dshm-stats-context'
+    context.className = 'dshm-stats-seg'
+    var track = document.createElement('span')
+    track.className = 'dshm-stats-track'
+    var fill = document.createElement('span')
+    fill.className = 'dshm-stats-fill'
+    track.appendChild(fill)
+    var contextText = document.createElement('span')
+    contextText.className = 'dshm-stats-text'
+    context.appendChild(track)
+    context.appendChild(contextText)
+    context.addEventListener('click', function () {
+      forwardStatsToggle('context')
+    })
+
+    var sepA = document.createElement('span')
+    sepA.className = 'dshm-stats-sep'
+    sepA.setAttribute('aria-hidden', 'true')
+    sepA.textContent = '·'
+
+    var time = document.createElement('button')
+    time.type = 'button'
+    time.id = 'dshm-stats-time'
+    time.className = 'dshm-stats-seg'
+    var timeText = document.createElement('span')
+    timeText.className = 'dshm-stats-text'
+    time.appendChild(timeText)
+    time.addEventListener('click', function () {
+      forwardStatsToggle('time')
+    })
+
+    var sepB = document.createElement('span')
+    sepB.className = 'dshm-stats-sep'
+    sepB.setAttribute('aria-hidden', 'true')
+    sepB.textContent = '·'
+
+    var usage = document.createElement('button')
+    usage.type = 'button'
+    usage.id = 'dshm-stats-usage'
+    usage.className = 'dshm-stats-seg'
+    var usageText = document.createElement('span')
+    usageText.className = 'dshm-stats-text'
+    usage.appendChild(usageText)
+    usage.addEventListener('click', function () {
+      forwardStatsToggle('usage')
+    })
+
+    element.appendChild(context)
+    element.appendChild(sepA)
+    element.appendChild(time)
+    element.appendChild(sepB)
+    element.appendChild(usage)
+    return {
+      element: element,
+      context: context,
+      contextText: contextText,
+      time: time,
+      timeText: timeText,
+      usage: usage,
+      usageText: usageText,
+      fill: fill,
+      track: track,
+      sepA: sepA,
+      sepB: sepB,
+      /** 上一次同步用的"解析结果指纹"：一样就一个字节都不写（防重绘，见 syncStatsBar）。 */
+      state: { signature: '' },
+    }
+  }
+
+  /**
+   * 把点击转发给 DSH 自己那颗控件。
+   *
+   * 这样"点开看详情"用的是**宿主原生的面板**（真数据、真交互、位置也由宿主算），
+   * 而不是我们另画一个 —— 后者迟早与宿主不一致（这个项目已经吃过两套实现的亏）✓。
+   *
+   * 三段各有各的落点：上下文 → `ContextMeter` 的环；轮次/用量 → `StatsPills` 的两颗胶囊。
+   * 某一颗不存在时（例如没有压力读数就没有环、`steps===0` 就没有时间胶囊）
+   * 就退回**同一族里还活着的那颗**，而不是"点了没反应" ✓。
+   */
+  function forwardStatsToggle(which) {
+    if (which === 'context') {
+      var meter = contextMeterButton()
+      if (meter !== null) meter.click()
+      return
+    }
+    var root = document.querySelector('[data-composer-stats]')
+    if (root === null || root === undefined) return
+    var buttons = root.querySelectorAll('button')
+    if (buttons.length === 0) return
+    var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
+    target.click()
+  }
+
+  /**
+   * 同步一次紧凑状态栏（由外壳那套去抖观察者调用）。
+   *
+   * 四条纪律：
+   *   1. **先保证自己挂在宿主那行后面** —— 这一步绝不能放到"文本没变就返回"之后；
+   *   2. **只在解析结果真的变了才写文本** —— 观察者每 120ms 就可能跑一次，
+   *      无条件改文字会让它一直重绘（本项目"控件闪烁"的老毛病）；
+   *   3. 找不到 DSH 那行时把自己**收起**（会话切到没有轮次的那个 → 宿主会把它卸载）；
+   *   4. 只在**手机外壳**上做这件事（安装点就在 installShell 里）。
+   *
+   * ## 第 1 条是踩出来的
+   *
+   * 实测：会话开着的时候 DSH 会**反复重渲染 composer**，而我们是往它的容器里塞了一个
+   * 它不认识的节点 —— 重渲染时那个节点会被摘掉 ✗。第一版把"插回去"写在
+   * "文本没变就 return"**之后**，于是"文本没变"（恰恰是最常见的情况）时既不插回去、
+   * 也永远回不来：整条状态栏凭空消失，而**截图里看不出来**（那一屏本来就没有它）。
+   * 抓到它的是 `check-mobile-layout` 的断言（`#dshm-stats` 不在 DOM 里），
+   * 不是肉眼 —— 这正是"寄生式改动必须配断言"的理由 ✓。
+   */
+  function syncStatsBar(bar) {
+    if (bar === undefined || bar === null) return
+    var root = document.querySelector('[data-composer-stats]')
+    var meter = contextMeterButton()
+    // 输入框里那个环：**隐身但保留盒子**（CSS 里 `[data-dshm-meter="hidden"]`）。
+    // 底部那条已经显示上下文占用了，输入框那格没必要再占一个位置；
+    // 但它是那块面板的锚点、而且面板就渲染在它的父节点里 —— 只能藏、绝不能删 ✓。
+    if (meter !== null && meter.getAttribute('data-dshm-meter') !== 'hidden') {
+      meter.setAttribute('data-dshm-meter', 'hidden')
+      // ★ 只让触发器"隐身"是不够的：它那 28px 的槽 + 两侧 12px 的 gap = **52px 空白还留着** ✗
+      //   （用户反馈："显示去掉了，但他仍然占着空位，这不好看"）。
+      //   所以连**容器**一起标记，由 CSS 把它移出文档流（0×0）→ 空白收回到正常的 12px ✓。
+      var meterRoot = meter.parentElement
+      if (meterRoot !== null && meterRoot !== undefined && meterRoot.dataset !== undefined) {
+        meterRoot.dataset.dshmMeterRoot = 'hidden'
+      }
+    }
+    // 两边都没了（切到了没有轮次、也没有压力读数的会话）→ 整条收起
+    if ((root === null || root === undefined) && meter === null) {
+      if (bar.state.signature !== '') {
+        bar.state.signature = ''
+        bar.element.dataset.on = '0'
+      }
+      return
+    }
+    // 挂在宿主那行的**后面**（原位置，只是宿主那行已经收成 0 高）。
+    // 判据用"父节点相同 + 紧邻"，这样无论是被摘掉、还是宿主自己重建成新节点，都能补回去 ✓
+    if (root !== null && root !== undefined) {
+      if (bar.element.parentNode !== root.parentNode || bar.element.previousElementSibling !== root) {
+        root.insertAdjacentElement('afterend', bar.element)
+      }
+    } else if (bar.element.parentNode === null || bar.element.parentNode === undefined) {
+      // 没有 StatsPills 但有上下文环（例如刚开始的会话）：挂在 composer 区域里，位置仍对 ✓
+      var anchor = meter.parentNode === null || meter.parentNode === undefined ? null : meter.parentNode
+      if (anchor !== null && anchor.parentNode !== null && anchor.parentNode !== undefined) {
+        anchor.parentNode.insertBefore(bar.element, anchor)
+      } else if (document.body !== null && document.body !== undefined) {
+        document.body.appendChild(bar.element)
+      }
+    }
+    // 宿主那行的文本：`aria-label` 优先（形如 `3 轮 195 步 · 272 tok/s`），
+    // 退化到 textContent（`3 轮 195 步·272 tok/s`）—— 两个正则都能吃 ✓
+    // ★ 用 textContent 而不是 innerText：那行被我们用 `visibility:hidden` 收起后，
+    //   `innerText`（尊重 CSS 可见性）会**返回空串**，于是"有内容"被读成"没内容" ✗
+    //   （实测：探针里 `innerText` 恒为空，害得脚本以为每个会话都没有状态栏）。
+    var all = ''
+    if (root !== null && root !== undefined) {
+      var buttons = root.querySelectorAll('button')
+      var labels = []
+      for (var i = 0; i < buttons.length; i++) {
+        var aria = buttons[i].getAttribute('aria-label')
+        labels.push(aria !== null && aria !== undefined && aria.length > 0 ? aria : buttons[i].textContent || '')
+      }
+      all = labels.join(' ')
+      if (all.replace(/\s+/g, '') === '') all = root.textContent || ''
+    }
+    var stats = parseStatsText(all)
+    var contextPercent = meter === null ? undefined : parsePercent(meter.getAttribute('aria-label'))
+    var signature = JSON.stringify({ stats: stats, context: contextPercent === undefined ? null : contextPercent })
+    if (signature === bar.state.signature) return
+    bar.state.signature = signature
+
+    var timeParts = []
+    if (stats.turns !== undefined) timeParts.push(stats.turns + ' 轮')
+    if (stats.steps !== undefined) timeParts.push(stats.steps + ' 步')
+    bar.timeText.textContent = timeParts.join(' ')
+
+    // 用量段只留 token 总数：`tok/s` 归「会话统计」、`缓存命中` 归「Token 用量」——
+    // 折叠态每多一项，412px 的手机上就多截断一处（实测），而它们在面板里都有上下文 ✓
+    // 数字**原样用宿主那串**（`118M tok`）：那是 `formatTokens` 的 3 位有效数字，
+    // 更细的小数位宿主没给；自己补零只是"看起来精确"，所以不补 ✓（见 `05` §34.8）。
+    bar.usageText.textContent = stats.tokens === undefined ? 'Token 用量' : stats.tokens + ' tok'
+
+    var hasContext = contextPercent !== undefined
+    var hasTime = timeParts.length > 0
+    var hasUsage = stats.tokens !== undefined
+    // ★ 没有压力读数就不画轨道：**绝不编一个百分比**，也不画一条假的满/空条 ✓
+    bar.track.style.display = hasContext ? '' : 'none'
+    bar.contextText.textContent = hasContext ? contextPercent + '%' : ''
+    if (hasContext) {
+      var percent = Math.max(0, Math.min(100, contextPercent))
+      bar.fill.style.width = percent + '%'
+      // 快满了要一眼看出来（这不是"美化"：上下文满了就该清，颜色是最省字的提示）
+      bar.fill.dataset.tone = percent >= 95 ? 'danger' : percent >= 80 ? 'warn' : ''
+      bar.context.setAttribute('title', meter.getAttribute('aria-label') || '')
+    } else {
+      bar.fill.style.width = '0%'
+      bar.fill.dataset.tone = ''
+    }
+    bar.context.style.display = hasContext ? '' : 'none'
+    bar.time.style.display = hasTime ? '' : 'none'
+    bar.usage.style.display = hasUsage ? '' : 'none'
+    bar.sepA.style.display = hasContext && (hasTime || hasUsage) ? '' : 'none'
+    bar.sepB.style.display = hasTime && hasUsage ? '' : 'none'
+    bar.element.dataset.on = hasContext || hasTime || hasUsage ? '1' : '0'
+    bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
+  }
+
+  /**
+   * 路径压成"末两段"，前面用省略号。
+   * 为什么不用 CSS 的 `text-overflow: ellipsis`：它截的是**尾部**，
+   * 而尾部恰恰是最有信息量的部分（`/Volumes/Data/workspac…` 六行全一样 ✗）。
+   * 手机上面板只有 264px 宽，保留末两段既够辨认，也不会两行折行。
+   */
+  function shortPath(path) {
+    var parts = String(path).split('/').filter(function (part) {
+      return part.length > 0
+    })
+    if (parts.length <= 2) return String(path)
+    return '…/' + parts.slice(-2).join('/')
+  }
+
+  /** 在面板里显示一行提示（加载中 / 出错 / 空）。 */
+  function sheetMessage(body, text) {
+    var line = document.createElement('div')
+    line.className = 'dshm-ws-path'
+    line.style.padding = '8px'
+    line.textContent = text
+    body.replaceChildren(line)
+  }
+
+  /**
+   * 走隧道调一个**插件自有**的端点（`mobile/` 前缀）。
+   *
+   * 这些端点由宿主插件在隧道的一元 RPC 委派里直接处理（见 host 的
+   * `invokeLocalEndpoint`）：设备身份由隧道握手保证，所以不需要新的 HTTP 路由，
+   * 也没有 DSH 授权门禁挡路——DSH 自带的 `/open-in-app/*` 在手机侧是 401，
+   * 那正是"手机只有一个简陋文件夹按钮"的原因。
+   */
+  async function callLocalEndpoint(getTunnel, endpoint, args) {
+    var tunnel = getTunnel()
+    if (tunnel === undefined || tunnel === null) throw new Error('隧道未建立')
+    var response = await tunnel.rpc(endpoint, { args: args === undefined ? {} : args }, undefined)
+    var result = response === undefined || response === null ? undefined : response.result
+    if (result === undefined || result === null) throw new Error('电脑没有返回结果')
+    if (result.ok !== true) {
+      var error = result.error || {}
+      var failure = new Error(String(error.message || error.code || '未知错误'))
+      failure.code = error.code
+      throw failure
+    }
+    return result.value
+  }
+
+  /** 设置视图里的一行"标签 / 值"。 */
+  function settingsRow(label, value, tone) {
+    var row = document.createElement('div')
+    row.className = 'dshm-set-row'
+    var name = document.createElement('span')
+    name.className = 'dshm-set-label'
+    name.textContent = label
+    var text = document.createElement('span')
+    text.className = 'dshm-set-value'
+    /**
+     * ★★ round 141（F-1）：值里的 `｜` 换成 ` · ` ✓，并**判断这一行是不是长值行** ✓。
+     *
+     * ## 为什么在这里做（只有这一处 ✓）
+     * `settingsRow` 是**所有**设置行的唯一出口 ✓（`grep settingsRow` 数十处调用 ✓），
+     * 所以"分段 + 判长"放在这里 ⇒ 一处生效 ✓、不会有某个调用点漏掉 ✗
+     * （本项目对"同一个概念两处实现"零容忍 ✓）。
+     *
+     * ## 判据
+     *   · `｜`（我们自己的读数行用它分段 ✓，例：`48px｜壳实测｜变量=48px env=0px` ✓）
+     *     ⇒ 换成 ` · ` ✓ —— 用户拍板"`｜` 换成 ` · ` 或分段"✓；
+     *   · 长度 > 18 个字符 ⇒ 也算长值 ✓（`2000ms（只记住了一条：学校）` ✓、
+     *     指纹 `0AD7-…-82FC` ✓ 都是这一类 ✓）。
+     * 命中的行打 `data-dshm-long-value="1"` ✓，CSS 把它改成"标签一行、值另起一行左对齐" ✓
+     * （见那条规则的注释 ✓）。**短值行一个字不变** ✗（`隧道` / `访问范围` ✓）。
+     *
+     * ## 为什么用 18 这个数 ✓
+     * 面板最窄是 256px ✓，12.5px 中文一行大约放得下 18 个字符 ✓ ——
+     * 超过它必然折行 ✓，而折行的右对齐正是"左边缘锯齿"的来源 ✗（用户第 1 条反馈 ✓）。
+     */
+    var raw = String(value)
+    var isLongValue = raw.indexOf('｜') >= 0 || raw.length > 18
+    text.textContent = raw.split('｜').join(' · ')
+    if (isLongValue) row.setAttribute('data-dshm-long-value', '1')
+    if (tone !== undefined) text.dataset.tone = tone
+    row.appendChild(name)
+    row.appendChild(text)
+    return row
+  }
+
+  /** 设置视图里的一个分组标题。 */
+  function settingsGroup(title) {
+    var group = document.createElement('div')
+    group.className = 'dshm-set-group'
+    var head = document.createElement('div')
+    head.className = 'dshm-set-title'
+    head.textContent = title
+    group.appendChild(head)
+    return group
+  }
+
+  /**
+   * ★ round 132：读壳里那份「两个默认链接」✓（`shellJson('endpoints')` ✓）。
+   *
+   * 为什么需要它：槽此前**只活在壳的 `SharedPreferences` 里** ✗ —— 网页侧上报完就
+   * 再没读过（只有 `shellEndpointHosts()` 借它判 authority ✓），于是**设置界面上一片空白** ✗，
+   * 用户看不到"两个默认链接"到底记下了什么 ✗（用户原话 ✓）。
+   *
+   * 容错口径与别处一致 ✓：没有壳 / 桥没有 `endpoints` / 返回不是 JSON ⇒ **空槽** ✓
+   * （调用方据此显示"还没有默认链接"那句人话 ✓，绝不显示 `undefined` ✗）；
+   * `slots` 里坏掉的条目（不是字符串、空串 ✓）**跳过** ✓；壳没给 `label` 时按地址
+   * 自己判一个 ✓（`100.64.0.0/10` ⇒ Tailscale ✓，其余 ⇒ 学校 ✓ —— 与 `derivePageSlots`
+   * 同一套分类 ✓）；`timeoutMs` 不是正数时退回 `SHELL_SLOT_TIMEOUT_MS` ✓。
+   */
+  function readDefaultLinks() {
+    var info = shellJson('endpoints')
+    var slots = []
+    var timeoutMs = SHELL_SLOT_TIMEOUT_MS
+    if (info !== null) {
+      var rawTimeout = Number(info.timeoutMs)
+      if (isFinite(rawTimeout) && rawTimeout > 0) timeoutMs = Math.round(rawTimeout)
+      var raw = Array.isArray(info.slots) ? info.slots : []
+      for (var i = 0; i < raw.length; i++) {
+        var slot = raw[i]
+        var url = slot !== null && typeof slot === 'object' ? slot.url : slot
+        if (typeof url !== 'string' || url.length === 0) continue
+        var label =
+          slot !== null && typeof slot === 'object' && typeof slot.label === 'string' && slot.label.length > 0
+            ? slot.label
+            : defaultLinkLabel(url)
+        slots.push({ label: label, url: url })
+      }
+    }
+    return { slots: slots, timeoutMs: timeoutMs }
+  }
+
+  /** 壳没给 `label` 时按地址自判（与 `derivePageSlots` 同一套分类 ✓）。 */
+  function defaultLinkLabel(url) {
+    try {
+      return isTailscaleHost(new URL(url, location.href).hostname) ? 'Tailscale' : '学校'
+    } catch (error) {
+      return '链接'
+    }
+  }
+
+  /**
+   * 这条槽是不是**当前地址** ✓ —— 按 `authority`（host:port）比 ✓，
+   * 与 `shellEndpointHosts()` 用**同一把尺子** ✓：槽 URL 可能带不同路径
+   * （`/mobile/app` ✓ / 根路径 ✓），而"是不是同一台电脑的入口"只由 authority 决定 ✓。
+   */
+  function defaultLinkIsCurrent(url) {
+    try {
+      return new URL(url, location.href).host === location.host
+    } catch (error) {
+      return false
+    }
+  }
+
+  /**
+   * ★ round 132：「默认链接」小节 ✓ —— 把壳里那两个槽**显示出来** ✓（只读 + 复制 ✓）。
+   *
+   * 视觉一律用本视图**既有的**类 ✓（`settingsGroup` / `settingsRow` / `dshm-set-hint` /
+   * `toolButton` ✓ —— 与上面「连接」那一组同一个写法 ✓，没有新造样式 ✗）。
+   *
+   * ★ 这一节**只读 + 复制** ✗✗：一个"点一下就切过去"的按钮都没有 ✓ ——
+   *   页面内跳到**另一个源**会被壳判成外链、甩给系统浏览器 ✗（真要做"一键切换"
+   *   得加 Java 桥 ✓，那是下一轮的事 ✓，本轮不做 ✓）。
+   *
+   * 当前地址那一条加**后缀「当前」** ✓（用户最想看的"我现在走的是哪条" ✓）并染成
+   * `ok` 色 ✓；读不到槽时给一句**说人话**的提示 ✓（不是空白 / 不是 `undefined` ✗）。
+   */
+  function buildDefaultLinksGroup() {
+    var links = readDefaultLinks()
+    var group = settingsGroup('默认链接')
+    group.setAttribute('data-dshm-default-links-group', '1')
+    var threshold = links.timeoutMs + 'ms'
+    if (links.slots.length >= 2) {
+      threshold += '（先试' + links.slots[0].label + '，超时切 ' + links.slots[1].label + '）'
+    } else if (links.slots.length === 1) {
+      threshold += '（只记住了一条：' + links.slots[0].label + '）'
+    } else {
+      threshold += '（还没有可切的第二条）'
+    }
+    group.appendChild(settingsRow('切换阈值', threshold))
+    if (links.slots.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'dshm-set-hint'
+      empty.setAttribute('data-dshm-default-links-empty', '1')
+      empty.textContent = '还没有默认链接：等这个页面成功加载一次后会自动记下'
+      group.appendChild(empty)
+      return group
+    }
+    var makeRow = function (slot) {
+      var current = defaultLinkIsCurrent(slot.url)
+      var row = settingsRow(slot.label, current ? slot.url + '（当前）' : slot.url, current ? 'ok' : undefined)
+      row.setAttribute('data-dshm-default-link-row', current ? 'current' : 'other')
+      var copy = toolButton('复制', function () {
+        void copyText(slot.url).then(function (how) {
+          if (how === undefined) {
+            setNote('浏览器不允许自动复制 —— 长按上面那个地址手动复制：' + slot.url)
+            return
+          }
+          setNote('已复制默认链接：' + slot.url)
+        })
+      })
+      copy.setAttribute('data-dshm-action', 'copy-default-link')
+      copy.title = '复制这个地址'
+      row.appendChild(copy)
+      return row
+    }
+    for (var i = 0; i < links.slots.length; i++) group.appendChild(makeRow(links.slots[i]))
+    return group
+  }
+
+  /**
+   * 面板的第三个视图：**设置**（工作区列表 → 文件浏览 → 设置）。
+   *
+   * ## 为什么需要它
+   *
+   * 在此之前，手机端能看到的东西只有"文件"与"端侧通道开关"，而**这台设备自己**
+   * 的状态（连着哪台电脑、隧道通不通、凭的哪个指纹、怎么解除配对）全都没有入口 —
+   * 出问题时只能靠 `?debug=1` 的调试框和猜。
+   *
+   * ## 为什么"解除配对"必须由手机发起
+   *
+   * 安全规范 §7 要求"撤销即时生效"，但此前只有**电脑端**的 `/mobile/devices/revoke`：
+   * 想解除配对得先回到电脑前，而这条路径最常见的动因恰恰是"手机丢了/要换机/怀疑被配对"，
+   * 那时候人不一定在电脑前。端点 `mobile/device/unpair` 是**单向**的：
+   * 本机凭据当场清掉、宿主侧记录置为 revoked（审计保留），想重新配对必须再用电脑确认指纹 —
+   * 所以"自己撤销"不会被用来悄悄换一个信任根 ✓。
+   */
+  /**
+   * ★★ round 142（本轮第 1 条）：**只含端侧能力**的那个视图 ✓。
+   *
+   * 用户原话："现在右侧文件目录的端侧能力按钮合理，但点开我希望只有端侧能力，
+   * 不要显示连接与设备的内容"✓。
+   *
+   * ## 它是什么（以及**不是**什么）
+   * 它是**文件面板里的一个子视图** ✓（面板的视图状态多了一个 `'capabilities'` ✓），
+   * **不新开浮层** ✗、**不借道 DSH 的设置弹窗** ✗（那是另一条路 ✓，见下面的分工 ✓）。
+   *
+   * ## 分工（改完这一轮之后，两条路各自管什么）
+   *   · **文件面板底部那行「端侧能力」** ⇒ 进**这个**视图 ✓：**只有** 5 颗开关 ✓
+   *     （不带「连接」「默认链接」「这台设备」「端侧诊断」「解除配对」✗）；
+   *   · **DSH 左侧栏 → 设置 →「连接与设备」** ⇒ 进**完整**那一页 ✓
+   *     （连接 / 默认链接 / 这台设备 / 端侧诊断 / **解除配对** ✓ 都在那里 ✓）。
+   * ★ 为什么这样分 ✗：用户要的是"在文件面板里顺手开个震动/剪贴板"这条**最短的路** ✓，
+   *   所以那一屏只放他此刻要的东西 ✓；而"看连接状态 / 解除配对"是要**认真做**的动作 ✓，
+   *   留在设置那一页 ✓（顺带也解释了为什么文件面板**不再有**通往设置/解除配对的入口 ✗）。
+   *
+   * ## 返回层级（★ 本轮点名要确认的）
+   * 它**不是** DSH 设置弹窗 ✓ ⇒ `dshmBack()` 里 `settingsOverlayOpen()` 那一支**不管它** ✓；
+   * 它走的是**文件面板**那一支 ✓（`body.dataset.dshmFiles === 'open'` ✓）——
+   * 而那一支现在会**先问一句**"面板里是不是停在子视图上" ✓（`backOutOfFiles` ✓）：
+   *   是 ⇒ **退回文件视图** ✓（面板不关 ✓）；不是 ⇒ 才关面板 ✓。
+   * ⇒ 返回键 ✓、以及面板上的**反向滑动** ✓（`run('close-files')` 也走同一个 `dshmBack()` ✓）
+   *   都能正确"关掉它"✓，而**背后那层（面板、左抽屉）不会被误关** ✗✓。
+   * ★ 顺序：它仍在"关抽屉"**之前** ✓（面板本来就排在抽屉之前 ✓ —— 它从文件面板里点进去 ✓）。
+   */
+  function openCapabilitiesView(sheet, getTunnel) {
+    sheet.setOpen(true)
+    sheet.currentView = 'capabilities'
+    sheet.setTitle('端侧能力')
+    // 设置页那套收尾照旧：多选态先退掉（底部固定区要让给开关 ✓）、整屏预览态收掉 ✓
+    exitSelectMode(sheet)
+    if (typeof sheet.setFull === 'function') sheet.setFull(false)
+    sheet.body.replaceChildren()
+    // ★ 只渲染**一组** ✓（`fillConnSettings` 的第三个参数 ✓）—— 别把整页搬过来 ✗
+    fillConnSettings(sheet.body, getTunnel, 'capabilities')
+  }
+
+  /**
+   * ★ round 142（本轮第 3 条）：原来这里还有一个 `renderSettings(sheet, getTunnel)`
+   *   —— 那是"在**文件面板里**画完整的连接与设备页" ✓，只有刚被删掉的齿轮会调它 ✗。
+   *   齿轮一删，它就没有调用者了 ⇒ **一起删掉** ✓（留着就是死代码 ✗，
+   *   而且会让人以为"文件面板还能打开完整设置页"✗ —— 那正是本轮要消灭的错觉 ✓）。
+   *   完整那一页现在的唯一去处：**DSH 左侧栏 → 设置 →「连接与设备」** ✓
+   *   （`ensureConnSettings` → `mountConnBody` → `fillConnSettings` ✓）。
+   */
+
+  /**
+   * ★ round 137：「连接与设备」这一页的**内容** ✓ —— 与 DSH 设置弹窗里的第 5 个导航项
+   *   **共用同一份实现** ✓（`ensureConnSettings` → `mountConnBody` → 这里 ✓）。
+   *
+   * ## 为什么必须提出来
+   * 用户第 5 点："把右边的设置集成到左边来"✓。合并之后**同一个页面有两个挂载点** ✓：
+   *   · DSH 设置弹窗的第 5 个导航项「连接与设备」（新入口 ✓ —— 本轮之后它是**唯一**能打开
+   *     **完整**这一页的地方 ✓）；
+   *   · 文件面板底部那行「端侧能力」（**只画一组** ✓，见下面的 `only` ✓）。
+   *   ★ round 142：文件面板右上角那颗齿轮**已经删掉** ✗（用户第 3 条 ✓）——
+   *     所以"完整页"的那个老挂载点没了 ✓，但**渲染代码仍然只有这一份** ✓。
+   * 两边**只允许有一份渲染代码** ✗ —— 抄一份出来就是"同一个概念两份实现"✗
+   * （本项目对这条零容忍：两份一定会漂，加一行设置时总有一边被忘掉 ✓）。
+   *
+   * ## 参数
+   * @param body - 往哪个容器里画 ✓（`sheet.body` ✓ 或 `content` 里那个 `.dshm-conn-body` ✓）。
+   * @param getTunnel - 隧道读取器 ✓（`installShell` 的参数 ✓，见那里的说明 ✓）。
+   * @param only - ★ round 142：`'capabilities'` = **只画「端侧能力」那一组** ✓
+   *   （文件面板底部那行入口进来的视图 ✓ —— 用户："点开我希望只有端侧能力"✓）。
+   *   省略 = 画**完整**那一页 ✓（DSH 左侧栏 → 设置 →「连接与设备」✓）。
+   *   ★ 为什么用一个参数而不是再写一份渲染函数 ✗：那会变成"同一个概念两份实现"✗，
+   *     加一组设置时必然有一边被忘掉 ✓（本项目对这条零容忍 ✓）——
+   *     所以只有**一份**渲染代码 ✓，"只画哪一组"只是它的一个开关 ✓。
+   */
+  function fillConnSettings(body, getTunnel, only) {
+    var capabilitiesOnly = only === 'capabilities'
+    /**
+     * 第一行把"这一页管什么"说清楚，并指出**同一个页面在左边哪里** ✓
+     * （用户第 5 点：要和 agent 的原生设置做区分 ✓）。
+     *
+     * ★ round 137 改了措辞 ✓：合并之后不再是"两处设置、别走错" ✓，而是
+     *   "这一页也在 DSH 设置里" ✓。
+     * ★ round 142：这行说明**只在完整那一页出现** ✗ ——
+     *   "只显示端侧能力"的那个视图里不该再解释"连接与设备"是什么 ✓（用户明确要求 ✓）。
+     */
+    var scopeHint = document.createElement('div')
+    scopeHint.className = 'dshm-set-hint'
+    scopeHint.textContent =
+      '这一页只管连接与端侧能力（配对、隧道、提醒/通知等）。同一个页面也能在 DSH 自己的设置里找到：左侧栏 →「设置」→「连接与设备」。'
+    // ★ round 142：只画端侧能力那一组时，这行"边界说明"**不出现** ✗（用户明确要求 ✓）
+    if (!capabilitiesOnly) body.appendChild(scopeHint)
+
+    /**
+     * ★★ round 138：「端侧能力」分组 —— 那 5 颗能力胶囊（提醒 / 通知 / 剪贴板 /
+     *   震动 / 打开链接 ✓）从**文件面板底部的固定区**搬到设置页里 ✓
+     *   （用户原话："右侧端侧通道的功能能不能也挪到设置里"✓）。
+     *
+     * ## 为什么放在**最上面**（紧跟那行说明 ✓）
+     * 用户从文件面板底部那行「端侧能力」点进来时 ✓，要的东西应该**第一眼就在** ✓ ——
+     * 所以它排在任何诊断/连接信息之前 ✓（这也是"从文件面板到开关只要一步"的另一半 ✓）。
+     *
+     * ## 行为**一点都没变** ✗✗（这是底线）
+     * 复用**同一个** `buildCapabilitySwitches()` ✓（不新写一份 ✓）：
+     *   · 5 颗胶囊、选中=已允许 ✓、`role="switch"` ✓、`aria-checked` ✓；
+     *   · 点「通知」时那条"必须在用户手势里申请系统通知权限"的路 ✓（`requestNotifyPermission` ✓）；
+     *   · 告诉宿主（`mobile/device/enable` ✓）与写 localStorage 的两处 ✓。
+     * 只是**摆放位置**变了 ✓。
+     *
+     * ★ 为什么这里**不**订阅 `refresh()` ✗：这个函数每次渲染都**新建**一份胶囊 ✓
+     *   （它建的时候就按 localStorage 现读 ✓ —— 见 `isOn` ✓），
+     *   所以"重画一次"就等于"刷新一次" ✓；而"进了我们这一页就重画"
+     *   由 `mountConnBody(panel, true)` 与齿轮那条路保证 ✓（都取当下 ✓）。
+     */
+    var capabilities = buildCapabilitySwitches()
+    var capabilityGroup = settingsGroup('端侧能力')
+    capabilityGroup.setAttribute('data-dshm-caps-group', '1')
+    capabilityGroup.appendChild(capabilities.element)
+    /**
+     * ★★ round 138：这一组分自己的**反馈行** ✓ —— 那 12 处"已允许/失败/权限"文案
+     *   由 `setNote` 写进**所有**带 `data-dshm-caps-note` 的活提示行 ✓（见 `setNote` ✓）。
+     *   为什么必须有它 ✗：左侧设置页里文件面板那一行不在屏幕上 ✓ ——
+     *   少了这一行，"点了开关没有任何反馈"就会在**新位置**上重现 ✗
+     *   （而"每步都要说得出来"是这个项目对端侧通道的硬要求 ✓）。
+     */
+    var capabilityNote = document.createElement('div')
+    capabilityNote.className = 'dshm-set-hint'
+    capabilityNote.setAttribute('data-dshm-caps-note', '1')
+    capabilityGroup.appendChild(capabilityNote)
+    body.appendChild(capabilityGroup)
+    /**
+     * ★★ round 142（本轮第 1 条）：**到这里就结束** ✓ —— 只画端侧能力那个视图 ✓。
+     * 用户："点开我希望只有端侧能力，不要显示连接与设备的内容"✓
+     * ⇒「端侧诊断」「连接」「默认链接」「这台设备」「解除配对」**一个都不画** ✗。
+     * ★ 它们并没有失联 ✗：完整那一页仍然在 **DSH 左侧栏 → 设置 →「连接与设备」** ✓
+     *   （`ensureConnSettings` 那条第 5 个导航项 ✓）—— 包括安全规范要求的**解除配对** ✓。
+     */
+    if (capabilitiesOnly) return
+
+    /**
+     * ★ 「端侧诊断」分组 ✓ —— 用户要求"改 DSH 预览那一轮"生效，而他手上无法判断
+     *   壳那半（APK）到底有没有生效 ✗（此前只能靠 `?debug=1` ✓）。
+     *
+     * 这三个数一摆，判断就是确定的 ✓：
+     *   · **壳版本** ✓：显示 `0.1.0+BUILD-…` → 在 APK 里 ✓；显示"（浏览器）" → 不是 APK ✓；
+     *   · **安全区** ✓：手机上应为**非 0**（状态栏高度 ✓）—— 为 0 ✗ 就说明壳那半没生效 ✓，
+     *     那么"DSH 原生预览全屏时头部顶到状态栏下面"必然修不好 ✓（不是网页那半的问题 ✓）；
+     *   · **键盘** ✓：弹出输入法时应从 0 变成几百 px ✓。
+     */
+    var shellInfo = shellBridge()
+    var shellPlatform = shellJson('platform')
+    var shellVersion =
+      shellInfo !== undefined ? String(shellInfo.version()) : '（浏览器，不是 APK ✓）'
+    /**
+     * ★ round 115：这里补了三件事 ✓ —— 都是"手机上没有控制台，只能靠屏幕上的字"逼出来的 ✓：
+     *   1. **安全区是多少、从哪来** ✓：壳实测（`--dshm-safe-top` ✓）/ 浏览器 env() ✓ /
+     *      都没有（0 ✓）。原先只显示一个秒数 ✓，于是"壳没生效"与"壳生效了但网页没用上"
+     *      在屏幕上长得一模一样 ✗（那正是上一轮卡住的地方 ✓）；
+     *   2. **edge-to-edge 有没有开** ✓：安全区为 0 在**没开** edge-to-edge 的机器上
+     *      （API 29）是**正常的** ✓ —— 不加这一项会把正常情况误报成"壳没生效"✗；
+     *   3. **通知权限** ✓：WebView 里 `Notification.permission` 不算数 ✗，
+     *      必须问壳 ✓（用户报的"通知权限没获取"就卡在这一项上 ✓）。
+     */
+    var readVar = function (name) {
+      var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+      return value === '' ? '（未设置）' : value
+    }
+    var readEnvPx = function (name) {
+      try {
+        var probe = document.createElement('div')
+        probe.style.cssText = 'position:absolute;left:-9999px;top:0;height:env(' + name + ',0px);'
+        document.body.appendChild(probe)
+        var height = Math.round(probe.getBoundingClientRect().height)
+        probe.remove()
+        return height
+      } catch (error) {
+        return -1
+      }
+    }
+    /**
+     * ★ round 116：这一行报的必须是**生效值**（`safeTopPx()` = max(变量, env) ✓），
+     *   而不是单独那个变量 ✗ —— 因为网页与壳在这件事上必须**只有一个数** ✓。
+     *   同时把两个原始值都写出来 ✓：手机上排障时"差在变量还是差在 env"一眼可辨 ✓
+     *   （真机实测：壳报 48px ✓，而上一轮验收只模拟了 24px ✗ —— 差了整整一倍 ✓）。
+     */
+    var safeTopNumber = safeTopPx()
+    var safeTopValue = safeTopNumber + 'px'
+    var shellInsets = shellJson('insets')
+    var envTop = readEnvPx('safe-area-inset-top')
+    var varTop = parseFloat(readVar('--dshm-safe-top')) || 0
+    var edgeToEdge = shellPlatform !== null && shellPlatform.edgeToEdge === true
+    /**
+     * ★ 来源要**按实际生效的那一个**说 ✓ —— 上一版写成"没有壳就一律叫浏览器 env()" ✗，
+     *   于是"变量=24px、env=0px"这种（验收里就是这样 ✓）会被说成 env() ✓，
+     *   一眼看过去正好把"到底谁在起作用"看反 ✗。
+     */
+    var safeTopSource =
+      safeTopNumber <= 0
+        ? '无（不是 APK、或 env() 与壳报的都是 0）'
+        : shellInsets !== null && shellInsets.seen === true
+          ? '壳实测' + (edgeToEdge ? '（edge-to-edge ✓）' : '（未开 edge-to-edge ✓）')
+          : varTop > 0 && varTop >= envTop
+            ? 'CSS 变量（--dshm-safe-top）'
+            : '浏览器 env()'
+    var diagnostics = settingsGroup('端侧诊断')
+    diagnostics.appendChild(
+      settingsRow(
+        '外壳版本',
+        shellVersion +
+          (shellPlatform === null
+            ? ''
+            : '｜安卓 ' + String(shellPlatform.android) + '（SDK ' + String(shellPlatform.sdk) + '）'),
+        shellVersion.indexOf('BUILD-') >= 0 ? 'ok' : 'warn',
+      ),
+    )
+    /**
+     * ★★ 「后台保活」那一行 ✓ —— **前台服务的原生时钟到底有没有在驱动网页** ✓。
+     *
+     * ## 为什么必须有它（用户报的核心问题就落在这一行上 ✓）
+     *   用户报的是"**退出 App 就断联**"✗，而方案 B′ 的命门是一个**未验证假设** ✓：
+     *   "原生注入的 JS 在后台到底还执不执行"✓（`25-壳侧保活与通知-勘察与方案.md` §4.5 ✓）。
+     *   这一行就是那个假设的读数 ✓：收到过几次 tick ✓ + 最近一次 ping / poll 是什么时候 ✓。
+     *   没有它，真机上这件事**只能靠猜** ✗（而"靠猜"在这个项目里已经付过学费 ✓）。
+     *
+     * ## ★ 为什么**不受 `?debug=1` 门控** ✗（与它下面那几行**不一样** ✓）
+     *   下面「视口 / 安全区 / 键盘让位」是**纯排障读数** ✓ ⇒ 门控起来 ✓（用户第 5 点要求 ✓）；
+     *   而这一行回答的是**用户自己会问的那句话**（"退到后台还连着没有 / 通知为什么不来"✓）——
+     *   让用户先去开调试模式再看，等于在最需要它的时刻多设一道门 ✗。
+     *   口径与同组的「外壳版本」「通知权限」一致 ✓（那两条也不门控 ✓，理由见紧接着的注释 ✓）。
+     *   ★ 代价只有一行字 ✓，换来的是这一整轮在真机上**唯一**能自证的入口 ✓。
+     *
+     * ## 读数什么时候刷新 ✓
+     *   本行的数在**每次点进这一页时取当下** ✓（`mountConnBody(panel, true)` ✓，
+     *   与「隧道」「通知权限」那几行同一个口径 ✓）—— 计数是**本页累计** ✓
+     *   （从页面加载算起 ✓），所以"进来看了两次、数在涨"本身就说明原生时钟在跑 ✓。
+     */
+    diagnostics.appendChild(settingsRow('后台保活', keepAliveDiagnosticText(), keepAliveDiagnosticTone()))
+    /**
+     * ★ round 137：下面这几行是**纯排障读数** ✓ ⇒ 只在 `?debug=1` 时渲染 ✓
+     *   （用户第 5 点："目前右边的设置有很多我们临时 debug 用的，等到最后要删掉"✓）。
+     *
+     * ★ 为什么是"门控"而不是"删掉" ✗✗（用户已拍板 ✓）：这些数字是**唯一的排障抓手** ✓
+     *   —— 手机上既没有控制台、也拿不到截图 ✓（这一页的每一行注释都在讲这个 ✗）。
+     *   删掉之后下次"安全区没生效 / 键盘不让位"就只能靠猜 ✓。
+     *   判据用现成的 `DEBUG_BOX_ON` ✓（文件开头那个"`?debug=1` 带一次就记住"的开关 ✓），
+     *   不新造第二个开关 ✗（同一个概念两个事实来源，本项目零容忍 ✓）。
+     *
+     * ★ 留在这组里的两条（外壳版本 / 通知权限）**不是**排障读数 ✓：
+     *   · 外壳版本：它一眼回答"我到底在不在 APK 里" ✓（用户被这件事困过 ✓）；
+     *   · 通知权限：用户反复报"通知权限没获取" ✓ ⇒ 它必须随时看得见 ✓。
+     */
+    if (DEBUG_BOX_ON) {
+      diagnostics.appendChild(settingsRow('视口', window.innerWidth + ' × ' + window.innerHeight))
+      diagnostics.appendChild(
+        settingsRow(
+          '安全区（状态栏）',
+          safeTopValue + '｜' + safeTopSource + '｜变量=' + readVar('--dshm-safe-top') + ' env=' + envTop + 'px',
+          // 只有"壳开了 edge-to-edge 却仍然是 0"才算真问题 ✓ —— 其余情况 0 是有道理的 ✓
+          edgeToEdge && !(safeTopNumber > 0) ? 'warn' : 'ok',
+        ),
+      )
+      diagnostics.appendChild(settingsRow('键盘让位', readVar('--dshm-keyboard')))
+    }
+    /**
+     * ★★ round 151：**「调试模式」开关** ✓（用户："另外你再加一个切换 debug 和正常模式的功能吧"✓）。
+     *
+     * ## 为什么放在**这一组**、而且是**始终可见**的 ✗
+     *   · 放在「端侧诊断」这一组 ✓ —— 它本来就是我们的**排障读数**组 ✓，语义最贴 ✓；
+     *   · ★ **不受 `?debug=1` 门控** ✗ —— 否则就成了死循环 ✓（关掉之后没有任何入口再打开 ✗）；
+     *     这一行任何时候都在 ✓（用户要的正是"正常模式下也能切回去"✓）。
+     *
+     * ## 与调试栏那颗按钮的关系 ✓
+     *   两处**共用 `setDebugMode()`** ✓（唯一读写口 ✓）：都改同一个存储标志 ✓、
+     *   都同步地址栏 ✓、都刷新 ✓ —— 不会出现"一边记住、一边忘改地址"的漂移 ✗。
+     * ## 判据（验收直接量 ✓）
+     *   `data-dshm-action="toggle-debug"` ✓ + `role="switch"` ✓ + `aria-checked` 随状态 ✓
+     *   + `aria-label="调试模式"` ✓。
+     */
+    var debugRow = document.createElement('div')
+    debugRow.className = 'dshm-set-row dshm-cap-row-item'
+    debugRow.setAttribute('data-dshm-debug-row', '1')
+    var debugLabel = document.createElement('span')
+    debugLabel.className = 'dshm-set-label'
+    debugLabel.textContent = '调试模式'
+    var debugSwitch = document.createElement('button')
+    debugSwitch.type = 'button'
+    debugSwitch.className = 'dshm-cap-switch'
+    debugSwitch.setAttribute('data-dshm-action', 'toggle-debug')
+    debugSwitch.setAttribute('role', 'switch')
+    debugSwitch.setAttribute('aria-label', '调试模式')
+    debugSwitch.setAttribute('aria-checked', DEBUG_BOX_ON === true ? 'true' : 'false')
+    debugSwitch.dataset.on = DEBUG_BOX_ON === true ? '1' : '0'
+    var debugKnob = document.createElement('span')
+    debugKnob.className = 'dshm-cap-knob'
+    debugSwitch.appendChild(debugKnob)
+    debugSwitch.addEventListener('click', function (event) {
+      if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+      // ★ 切到**相反**的状态 ✓（唯一读写口 ✓）
+      setDebugMode(DEBUG_BOX_ON !== true, true)
+    })
+    debugRow.appendChild(debugLabel)
+    debugRow.appendChild(debugSwitch)
+    diagnostics.appendChild(debugRow)
+    /**
+     * ★★ round 124：底部**手势导航条（小白条）**的三个读数 ✓ —— 本轮**只报数、不让位** ✗。
+     *
+     * 用户原话："我的手机底部开启了小白条（手势导航条），目前应用最底下的**上下文用量说明**
+     * 那一行与它冲突（小白条不打开输入法时会盖到那一行字约 40% 高度）" ✗。
+     *
+     * 为什么三个都要摆出来：壳一直只读 `navigationBars` ✗，而**手势导航下它往往远小于**
+     * 小白条实际占的区域 ✓ —— 真正描述"系统强制手势区"的是 `mandatorySystemGestures` ✓。
+     * 三个数并排放在屏幕上，用户一眼就能看出"哪个才是那个高度" ✓
+     * （这一轮的全部目的就是拿到这三个数 ✓，补偿留到下一轮 ✓ —— 免得"武断地抬高"✗）。
+     *
+     * ★ 取值顺序与别处一致 ✓：**壳报的为准**（`shellInsets` ✓）→ 退到 CSS 变量 ✓ → 都没有就是 0 ✓。
+     *   旧壳没有这两个新字段时会退到变量（也是 0 ✓），不会显示成"（未设置）"那种看不出所以然的样子 ✓。
+     * ★ 无头验收里这三个值都是 0 ✓ —— 断言只查"行在、字段在" ✗，不查具体像素 ✓。
+     * ★ 这一行与上面几行**同一个出处**（「端侧诊断」分组 ✓，只在手机外壳/移动布局里出现 ✓）——
+     *   新增的 CSS 变量本轮**不参与任何布局** ✗（输入区、安全区让位、预览层都没动 ✓）。
+     */
+    var insetNumber = function (key, cssName) {
+      var fromShell = shellInsets === null || shellInsets === undefined ? NaN : Number(shellInsets[key])
+      if (isFinite(fromShell) && fromShell >= 0) return Math.round(fromShell)
+      var fromVar = parseFloat(readVar(cssName))
+      return isFinite(fromVar) && fromVar > 0 ? Math.round(fromVar) : 0
+    }
+    var navBottomPx = insetNumber('bottom', '--dshm-safe-bottom')
+    var gestureBottomPx = insetNumber('gestureBottom', '--dshm-gesture-bottom')
+    var systemGestureBottomPx = insetNumber('systemGestureBottom', '--dshm-system-gesture-bottom')
+    if (DEBUG_BOX_ON) {
+      diagnostics.appendChild(
+        settingsRow(
+          '导航栏（底部小白条）',
+          'navigationBars=' +
+            navBottomPx +
+            'px｜手势区=' +
+            gestureBottomPx +
+            'px｜系统手势区=' +
+            systemGestureBottomPx +
+            'px｜edge-to-edge ' +
+            (edgeToEdge ? '✓' : '✗'),
+        ),
+      )
+    }
+    /**
+     * ★★ round 116：**把"现在还有几个能点的控件压在顶部安全区里"直接写在屏幕上** ✓。
+     *
+     * 为什么值得单独写一行：这条链路的失败在手机上是**无声**的 ✓ ——
+     * 用户只能说"还是进状态栏了"✗，而我这边看不到 DOM ✗、也拿不到截图 ✓，
+     * 于是只能靠猜 ✗（这一轮就是这么过来的 ✓）。有了这一行，用户一眼就能报出
+     * "0 个 ✓"（修好了 ✓）或者"3 个：_tabStrip_xxx、_addTab_xxx…"✓（我立刻知道是谁 ✓）。
+     * 判据与验收脚本里那条断言**完全一致**（几何 + 命中测试 ✓）。
+     */
+    var previewNow = document.body !== null && document.body !== undefined && document.body.dataset.dshmDshPreview === '1'
+    var topBandNames = safeTopNumber > 0 ? (previewNow ? probeTopBand(safeTopNumber) : dshmTopBandLast) : null
+    var topBandText
+    if (!(safeTopNumber > 0)) topBandText = '（安全区是 0，无从判断）'
+    else if (topBandNames === null) topBandText = '（还没打开过 DSH 预览）'
+    else if (topBandNames.length === 0) topBandText = (previewNow ? '现在：没有 ✓' : '预览打开时：没有 ✓')
+    else topBandText = (previewNow ? '现在' : '预览打开时') + '：' + topBandNames.length + ' 个：' + topBandNames.join('、')
+    if (DEBUG_BOX_ON) {
+      diagnostics.appendChild(
+        settingsRow('压在安全区里的控件', topBandText, topBandNames !== null && topBandNames.length > 0 ? 'warn' : 'ok'),
+      )
+    }
+    var notifyState = notifyPermissionState()
+    diagnostics.appendChild(
+      settingsRow(
+        '通知权限',
+        notifyState + (shellInfo === undefined ? '（浏览器）' : '（原生）'),
+        notifyState === 'granted' ? 'ok' : 'warn',
+      ),
+    )
+    /**
+     * ★★ round 141（F-6）：这一组**不在这里挂** ✗ —— 挪到「这台设备」之后 ✓（见下面 ✓）。
+     *
+     * 用户第 6 条反馈是"诊断行与用户信息混排"✓，实测比"混排"更糟 ✗：
+     * 原来的顺序是 **端侧能力 → 端侧诊断 → 连接 → 默认链接 → 这台设备 → 解除配对** ✓
+     * ⇒ 排障读数排在**所有用户信息之前** ✓ —— 一进这一页先看到一串数字 ✓（截图可见 ✓）。
+     * 现在挪到 `device` 之后、`actions`（解除配对）之前 ✓：
+     *   **端侧能力 → 连接 → 默认链接 → 这台设备 →（?debug=1 时）端侧诊断 → 解除配对** ✓
+     * —— 用户信息在前 ✓、危险操作仍在最后 ✓、诊断夹在它们之间 ✓（不开 debug 时它根本不渲染 ✓，
+     * 所以对普通用户是**零可见变化** ✗，这一点在报告里如实写了 ✓）。
+     */
+
+    var connection = settingsGroup('连接')
+    connection.appendChild(settingsRow('当前地址', location.host))
+    /**
+     * ★ round 126：**「改地址」入口** ✓ —— 壳里 DshmShell.changeAddress() 早就实现了 ✓
+     *   （MainActivity.ShellBridge ✓，内部 runOnUiThread 弹"电脑地址"输入框 ✓），
+     *   而网页侧此前**一次都没调用过它** ✗ —— 这条桥是死代码 ✓，
+     *   用户没有任何手动改地址的入口 ✗（只能重新配对/重装 ✓）。
+     *
+     * ★ 为什么不恢复"双击返回改地址"那个手势 ✗：侧滑导航下 600ms 内两次根本做不出来 ✗
+     *   （用户已拍板 ✗）。只补这一行页面入口 ✓ —— 刷新网页即可生效 ✓，不用重装 APK ✓。
+     *
+     * ★ 只在**真·APK**里渲染这一行 ✓：判据就是 shellBridge() !== undefined ✓ ——
+     *   纯浏览器里调它也没有任何作用 ✗，显示出来只会让人以为坏了 ✗。
+     * ★ 点它抛错时**不静默** ✗：在按钮下面写一句可读的提示 ✓ ——
+     *   提示元素用的是本视图既有的类 dshm-set-hint ✓（与「解除配对」下面那句同一个写法 ✓），
+     *   并且**按需创建** ✓：空元素也会占住那 6px 内边距 ✓，白白在「隧道」前多一道缝 ✗。
+     * ★ 按钮用的是本文件既有的 toolButton ✓（= .dshm-tool 胶囊 ✓，与面板里其它动作按钮同款 ✓），
+     *   没有新造样式 ✓。
+     */
+    if (shellBridge() !== undefined) {
+      var changeAddressHint = null
+      var changeAddressButton = toolButton('改地址', function () {
+        var failure = null
+        try {
+          var bridge = shellBridge()
+          if (bridge === undefined || typeof bridge.changeAddress !== 'function') {
+            // 旧壳还没有这条桥 ✓ —— 说清楚"装新 APK 后可用" ✓，而不是点了没反应 ✗
+            failure = '这个外壳版本还没有「改地址」的桥（装上带 changeAddress 的新 APK 后可用）'
+          } else {
+            bridge.changeAddress()
+          }
+        } catch (problem) {
+          failure = describeError(problem)
+        }
+        if (failure === null) return
+        if (changeAddressHint === null) {
+          changeAddressHint = document.createElement('div')
+          changeAddressHint.className = 'dshm-set-hint'
+          if (changeAddressButton.parentNode !== null) {
+            changeAddressButton.parentNode.insertBefore(changeAddressHint, changeAddressButton.nextSibling)
+          }
+        }
+        changeAddressHint.textContent = '改地址失败：' + failure
+      })
+      // ★ 给验收脚本一个**稳定的定位钩子** ✓（文案会改 ✓，这个属性不会 ✓）
+      changeAddressButton.dataset.dshmAction = 'change-address'
+      changeAddressButton.title = '在原生输入框里改「电脑地址」'
+      connection.appendChild(changeAddressButton)
+    }
+    /**
+     * ★★ round 152：「扫码配对」入口 ✓ —— 起因是用户报的
+     *   "**手机端的 dshmobile 页面点击扫码配对没有正常功能**"✗。
+     *
+     * 查下来的根因（两半都缺 ✓）：
+     *   · 网页侧此前**根本没有**这条入口 ✗（配对页 `/mobile` 上那颗「扫码配对」
+     *     也只是一句提示 ✓ —— 那一半在 `packages/host/src/pairing-page.html` 里修 ✓）；
+     *   · 壳侧**没有**"让网页开扫码"的桥 ✗ —— `ScanActivity` 早就有了 ✓，
+     *     却只长在「电脑地址」框上 ✓（MainActivity 的 `startScan` ✓），
+     *     网页**一个字都调不到** ✗。
+     *
+     * 于是本轮：壳加 `DshmShell.scanPair()` ✓（round 152 ✓），网页把按钮接上 ✓。
+     * ★ 与上面「改地址」那一行是**同一套写法** ✓（同一个判据 ✓、同一个 toolButton ✓、
+     *   同样的"旧壳要说清楚"降级 ✓）—— 因为要防的是同一类事故 ✗：
+     *   按钮画出来、点了没反应 ✓，而手机上没有任何报错 ✗。
+     *
+     * ★ 只在**真·APK**里渲染 ✓：判据就是 `shellBridge() !== undefined` ✓ ——
+     *   纯浏览器里没有壳 ✓，画出来只会让人以为坏了 ✗
+     *   （没有壳时"扫码"这件事由电脑屏幕上那张二维码 + 手机自带相机承担 ✓）。
+     * ★ 文案与「改地址」一致地**不静默** ✗：失败/旧壳都在按钮下面写一句可读的话 ✓，
+     *   提示元素**按需创建** ✓（空元素也会占住内边距 ✓，白白多一道缝 ✗）。
+     * ★ `data-dshm-action="scan-pair"` 是给验收脚本的**稳定定位钩子** ✓
+     *   （文案会改 ✓，这个属性不会 ✓ —— 与 `change-address` 同一个约定 ✓）。
+     */
+    if (shellBridge() !== undefined) {
+      var scanPairHint = null
+      var scanPairButton = toolButton('扫码配对', function () {
+        var failure = null
+        try {
+          var bridge = shellBridge()
+          if (bridge === undefined || typeof bridge.scanPair !== 'function') {
+            // 旧壳还没有这条桥 ✓ —— 说清楚"装新 APK 后可用" ✓，而不是点了没反应 ✗
+            failure = '这个外壳版本还没有「扫码配对」的桥（装上带 scanPair 的新 APK 后可用）'
+          } else {
+            var result = bridge.scanPair()
+            if (result === 'busy') {
+              failure = '扫码界面已经打开了 —— 对准电脑屏幕上的二维码即可'
+            } else if (result !== 'ok') {
+              failure = '壳没有受理这次扫码请求（' + String(result) + '）'
+            }
+          }
+        } catch (problem) {
+          failure = describeError(problem)
+        }
+        if (failure === null) return
+        if (scanPairHint === null) {
+          scanPairHint = document.createElement('div')
+          scanPairHint.className = 'dshm-set-hint'
+          if (scanPairButton.parentNode !== null) {
+            scanPairButton.parentNode.insertBefore(scanPairHint, scanPairButton.nextSibling)
+          }
+        }
+        scanPairHint.textContent = '扫码配对失败：' + failure
+      })
+      scanPairButton.dataset.dshmAction = 'scan-pair'
+      scanPairButton.title = '打开壳内相机，扫电脑屏幕上那张配对二维码'
+      connection.appendChild(scanPairButton)
+    }
+    var transport = getTunnel()
+    var state = tunnelStatusText(transport)
+    connection.appendChild(
+      settingsRow('隧道', state, transport !== undefined && transport !== null && transport.placeholder !== true ? 'ok' : 'warn'),
+    )
+    /**
+     * ★ round 137：这两行也是**排障读数** ✓ ⇒ 只在 `?debug=1` 时渲染 ✓
+     *   （「最近可用端点」是"我刚才走的是哪条路"✓，「最近一次隧道」是"上次为什么切"✓
+     *     —— 两者都是排障时要问的问题 ✓，日常用户不需要 ✓）。
+     *   注意**不删** ✗：换端点/隧道这类问题全靠它俩 ✓（见上面 DEBUG_BOX_ON 那段说明 ✓）。
+     */
+    if (DEBUG_BOX_ON) {
+      var lastEndpoint = null
+      try {
+        // P1a：这条读数也按宿主命名空间化 ✓（否则多宿主下会显示别台电脑的端点 ✓）
+        lastEndpoint = readIdentityKeyValue(LAST_ENDPOINT_KEY)
+      } catch (error) {
+        void error
+      }
+      connection.appendChild(settingsRow('最近可用端点', lastEndpoint === null || lastEndpoint === '' ? '（未记录）' : lastEndpoint))
+      var lastTunnel = null
+      try {
+        lastTunnel = JSON.parse(localStorage.getItem('dsh-mobile.lastTunnel') || 'null')
+      } catch (error) {
+        void error
+      }
+      if (lastTunnel !== null && typeof lastTunnel === 'object') {
+        var at = String(lastTunnel.at || '')
+        var detail = String(lastTunnel.endpoint || lastTunnel.reason || '')
+        connection.appendChild(settingsRow('最近一次隧道', (at ? at.slice(11, 19) + ' ' : '') + detail))
+      }
+    }
+    body.appendChild(connection)
+
+    /**
+     * ★★ P1a 第 ③ 条：**列出所有电脑**并标出当前那台 ✓（`buildHostsGroup` ✓）。
+     * 放在「连接」之后、「默认链接」之前 ✓ —— 它回答的是"我这台手机管着哪几台电脑"✓，
+     * 属于连接这一类 ✓。判据里**不看有没有壳** ✗：宿主目录在本机 localStorage 里也有一份 ✓
+     * （纯浏览器配对过的那台也该列出来 ✓）。
+     */
+    body.appendChild(buildHostsGroup())
+
+    /**
+     * ★ round 132：「默认链接」小节 ✓ —— 把壳里那两个默认链接（学校 / Tailscale ✓）
+     *   与切换阈值**显示出来** ✓（此前它们只活在壳的 `SharedPreferences` 里 ✗，
+     *   设置界面上一片空白 ✗，用户看不到到底记下了什么 ✗）。
+     *
+     * ★ **只在壳里渲染** ✓：判据就是该页既有的 `shellBridge() !== undefined` ✓
+     *   （与上面「改地址」那一行同一个写法 ✓）。纯浏览器里没有壳的存储 ✗ ——
+     *   写出来只会有空白或 `undefined` ✗，那正是本轮要消灭的东西 ✓。
+     */
+    if (shellBridge() !== undefined) {
+      body.appendChild(buildDefaultLinksGroup())
+    }
+
+    var device = settingsGroup('这台设备')
+    var deviceId = ''
+    var pinned = ''
+    try {
+      // P1a：这两行读数也按**当前源对应的指纹**取 ✓（设置页要显示的是"这台设备 / 这台电脑" ✓）
+      var storedDevice = JSON.parse(readIdentityKeyValue(DEVICE_KEY) || 'null')
+      if (storedDevice !== null && typeof storedDevice === 'object') deviceId = String(storedDevice.deviceId || '')
+      var storedHost = JSON.parse(readIdentityKeyValue(STORAGE_KEY) || 'null')
+      if (storedHost !== null && typeof storedHost === 'object') {
+        pinned = String(storedHost.pinnedHostFingerprint || '')
+      }
+    } catch (error) {
+      void error
+    }
+    /**
+     * ★ round 137：设备 ID 是**排障读数** ✓ ⇒ 只在 `?debug=1` 时渲染 ✓
+     *   （它回答的是"我凭哪个身份连上了哪台电脑"✓ —— 配对出问题时才有用 ✓；
+     *    日常用户看到一串不透明标识只会觉得吵 ✓）。
+     *   同样**不删** ✗（见上面 DEBUG_BOX_ON 那段说明 ✓）。
+     *   「访问范围」留着 ✓ —— 它是给用户看的一句话承诺，不是读数 ✓。
+     *
+     * ★★ round 138：**电脑指纹回到"始终可见"** ✗ ← round 137 我把它和设备 ID 一起
+     *   门控了，那是**分类分错了** ✓。它**不是**排障读数 ✗：
+     *   代码里那句注释早就写明了 —— "主机指纹是**配对时人工比对过的那个值**：
+     *   把它显示出来，用户随时能复核自己连的是哪台电脑" ✓ ⇒ 这是一条**面向用户的
+     *   安全确认** ✓（和"访问范围"同一类 ✓），藏起来等于把用户自己的核对手段拿走 ✗。
+     *   ★ 证据不是推理 ✓：`scripts/check-device-channel.mjs` 有一条断言
+     *   （"设置视图显示连接状态与本机凭据" ✓）正是守着它 ✓ —— 本轮跑它的**基线**
+     *   就已经是红的 ✓（44/45，唯一那条红就是它 ✓）。所以这一处是**改回原样** ✓，
+     *   不是"为了让验收变绿而放宽断言" ✓（那条断言我一个字都没动 ✓）。
+     */
+    if (DEBUG_BOX_ON) {
+      device.appendChild(settingsRow('设备 ID', deviceId === '' ? '（未配对）' : deviceId.length > 18 ? deviceId.slice(0, 18) + '…' : deviceId))
+    }
+    device.appendChild(settingsRow('电脑指纹', pinned === '' ? '（无）' : formatFingerprint(pinned)))
+    device.appendChild(settingsRow('访问范围', '限 DSH 工作区'))
+    body.appendChild(device)
+    // ★ round 141（F-6）：诊断组挂**在这里** ✓（用户信息之后、危险操作之前 ✓ —— 见上面那段说明 ✓）。
+    //   不开 `?debug=1` 时它整个不渲染 ✓ ⇒ 普通用户看到的顺序与改动前**完全一样** ✗。
+    body.appendChild(diagnostics)
+
+    var actions = settingsGroup('解除配对')
+    var danger = document.createElement('button')
+    danger.type = 'button'
+    danger.className = 'dshm-set-danger'
+    danger.textContent = '在这台手机上解除配对'
+    var armed = false
+    danger.addEventListener('click', function () {
+      if (!armed) {
+        armed = true
+        danger.textContent = '再点一次确认解除'
+        return
+      }
+      danger.disabled = true
+      danger.textContent = '正在解除…'
+      callLocalEndpoint(getTunnel, 'mobile/device/unpair', {}).then(
+        function () {
+          finishUnpair('已在电脑侧撤销这台设备')
+        },
+        function (error) {
+          // 连不上电脑也要能**在本机**解除：否则"手机丢了要断掉信任"这件事反而做不成
+          finishUnpair('未能通知电脑（' + describeError(error) + '），已清除本机凭据')
+        },
+      )
+    })
+    function finishUnpair(message) {
+      try {
+        // ★ 必须走身份写入口（= 两边一起删 ✗）：只删 localStorage 的话，下一次启动会
+        //   从壳的库里把刚解除的身份**恢复回来** ✗ —— "解除配对"当场失效 ✓。
+        // ★ P1a：**只清当前这台宿主**那几条 ✓（`identityKeyFor` 按指纹命名空间化 ✓；
+        //   连字面量也换成常量 ✓ —— 否则多宿主下会清错/清漏 ✓）。
+        removeIdentityKey(STORAGE_KEY)
+        removeIdentityKey(DEVICE_KEY)
+        removeIdentityKey(CLAIMED_KEY)
+        removeIdentityKey(LAST_ENDPOINT_KEY)
+      } catch (error) {
+        void error
+      }
+      setNote(message + '；正在回到配对页…')
+      setTimeout(function () {
+        location.href = '/mobile'
+      }, 1200)
+    }
+    actions.appendChild(danger)
+    var hint = document.createElement('div')
+    hint.className = 'dshm-set-hint'
+    hint.textContent = '解除后本机凭据立即清除，需要重新配对（并在电脑上再确认一次指纹）才能再次接入。'
+    actions.appendChild(hint)
+    body.appendChild(actions)
+  }
+
+  /**
+   * 打开「电脑文件目录」面板。
+   *
+   * 两级结构：
+   *   一级 = 工作区列表（真实数据，来自 `workspace/follow`），每行一个快捷「访达」+「打开方式…」；
+   *   二级 = 该工作区的全部打开方式（访达/显示/终端/本机装了的 IDE）。
+   *
+   * 二级的应用列表来自宿主的 `mobile/openInApp/apps`——**按本机实际安装情况探测**，
+   * 不列没装的按钮。
+   *
+   * ★ round 128：多了两个**可选**参数 ✓ —— 交付卡片那句「打开所在目录」就是从
+   *   这两个参数进来的 ✓（`targetDir` + `focusName` ✓）。不传时行为与以前**逐字节一致** ✓
+   *   （照旧落到工作区列表 ✓）。
+   *
+   * @param sheet - `buildFilesSheet()` 的产物。
+   * @param getTunnel - 见 `installShell` 的说明（隧道可能尚未建立）。
+   * @param targetDir - 要直接跳进去的目录（绝对路径 ✓，可省略 ✓）。
+   * @param focusName - 进去之后要滚到可见并高亮的**文件名** ✓（可省略 ✓）。
+   */
+  async function openFilesSheet(sheet, getTunnel, targetDir, focusName) {
+
+    sheet.setOpen(true)
+    // ★ 先给一个**兜底的**"返回文件视图"，再由具体的渲染函数覆盖成更精确的那个
+    //   （工作区列表 / 某个工作区的文件浏览器）。
+    //   少了这个兜底，"齿轮再点一次返回"在**打开面板却没有任何工作区**时会失效：
+    //   那条路径只调用 sheetMessage()，从不设置 restoreFiles ✗ ——
+    //   而"新装、还没有工作区"恰恰是最常见的状态之一 ✓。
+    //   （真实发现路径：截图工具的临时家目录有工作区，所以它一直是绿的；
+    //     check-device-channel 的临时家目录没有工作区，才把它暴露出来。）
+    sheet.currentView = 'files'
+    sheet.restoreFiles = function () {
+      void openFilesSheet(sheet, getTunnel)
+    }
+    // ★★ round 148：进面板先清掉"上一级目录"那个动作 ✓（它只属于**某个工作区的文件列表**那屏 ✓）。
+    //   不清的后果：`sheet` 只建一次 ✓，上一次文件浏览器留下的闭包还挂着 ✗ ——
+    //   在**工作区列表**上按返回会跳回上一个工作区的目录，而不是关面板 ✗。
+    //   （`renderWorkspaceList` 只能从这里进来 ✓，所以清在这一处就够 ✓。）
+    sheet.backUpOneLevel = undefined
+    // ★★ round 153：**回到工作区列表**那个动作也先清掉 ✓（与上面同一个"陈旧闭包"的理由 ✓）——
+    //   它由下面数据到手之后**只定义一次** ✓（见 `sheet.restoreWorkspaceList` ✓）。
+    //   提前返回的那几条分支（未连接 / 没有工作区 / 读取失败）于是不会留下旧列表 ✓。
+    sheet.restoreWorkspaceList = undefined
+    // ★ 标题也在**入口处**就定下来：`openFilesSheet` 有几条提前返回的分支
+    //   （隧道未建立 / 没有工作区 / 读取失败），它们只写正文、从不 setTitle ✗ ——
+    //   于是"没有工作区"时正文说"还没有工作区"、标题却还停在「设置」✓。
+    //   这个不一致是被验收断言抓到的（它读标题判断有没有回到文件视图）。
+    sheet.setTitle('电脑文件目录')
+    var tunnel = getTunnel()
+    if (tunnel === undefined || tunnel === null) {
+      sheetMessage(sheet.body, '尚未连接到电脑。')
+      return
+    }
+    sheetMessage(sheet.body, '读取工作区…')
+
+    var workspaces = []
+    try {
+      // `workspace/follow` 是流：第一帧固定是 baseline，之后是增量。
+      // 这里只取 baseline 就够——面板是一次性读取，不做实时跟随。
+      var stream = tunnel.openStream('workspace/follow', { args: {} })
+      for await (var frame of stream) {
+        if (frame !== null && frame !== undefined && frame.type === 'baseline') {
+          workspaces = (frame.value && frame.value.items) || []
+          break
+        }
+      }
+      // `for await` 里的 break 会自动关闭迭代器（发送 StreamCancel），
+      // 因此这里不需要再手动 return()——重复关闭会多发一条取消帧。
+    } catch (error) {
+      sheetMessage(sheet.body, '读取工作区失败：' + String(error && error.message ? error.message : error))
+      return
+    }
+
+    if (workspaces.length === 0) {
+      sheetMessage(sheet.body, '电脑上还没有工作区。')
+      return
+    }
+
+    // 打开方式：拿不到就退化为"只有访达/在本地打开"（旧宿主还没重启时的表现），
+    // 这样**面板永远可用**，不会因为宿主版本旧而变成一块空白。
+    var targets = undefined
+    try {
+      targets = await callLocalEndpoint(getTunnel, 'mobile/openInApp/apps', {})
+    } catch (error) {
+      console.info('[dsh-mobile] 电脑端尚未提供「打开方式」列表（可能需要重启 DSH），退回基础动作：', error && error.message)
+    }
+
+    // 当前会话所属的工作区排到最前（DSH 侧栏用 folder_active 标记激活的工作区）。
+    var activeTitle = activeWorkspaceTitle()
+    if (activeTitle !== '') {
+      workspaces = workspaces.slice().sort(function (a, b) {
+        var aw = a.title === activeTitle ? 0 : 1
+        var bw = b.title === activeTitle ? 0 : 1
+        return aw - bw
+      })
+    }
+
+    /**
+     * ★★ round 153（用户真机原话："返回到一个项目的根目录就推到聊天页面了，
+     *   我希望的是返回到点开文件目录出现的整个工作区那个页面，再返回才退出"✓）：
+     *   **面板最底一级 = 工作区列表** ✓（点开「电脑文件目录」先看到的那一屏 ✓）。
+     *
+     * 这就是"回工作区列表"的**唯一一份实现** ✓ —— 文件浏览器退到工作区根那一步
+     * （`sheet.backUpOneLevel` 里 ✓）与 `renderWorkspaceList` 的 `restoreFiles`
+     * 都指向它 ✓，**不在调用方各写一遍** ✗（本项目对"同一个概念两份实现"零容忍 ✓）。
+     * 顺带覆盖了一条真实动线 ✓：卡片「在文件面板中打开」是**直接进文件浏览器**的 ✗
+     * （`renderWorkspaceList` 根本没跑过 ✓）⇒ 从那个根往后退同样回得到工作区列表 ✓。
+     */
+    sheet.restoreWorkspaceList = function () {
+      renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel)
+    }
+
+    /**
+     * ★ round 128：卡片「打开所在目录」给的目录 ⇒ 直接在**包含它的那个工作区**里
+     *   落到那个目录 ✓（复用下面同一套文件浏览器 ✓，不新写一套 ✗）。
+     *   找不到归属（不在任何工作区里 ✓）⇒ 如实说一句 + 照旧给工作区列表 ✓（不硬跳 ✗）。
+     */
+    if (typeof targetDir === 'string' && targetDir !== '') {
+      var wanted = targetDir.replace(/\/+$/, '')
+      var picked = null
+      for (var w = 0; w < workspaces.length; w++) {
+        var rootPath = String(workspaces[w].path || '').replace(/\/+$/, '')
+        if (rootPath === '' ) continue
+        if (wanted === rootPath || wanted.indexOf(rootPath + '/') === 0) {
+          if (picked === null || rootPath.length > String(picked.path || '').replace(/\/+$/, '').length) picked = workspaces[w]
+        }
+      }
+      if (picked !== null) {
+        renderFileBrowser(sheet, picked, targets, getTunnel, targetDir, focusName)
+        return
+      }
+      setNote('这个文件不在任何工作区里 ⇒ 只能给你工作区列表（' + targetDir + '）')
+    }
+
+    renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel)
+  }
+
+  /** 一级：工作区列表。 */
+  function renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel) {
+    // 回一级列表 = 离开文件视图：多选态收掉（底栏与选中集合都不该跨视图存活）
+    exitSelectMode(sheet)
+    if (typeof sheet.setFull === 'function') sheet.setFull(false)
+    sheet.currentView = 'files'
+    /**
+     * ★★ round 153：这一屏就是"回工作区列表"那一个落点 ✓（`openFilesSheet` 定义 ✓）——
+     *   不再另写一份闭包 ✓（同一个概念只许一处实现 ✓）。
+     */
+    sheet.restoreFiles = sheet.restoreWorkspaceList
+    /**
+     * ★★ round 153：**在工作区列表上，返回键没有更下一级** ⇒ 必须清掉"上一级目录"那个动作 ✓
+     *   ——`sheet` 只建一次 ✗，不清的话，从某个工作区根退回来之后
+     *   `sheet.backUpOneLevel` 还指着**旧文件浏览器**的闭包 ✓，再按返回会又跳回那个工作区、
+     *   而不是关面板 ✗（与 round 148 那一处同一个坑 ✓）。
+     *   清掉 ⇒ `sheet.backOutOfView()` 返回 false ⇒ `dshmBack()` 照旧关面板 ✓（用户要的那一下 ✓）。
+     */
+    sheet.backUpOneLevel = undefined
+    sheet.setTitle('电脑文件目录')
+    sheet.body.replaceChildren()
+    for (var i = 0; i < workspaces.length; i++) {
+      sheet.body.appendChild(workspaceRow(sheet, workspaces[i], activeTitle, targets, getTunnel))
+    }
+  }
+
+  /**
+   * 二级：**工作区文件管理器**。
+   *
+   * 用户要的是"像第一版的文件夹按钮一样，点击显示工作目录的结构，甚至可以操作这个目录"，
+   * 所以这里不是"打开方式列表"，而是一个文件浏览器：
+   *   浏览（进入子目录 / 返回上级）、下载、重命名、复制、剪切、粘贴、新建文件夹、删除、
+   *   以及在**电脑上**用终端/访达打开当前目录。
+   *
+   * 数据面：宿主插件的 `mobile/files/*`（见 host 的 workspace-files.ts）。
+   * DSH 自己的 `workspaceFiles/*` **只有读操作**，写操作全是插件实现的。
+   *
+   * @param sheet - 面板。
+   * @param workspace - 当前工作区（决定根与标题）。
+   * @param targets - `mobile/openInApp/apps` 的结果；undefined 表示旧宿主（工具栏只留基础动作）。
+   * @param getTunnel - 取隧道。
+   * @param startPath - 不从头开始，直接落到这个目录 ✓（卡片「打开所在目录」用 ✓，可省略 ✓）。
+   * @param focusName - 到位之后滚到可见并高亮的那个文件名 ✓（可省略 ✓）。
+   */
+  function renderFileBrowser(sheet, workspace, targets, getTunnel, startPath, focusName) {
+    var root = String(workspace.path || '')
+    /**
+     * 面板级状态：当前目录、剪贴板（复制/剪切）、以及正在进行的输入。
+     *
+     * `selecting` / `selected` / `confirmDelete` 是多选态的全部状态：
+     * 选中集合按**路径**索引（值取整个 entry，删除时要 `type` 决定 `recursive`）。
+     * 它挂在这个 state 上而不是模块级变量上 —— 关闭面板、换工作区都会新建
+     * 一份 state，多选态于是自然归零，不会串到别的目录去。
+     */
+    var state = {
+      workspace: workspace,
+      root: root,
+      path: typeof startPath === 'string' && startPath !== '' ? startPath : root,
+      /** 到位后要高亮的那一行（`loadDirectory` 渲染完会消费掉它 ✓ —— 只高亮一次 ✓）。 */
+      focusName: typeof focusName === 'string' ? focusName : '',
+      clipboard: undefined,
+      targets: targets,
+      getTunnel: getTunnel,
+      busy: false,
+      selecting: false,
+      selected: {},
+      confirmDelete: false,
+      entries: [],
+      /** 当前目录已经渲染了多少行（大目录按 FILE_RENDER_STEP 追加，见 renderListing）。 */
+      rendered: 0,
+      /**
+       * ★★ round 156（A ✓）：文件浏览器那一层的**常驻节点**（只建一次 ✓，见 `ensureBrowserFrame`）——
+       *   `toolbar`（那一栏按钮 ✓）/ `crumb`（面包屑 ✓）/ `listHost`（列表区域 ✓，
+       *   骨架 / 条目 / 错误行都画在它里面 ✓），以及工具栏上要就地刷新的「粘贴」那颗 ✓。
+       *   它们挂在 state 上（而不是模块级变量 ✓）：关面板、换工作区都会新建一份 state ✓，
+       *   多选态与**这一层的 DOM**于是自然归零、不会串到别的工作区去 ✓。
+       */
+      toolbar: undefined,
+      crumb: undefined,
+      listHost: undefined,
+      pasteButton: undefined,
+    }
+    // 上一次的底栏可能还开着（换工作区时 state 是新的，DOM 却是旧的）
+    exitSelectMode(sheet)
+    if (typeof sheet.setFull === 'function') sheet.setFull(false)
+    sheet.currentView = 'files'
+    // 回到"这个工作区"（而不是回到工作区列表）：设置页里点齿轮返回时，
+    // 用户期望回到自己刚才在看的那个目录上下文 ✓
+    sheet.restoreFiles = function () {
+      renderFileBrowser(sheet, workspace, targets, getTunnel)
+    }
+    /**
+     * ★★ round 148（用户："给文件面板加安卓返回键逻辑（返回回到上一页，而不是回主页面）"✓）：
+     * **返回键**在这一屏的语义 = **上一级目录** ✓（面板**不关** ✓）；
+     * ★★ round 153（用户真机："返回到一个项目的根目录就推到聊天页面了，我希望的是返回到
+     *   点开文件目录出现的整个工作区那个页面，**再返回才退出**"✓）：
+     *   到**工作区根**不再关面板 ✗ ⇒ **回工作区列表** ✓（面板仍开 ✓，就是"点开文件目录
+     *   先看到的那一屏"✓）；**在工作区列表上**再按才关面板 ✓（那一层没有这个方法 ⇒
+     *   `sheet.backOutOfView()` 返回 false ⇒ `dshmBack()` 照旧关面板 ✓）。
+     *
+     * ## 判据与面包屑那颗「↑ 上级」是**同一把尺子** ✓
+     *   `crumbRow()` 只在 `state.path !== state.root` 时渲染那颗按钮 ✓，点它
+     *   `loadDirectory(sheet, state, listing.parent == null ? state.root : listing.parent)` ✓ ——
+     *   这里**逐字**用同一个条件、同一个落点 ✓（上一级记在 `state.parent` ✓，由 `loadDirectory`
+     *   收列表时写下 ✓）⇒ "有没有级"两边永远一致 ✓（根写法校准见 `loadDirectory` 那段 ✓）。
+     *
+     * @returns true = 确实退了一层（上一级目录 / 回工作区列表 ✓，面板都没关 ✓）；
+     *          false = 没得退（工作区列表那一屏 ✓ / 没有列表落点 ✓）⇒ 调用方照旧关面板 ✓。
+     *
+     * ## ★ 绝不抛 ✓（round 147/148 的实测教训 ✓）
+     *   揭示动线（卡片「在文件面板中打开」✓）上曾有版本因 `workspace.root` 未定义而抛 ✗
+     *   （实测：那个字段确实不存在，根要用 `workspace.path` ✓）—— 异常冒到 `dshmBack()`
+     *   的 try/catch 会被当成"什么都没做"✗，现象极像"返回键坏了"✗。所以这里自己兜住 ✓。
+     *
+     * ## 只属于"正在浏览某个工作区的文件列表"这一屏 ✓
+     *   `sheet` 是 `installShell` 里**只建一次**的 ✗ ⇒ 离开这一屏必须清掉这个方法 ✓
+     *   （`openFilesSheet` 进面板时清 ✓、`renderWorkspaceList` 回到列表时也清 ✓），
+     *   否则会留下指向**旧 state** 的闭包：在工作区列表上按返回会跳回上一个工作区的目录，
+     *   而不是关面板 ✗。
+     * ★ 侧滑**刻意不同**（一键关面板 ✓，用户拍板 ✓）—— 它根本不走这里 ✗（见 `run('close-files')` ✓）。
+     */
+    sheet.backUpOneLevel = function () {
+      try {
+        if (sheet.currentView !== 'files') return false
+        if (state.path === state.root) {
+          /**
+           * ★★ round 153：退到工作区根 ⇒ **回工作区列表** ✓（调用那一份唯一实现 ✓，
+           *   不在这里另写一遍"渲染工作区列表" ✗）。没有那个落点（例如将来别的入口 ✓）
+           *   就退回老行为 false ⇒ 关面板 ✓。
+           */
+          if (typeof sheet.restoreWorkspaceList === 'function') {
+            sheet.restoreWorkspaceList()
+            return true
+          }
+          return false
+        }
+        loadDirectory(sheet, state, state.parent === null || state.parent === undefined ? state.root : state.parent)
+        return true
+      } catch (error) {
+        debugBoxLine('[back] 上一级目录失败（按"没得退"处理 ✓）：' + String(error && error.message ? error.message : error))
+        return false
+      }
+    }
+    sheet.setTitle('电脑文件目录')
+    // 底部提示改成文件管理的语义（setTitle 给的是"打开方式"那套文案）
+    // 注意：这句说明现在在**头部副标题**里，底部提示行只用于操作反馈
+    // （旧版两处都写，底部于是多出一行重复文案）。
+    // ★ 起点用 `state.path`（而不是 `root` ✓）：卡片「打开所在目录」可能指定了子目录 ✓；
+    //   不指定时它**就等于** root ✓ ⇒ 老行为逐字节不变 ✓。
+    loadDirectory(sheet, state, state.path)
+
+  }
+
+  /** 预览的规模上限：手机上"看得见"比"全都有"重要，超了就要**明说只显示前面这段** ✓。 */
+  var PREVIEW_TEXT_BYTES = 200 * 1024
+  var PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024
+  /** 一次 `mobile/files/read` 拉多少（隧道单帧有上限，1 MiB 是实测稳妥值 ✓）。 */
+  var PREVIEW_CHUNK = 1024 * 1024
+  var PREVIEW_IMAGE_EXT = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, svg: 1, avif: 1, ico: 1 }
+  var PREVIEW_TEXT_EXT = {
+    txt: 1, text: 1, md: 1, markdown: 1, json: 1, jsonc: 1, js: 1, mjs: 1, cjs: 1, ts: 1, tsx: 1,
+    jsx: 1, css: 1, scss: 1, less: 1, html: 1, htm: 1, xml: 1, yml: 1, yaml: 1, toml: 1, ini: 1,
+    conf: 1, sh: 1, bash: 1, zsh: 1, py: 1, rb: 1, go: 1, rs: 1, java: 1, kt: 1, c: 1, h: 1,
+    cc: 1, cpp: 1, hpp: 1, cs: 1, php: 1, sql: 1, log: 1, csv: 1, tsv: 1, env: 1, patch: 1, diff: 1,
+  }
+
+  /** 按扩展名判断预览方式；`sniff` = 先读一小段再定（无扩展名或没见过的类型 ✓）。 */
+  function previewKindOf(entry) {
+    var name = String(entry.name || '').toLowerCase()
+    var dot = name.lastIndexOf('.')
+    var ext = dot >= 0 ? name.slice(dot + 1) : ''
+    if (PREVIEW_IMAGE_EXT[ext] === 1) return 'image'
+    if (PREVIEW_TEXT_EXT[ext] === 1) return 'text'
+    if (dot < 0 && /^(readme|license|licence|makefile|dockerfile|procfile|changelog|authors)$/.test(name)) return 'text'
+    return 'sniff'
+  }
+
+  /**
+   * 分块读一个文件的字节（最多 `cap` 个）。
+   *
+   * 复用下载那条链路（每次 ≤1 MiB ✓），并**如实返回"是不是被截断了"** ✓ ——
+   * 截断必须让用户看见（"只显示前 200 KB"），不能悄悄只给一半 ✗
+   * （本项目对"静默降级"零容忍，这条同源）。
+   */
+  function readFileBytes(state, path, cap, onProgress) {
+    var chunks = []
+    var total = 0
+    var size = 0
+    var step = function () {
+      return callLocalEndpoint(state.getTunnel, 'mobile/files/read', {
+        path: path,
+        offset: total,
+        length: Math.max(1, Math.min(PREVIEW_CHUNK, cap - total)),
+      }).then(function (chunk) {
+        var bytes = base64ToBytes(chunk.data)
+        chunks.push(bytes)
+        total += bytes.length
+        size = typeof chunk.size === 'number' ? chunk.size : total
+        if (onProgress !== undefined) onProgress(total, size)
+        if (chunk.eof === true || bytes.length === 0 || total >= cap) return undefined
+        return step()
+      })
+    }
+    return step().then(function () {
+      var merged = new Uint8Array(total)
+      var at = 0
+      for (var i = 0; i < chunks.length; i++) {
+        merged.set(chunks[i], at)
+        at += chunks[i].length
+      }
+      return { bytes: merged, size: size, truncated: total < size }
+    })
+  }
+
+  /** 这段字节像不像文本：**有 NUL 就直接判否** ✓，否则看不可打印字符的比例 ✓。 */
+  function looksLikeText(bytes) {
+    var limit = Math.min(bytes.length, 4096)
+    var suspicious = 0
+    for (var i = 0; i < limit; i++) {
+      var byte = bytes[i]
+      if (byte === 0) return false
+      if (byte < 9 || (byte > 13 && byte < 32)) suspicious += 1
+    }
+    if (limit === 0) return true
+    return suspicious / limit < 0.05
+  }
+
+  /** 释放预览用的 object URL（图片走 Blob，不释放就会一直占着内存 ✓）。 */
+  function releasePreviewUrl(sheet) {
+    if (sheet === undefined || sheet === null || sheet.previewObjectUrl === undefined) return
+    try {
+      URL.revokeObjectURL(sheet.previewObjectUrl)
+    } catch (error) {
+      void error
+    }
+    sheet.previewObjectUrl = undefined
+  }
+
+  /**
+   * 面板的第二个内容视图：**文件预览**（用户第 1 点）。
+   *
+   * 为什么不复用 DSH 自带的预览：实测它**能用**（round 80：转录里点文件链接 → 412×877 全屏、
+   * 带行号 ✓），但那条路只在"对话里提到这个文件"时才走得到 ✗；用户要的是
+   * **在我们自己的文件面板里点一下就能看** ✓，所以这一屏是独立的、只依赖 `mobile/files/read`。
+   *
+   * 三条硬规矩：
+   *   1. **有上限且说清上限** —— 文本 200 KB、图片 8 MB，超了显示"只显示前 …"，绝不假装完整 ✓；
+   *   2. **读不到就说原因** —— 失败一律把 `describeError` 的原文摆出来（手机上没有控制台 ✓）；
+   *   3. **二进制不硬塞** —— sniff 出不是文本就给一句人话 + 下载/在电脑上打开的出路 ✓。
+   */
+  var PREVIEW_MARKDOWN_EXT = { md: 1, markdown: 1 }
+  var PREVIEW_PDF_EXT = { pdf: 1 }
+  /** PDF 整读上限：再大就不往内存里搬了（手机上那是实打实的风险 ✗）。 */
+  var PREVIEW_PDF_BYTES = 32 * 1024 * 1024
+
+  /**
+   * 公式渲染器（Temml）的接入。
+   *
+   * ## 为什么是"懒加载 + 降级"
+   *
+   * Temml 有 168 KB ✓（MIT，输出 MathML，Chrome 109+ 原生就能画 ✓，**不需要字体与 CSS** ✓）。
+   * 不可能让每个 md 文件都背上它 ✗ —— 所以：
+   *   · **只有文件里真的出现公式时才去下** ✓（地址由宿主注入到 `<meta name="dshm-temml">` ✓，
+   *     版本号只写在宿主一处 ✓，两边不会各写一份而对不上 ✗）；
+   *   · 下载完成前，公式**按原样 TeX 显示**（等宽小字 ✓）—— 绝不吞掉内容 ✗；
+   *   · 取不到就**说出来**（容器上带 `data-dshm-math="failed"` + 标题写原因 + 预览的元信息行提示 ✓），
+   *     而不是安静地留一堆 `$…$` 让人以为"公式坏了" ✓。
+   *
+   * ## 为什么公式必须**先切出来**再交给 markdown
+   *
+   * TeX 里满是 `_` `*` `^` ✓ —— 直接走 markdown 行内规则会被吃乱 ✗
+   * （`x_1` 的下划线、`a*b` 的星号都可能变成强调 ✓）。
+   * 所以 `markdownInline` 先把文本切成"普通文本 / 公式"两种片段 ✓，
+   * 公式片段**整段拿走** ✓，只对普通文本跑强调/链接/行内代码 ✓。
+   */
+  var TEMML_STATE = { state: 'idle', url: '', error: '', pending: 0, rendered: 0 }
+
+  /**
+   * Temml 的源码（**gzip + base64，构建时注入** ✓）。
+   *
+   * 为什么内联：用户明确要求"**不要重启**就能用" ✓ —— 而宿主侧新增路由必须重启才生效 ✗；
+   * `boot.js` 相反：它是**每次请求从磁盘读**的 ✓（所以客户端改动刷新即生效 ✓）。
+   * 把 168 KB 的渲染器 gzip 后 base64 只有 ~66 KB ✓，代价可接受 ✓，
+   * 换来"完全客户端、零重启" ✓。真正解压与求值都**推迟到第一次遇到公式**时 ✓。
+   *
+   * 占位符在**源码**里保持原样 ✓（用源码直接跑时它解不出来 ✓ → 自动回退到
+   * 宿主路由 / 原样 TeX + 提示 ✓，不会静默 ✗）。
+   */
+  var TEMML_INLINE_GZIP_BASE64 = "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"
+
+  /** 从内联副本里解出 Temml 并挂到 `globalThis.temml`（只在有公式时调用 ✓）。 */
+  function loadTemmlFromInline() {
+    return Promise.resolve().then(function () {
+      var base64 = String(TEMML_INLINE_GZIP_BASE64)
+      if (base64 === '' || base64.indexOf('__DSHM_TEMML') === 0) throw new Error('内联副本未注入（源码直跑）')
+      if (typeof globalThis.DecompressionStream !== 'function') throw new Error('这台浏览器没有 DecompressionStream')
+      var binary = globalThis.atob(base64)
+      var bytes = new Uint8Array(binary.length)
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      var stream = new Blob([bytes]).stream().pipeThrough(new globalThis.DecompressionStream('gzip'))
+      return new Response(stream).text()
+    }).then(function (source) {
+      // Temml 的发行版是一个 IIFE：`var temml = (function(){…})()` ✓ ——
+      // 放进函数作用域里求值再把结果取出来 ✓（页面没有 CSP，实测 `new Function` 可用 ✓；
+      // 万一将来被 CSP 挡下，异常会被上层捕获并如实报出来 ✓）
+      var factory = new Function(source + '\nreturn typeof temml === "undefined" ? undefined : temml')
+      var loaded = factory()
+      if (loaded === undefined) throw new Error('内联副本求值后没有拿到 temml')
+      globalThis.temml = loaded
+      return loaded
+    })
+  }
+
+  /**
+   * ★★ round 120：聊天**正文**里的文件链接点不动 ✗ —— 在捕获阶段接管 ✓。
+   *
+   * ## 实测（本轮量出来的事实，不是猜的）
+   *
+   * 正文里的文件链接在 DOM 里**不是 a[href]** ✓，而是 DSH 的"文件提及"按钮：
+   * `button[class*="fileMention"]`（title 属性就是文件路径 ✓）。
+   * 点它会 POST `/api/present.open?sessionId=…&seq=…&index=…` ✓，而手机页面在
+   * DSH 自己的信任栅栏**之外**（与 `/open-in-app/*` 同一条，见本文件那段说明 ✓）
+   * ⇒ **HTTP 401** ✓ ⇒ 屏幕上就是"点了没反应" ✗。
+   *
+   * 另一种形状也在同一轮量到了：`dsh-resource://file/session/<id>/<路径>` 的 `a[href]` ✓，
+   * 手机 WebView / Chrome 都不认识这个协议 ✓（浏览器自己报
+   * "Failed to launch … because the scheme does not have a registered handler" ✓）
+   * ⇒ 同样"没反应" ✗。两种形状在这里一起接管 ✓。
+   *
+   * ## 为什么改成"用 DSH 预览打开"
+   *
+   * 那条 POST 的语义是"在**电脑**的默认程序里打开" ✓ —— 手机用户点了手里什么也看不到 ✗；
+   * 而本项目"文件链接点开"的既定去处就是 **DSH 预览** ✓
+   * （工具调用行上的文件名、文件面板、PDF 那几条都汇到它 ✓）。
+   * 所以这里统一成：正文里的文件链接 → DSH 预览 ✓（用户要的是"点开能看" ✓）。
+   *
+   * ## 命中条件（窄）
+   *
+   *  · 只在**聊天列**（`[class*="centerCol"]` ✓）里动手 ✓；别处原样放行 ✓；
+   *  · 只在**桥就绪**时动手 ✓（没有桥 ⇒ 原样交给网页 ✓ + 调试框里如实写一行 ✓）；
+   *  · 只在能解出**绝对路径**时动手 ✓；解不出来 ⇒ **不拦** ✓（保持原行为 ✓）。
+   */
+  /** 工作区表缓存：正文链接里的**相对路径**要拼到当前工作区的绝对根上 ✓。 */
+  var shellWorkspaceRoots = { at: 0, items: [] }
+
+  /** 读一次工作区表（`workspace/follow` 的 baseline ✓，与文件面板同一条路 ✓）。 */
+  function loadShellWorkspaceRoots(getTunnel) {
+    var tunnel = typeof getTunnel === 'function' ? getTunnel() : undefined
+    if (tunnel === undefined || tunnel === null) return Promise.resolve([])
+    return Promise.resolve()
+      .then(function () {
+        var stream = tunnel.openStream('workspace/follow', { args: {} })
+        return (async function () {
+          for await (var frame of stream) {
+            if (frame !== null && frame !== undefined && frame.type === 'baseline') {
+              return (frame.value && frame.value.items) || []
+            }
+          }
+          return []
+        })()
+      })
+      .then(function (items) {
+        var roots = []
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i]
+          if (item === null || item === undefined) continue
+          if (typeof item.path !== 'string' || item.path === '') continue
+          roots.push({ title: typeof item.title === 'string' ? item.title : '', path: item.path })
+        }
+        shellWorkspaceRoots = { at: Date.now(), items: roots }
+        return roots
+      })
+      .catch(function () {
+        return []
+      })
+  }
+
+  /**
+   * 把正文链接里的路径变成**绝对路径** ✓。
+   *
+   * 绝对路径直接认 ✓；**会话相对路径**（DSH 的正文链接就是这种 ✓）拼到
+   * **当前工作区根**上 ✓ —— 那个根来自工作区表（绝对路径 ✓），
+   * 而"当前是哪个工作区"由 DSH 侧栏的 folder_active 标记给出 ✓（与文件面板同一判据 ✓）。
+   * 拼不出来（表还没读到 / 根本不是路径形状）⇒ null ✓（调用方据此**不拦** ✓）。
+   */
+  function absolutePathForChatLink(path) {
+    var raw = String(path === undefined || path === null ? '' : path).trim()
+    if (raw === '') return null
+    if (raw.charAt(0) === '/') return raw
+    if (/^[A-Za-z]:[\\/]/.test(raw) || raw.indexOf('\\\\') === 0) return raw
+    var roots = shellWorkspaceRoots.items
+    if (roots.length === 0) return null
+    var active = activeWorkspaceTitle()
+    var root = null
+    for (var i = 0; i < roots.length; i++) {
+      if (active !== '' && roots[i].title === active) {
+        root = roots[i]
+        break
+      }
+    }
+    if (root === null) root = roots[0]
+    return String(root.path).replace(/\/+$/, '') + '/' + raw.replace(/^(?:\.\/)+/, '')
+  }
+
+  /** dsh-resource 文件地址的前缀（与 packages/bridge/lib/client.js 的等价移植一致 ✓）。 */
+  var CHAT_FILE_ADDRESS_PREFIX = 'dsh-resource://file/'
+  var CHAT_FILE_SESSION_PREFIX = 'dsh-resource://file/session/'
+
+  /** 逐段解码 dsh-resource 地址里的路径 ✓；解不出来返回 null ✓（调用方据此不拦 ✓）。 */
+  function decodeChatAddressPath(encoded) {
+    try {
+      var segments = String(encoded).split('/')
+      var out = []
+      for (var i = 0; i < segments.length; i++) out.push(decodeURIComponent(segments[i]))
+      return out.join('/')
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * 从 `dsh-resource://file/session/<会话 id>/<路径>` 反解出路径 ✓。
+   *
+   * 形状不对（前缀不是它 / 缺会话 id / 编码坏了）一律返回 null ✓ ⇒ 调用方**不拦** ✓。
+   * 返回的可能是**绝对**路径（外层地址里带绝对路径时 ✓）或**会话相对**路径 ✓。
+   * ★ 会话相对的那种**故意不接管** ✗：它相对的是**那个会话**的工作区 ✓，
+   *   而这个函数拿不到那个会话的 cwd（桥没暴露 ✓）——按纪律"解不出来就不要拦" ✓。
+   */
+  function chatPathFromFileAddress(href) {
+    var text = String(href)
+    if (text.indexOf(CHAT_FILE_SESSION_PREFIX) !== 0) return null
+    var rest = text.slice(CHAT_FILE_SESSION_PREFIX.length)
+    var slash = rest.indexOf('/')
+    if (slash <= 0) return null
+    var decoded = decodeChatAddressPath(rest.slice(slash + 1))
+    if (decoded === null || decoded === '') return null
+    return decoded
+  }
+
+  /**
+   * 安装"正文文件链接 → DSH 预览"的**捕获阶段**接管 ✓（只在手机外壳里装 ✓）。
+   *
+   * 必须是捕获阶段（第三个参数 true ✓）：要赶在 DSH 自己的 React onClick **之前**
+   * 拿到这一次点击 ✓ —— 否则那个会 401 的 POST 已经发出去了，而它发出去就没法取消 ✗。
+   */
+  function installChatFileLinkBridge(getTunnel) {
+    if (document.documentElement.dataset.dshmChatLinkBridge === '1') return
+    document.documentElement.dataset.dshmChatLinkBridge = '1'
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null || event.defaultPrevented === true) return
+          var node = event.target
+          if (node === null || node === undefined || typeof node.closest !== 'function') return
+          var anchor = null
+          var path = null
+          var shape = ''
+          var link = node.closest('a[href]')
+          if (link !== null) {
+            var href = String(link.getAttribute('href') || '')
+            if (href.indexOf(CHAT_FILE_ADDRESS_PREFIX) === 0) {
+              anchor = link
+              path = chatPathFromFileAddress(href)
+              shape = 'dsh-resource 地址'
+              if (path === null) {
+                debugBoxLine('[link] 这个 dsh-resource 地址解不出路径 ⇒ 原样交给网页 ✓（' + href.slice(0, 80) + '）')
+                return
+              }
+            }
+          }
+          if (anchor === null) {
+            var mention = node.closest('button[class*="fileMention"]')
+            if (mention !== null) {
+              anchor = mention
+              path = String(mention.getAttribute('title') || '')
+              shape = '正文文件链接按钮'
+            }
+          }
+          if (anchor === null || path === null || path === '') return
+          // 命中条件要**窄**：只管聊天列（正文 ✓）；工具调用行等别处原样放行 ✓。
+          if (anchor.closest('[class*="centerCol"]') === null) return
+          var bridge = dshPreview()
+          if (bridge === undefined) {
+            debugBoxLine('[link] 没有预览桥 ⇒ 这个文件链接原样交给网页 ✓（' + String(path).slice(0, 60) + '）')
+            return
+          }
+          var decoded = String(path)
+          var isAbsolute = decoded.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(decoded)
+          if (shape === 'dsh-resource 地址' && !isAbsolute) {
+            debugBoxLine('[link] 这是会话相对路径（' + decoded.slice(0, 60) + '）⇒ 本页解不出绝对路径，原样交给网页 ✓')
+            return
+          }
+          event.preventDefault()
+          event.stopPropagation()
+          var openWith = function (absolute) {
+            if (absolute === null || absolute === '') {
+              debugBoxLine('[link] 解不出绝对路径 ⇒ 这次没打开 ✗（' + shape + '：' + decoded.slice(0, 60) + '）')
+              return
+            }
+            var result
+            try {
+              result = bridge.open({ path: absolute })
+            } catch (error) {
+              result = { ok: false, reason: String(error && error.message ? error.message : error) }
+            }
+            debugBoxLine(
+              result !== undefined && result !== null && result.ok === true
+                ? '[link] ' + shape + ' → DSH 预览 ✓（' + String(absolute).slice(-48) + '）'
+                : '[link] ' + shape + ' 打不开 ✗ ' + String((result && result.reason) || '未知原因'),
+            )
+          }
+          if (isAbsolute) openWith(decoded)
+          else loadShellWorkspaceRoots(getTunnel).then(function () { openWith(absolutePathForChatLink(decoded)) })
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+  }
+
+  /**
+   * ★★ round 130：给 DSH 的 GET /api/present.host 一条**兜底应答** ✓（只在手机外壳里装 ✓）。
+   *
+   * ## 为什么非有它不可（没有它，A 方案在真机上等于零 ✗）
+   *
+   * 卡片上那个下拉能不能点，是 **DSH 自己**算的 ✓（它的 PresentedFileCard 里写着
+   *   menuDisabled = phase 忙 || host === null || !host.available ✓，
+   *   而菜单本身的开关是 open: menuOpen && !menuDisabled ✓）⇒
+   *   **host 一天为 null，那个 v 就一天点不开** ✗（点了没反应 ✗ —— 与 round 123 收它的理由同一条 ✓）。
+   * 而 present.host 在手机页上恒 401 ✗（手机页在 DSH 的信任栅栏之外 ✓，与 /api/present.open 同一条 ✓），
+   *   于是 DSH 拿到的 host 恒为 "error" ⇒ 卡片里那个参数被换成 null ⇒ 永远 disabled ✗。
+   *   （这条判据来自 DSH 自己的 bundle，不是猜的 ✗：
+   *    node_modules/@deepseek-ai/dsh-client-ui-deliverables/lib/client.js ✓。）
+   *
+   * ## 这条兜底说的是**真事** ✓（不是谎报）
+   *
+   * 它回答的是"这张卡片上的两项在这里能不能用" ✓：available=true 表示**能** ✓ ——
+   *   一项下载到手机 ✓、一项在我们自己的文件面板里打开那个目录 ✓
+   *   （两项都由同文件的 installPresentedMenuBridge 接管 ✓，都不会去打那个 401 端点 ✗）。
+   * fileManager 报 "directory" ✓ —— 因为我们的落点就是**自己的文件面板** ✓
+   *   （不是 Finder / 资源管理器 ✗ ⇒ DSH 给第二项的原生文案也正好是「打开所在文件夹」✓，
+   *    与我们的实际行为对得上 ✓，改完文案更是完全一致 ✓）。
+   * 反过来说：**不**改这个应答，用户拿到的不是"诚实"，而是一个点不开的死按钮 ✗
+   *   （round 123 的实测就是它 ✓）。
+   *
+   * ## 范围（窄 ✓）
+   *
+   * · 只认 GET /api/present.host 这**一个**路径 ✓（其余请求一个字节都不动 ✓，原样交给原来的 fetch ✓）；
+   * · 只随 installShell 装 ✓ ⇒ 电脑端的 DSH 一个字都不变 ✓（那边本来就能真开桌面程序 ✓）；
+   * · 页面上没有 fetch（或已经装过 ✓）就如实退回去 ✓，不抛 ✗。
+   *
+   * @returns 真的装上了吗 ✓。
+   */
+  function installPresentedHostShim() {
+    if (globalThis.__dshmPresentedHostShim === true) return false
+    var originalFetch = globalThis.fetch
+    if (typeof originalFetch !== 'function') return false
+    globalThis.__dshmPresentedHostShim = true
+    globalThis.fetch = function (input, init) {
+      try {
+        var raw =
+          typeof input === 'string'
+            ? input
+            : input && typeof input.url === 'string'
+              ? input.url
+              : String(input || '')
+        if (raw !== '') {
+          var url = new URL(raw, location.origin + '/')
+          if (url.pathname === '/api/present.host') {
+            // ★ 故意**同步** resolve ✓：DSH 那边是 await fetch(...) ✓，
+            //   同步 resolve 与一次真实往返在它眼里没有区别 ✓（少一次无谓的 401 ✓）。
+            return Promise.resolve(
+              new Response(JSON.stringify({ name: 'dsh-mobile', available: true, fileManager: 'directory' }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              }),
+            )
+          }
+        }
+      } catch (error) {
+        void error
+      }
+      return originalFetch.apply(globalThis, arguments)
+    }
+    return true
+  }
+
+  /**
+   * 安装"交付文件卡片上的动作按钮"的接管 ✓（只在手机外壳里装 ✓；round 122 起 A2 ✓）。
+   *
+   * ## 手机上那个 ⋯ 菜单里两项为什么是死的
+   *
+   * 它只有两项：**用默认应用打开** / **打开所在文件夹** ✓ —— 两项都走
+   * POST /api/present.open ✓，而手机页在 DSH 自己的信任栅栏之外
+   * ⇒ **401** ✗（与正文文件链接、/open-in-app/* 同一条 ✓）。
+   *
+   * ## round 130（A 方案）：那颗 v **回来**了，接管对象也变成"菜单里的两项"
+   *
+   * 用户原话："改好了，但很丑，**我不是说收纳进 dsh 的原生控件吗**？" ⇒ A 方案 ✓：
+   *   撤掉 round 128 我们自己注进卡片的两颗图标按钮 ✓（连注入与补回观察者一起 ✓），
+   *   把动作放回 **DSH 自己的下拉**里 ✓ —— 见 installPresentedMenuBridge 那一段 ✓
+   *   （它同时负责：给 present.host 兜底 ✓ / 把那两项的文案改准 ✓ / 在捕获阶段接管那两项 ✓ /
+   *    v 万一被 DSH 标成 disabled 时用兜底菜单兜住"点了没反应" ✗）。
+   *
+   * 这一段（函数体）剩下的是**卡片内部**两颗 DSH 原生按钮的指针接管 ✓：
+   *   · _open（左下那个「打开」✓，disabled=false ✓）⇒ 真触摸打开 **DSH 预览** ✓
+   *     （与 round 120 的文件提及按钮同一个去处 ✓，卡片标题里就是绝对路径 ✓）；
+   *   · _chevron（右边那个「v」✓）⇒ **不再**打开预览了 ✗：它是原生菜单的锚点 ✓，
+   *     该由 DSH 自己去开菜单 ✓（round 130 起 host 有兜底应答 ⇒ 它不再恒 disabled ✓）；
+   *     只有它**真的**是 disabled（菜单因此永远渲染不出来 ✗）时，我们才弹自己的兜底菜单 ✓。
+   *
+   * ## 为什么"靠 pointer 事件"这条还在
+   *
+   * 真机实测（round 123 量的 ✓，清单常驻在 check-mobile-layout 的日志里 ✓）：
+   *   disabled 的 button **不派发 click** ✗，但 pointerdown / pointerup 照常派发 ✓
+   *   （event.target 就是那个按钮 ✓）。所以"同一处轻点"这条路径对 _open 是统一实现 ✓，
+   *   对"被标成 disabled 的 chevron"是**唯一**能接到那一下的路 ✓。
+   * 全程**不动 DSH 自己的 DOM** ✓（不去摘它的 disabled ✗ —— 那是 React 的属性，
+   *   摘了会在下次渲染时打架 ✓）。
+   */
+  function installDeliverablesCardBridge(getTunnel) {
+    if (document.documentElement.dataset.dshmPresentedBridge === '1') return
+    document.documentElement.dataset.dshmPresentedBridge = '1'
+    /** 上一次按下的位置与时刻 ✓（只有"同一处轻点"才算一下 ✓ —— 从它上面划过去不算 ✓）。 */
+    var press = null
+    /** 刚刚被 pointerup 处理过的时刻 ✓（紧随其后的那次 click 不再处理一遍 ✗）。 */
+    var handledAt = 0
+
+    /**
+     * 卡片里的两个**动作**按钮 ✓（类名哈希会变 ⇒ 用**后缀**认 ✓，且必须在卡片内部 ✓）：
+     *   · _chevron —— 右边那个下拉 ✓（round 130 起它**恢复显示** ✓，而且 host 有兜底应答
+     *     ⇒ 它不再恒 disabled ✓ ⇒ 正常情况下这一下交给 DSH 自己开原生菜单 ✓）；
+     *   · _open    —— 左下那个「打开」✓（disabled=false ✓，真触摸它 ⇒ DSH 预览 ✓）。
+     * 只有这两个后缀 ✓ —— 铺满整张卡的那层 _cardPreview 覆盖层**不在内** ✗
+     * （它本来就通 DSH 自己的 onPreview ✓，别多管 ✓）。
+     */
+    function cardActionOf(node) {
+      if (node === null || node === undefined || typeof node.closest !== 'function') return null
+      var card = node.closest('[data-presented-file]')
+      if (card === null) return null
+      var button = node.closest('button')
+      if (button === null) return null
+      if (!classHasSuffix(button, 'chevron') && !classHasSuffix(button, 'open')) return null
+      if (!card.contains(button)) return null
+      return { card: card, button: button }
+    }
+
+    /** 这一下按的是哪个按钮 ✓（只用于调试框里那行说明 ✓；这里只剩「打开」这一支 ✓）。 */
+    function actionName(button) {
+      return classHasSuffix(button, 'open') ? '卡片「打开」' : '卡片 v'
+    }
+
+    /** 卡片的路径：DSH 把 `resolveWorkspacePath(cwd, file.path)` 写在卡片预览按钮的 title 上 ✓（绝对 ✓）。 */
+    function pathOfCard(card) {
+      var preview = card.querySelector('button[class*="cardPreview"]')
+      var title = preview === null ? '' : String(preview.getAttribute('title') || '')
+      if (title !== '') return title
+      var chevron = card.querySelector('button[class*="chevron"]')
+      return chevron === null ? '' : String(chevron.getAttribute('aria-label') || '')
+    }
+
+    /** 真的去开预览 ✓；打不开就**在调试框里说明** ✓（手机上不能"点了没反应"✗）。 */
+    function openCard(card, why) {
+      var decoded = String(pathOfCard(card))
+      var bridge = dshPreview()
+      if (bridge === undefined) {
+        debugBoxLine('[presented] 没有预览桥 ⇒ 这张卡片原样交给网页 ✓（' + decoded.slice(0, 60) + '）')
+        return
+      }
+      var openWith = function (absolute) {
+        if (absolute === null || absolute === '') {
+          debugBoxLine('[presented] 解不出绝对路径 ⇒ 这次没打开 ✗（' + decoded.slice(0, 60) + '）')
+          return
+        }
+        var result
+        try {
+          result = bridge.open({ path: absolute })
+        } catch (error) {
+          result = { ok: false, reason: String(error && error.message ? error.message : error) }
+        }
+        debugBoxLine(
+          result !== undefined && result !== null && result.ok === true
+            ? '[presented] ' + why + ' → DSH 预览 ✓（' + String(absolute).slice(-48) + '）'
+            : '[presented] ' + why + ' 打不开 ✗ ' + String((result && result.reason) || '未知原因'),
+        )
+      }
+      var isAbsolute = decoded.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(decoded)
+      if (isAbsolute) openWith(decoded)
+      else loadShellWorkspaceRoots(getTunnel).then(function () { openWith(absolutePathForChatLink(decoded)) })
+    }
+
+    document.addEventListener(
+      'pointerdown',
+      function (event) {
+        try {
+          if (event === undefined || event === null) return
+          var hit = cardActionOf(event.target)
+          // ★ round 130：顺手记住"这一下是按在哪张卡的 v 上" ✓ ——
+          //   DSH 的菜单是 body 上的 portal ✓，项与卡片没有 DOM 关系 ✗，
+          //   万一 aria-expanded 读不到（时序 / DSH 改版 ✓），靠这个还能认回卡片 ✓。
+          if (hit !== null && classHasSuffix(hit.button, 'chevron') === true) lastChevronCard = hit.card
+          press =
+            hit === null
+              ? null
+              : {
+                  x: Number(event.clientX),
+                  y: Number(event.clientY),
+                  at: Date.now(),
+                  card: hit.card,
+                  button: hit.button,
+                }
+        } catch (error) {
+          press = null
+        }
+      },
+      true,
+    )
+    document.addEventListener(
+      'pointerup',
+      function (event) {
+        try {
+          if (press === null || event === undefined || event === null) return
+          var hit = cardActionOf(event.target)
+          var here = press
+          press = null
+          if (hit === null || hit.card !== here.card) return
+          if (Date.now() - here.at > 900) return
+          if (Math.abs(Number(event.clientX) - here.x) + Math.abs(Number(event.clientY) - here.y) > 12) return
+          /**
+           * ★ round 130：那颗 v 不再走"打开预览"了 ✗。分两支 ✓：
+           *   · **不是 disabled** ⇒ 什么都不做 ✓ —— 把这一下**原样留给 DSH** ✓
+           *     （host 有兜底应答 ⇒ 它不再是恒 disabled ✓ ⇒ DSH 自己的 click 会去开
+           *      它那颗原生菜单 ✓，菜单里的两项由 installPresentedMenuBridge 接管 ✓）；
+           *   · **是 disabled** ⇒ DSH 自己的菜单**永远不会**渲染 ✓（它的开关是
+           *      open: menuOpen && !menuDisabled ✓）⇒ 这一下若不管，就是"点了没反应" ✗
+           *     ⇒ 弹我们自己的兜底菜单 ✓（两项文案与行为能力完全一样 ✓）。
+           * preventDefault + stopPropagation 只在第二支里做 ✓ —— 第一支拦了它就没有 click 了 ✗。
+           */
+          if (classHasSuffix(here.button, 'chevron') === true) {
+            if (here.button.disabled !== true) return
+            handledAt = Date.now()
+            event.preventDefault()
+            event.stopPropagation()
+            toggleFallbackMenu(here.card)
+            return
+          }
+          handledAt = Date.now()
+          event.preventDefault()
+          event.stopPropagation()
+          openCard(here.card, actionName(here.button))
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+    // 兜底：DSH 哪天把某个按钮的 disabled 去掉、或某些浏览器会派发 click ⇒ 这一路也在 ✓。
+    // ★ round 130：这里只认「打开」那一个后缀 ✓ —— 那颗 v 的 click 是 **DSH 自己的**
+    //   （它要去开原生菜单 ✓），拦下来就等于把菜单掐掉 ✗（round 123 的老写法正是见 chevron 就开预览 ✗）。
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null || event.defaultPrevented === true) return
+          if (Date.now() - handledAt <= 600) return
+          var hit = cardActionOf(event.target)
+          if (hit === null || classHasSuffix(hit.button, 'chevron')) return
+          event.preventDefault()
+          event.stopPropagation()
+          openCard(hit.card, actionName(hit.button))
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+
+    /**
+     * ─────────── ★★ round 128 的历史（**已被 round 130 取代** ✓，留作记录 ✓）───────────
+     *
+     * round 123 曾把 DSH 原生那颗 v 收起来 ✓（它展开的两项说的都是**电脑的**桌面 ✓，
+     *  在手机上 401 ✗）；round 128 于是在卡片里**注入我们自己的两颗图标按钮** ✓
+     *  （下载到手机 / 打开所在目录 ✓）。功能是通的 ✓，但外观很丑 ✗
+     *  —— 用户："我不是说收纳进 dsh 的原生控件吗？" ✓
+     *
+     * ## round 130（A 方案）：这一整段"我们自己的两颗按钮"**已经撤掉** ✓
+     *
+     * 动作放回 DSH 自己的下拉里 ✓（见下面 PRESENTED_NATIVE_LABELS 那一段 ✓）。
+     *  原来的注入函数、"被重渲染就补回"的观察者、以及那条 data-dshm-card-act 的点击监听
+     *  **全部删除** ✓ —— 只保留两条**能力** ✓：runCardDownload ✓（与文件面板同一条通道 ✓）
+     *  与 runCardReveal ✓（复用 dshmFilesRuntime.openAt ✓），改由菜单项调用 ✓。
+     */
+
+    /**
+     * ★★ round 130：DSH 原生「v」菜单里那两项的接管 ✓。
+     *
+     * ## 先量后写：那两项长什么样（从 DSH 自己的 bundle 里读出来的 ✓，不是猜的 ✗）
+     *
+     * 出处：node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/index-BKQ_L1z6.js 里的 Menu ✓：
+     *   · 菜单本身是 createPortal 到 **document.body** 的 div[role="menu"] ✓
+     *     （类名 _list_1nxmc_8 / _portal_1nxmc_44 / _alignEnd_1nxmc_57 ✓）；
+     *   · 里面 div._viewport[role="presentation"] ✓ → div._itemWrap_1nxmc_92 ✓
+     *     → **button[role="menuitem"]**（_item_1nxmc_92 ✓）
+     *     → [span._itemIcon_1nxmc_144 + span._itemLabel_1nxmc_174] ✓。
+     * 于是 portal 里的项与卡片之间**没有 DOM 父子关系** ✗ ⇒ 卡片要靠 chevron 的
+     *  aria-expanded="true" 认回来 ✓（那正是 DSH 菜单打开时写的 ✓）；读不到时退回
+     *  "最近一次轻点过的那张卡" ✓ —— 这两条都是为了不吃"点了没反应"的亏 ✗。
+     *
+     * ## 只认这两项（别的菜单一个字都不碰 ✗）
+     *
+     * 三个条件同时成立才算 ✓：① 在 div[role="menu"] 里 ✓；② 是 button[role="menuitem"]
+     *  （或它内部 ✓）；③ 文案是那两项的原生文案之一 ✓（或已经被我们打过标记 ✓）。
+     * 文案表取自 DSH 自己的词典 ✓（zh + en 都收 ✓，免得界面切英文就全落空 ✗）：
+     *  presented.defaultApp = 用默认应用打开 ✓；presented.directory = 打开所在文件夹 ✓
+     *  （presented.finder / presented.explorer 是同一件事的另外两种叫法 ✓）。
+     * 另外还要求"页面上确实有一张交付卡片" ✓ —— 别处万一有同名菜单，一律不动 ✓。
+     *
+     * ## 文案怎么改准、被重渲染冲掉怎么保持
+     *
+     * 改的是**文本节点** ✓：把 span.itemLabel 那个 span 的 textContent 换成新文案 ✓，
+     *  同时在 button 上打 data-dshm-presented-act（download / reveal ✓）与
+     *  data-dshm-native-label（原生文案，留作诊断 ✓），并同步 aria-label ✓
+     *  （无障碍名字与看得见的文案保持一致 ✓）。
+     * DSH 一重渲染，这些节点就是**新的** ⇒ 标记与文案都会回到原生 ✗
+     *  ⇒ 用一个只在 body 上盯 childList 的 MutationObserver **再改一遍** ✓
+     *  （与 round 128 那个"补回按钮"的观察者同一个思路 ✓，只是这次改的是 DSH 自己的节点 ✓）。
+     *  它不会自激 ✓：第二轮因为标记已在，返回 0 ✓，不再写 DOM ✓。
+     *
+     * ## 点下去之后菜单怎么收（DSH 的菜单是被"外部 pointerdown"关的 ✓）
+     *
+     * 我们把那一项的 click 拦住了 ✗ ⇒ DSH 的 onSelect（它会顺手 setMenuOpen(false) ✓）
+     *  不会跑 ⇒ 菜单会一直挂在那儿 ✗。所以接管之后**补一次合成的 pointerdown** ✓
+     *  （打在 body 上 ✓）—— DSH 的关闭判定正是"目标不在菜单里、也不在锚点里" ✓。
+     */
+    /** 两项的原生文案 ✓（DSH 词典的原文 ✓；zh / en 都收 ✓）。 */
+    var PRESENTED_NATIVE_LABELS = {
+      download: ['用默认应用打开', 'Open in default app'],
+      reveal: [
+        '打开所在文件夹',
+        '在 Finder 中显示',
+        '在文件资源管理器中显示',
+        'Open containing folder',
+        'Show in Finder',
+        'Show in File Explorer',
+      ],
+    }
+    /** 改准之后的文案 ✓（标签与实际行为必须一致 ✓）。 */
+    var PRESENTED_MENU_LABELS = { download: '下载到手机', reveal: '在文件面板中打开' }
+    /** 兜底菜单的当前状态 ✓（它是 body 上的浮层 ✓ ⇒ 卡片被 DSH 重渲染也不受影响 ✓）。 */
+    var presentedMenu = { root: null, card: null }
+    /** 最近一次轻点过的卡片下拉 ✓（aria-expanded 万一读不到时的兜底 ✓）。 */
+    var lastChevronCard = null
+
+    /** 一个菜单项的文字 ✓（DSH 放在 span.itemLabel 里 ✓；读不到就退回整块文字 ✓）。 */
+    function menuItemText(button) {
+      var label = button.querySelector('span[class*="itemLabel"]')
+      var text = label === null ? String(button.textContent || '') : String(label.textContent || '')
+      return text.replace(/\s+/g, ' ').trim()
+    }
+
+    /** 这一项属于哪个动作 ✓；不是那两项就返回 null ✓（**只认这两项** ✓）。 */
+    function menuItemAction(button) {
+      var marked = String(button.getAttribute('data-dshm-presented-act') || '')
+      if (marked === 'download' || marked === 'reveal') return marked
+      var text = menuItemText(button)
+      if (text === '') return null
+      var actions = ['download', 'reveal']
+      for (var i = 0; i < actions.length; i++) {
+        var list = PRESENTED_NATIVE_LABELS[actions[i]]
+        for (var j = 0; j < list.length; j++) {
+          if (list[j] === text) return actions[i]
+        }
+      }
+      return null
+    }
+
+    /** 这一下点的是哪个菜单项 ✓（不是那两项就返回 null ✓）。 */
+    function menuItemOf(node) {
+      if (node === null || node === undefined || typeof node.closest !== 'function') return null
+      var button = node.closest('button[role="menuitem"]')
+      if (button === null) return null
+      if (button.closest('div[role="menu"]') === null) return null
+      var action = menuItemAction(button)
+      if (action === null) return null
+      return { button: button, action: action }
+    }
+
+    /**
+     * 把 DSH 那两项的**文案改准** ✓（文本节点替换 ✓ + 打标记 ✓ + 同步 aria-label ✓）。
+     * @returns 这一轮改了几项 ✓（0 = 观察者不用再排一轮 ✓）。
+     */
+    function relabelNativeItems() {
+      if (document.querySelector('[data-presented-file]') === null) return 0
+      var items = document.querySelectorAll('div[role="menu"] button[role="menuitem"]')
+      var changed = 0
+      for (var i = 0; i < items.length; i++) {
+        var button = items[i]
+        if (String(button.getAttribute('data-dshm-presented-act') || '') !== '') continue
+        var action = menuItemAction(button)
+        if (action === null) continue
+        var label = button.querySelector('span[class*="itemLabel"]')
+        button.setAttribute('data-dshm-presented-act', action)
+        button.setAttribute('data-dshm-native-label', menuItemText(button))
+        button.setAttribute('aria-label', PRESENTED_MENU_LABELS[action])
+        if (label === null) button.textContent = PRESENTED_MENU_LABELS[action]
+        else label.textContent = PRESENTED_MENU_LABELS[action]
+        changed += 1
+      }
+      return changed
+    }
+
+    /** 一张卡片里那颗下拉 ✓（卡片内部 + 类名后缀 _chevron ✓ —— 与 round 123 的量测一致 ✓）。 */
+    function chevronOf(card) {
+      var list = card.querySelectorAll('button')
+      for (var i = 0; i < list.length; i++) {
+        if (classHasSuffix(list[i], 'chevron')) return list[i]
+      }
+      return null
+    }
+
+    /** 现在**开着菜单**的那张卡片 ✓（DSH 打开菜单时会给 chevron 写 aria-expanded="true" ✓）。 */
+    function expandedCard() {
+      var list = document.querySelectorAll('[data-presented-file]')
+      for (var i = 0; i < list.length; i++) {
+        var chevron = chevronOf(list[i])
+        if (chevron !== null && String(chevron.getAttribute('aria-expanded') || '') === 'true') return list[i]
+      }
+      return null
+    }
+
+    /** 这一下该落到哪张卡片上 ✓（开着菜单的那张 ✓ → 兜底菜单记着的那张 ✓ → 最近轻点过的那张 ✓）。 */
+    function menuCard() {
+      var open = expandedCard()
+      if (open !== null) return open
+      if (presentedMenu.card !== null) return presentedMenu.card
+      return lastChevronCard
+    }
+
+    /** 让 DSH 自己把菜单收掉 ✓（它听的是外部 pointerdown ✓；它的 onSelect 被我们挡住了 ✗）。 */
+    function closeNativeMenu() {
+      try {
+        if (document.body === null || document.body === undefined) return
+        var event =
+          typeof PointerEvent === 'function'
+            ? new PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+            : new MouseEvent('pointerdown', { bubbles: true, cancelable: true })
+        document.body.dispatchEvent(event)
+      } catch (error) {
+        void error
+      }
+    }
+
+    /** 关掉我们自己的兜底菜单 ✓（没开时什么都不做 ✓）。 */
+    function closeFallbackMenu() {
+      if (presentedMenu.root !== null && presentedMenu.root.parentElement !== null) {
+        presentedMenu.root.parentElement.removeChild(presentedMenu.root)
+      }
+      presentedMenu.root = null
+      presentedMenu.card = null
+    }
+
+    /** 兜底菜单的一项 ✓（形状与 DSH 的菜单项一致 ✓：左图标 + 文案 ✓）。 */
+    function fallbackMenuItem(action, icon) {
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('role', 'menuitem')
+      button.setAttribute('data-dshm-presented-act', action)
+      button.setAttribute('aria-label', PRESENTED_MENU_LABELS[action])
+      var glyph = document.createElement('span')
+      glyph.setAttribute('data-dshm-menu-icon', '1')
+      glyph.innerHTML = icon
+      var label = document.createElement('span')
+      label.textContent = PRESENTED_MENU_LABELS[action]
+      button.appendChild(glyph)
+      button.appendChild(label)
+      return button
+    }
+
+    /**
+     * 打开兜底菜单 ✓（**只有** DSH 自己的菜单打不开时才走到这里 ✓）。
+     *
+     * 位置照 DSH 的 Menu 来 ✓：贴在下拉正下方 ✓，右边越界就往回收 ✓、
+     *  下面放不下就翻到上面 ✓（视口夹取 ✓）—— 它必须是 body 上的**固定定位浮层** ✓，
+     *  放卡片里会被 DSH 那个 overflow:hidden 裁掉 ✗（round 128 量过 ✓）。
+     */
+    function openFallbackMenu(card) {
+      closeFallbackMenu()
+      var chevron = chevronOf(card)
+      if (chevron === null) return false
+      if (document.body === null || document.body === undefined) return false
+      var root = document.createElement('div')
+      root.id = 'dshm-presented-menu'
+      root.setAttribute('role', 'menu')
+      root.setAttribute('data-dshm-presented-menu', '1')
+      root.appendChild(fallbackMenuItem('download', ICON_CARD_DOWNLOAD))
+      root.appendChild(fallbackMenuItem('reveal', ICON_CARD_FOLDER))
+      document.body.appendChild(root)
+      var anchor = chevron.getBoundingClientRect()
+      var box = root.getBoundingClientRect()
+      var left = anchor.left + box.width > window.innerWidth - 4 ? Math.max(4, anchor.right - box.width) : anchor.left
+      var top = anchor.bottom + 4
+      if (top + box.height > window.innerHeight - 4) top = Math.max(4, anchor.top - box.height - 4)
+      root.style.left = Math.round(left) + 'px'
+      root.style.top = Math.round(top) + 'px'
+      presentedMenu.root = root
+      presentedMenu.card = card
+      return true
+    }
+
+    /** 同一张卡片上再轻点一次那颗 v ⇒ 收起来 ✓（DSH 自己的菜单也是这个手感 ✓）。 */
+    function toggleFallbackMenu(card) {
+      if (presentedMenu.root !== null && presentedMenu.card === card) {
+        closeFallbackMenu()
+        return false
+      }
+      return openFallbackMenu(card)
+    }
+
+    /**
+     * ★ 那两项的点击在**捕获阶段**认下来 ✓：
+     *  preventDefault + stopPropagation ⇒ DSH 自己的 onSelect 不会跑 ✓
+     *  （它那一下会去打 401 的 /api/present.open ✗），铺满卡片的 _cardPreview 也不会被顺带触发 ✓。
+     * 然后**把菜单收掉** ✓（见 closeNativeMenu 的说明 ✓），再执行那件事 ✓。
+     */
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null) return
+          var item = menuItemOf(event.target)
+          if (item === null) return
+          var card = menuCard()
+          if (card === null || card === undefined) return
+          event.preventDefault()
+          event.stopPropagation()
+          closeFallbackMenu()
+          closeNativeMenu()
+          debugBoxLine('[presented] 卡片菜单项「' + PRESENTED_MENU_LABELS[item.action] + '」→ 已接管 ✓')
+          if (item.action === 'download') runCardDownload(card)
+          else runCardReveal(card)
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+
+    /**
+     * 兜底菜单自己的关闭路径 ✓：点到外面 ✓ / Escape ✓ / 视口变了 ✓。
+     * ★ 点在**卡片那颗 v** 上时不在这里关 ✓ —— 交给 pointerup 的 toggle ✓（否则会"关了又开" ✗）。
+     */
+    document.addEventListener(
+      'pointerdown',
+      function (event) {
+        try {
+          if (presentedMenu.root === null) return
+          var node = event === undefined || event === null ? null : event.target
+          if (node !== null && node !== undefined && presentedMenu.root.contains(node)) return
+          var hit = cardActionOf(node)
+          if (hit !== null && classHasSuffix(hit.button, 'chevron') === true) return
+          closeFallbackMenu()
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+    document.addEventListener(
+      'keydown',
+      function (event) {
+        try {
+          if (presentedMenu.root === null) return
+          if (String(event === undefined || event === null ? '' : event.key) !== 'Escape') return
+          closeFallbackMenu()
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+    var closeFallbackOnViewport = function () {
+      try {
+        closeFallbackMenu()
+      } catch (error) {
+        void error
+      }
+    }
+    globalThis.addEventListener('resize', closeFallbackOnViewport, true)
+    globalThis.addEventListener('scroll', closeFallbackOnViewport, true)
+
+    /**
+     * 卡片菜单「下载到手机」：与文件面板**同一条通道** ✓（readRemoteFileBytes ✓）+ 同一条桥 ✓。
+     *   ★ round 130：函数体**一个字没改** ✓ —— round 128 做好的这条桥原样复用 ✓
+     *   （用户要的是把它从"我们自己那颗按钮"挪进 DSH 原生菜单里 ✓，不是重做一遍 ✗）。
+     */
+    function runCardDownload(card) {
+      var path = String(pathOfCard(card))
+      var parts = splitFilePath(path)
+      if (path === '' || parts.name === '') {
+        saveFeedback('下载失败：这张卡片上没有可用的文件路径')
+        return
+      }
+      saveFeedback('正在从电脑读取 ' + parts.name + ' …')
+      readRemoteFileBytes(getTunnel, path, function (offset) {
+        setNote('下载中 ' + formatSize(offset) + ' …')
+      }).then(
+        function (bytes) {
+          shellSaveBytes(parts.name, bytes)
+        },
+        function (error) {
+          saveFeedback('下载失败：' + describeError(error))
+        },
+      )
+    }
+
+    /**
+     * 卡片菜单「在文件面板中打开」：复用文件面板的进目录逻辑 ✓（只把目录与文件名递过去 ✓）。
+     *   ★ round 130：与 round 128 同一条路 ✓（`dshmFilesRuntime.openAt` ✓）——
+     *   只把文案里的旧名字「打开所在目录」换成菜单上现在真正写着的那句 ✓
+     *   （标签与实际行为不许各说各话 ✗）。
+     */
+    function runCardReveal(card) {
+      var path = String(pathOfCard(card))
+      if (path === '') {
+        saveFeedback('在文件面板中打开：这张卡片上没有可用的文件路径')
+        return
+      }
+      var open = function (absolute) {
+        if (absolute === null || absolute === undefined || absolute === '') {
+          saveFeedback('在文件面板中打开：解不出这个文件的绝对路径 ⇒ 这次不跳（不猜 ✗）')
+          return
+        }
+        var runtime = dshmFilesRuntime
+        if (runtime === null || runtime === undefined || typeof runtime.openAt !== 'function') {
+          saveFeedback('在文件面板中打开：文件面板还没装好（这一页不是手机外壳？）')
+          return
+        }
+        var parts = runtime.openAt(absolute)
+        saveFeedback('已在我们的文件面板里打开并跳到：' + String(parts.dir))
+      }
+      var isAbsolute = path.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(path)
+      if (isAbsolute) open(path)
+      else loadShellWorkspaceRoots(getTunnel).then(function () { open(absolutePathForChatLink(path)) })
+    }
+
+    /**
+     * ★ **被 DSH 重渲染冲掉就补回** ✓（round 130：这次补的是**文案** ✓，不是我们自己的按钮 ✗）。
+     *
+     * 只观察 body 的 childList + subtree ✓（**不观察 attributes** ✗ —— 免得观察者被自己触发成死循环 ✗）。
+     * 命中概率极高 ✓：DSH 每次打开菜单都往 body 上挂一个新的 portal ✓
+     *  ⇒ 那一下正好就是"菜单刚渲染出来"的时刻 ✓ ⇒ 顺手把两项的文案改准 ✓。
+     * 回调里只在真的改了东西时才再补一次 ✓（第二轮因为标记已在，返回 0 ✓，不会自激 ✓）。
+     */
+    relabelNativeItems()
+    try {
+      var menuObserver = new MutationObserver(function () {
+        try {
+          if (relabelNativeItems() > 0) relabelNativeItems()
+        } catch (error) {
+          void error
+        }
+      })
+      if (document.body !== null && document.body !== undefined) {
+        menuObserver.observe(document.body, { childList: true, subtree: true })
+      } else {
+        document.addEventListener(
+          'DOMContentLoaded',
+          function () {
+            try {
+              relabelNativeItems()
+              menuObserver.observe(document.body, { childList: true, subtree: true })
+            } catch (error) {
+              void error
+            }
+          },
+          { once: true },
+        )
+      }
+    } catch (error) {
+      debugBoxLine('[presented] 菜单文案的补回观察者没装上：' + String(error && error.message ? error.message : error))
+    }
+  }
+
+  /**
+   * 安装"外链（`target="_blank"`）→ 壳的系统浏览器"这条**网页侧兜底** ✓（只在手机外壳里装 ✓；本轮 U1 ✓）。
+   *
+   * ## 为什么光有壳那半不够
+   *
+   * 壳的 `onCreateWindow` 靠 `view.getHitTestResult().getExtra()` 取地址 ✓ ——
+   * 那是"上一次触摸命中的是什么" ✓，对**程序化**弹窗、以及部分锚点并不可靠 ✗
+   * （拿不到就 `return false` ✓ ⇒ 弹窗被丢掉 ⇒ 又是"点了没反应"✗，日志里那句
+   * "外链点了但拿不到地址（_blank）"就是它 ✓）。
+   * 网页这一侧**知道**那个 `<a href>` 是谁 ✓（事件目标就是它 ✓），所以在这里兜一层 ✓。
+   *
+   * ## 为什么必须走壳
+   *
+   * 网页没有"直接开系统浏览器"的能力 ✗（WebView 里的 `window.open` 会被丢掉 ✗）；
+   * 真正能开的只有壳 ✓ —— 走 `DshmShell.openExternal(url)` ✓（壳里用 `Intent.ACTION_VIEW` ✓，
+   * **不需要新权限** ✓）。旧 APK 没有这条桥 ⇒ 这里**不拦** ✓（保持原样 ✓ + 调试框里说明 ✓）。
+   *
+   * ## 认领的次序很关键
+   *
+   * 桥调用是**同步**的 ✓（`@JavascriptInterface` 直接返回字符串 ✓）⇒
+   * 先问桥"这一下你接住了吗" ✓，只有拿到 `ok` 才 `preventDefault` ✓ ——
+   * 反过来（先 preventDefault 再问）在旧 APK 上会把外链**变成彻底点不动** ✗。
+   */
+  function installExternalLinkBridge() {
+    if (document.documentElement.dataset.dshmExternalLinkBridge === '1') return
+    document.documentElement.dataset.dshmExternalLinkBridge = '1'
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null || event.defaultPrevented === true) return
+          if (event.button !== undefined && event.button !== 0) return
+          if (event.metaKey === true || event.ctrlKey === true || event.shiftKey === true || event.altKey === true) return
+          var node = event.target
+          if (node === null || node === undefined || typeof node.closest !== 'function') return
+          var link = node.closest('a[target="_blank"][href]')
+          if (link === null) return
+          var href = String(link.getAttribute('href') || '')
+          // 只管 http/https ✓：`mailto:` 等由壳的 `shouldOverrideUrlLoading` 那条路管 ✓（round 120 ✓）。
+          if (!/^https?:\/\//i.test(href)) return
+          var bridge = shellBridge()
+          if (bridge === undefined || typeof bridge.openExternal !== 'function') {
+            debugBoxLine('[link] 外链：这个 APK 还没有 openExternal 桥（要重装 APK ✓）⇒ 原样交给网页 ✓ ' + href.slice(0, 80))
+            return
+          }
+          var result
+          try {
+            result = String(bridge.openExternal(href))
+          } catch (error) {
+            result = 'error'
+          }
+          if (result !== 'ok') {
+            debugBoxLine('[link] 外链没打开 ✗（壳回 ' + result + '）：' + href.slice(0, 80))
+            return
+          }
+          event.preventDefault()
+          event.stopPropagation()
+          debugBoxLine('[link] 外链已交给系统浏览器 ✓ ' + href.slice(0, 80))
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+  }
+
+  /**
+   * ★★ Session 日志下载（普查 **A4**）也走桥 ✓（round 128 ✓）。
+   *
+   * ## 它坏在哪（两处**独立**原因 ✓，原样抄自普查）
+   *
+   * 用户点 Session 头「⋯」→「下载 Session 日志」（或打 `/export` ✓）时，DSH 会：
+   *   ① 先 `HEAD /api/session.export…` 探一次 ✓；② 成功才把 URL 交给浏览器下载
+   *   （`downloadUrl`：新建一个 **不在文档里**的 `<a download>` 并 `click()` ✓）。
+   *
+   * 手机上两处都过不去 ✗：
+   *   · ① 那条路由在 DSH 自己的信任栅栏**之内** ✓（手机页没有 GUI cookie ✓）
+   *     ⇒ **HTTP 401** ✗（这一步原本有可见报错 ✓，不是静默 ✓）；
+   *   · ② 就算过了 ①，`<a download>` 也会被 WebView **整条丢掉** ✗
+   *     （壳没有 `setDownloadListener` ✓，与文件面板那条同一个病 ✓）。
+   *
+   * ## 这一段做了什么（**只做能做的** ✗）
+   *
+   * · **有壳**时接管"保存"那一下 ✓：DSH 建的锚点不在文档里 ✓（事件冒泡接不到 ✗），
+   *   所以只能接管 `HTMLAnchorElement.prototype.click` ✓ —— 命中条件**极窄** ✓：
+   *   壳在 ✓ + 有 `download` 属性 ✓ + 地址是 `/api/session.export` ✓。其余一律原样放行 ✓。
+   *   接住之后先 `fetch` 取字节 ✓，再走**同一条桥**（`shellSaveBytes` ✓）存进手机 ✓。
+   * · **没壳**（纯浏览器 / 桌面端 ✓）⇒ **一个字节都不动** ✓（那里 `<a download>` 是好用的 ✓）。
+   * · 有壳而 ① 真的 401 时，把 DSH 那句干巴巴的 `HTTP 401` **换成一句能读懂的话** ✓
+   *   （并且**不谎报成功** ✗ —— 那种情况下 DSH 根本不会走到"下载已开始"那一步 ✓）。
+   *
+   * ⚠️ **未做到 / 需要说明**（如实 ✓）：401 那一步（①）**在手机上仍然过不去** ✗ ——
+   *   ZIP 的字节在电脑端、而手机页取不到它 ✗。真正修 ① 需要**电脑端**给一条
+   *   "经隧道取 Session 日志"的端点 ✓（这一轮没做 ✗，见本轮报告）。所以这一段
+   *   目前只在"页面本来就带 DSH cookie"的环境里能真的把 ZIP 存到手机 ✓；
+   *   绝大多数手机上，用户看到的是一句**说明原因**的错误 ✓，而不是那句假的"已开始下载" ✗。
+   */
+  function installSessionExportBridge() {
+    if (document.documentElement.dataset.dshmSessionExportBridge === '1') return false
+    document.documentElement.dataset.dshmSessionExportBridge = '1'
+    var EXPORT_PATH = '/api/session.export'
+
+    /** 这个 input 是不是 `/api/session.export` ✓；不是就返回空串 ✓（三种 input 形态都要认 ✓）。 */
+    function exportUrlOf(input) {
+      try {
+        var raw =
+          typeof input === 'string'
+            ? input
+            : input && typeof input.href === 'string'
+              ? input.href
+              : input && typeof input.url === 'string'
+                ? input.url
+                : String(input || '')
+        if (raw === '') return ''
+        var url = new URL(raw, location.origin + '/')
+        return url.pathname === EXPORT_PATH ? url.toString() : ''
+      } catch (error) {
+        return ''
+      }
+    }
+
+    /** 真的把 ZIP 取回来再交给壳 ✓（取不到就**如实说** ✓，不谎报 ✓）。 */
+    function saveExportViaShell(name, url) {
+      saveFeedback('正在从电脑取 Session 日志（' + name + '）…')
+      Promise.resolve()
+        .then(function () {
+          return globalThis.fetch(url, { credentials: 'include' })
+        })
+        .then(function (response) {
+          var status = response === undefined || response === null ? 0 : Number(response.status)
+          if (response === undefined || response === null || response.ok !== true) {
+            saveFeedback('Session 导出失败：电脑端返回 HTTP ' + status + '（手机上还取不到这个 ZIP，需要在电脑端放行导出）')
+            return undefined
+          }
+          return response.arrayBuffer().then(function (buffer) {
+            shellSaveBytes(name, new Uint8Array(buffer))
+          })
+        })
+        .catch(function (error) {
+          saveFeedback('Session 导出失败：' + String(error && error.message ? error.message : error))
+        })
+    }
+
+    /**
+     * ① 预检那一下：壳在、而且**真的**过不去时，把原因说清楚 ✓。
+     *   ★ 刻意**不伪造成功** ✗ —— 只把那句 `HTTP 401` 换成一句人能读懂的话 ✓，
+     *   同时仍然让 DSH 走进它的"导出失败"分支 ✓（用户看到的是失败 ✓，不是假成功 ✗）。
+     */
+    var originalFetch = globalThis.fetch
+    if (typeof originalFetch === 'function' && globalThis.__dshmExportFetchWrapped !== true) {
+      globalThis.__dshmExportFetchWrapped = true
+      globalThis.fetch = function (input, init) {
+        var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase()
+        var target = exportUrlOf(input)
+        if (target === '' || method !== 'HEAD' || shellBridge() === undefined) {
+          return originalFetch.apply(globalThis, arguments)
+        }
+        return originalFetch.apply(globalThis, arguments).then(function (response) {
+          if (response !== undefined && response !== null && response.ok === true) return response
+          var status = response === undefined || response === null ? 0 : Number(response.status)
+          saveFeedback('Session 导出在手机上取不到：电脑端把 /api/session.export 拦在授权之外（HTTP ' + status + '）—— 这一步需要电脑端配合')
+          return new Response('手机端还没有取这个 ZIP 的通道（电脑端需要先放行 Session 导出）', {
+            status: 502,
+            statusText: 'dshm export unavailable',
+          })
+        })
+      }
+    }
+
+    /**
+     * ② 保存那一下：DSH 建的 `<a download>` **不在文档里** ✗（监听不到事件 ✓），
+     *   所以只能接管这个原型方法 ✓。命中条件窄到只有"Session 导出"这一条路 ✓。
+     */
+    var originalClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function () {
+      try {
+        if (shellBridge() !== undefined && this.download !== undefined && String(this.download) !== '') {
+          var target = exportUrlOf(this.href)
+          if (target !== '') {
+            saveExportViaShell(String(this.download), target)
+            return
+          }
+        }
+      } catch (error) {
+        void error
+      }
+      return originalClick.apply(this, arguments)
+    }
+    return true
+  }
+
+  /**
+   * DSH 预览桥（`@dsh-mobile/bridge` ✓ 宿主侧声明、页面里由它注册 ✓）。
+   *
+   * 它把 DSH **自带**的文档预览交给我们 ✓ —— 那套预览内置 KaTeX ✓
+   * （公式与 DSH 聊天里一模一样 ✓），并且支持 **PDF** ✓、代码 ✓、图片 ✓、HTML ✓。
+   * 没有桥（旧宿主 / 还没重启 ✓）时这里返回 `undefined` ✓，
+   * 调用方必须**如实说明**而不是静默 ✗。
+   */
+  function dshPreview() {
+    var bridge = globalThis.__DSHM_DSH_PREVIEW__
+    return bridge !== undefined && bridge.ready === true ? bridge : undefined
+  }
+
+  /**
+   * ★ round 117：把文件交给 **DSH 自带预览**（现在是**默认**路径 ✓ —— 用户："从现在起都用 dsh 预览" ✓）。
+   *
+   * ★★ round 157（B ✓）：多了一个**返回落点**入参 ✓（`filesState` = 文件浏览器那一层的 state ✓）。
+   * 为什么必须有它 ✗：下面那句 `setOpen(false)` 会把文件面板整个收掉 ✓ ⇒
+   * 用户关掉 DSH 预览时**底下什么都没有** ✗ ⇒ 直接落到聊天页 ✗（用户："**2 不行**"✓）。
+   * 落点只能用**调用方**的 `state.path` ✓ —— 这个函数自己够不着它 ✗
+   * （`state` 长在 `renderFileBrowser` 那个闭包里 ✓），所以由调用方递进来 ✓，
+   * 且**不改 `sheet.restoreFiles`** ✗（那是"回工作区根"的落点 ✓，不是当前目录 ✗）。
+   *
+   * @param filesState - 可选：`{ path, getTunnel }`（文件浏览器那一屏的 state ✓）。
+   *   给了才记"返回点" ✓（= 这一下**确实是从文件面板点开的** ✓，护栏①）。
+   * @returns `true` = 已经交给 DSH（调用方**不要**再渲染自家预览 ✗）；
+   *          `false` = 桥不可用 / 打不开 ⇒ 调用方回退到自家预览 ✓，
+   *                    并且这里已经**如实说明了原因** ✓（手机上不能"点了没反应" ✗）。
+   */
+  function openFileInDshPreview(sheet, entry, filesState) {
+    var bridge = dshPreview()
+    /**
+     * ★★ round 170（用户实拍："**顶栏依旧闪**"✗）：在**请求预览之前**就把我们的顶栏/入口藏起来 ✓。
+     *   为什么必须提前到这一行 ✗：DSH 那一层是**点完文件之后**才渲染的 ✓ ——
+     *   靠标记（JS 探测 ✓）或 `:has()`（要等那一层进 DOM ✓）都只能**事后**知道 ✓
+     *   ⇒ 从"点文件"到"预览出现"这段里顶栏必然露一次脸 ✓；露脸时壳的 insets 若还没上报 ✓
+     *   （`--dshm-safe-top` 仍是 0 ✓）它就正好**压在状态栏上** ✓ = 用户说的"闪/跑到状态栏" ✓。
+     * 清掉的三条路 ✓：真的出现了（标记接管 ✓，见 `syncDshPreviewState` ✓）、打不开（下面每个失败分支 ✓）、
+     *   迟迟不出现（兜底超时 ✓）——**每一条都清 ✓**，绝不留下"顶栏永久隐藏"✗。
+     */
+    var markPending = function (on) {
+      try {
+        if (document.body === null || document.body === undefined || document.body.dataset === undefined) return
+        if (on) document.body.dataset.dshmPreviewPending = '1'
+        else delete document.body.dataset.dshmPreviewPending
+      } catch (error) {
+        void error
+      }
+    }
+    if (bridge === undefined) {
+      setNote('这个 DSH 版本还没有预览桥（重启 DSH 后可用 ✓）——先用手机自带的预览 ✓')
+      return false
+    }
+    // ★ 请求之前就打上（见上面那段说明 ✓）
+    markPending(true)
+    // ★ 兜底：万一预览迟迟不出现（桥静默失败 ✓），**必须**把顶栏还回来 ✗（绝不留"永久隐藏"✗）
+    try {
+      globalThis.setTimeout(function () {
+        markPending(false)
+      }, 12000)
+    } catch (error) {
+      void error
+    }
+    var result
+    try {
+      result = bridge.open({ path: entry.path })
+    } catch (error) {
+      markPending(false)
+      setNote(
+        'DSH 预览打不开：' + String(error && error.message ? error.message : error) + ' —— 先用手机自带的预览 ✓',
+      )
+      return false
+    }
+    if (result === undefined || result === null || result.ok !== true) {
+      markPending(false)
+      setNote('DSH 预览打不开：' + String((result && result.reason) || '未知原因') + ' —— 先用手机自带的预览 ✓')
+      return false
+    }
+    /**
+     * ★ round 170：**预览真的出现了 ⇒ pending 交棒给标记** ✓（标记那条在 `syncDshPreviewState`
+     *   的开支里清 pending ✓ —— 两条规则同时成立也无所谓 ✓，但早清掉更干净 ✓）。
+     */
+    if (typeof syncDshPreviewState === 'function') {
+      try {
+        globalThis.setTimeout(function () {
+          if (document.body !== null && document.body !== undefined && document.body.dataset !== undefined) {
+            if (document.body.dataset.dshmDshPreview === '1') markPending(false)
+          }
+        }, 400)
+      } catch (error) {
+        void error
+      }
+    }
+    // 立刻同步一次"预览开着"✓（观察器要等下一帧 ✓，而这一步可能已经推开了布局 ✓）
+    if (typeof syncDshPreviewState === 'function') setTimeout(syncDshPreviewState, 0)
+    /**
+     * ★★ round 158（B2 ✓）：**"这一次预览是我们请求的"要单独记一笔** ✗。
+     *
+     * round 157 只按**时间**判"这预览是不是刚从文件面板点开的"（`at` 与那个 3000ms 窗口 ✓）。
+     * 真机上的失败形状（用户原话："**打开多个文件（开一个退出不关闭）以后用返回键无法回到
+     * 文件目录**"✗）：文件越大 / 预览越慢 ⇒ 那一层进 DOM 的时刻可能**晚于 3 秒** ✓
+     * ⇒ 下面 `syncDshPreviewState` 那条"佩戴时刻"判据把记忆**当场作废** ✗
+     * ⇒ 这一轮的返回点就没了 ✓（下一轮再从面板点开才有可能恢复 ✓ = 时灵时不灵 ✓）。
+     * 现在多一个**令牌** ✓：只要预览是我们这一下请求出来的（`bridge.open` 已经回 `{ok:true}` ✓），
+     * **不管它花了多久**都算数 ✓；"不是我们请求的"（聊天里的文件链接 ✓）照旧由时间那条挡住 ✓
+     * —— 护栏①一个字没松 ✓（见 `syncDshPreviewState` 里那一支 ✓）。
+     */
+    dshmPreviewOpenRequested = true
+    /**
+     * ★★ round 157（B ✓）：**在收起面板之前**把"这一下是为了看预览"与**落点**记下来 ✓
+     *   （顺序不能反 ✗：`setOpen(false)` 一跑，面板状态就变了 ✓）。
+     * 两条前置缺一不可 ✓（护栏①的判据就在这里 ✓）：
+     *   · 调用方**递了 state** ✓ = 这一下是从**文件浏览器那一屏**点出来的 ✓；
+     *   · 面板**此刻真的开着** ✓ —— 不然就是"凭空记一笔"，关预览时会凭空弹面板 ✗。
+     * 落点取 `state.path` ✓（**当前目录** ✓ —— 用户要"停在原目录"，不是回工作区根 ✗）。
+     */
+    if (
+      filesState !== undefined &&
+      filesState !== null &&
+      typeof filesState.path === 'string' &&
+      document.body !== null &&
+      document.body !== undefined &&
+      document.body.dataset.dshmFiles === 'open'
+    ) {
+      dshmFilesReturnAfterPreview = {
+        sheet: sheet,
+        getTunnel: filesState.getTunnel,
+        path: filesState.path,
+        // ★ 这一屏自己的两个入参 ✓（恢复时直接进同一屏 ✓，不必按路径去猜工作区 ✓）
+        workspace: filesState.workspace,
+        targets: filesState.targets,
+        at: Date.now(),
+      }
+      debugBoxLine('[files] 为 DSH 预览收起文件面板（记住返回点：' + filesState.path + ' ✓）')
+    }
+    /**
+     * ★★ round 158（B1 ✓）：**不再收起文件面板** ✗✗（round 157 这里有一句 `setOpen(false)` ✓）。
+     *
+     * 用户原话（本轮 B1）："**目前的返回文件目录是先回到主页面，然后让文件目录跳出来，
+     * 这点不好**"✗ —— 那正是 round 157"关预览 ⇒ 重新打开面板"的观感：
+     * **先露出聊天页 → 面板再滑进来** ✓。
+     *
+     * 真机实测（round 158，真 DSH + 真预览，读数见 round 158 报告）：
+     *   · DSH 预览那一层 `div.dhJKeW_preview` = `0,38 → 412,915` ✓ **盖住整屏** ✓
+     *     （`position: static` ✓、挂在右栏那一列里 ✓）；
+     *   · 我们的面板是 `position: fixed; z-index: 85` ✓，而右栏那一整列只有 `z-index: 25` ✗
+     *     ⇒ **面板会画在预览上面** ✓（实测：面板 x 148–412 那一段盖住预览 ✓）。
+     * 所以"面板留在底下不会被看见"这句**不成立** ✗ —— 必须补一条"预览开着时**不画面板**" ✓
+     * （`body[data-dshm-dsh-preview="1"] #dsh-mobile-sheet { display: none !important }` ✓）。
+     * 这样：**状态一直是 open** ✓（用户要的"全程没有中间那一帧"✓）、
+     * 屏幕上只有预览 ✓、预览一关面板**本来就在** ✓（一步到位、零闪烁 ✓）。
+     *
+     * ★ 面板**不再被关** ⇒ `restoreFilesAfterDshPreview` 那笔记忆退化成"兜底"✓
+     *   （只有面板被**别的东西**关掉时才用得上 ✓），但**一个字都不删** ✗ ——
+     *   157-B-①～⑥ 的护栏（不是从面板打开的预览不许弹面板 ✓、最小化不算关闭 ✓、
+     *   只恢复一次 ✓）照旧全靠它 ✓。
+     */
+    return true
+  }
+
+  /** 读宿主注入的渲染器地址（没有就说明这台宿主没装 ✓；仅作兜底 ✓）。 */
+  function temmlUrl() {
+    try {
+      if (typeof document.querySelector !== 'function') return ''
+      var meta = document.querySelector('meta[name="dshm-temml"]')
+      if (meta === null || meta === undefined) return ''
+      return String(meta.getAttribute('content') || '')
+    } catch (error) {
+      return ''
+    }
+  }
+
+  /** 拿不到渲染器时的提示去处（预览页会把元信息行挂上来 ✓）。 */
+  var mathNotice = null
+  function reportMathProblem(reason) {
+    TEMML_STATE.error = String(reason)
+    if (typeof mathNotice === 'function') mathNotice(String(reason))
+  }
+
+  function flushMathQueue() {
+    var queue = TEMML_STATE.queue
+    TEMML_STATE.queue = []
+    for (var i = 0; i < queue.length; i++) paintMath(queue[i].container, queue[i].tex, queue[i].display)
+  }
+
+  /**
+   * 按需把 Temml 装上（只做这一次 ✓）。
+   *
+   * 顺序：**内联副本优先** ✓（零重启 ✓）→ 宿主路由兜底 ✓（老宿主 / 源码直跑 ✓）→
+   * 都不行就如实报错 ✓（公式仍按原样 TeX 显示 ✓，绝不静默 ✗）。
+   */
+  function ensureTemml() {
+    if (TEMML_STATE.state === 'loading' || TEMML_STATE.state === 'ready' || TEMML_STATE.state === 'failed') return
+    TEMML_STATE.state = 'loading'
+    TEMML_STATE.source = 'inline'
+    loadTemmlFromInline().then(
+      function () {
+        TEMML_STATE.state = 'ready'
+        flushMathQueue()
+      },
+      function (inlineError) {
+        var url = temmlUrl()
+        TEMML_STATE.url = url
+        TEMML_STATE.source = 'asset'
+        if (url === '') {
+          TEMML_STATE.state = 'failed'
+          reportMathProblem(
+            '内联副本不可用（' + String(inlineError && inlineError.message ? inlineError.message : inlineError) +
+              '），宿主也没有提供 /mobile/vendor/temml-*.js',
+          )
+          return
+        }
+        try {
+          var script = document.createElement('script')
+          script.src = url
+          script.async = true
+          script.addEventListener('load', function () {
+            if (globalThis.temml === undefined) {
+              TEMML_STATE.state = 'failed'
+              reportMathProblem('公式渲染器下载了但没有生效')
+              return
+            }
+            TEMML_STATE.state = 'ready'
+            flushMathQueue()
+          })
+          script.addEventListener('error', function () {
+            TEMML_STATE.state = 'failed'
+            reportMathProblem('公式渲染器下载失败：' + url)
+          })
+          document.head.appendChild(script)
+        } catch (error) {
+          TEMML_STATE.state = 'failed'
+          reportMathProblem('公式渲染器加载异常：' + String(error && error.message ? error.message : error))
+        }
+      },
+    )
+  }
+
+  /** 画一个公式：能画就画 ✓，不能就先按原样 TeX 显示并排队 ✓。 */
+  function paintMath(container, tex, display) {
+    if (TEMML_STATE.state === 'ready' && globalThis.temml !== undefined) {
+      try {
+        container.innerHTML = globalThis.temml.renderToString(tex, {
+          displayMode: display === true,
+          throwOnError: false,
+        })
+        container.dataset.dshmMath = 'ready'
+        TEMML_STATE.rendered += 1
+        return true
+      } catch (error) {
+        container.dataset.dshmMath = 'failed'
+        reportMathProblem('公式渲染失败：' + String(error && error.message ? error.message : error))
+        return false
+      }
+    }
+    // 未加载完（或失败）时：原样显示 TeX（不吞内容 ✓，也不套 markdown 规则 ✓）
+    container.textContent = tex
+    container.dataset.dshmMath = TEMML_STATE.state === 'failed' ? 'failed' : 'pending'
+    if (TEMML_STATE.queue === undefined) TEMML_STATE.queue = []
+    if (TEMML_STATE.state !== 'failed') TEMML_STATE.queue.push({ container: container, tex: tex, display: display })
+    return false
+  }
+
+  /** 造一个公式容器（行内 / 行间两种 ✓）。 */
+  function mathNode(tex, display) {
+    var node = document.createElement('span')
+    node.className = 'dshm-md-math'
+    node.setAttribute('data-dshm-math', 'pending')
+    if (display === true) node.setAttribute('data-display', '1')
+    paintMath(node, tex, display)
+    if (TEMML_STATE.state === 'idle') ensureTemml()
+    return node
+  }
+
+  /**
+   * 把一段行内文本切成"普通文本 / 公式"片段 ✓。
+   *
+   * `$…$` 的判定要防误伤：开 `$` 后不能是空白 ✓、闭 `$` 前不能是空白 ✓、
+   * 中间不能有 `$` 或换行 ✓ —— 这样"价格 $5 和 $10"不会被当成公式 ✓
+   * （`$5` 后面是空格、`$10` 前面是空格 ✓，两条都被挡下 ✓）。
+   */
+  function splitInlineMath(source) {
+    var text = String(source)
+    var parts = []
+    var buffer = ''
+    var index = 0
+    var flush = function () {
+      if (buffer !== '') parts.push({ math: false, value: buffer })
+      buffer = ''
+    }
+    while (index < text.length) {
+      // `\( … \)` 形式 ✓
+      if (text.slice(index, index + 2) === '\\(') {
+        var closeParen = text.indexOf('\\)', index + 2)
+        if (closeParen > 0) {
+          flush()
+          parts.push({ math: true, value: text.slice(index + 2, closeParen), display: false })
+          index = closeParen + 2
+          continue
+        }
+      }
+      if (text[index] === '$') {
+        // `$$…$$`（行内出现也算行间公式 ✓）
+        if (text.slice(index, index + 2) === '$$') {
+          var closeTwo = text.indexOf('$$', index + 2)
+          if (closeTwo > 0) {
+            flush()
+            parts.push({ math: true, value: text.slice(index + 2, closeTwo), display: true })
+            index = closeTwo + 2
+            continue
+          }
+        }
+        var next = text[index + 1]
+        if (next !== undefined && !/\s/.test(next)) {
+          var close = text.indexOf('$', index + 1)
+          while (close > 0 && /\s/.test(text[close - 1])) close = text.indexOf('$', close + 1)
+          if (close > index + 1 && text.slice(index + 1, close).indexOf('\n') < 0) {
+            flush()
+            parts.push({ math: true, value: text.slice(index + 1, close), display: false })
+            index = close + 1
+            continue
+          }
+        }
+      }
+      buffer += text[index]
+      index += 1
+    }
+    flush()
+    return parts
+  }
+
+  /**
+   * 极简 Markdown 渲染器（**够用就好**，不追求完整实现）。
+   *
+   * ## 为什么自己写
+   *
+   * 这个前端是**零依赖的单文件**（boot.js 从电脑一路经隧道送到手机 ✓），
+   * 引一个 markdown 库就多一份产物、多一条"改了没生效"的路径 ✗。
+   * 而"在手机上看 md"真正需要的只有：标题 / 列表 / 代码块 / 行内代码 / 粗斜体 /
+   * 链接 / 引用 / 分隔线 / 表格 / 任务勾选 ✓ —— 这些一共两百行，且**可以断言** ✓。
+   *
+   * ## 三条安全底线（都有验收断言盯着 ✓）
+   *
+   * 1. **内容一律走 `textContent`**（绝不 `innerHTML` ✗）：文件里写 `<img onerror=…>`
+   *    只会原样显示成文本 ✓；
+   * 2. **链接只允许 `http(s)` / `mailto:` / `#` / 站内相对路径** ✓，
+   *    `javascript:` 之类一律降级成纯文本 ✗（这是 markdown 渲染器最经典的一个洞 ✓）；
+   * 3. **图片不自动加载**（渲染成"图片：alt"的链接 ✓）—— 手机流量、离线可用、
+   *    以及"替用户去请求哪个地址"这三件事，都不该由点开一个 md 文件决定 ✓。
+   */
+  function markdownInline(into, text) {
+    /**
+     * ★ 先把公式整段切出来 ✓，只对普通文本跑 markdown 规则 ——
+     *   否则 TeX 里的 `_` `*` 会被当成强调，公式被吃乱 ✗。
+     */
+    var parts = splitInlineMath(text)
+    if (parts.length > 1 || (parts.length === 1 && parts[0].math === true)) {
+      for (var part = 0; part < parts.length; part++) {
+        if (parts[part].math === true) into.appendChild(mathNode(parts[part].value, parts[part].display === true))
+        else markdownInlinePlain(into, parts[part].value)
+      }
+      return
+    }
+    markdownInlinePlain(into, text)
+  }
+
+  /** 真正的行内规则（强调 / 行内代码 / 链接 ✓）—— 公式已经在外面切走了 ✓。 */
+  function markdownInlinePlain(into, text) {
+    var source = String(text)
+    // 一次扫描：行内代码 / 粗体 / 斜体 / 删除线 / 链接 / 裸链接
+    /**
+     * ★ 这个正则**必须有 `g` 标志** ✗ —— 少一个字母的代价是整页卡死：
+     *   没有 `g` 时 `exec` 每次都返回**同一个**匹配 ✓，`at` 永远不前进 ✓，
+     *   于是 while 里无限追加同一个文本 → 浏览器标签页直接 OOM ✓（本轮真发生过，
+     *   现象是验收里那句 `(超时)` ✗ —— 而 Node 里用假 DOM 跑一遍三秒就能复现 ✓）。
+     * 下面还加了一道"没前进就退出"的兜底：这类错误以后最多是少渲染一段，绝不会拖死页面 ✓。
+     */
+    var pattern =
+      /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*]+\*)|(_[^_]+_)|(~~[^~]+~~)|(!?\[[^\]]*\]\([^)\s]+\))|(https?:\/\/[^\s)]+)/g
+    var at = 0
+    var match = pattern.exec(source)
+    while (match !== null) {
+      if (match.index > at) into.appendChild(document.createTextNode(source.slice(at, match.index)))
+      var token = match[0]
+      if (token.slice(0, 1) === '`') {
+        var code = document.createElement('code')
+        code.textContent = token.slice(1, -1)
+        into.appendChild(code)
+      } else if (token.slice(0, 2) === '**' || token.slice(0, 2) === '__') {
+        var strong = document.createElement('strong')
+        markdownInline(strong, token.slice(2, -2))
+        into.appendChild(strong)
+      } else if (token.slice(0, 2) === '~~') {
+        var strike = document.createElement('del')
+        markdownInline(strike, token.slice(2, -2))
+        into.appendChild(strike)
+      } else if (token.slice(0, 1) === '*' || token.slice(0, 1) === '_') {
+        var em = document.createElement('em')
+        markdownInline(em, token.slice(1, -1))
+        into.appendChild(em)
+      } else if (token.slice(0, 1) === '!' || token.slice(0, 1) === '[') {
+        var isImage = token.slice(0, 1) === '!'
+        var body = token.slice(isImage ? 2 : 1, token.lastIndexOf(']'))
+        var href = token.slice(token.lastIndexOf('(') + 1, -1)
+        // ★ 只放行安全的协议：`javascript:` 这类一律当纯文本 ✓
+        var safe = /^(https?:\/\/|mailto:|#|\/|\.\/|\.\.\/)/i.test(href)
+        if (isImage) {
+          // 图片不自动加载：给一个链接 + alt 文字 ✓（见函数头第 3 条）
+          var imageNote = document.createElement('a')
+          imageNote.className = 'dshm-md-image'
+          imageNote.textContent = '[图片：' + (body === '' ? href : body) + ']'
+          if (safe) {
+            imageNote.href = href
+            imageNote.target = '_blank'
+            imageNote.rel = 'noreferrer'
+          }
+          into.appendChild(imageNote)
+        } else if (safe) {
+          var link = document.createElement('a')
+          link.href = href
+          link.rel = 'noreferrer'
+          if (!href.slice(0, 1).match(/[#./]/)) link.target = '_blank'
+          markdownInline(link, body)
+          into.appendChild(link)
+        } else {
+          into.appendChild(document.createTextNode(body + '（链接协议不被允许，已按纯文本显示）'))
+        }
+      } else {
+        var bare = document.createElement('a')
+        bare.href = token
+        bare.target = '_blank'
+        bare.rel = 'noreferrer'
+        bare.textContent = token
+        into.appendChild(bare)
+      }
+      var next = match.index + token.length
+      // 兜底：正则不前进就退出（见上面那段注释 —— 少了 `g` 时就是这个症状 ✓）
+      if (next <= at) break
+      at = next
+      match = pattern.exec(source)
+    }
+    if (at < source.length) into.appendChild(document.createTextNode(source.slice(at)))
+  }
+
+  /**
+   * 把 markdown 文本渲染进容器。
+   *
+   * 块级语法是**逐行扫描**：围栏代码 → 标题 → 分隔线 → 引用 → 表格 → 列表 → 段落 ✓
+   * （顺序有讲究：围栏必须在最前，否则代码块里的 `#` 会被当成标题 ✗）。
+   */
+  function renderMarkdownInto(container, text) {
+    var lines = String(text).replace(/\r\n?/g, '\n').split('\n')
+    var index = 0
+
+    var paragraph = function (buffer) {
+      if (buffer.length === 0) return
+      var p = document.createElement('p')
+      markdownInline(p, buffer.join(' '))
+      container.appendChild(p)
+    }
+
+    var buffer = []
+    while (index < lines.length) {
+      var line = lines[index]
+
+      // ① 围栏代码块（``` 或 ~~~），必须最先判 ✓
+      var fence = /^\s*(```|~~~)\s*([A-Za-z0-9+#._-]*)\s*$/.exec(line)
+      if (fence !== null) {
+        paragraph(buffer)
+        buffer = []
+        var body = []
+        index += 1
+        while (index < lines.length && !new RegExp('^\\s*' + fence[1] + '\\s*$').test(lines[index])) {
+          body.push(lines[index])
+          index += 1
+        }
+        index += 1 // 吃掉收尾围栏（没有收尾就到文件末尾 ✓）
+        var pre = document.createElement('pre')
+        pre.className = 'dshm-md-code'
+        if (fence[2] !== '') {
+          var label = document.createElement('span')
+          label.className = 'dshm-md-lang'
+          label.textContent = fence[2]
+          pre.appendChild(label)
+        }
+        var code = document.createElement('code')
+        code.textContent = body.join('\n')
+        pre.appendChild(code)
+        container.appendChild(pre)
+        continue
+      }
+
+      /**
+       * ★ 块级公式（`$$ … $$`、`\[ … \]`）—— 必须排在"段落/列表"之前 ✓，
+       *   否则公式里的 `-` `*` 会被当成列表项、`_` 会被当成强调 ✗。
+       *   两种写法都支持：同一行闭合 ✓、以及"开放行 + 若干行 + 闭合行" ✓。
+       */
+      var blockOpen = /^\s*(\$\$|\\\[)\s*(.*)$/.exec(line)
+      if (blockOpen !== null && line.trim().slice(0, 2) !== '$$' + '$') {
+        var closer = blockOpen[1] === '$$' ? '$$' : '\\]'
+        var inlineClose = blockOpen[2].indexOf(closer)
+        if (inlineClose >= 0) {
+          paragraph(buffer)
+          buffer = []
+          container.appendChild(mathNode(blockOpen[2].slice(0, inlineClose).trim(), true))
+          index += 1
+          continue
+        }
+        var body = blockOpen[2] === '' ? [] : [blockOpen[2]]
+        index += 1
+        while (index < lines.length && lines[index].indexOf(closer) < 0) {
+          body.push(lines[index])
+          index += 1
+        }
+        if (index < lines.length) {
+          var tail = lines[index].slice(0, lines[index].indexOf(closer))
+          if (tail.trim() !== '') body.push(tail)
+          index += 1
+        }
+        paragraph(buffer)
+        buffer = []
+        container.appendChild(mathNode(body.join('\n').trim(), true))
+        continue
+      }
+
+      // ② 空行 = 段落结束
+      if (/^\s*$/.test(line)) {
+        paragraph(buffer)
+        buffer = []
+        index += 1
+        continue
+      }
+
+      // ③ 分隔线
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        paragraph(buffer)
+        buffer = []
+        container.appendChild(document.createElement('hr'))
+        index += 1
+        continue
+      }
+
+      // ④ 标题
+      var heading = /^(#{1,6})\s+(.*)$/.exec(line)
+      if (heading !== null) {
+        paragraph(buffer)
+        buffer = []
+        var level = heading[1].length
+        var node = document.createElement('h' + String(level))
+        markdownInline(node, heading[2])
+        container.appendChild(node)
+        index += 1
+        continue
+      }
+
+      // ⑤ 引用（连续行合并；内部**递归**渲染，所以引用里也能有列表/代码 ✓）
+      if (/^\s*>\s?/.test(line)) {
+        paragraph(buffer)
+        buffer = []
+        var quoted = []
+        while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+          quoted.push(lines[index].replace(/^\s*>\s?/, ''))
+          index += 1
+        }
+        var quote = document.createElement('blockquote')
+        renderMarkdownInto(quote, quoted.join('\n'))
+        container.appendChild(quote)
+        continue
+      }
+
+      // ⑥ 表格：本行有 |，下一行是 |---| 之类
+      if (line.indexOf('|') >= 0 && index + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[index + 1]) && lines[index + 1].indexOf('-') >= 0) {
+        paragraph(buffer)
+        buffer = []
+        var cellsOf = function (row) {
+          return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(function (cell) { return cell.trim() })
+        }
+        var table = document.createElement('table')
+        table.className = 'dshm-md-table'
+        var head = document.createElement('tr')
+        var heads = cellsOf(line)
+        for (var h = 0; h < heads.length; h++) {
+          var th = document.createElement('th')
+          markdownInline(th, heads[h])
+          head.appendChild(th)
+        }
+        table.appendChild(head)
+        index += 2
+        while (index < lines.length && lines[index].indexOf('|') >= 0 && !/^\s*$/.test(lines[index])) {
+          var tr = document.createElement('tr')
+          var cells = cellsOf(lines[index])
+          for (var c = 0; c < cells.length; c++) {
+            var td = document.createElement('td')
+            markdownInline(td, cells[c])
+            tr.appendChild(td)
+          }
+          table.appendChild(tr)
+          index += 1
+        }
+        container.appendChild(table)
+        continue
+      }
+
+      // ⑦ 列表（无序 / 有序；支持 `- [ ]` `- [x]` 任务勾选 ✓）
+      var bullet = /^\s*[-*+]\s+(.*)$/.exec(line)
+      var numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line)
+      if (bullet !== null || numbered !== null) {
+        paragraph(buffer)
+        buffer = []
+        var list = document.createElement(bullet !== null ? 'ul' : 'ol')
+        while (index < lines.length) {
+          var item = bullet !== null ? /^\s*[-*+]\s+(.*)$/.exec(lines[index]) : /^\s*\d+[.)]\s+(.*)$/.exec(lines[index])
+          if (item === null) break
+          var li = document.createElement('li')
+          var content = item[1]
+          var task = /^\[([ xX])\]\s*(.*)$/.exec(content)
+          if (task !== null) {
+            var box = document.createElement('span')
+            box.className = 'dshm-md-task'
+            box.textContent = task[1].toLowerCase() === 'x' ? '☑ ' : '☐ '
+            li.appendChild(box)
+            content = task[2]
+          }
+          markdownInline(li, content)
+          list.appendChild(li)
+          index += 1
+        }
+        container.appendChild(list)
+        continue
+      }
+
+      // ⑧ 普通段落行
+      buffer.push(line.trim())
+      index += 1
+    }
+    paragraph(buffer)
+  }
+
+  /**
+   * PDF：**走 DSH 自带预览** ✓；没有预览桥就**只给真能走的两条路** ✓（下载 / 在电脑上打开 ✓）。
+   *
+   * ★ 改写的原因（本轮 U2 ✓）：这里原来用 `globalThis.open(blobUrl, '_blank')` 开一个 blob 新标签 ✗ ——
+   *   程序化的 `window.open` **没有"被点中的那个 `<a>`"** ✓ ⇒ 壳的 `onCreateWindow`
+   *   靠 hit test 取地址必然取空 ✗ ⇒ `return false` ⇒ 弹窗被丢 ✗；
+   *   而且它还把 `opened === null` 说成"浏览器拦下了新标签（请再点一次）"✗ ——
+   *   **那句话是误导** ✓：手机上真正发生的是"没人接住"，再点一次也一样 ✗。
+   *   另外手机上的浏览器本来就不会在页面里显示 PDF ✗（这与我们这个面板无关 ✓）。
+   *   现在：桥在就直接进 DSH 预览 ✓（那才是用户要的"点开能看"✓）；桥不在就**如实降级** ✓
+   *   （面板上就有「下载」「在电脑上打开」两个按钮 ✓ —— 见 renderFilePreview 的 PDF 那一支 ✓）。
+   *
+   * 函数名保持不变 ✓：它是这个文件里一份**可复用**的路径 ✓，改名只会让引用它的注释对不上 ✓。
+   */
+  function openPdfInTab(sheet, state, entry, meta) {
+    if (entry.size > PREVIEW_PDF_BYTES) {
+      meta.textContent = formatSize(entry.size) + ' · 超过 ' + formatSize(PREVIEW_PDF_BYTES) + '，不搬到手机内存里'
+      return
+    }
+    var bridge = dshPreview()
+    if (bridge !== undefined) {
+      var result
+      try {
+        result = bridge.open({ path: entry.path })
+      } catch (error) {
+        result = { ok: false, reason: String(error && error.message ? error.message : error) }
+      }
+      if (result !== undefined && result !== null && result.ok === true) {
+        meta.textContent = '已在 DSH 预览里打开 ✓'
+        if (sheet !== undefined && sheet !== null && typeof sheet.setOpen === 'function') sheet.setOpen(false)
+        return
+      }
+      meta.textContent =
+        'DSH 预览打不开：' + String((result && result.reason) || '未知原因') + ' —— 用「下载」或在电脑上打开 ✓'
+      return
+    }
+    meta.textContent =
+      '这台宿主还没有预览桥（重启 DSH 后可用 ✓）：先「下载」，或在电脑上打开 ✓' +
+      '（手机上的浏览器不会在页面里显示 PDF ✓）'
+  }
+
+  function renderFilePreview(sheet, state, entry) {
+    exitSelectMode(sheet)
+    releasePreviewUrl(sheet)
+    sheet.currentView = 'preview'
+    sheet.setTitle(entry.name)
+    // 副标题显式写"只读预览"：预览页的主标题是文件名，落不进 setTitle 那张表 ✓
+    if (typeof sheet.setSubtitle === 'function') sheet.setSubtitle('只读预览 · 来自电脑')
+    /**
+     * ★ 整屏（用户要求："文件预览的时候左移直到占据全屏"）。
+     *
+     * 为什么只给预览加：浏览目录时**需要看到主页面作参照**（那正是抽屉式面板的意义 ✓），
+     * 而读文件时不需要 —— 64vw 的面板读代码/读 md 都太窄 ✓。
+     * 做成 `data-full` 属性而不是改宽度变量：离开预览（返回文件列表/工作区/设置）时
+     * 一律清掉 ✓，两条路径不会互相残留（见 setOpen(false) 与各 render* 的清理 ✓）。
+     */
+    if (typeof sheet.setFull === 'function') sheet.setFull(true)
+    var body = sheet.body
+    body.replaceChildren()
+
+    var bar = document.createElement('div')
+    bar.className = 'dshm-preview-bar'
+    bar.appendChild(
+      toolButton('← 返回文件', function () {
+        if (typeof sheet.setFull === 'function') sheet.setFull(false)
+        if (typeof sheet.restoreFiles === 'function') sheet.restoreFiles()
+      }),
+    )
+    bar.appendChild(
+      toolButton('下载', function () {
+        downloadEntry(sheet, state, entry)
+      }),
+    )
+    bar.appendChild(
+      toolButton('在电脑上打开', function () {
+        openOnComputer(sheet, state, entry.path)
+      }),
+    )
+    /**
+     * 「用 DSH 预览打开」✓ —— 走的是 **DSH 自带**的文档预览（KaTeX / PDF / 图片 / 代码 ✓）。
+     *
+     * 为什么值得放在最显眼的位置：用户对它的评价是"打开就是渲染好的" ✓ ——
+     * 公式与 DSH 聊天里**一模一样** ✓，而且 PDF 也能直接看 ✓（我们自己的渲染器做不到 ✓）。
+     * 桥不可用时**如实说明** ✓（旧宿主 / 还没重启 ✓），不静默 ✗。
+     */
+    bar.appendChild(
+      toolButton('用 DSH 预览打开', function () {
+        var bridge = dshPreview()
+        if (bridge === undefined) {
+          setNote('这个 DSH 版本还没有预览桥（重启 DSH 后可用 ✓）——先用下面的下载/在电脑上打开 ✓')
+          return
+        }
+        var result = bridge.open({ path: entry.path })
+        if (result.ok !== true) {
+          setNote('DSH 预览打不开：' + String(result.reason) + ' ✓')
+          return
+        }
+        // 立刻同步一次"预览开着"✓（观察器要等下一帧 ✓，而这一段可能已经推开了布局 ✓）
+        if (typeof syncDshPreviewState === 'function') setTimeout(syncDshPreviewState, 0)
+        // DSH 的预览开在它自己的右侧栏里 ✓ —— 把我们的文件面板收起来，别挡着它 ✓
+        sheet.setOpen(false)
+        setNote('已在 DSH 的预览里打开：' + entry.name + ' ✓')
+      }),
+    )
+    var meta = document.createElement('div')
+    meta.className = 'dshm-preview-meta'
+    meta.textContent = formatSize(entry.size) + ' · 读取中…'
+    var host = document.createElement('div')
+    host.className = 'dshm-preview-host'
+    body.appendChild(bar)
+    body.appendChild(meta)
+    body.appendChild(host)
+
+    var fail = function (text) {
+      host.replaceChildren()
+      var line = document.createElement('div')
+      line.className = 'dshm-preview-fallback'
+      line.textContent = text
+      host.appendChild(line)
+      meta.textContent = formatSize(entry.size) + ' · 预览失败'
+    }
+
+    /**
+     * 公式渲染器出问题时，**在屏幕上说出来** ✓（手机没有控制台 ✗）。
+     * 不这么做的话，用户看到的只是一堆原样 `$…$` ✓，与"公式坏了"分不清 ✓。
+     */
+    TEMML_STATE.rendered = 0
+    mathNotice = function (reason) {
+      if (host.querySelector('.dshm-md-math-note') !== null) return
+      var note = document.createElement('div')
+      note.className = 'dshm-preview-fallback dshm-md-math-note'
+      note.textContent = '公式渲染器不可用（' + reason + '）：公式按原样 TeX 显示 ✓'
+      host.insertBefore(note, host.firstChild)
+    }
+
+    var ext = String(entry.name || '').toLowerCase().split('.').pop()
+    var kind = previewKindOf(entry)
+    var isMarkdown = PREVIEW_MARKDOWN_EXT[ext] === 1
+    var isPdf = PREVIEW_PDF_EXT[ext] === 1
+
+    if (kind === 'image' && entry.size > PREVIEW_IMAGE_BYTES) {
+      meta.textContent = formatSize(entry.size) + ' · 超过 ' + formatSize(PREVIEW_IMAGE_BYTES)
+      fail('图片太大，手机上不预览（可以下载，或用"在电脑上打开"）。')
+      return
+    }
+
+    // ── PDF：说清限制 + 给出两条真能走的路（见 openPdfInTab 注释）──────────────
+    if (isPdf) {
+      /**
+       * PDF：**首选 DSH 自带预览** ✓（它的预览支持 PDF ✓，在手机上直接能看 ✓）。
+       *
+       * 以前这里只有"下载"和"在新标签试试"✗ —— 后者是句抽象的说法 ✓
+       * （用户："太难绷了"✓），因为手机 Chrome 根本不会内嵌显示 PDF ✗。
+       * 现在：桥在就用 DSH 预览 ✓，桥不在就**只说能做成的事** ✓（下载 / 在电脑上打开 ✓）。
+       */
+      var pdfBridge = dshPreview()
+      meta.textContent = formatSize(entry.size) + ' · PDF' + (pdfBridge === undefined ? '（本机没有预览桥）' : ' · 可用 DSH 预览 ✓')
+      host.replaceChildren()
+      var note = document.createElement('div')
+      note.className = 'dshm-preview-fallback'
+      note.setAttribute('data-dshm-preview', 'pdf-note')
+      note.textContent =
+        pdfBridge === undefined
+          ? 'PDF 用 DSH 自带的预览看最省事，但这台宿主还没装上预览桥（重启 DSH 后可用 ✓）。现在可以：下载后用系统应用打开，或在电脑上打开。'
+          : '手机上的 Chrome 不会在页面里直接显示 PDF，但 DSH 自带的预览可以 ✓ —— 点下面的按钮即可。'
+      host.appendChild(note)
+      var pdfRow = document.createElement('div')
+      pdfRow.className = 'dshm-preview-bar'
+      if (pdfBridge !== undefined) {
+        pdfRow.appendChild(
+          toolButton('用 DSH 预览打开', function () {
+            var result = pdfBridge.open({ path: entry.path })
+            if (result.ok !== true) {
+              meta.textContent = formatSize(entry.size) + ' · PDF · 预览打不开：' + String(result.reason)
+              return
+            }
+            sheet.setOpen(false)
+          }),
+        )
+      }
+      pdfRow.appendChild(
+        toolButton('下载', function () {
+          downloadEntry(sheet, state, entry)
+        }),
+      )
+      pdfRow.appendChild(
+        toolButton('在电脑上打开', function () {
+          openOnComputer(sheet, state, entry.path)
+        }),
+      )
+      host.appendChild(pdfRow)
+      return
+    }
+
+    /** 已加载的原文（markdown 要在"预览/源码"之间切换，所以要留着 ✓）。 */
+    var loaded = null
+    var asSource = false
+
+    var paintText = function () {
+      if (loaded === null) return
+      if (isMarkdown && asSource !== true) {
+        var box = document.createElement('div')
+        box.className = 'dshm-md'
+        box.setAttribute('data-dshm-preview', 'markdown')
+        renderMarkdownInto(box, loaded)
+        host.replaceChildren(box)
+      } else {
+        var pre = document.createElement('pre')
+        pre.className = 'dshm-preview-text'
+        pre.setAttribute('data-dshm-preview', 'text')
+        pre.textContent = loaded
+        host.replaceChildren(pre)
+      }
+    }
+
+    var showText = function (result, notePrefix) {
+      var text = new TextDecoder('utf-8', { fatal: false }).decode(result.bytes)
+      loaded = text
+      var lines = text === '' ? 0 : text.split('\n').length
+      meta.textContent =
+        formatSize(result.size) + ' · ' + String(lines) + ' 行' +
+        (result.truncated ? ' · 只显示前 ' + formatSize(result.bytes.length) : '') +
+        (notePrefix === undefined ? '' : ' · ' + notePrefix) +
+        (isMarkdown ? ' · ' + (asSource ? '源码' : '已排版') : '')
+      paintText()
+    }
+
+    if (isMarkdown) {
+      // markdown 默认**排版后**显示（用户反馈"md 没格式" ✓），并给一个看源码的开关 ✓
+      bar.appendChild(
+        toolButton('看源码', function (event) {
+          asSource = asSource !== true
+          if (event !== undefined && event.target !== undefined) event.target.textContent = asSource ? '看排版' : '看源码'
+          showText({ bytes: new TextEncoder().encode(loaded === null ? '' : loaded), size: entry.size, truncated: false })
+        }),
+      )
+    }
+
+    var showImage = function (result) {
+      var blob = new Blob([result.bytes], { type: 'image/' + (ext === 'svg' ? 'svg+xml' : ext) })
+      var url = URL.createObjectURL(blob)
+      sheet.previewObjectUrl = url
+      var image = document.createElement('img')
+      image.className = 'dshm-preview-image'
+      image.setAttribute('data-dshm-preview', 'image')
+      image.alt = entry.name
+      image.addEventListener('load', function () {
+        meta.textContent = formatSize(result.size) + ' · ' + String(image.naturalWidth) + '×' + String(image.naturalHeight) + ' · 点图切换原始大小'
+      })
+      image.addEventListener('error', function () {
+        fail('图片解码失败（格式可能不被浏览器支持）。')
+      })
+      image.addEventListener('click', function () {
+        image.dataset.zoom = image.dataset.zoom === '1' ? '0' : '1'
+      })
+      image.src = url
+      host.replaceChildren(image)
+    }
+
+    var progress = function (read, total) {
+      // 大文件要能看出"在传"（秒表 + 字节数），否则和第 74 轮那个白屏是同一类观感问题 ✓
+      if (total > 0) meta.textContent = formatSize(total) + ' · 读取中 ' + formatSize(read) + '（' + String(Math.round((read / total) * 100)) + '%）'
+      else meta.textContent = '读取中 ' + formatSize(read)
+    }
+    var read = function (cap, wantImage) {
+      readFileBytes(state, entry.path, cap, progress).then(
+        function (result) {
+          if (wantImage) showImage(result)
+          else showText(result)
+        },
+        function (error) {
+          fail('读取失败：' + describeError(error))
+        },
+      )
+    }
+
+    if (kind === 'image') {
+      read(PREVIEW_IMAGE_BYTES, true)
+      return
+    }
+    if (kind === 'text') {
+      read(PREVIEW_TEXT_BYTES, false)
+      return
+    }
+    // 没见过的类型：先读 4 KB 判断是不是文本（二进制不硬塞 ✓）
+    readFileBytes(state, entry.path, 4096, undefined).then(
+      function (probe) {
+        if (looksLikeText(probe.bytes)) {
+          read(PREVIEW_TEXT_BYTES, false)
+          return
+        }
+        meta.textContent = formatSize(entry.size) + ' · 二进制文件'
+        fail('这个类型在手机上不预览（二进制文件）。可以下载，或用"在电脑上打开"。')
+      },
+      function (error) {
+        fail('读取失败：' + describeError(error))
+      },
+    )
+  }
+
+  /** 一屏渲染多少行；「继续显示」每次再加这么多（大目录只保留用户真要看的那部分 DOM）。 */
+  var FILE_RENDER_STEP = 200
+
+  /**
+   * 大目录的"读取中"这一屏：骨架 + **秒表** + 超过 3 秒的一句解释。
+   *
+   * 为什么要秒表：实测 20000 项的目录，宿主列举只要 ~200ms，但 payload **3.8MB**
+   * （每项都带绝对路径），经隧道送到手机要好几秒 —— 那几秒里如果只写"读取 …"，
+   * 用户无法区分"在传"和"死了" ✓（"绝不静默失败"在这条动线上的形态）。
+   * 秒表每 100ms 更新一次，所以页面**一直在动**：卡住与慢，一眼能分。
+   *
+   * 返回 `stop()`：响应回来（成功或失败）必须调用，否则计时器会一直跑 ✗。
+   */
+  function renderLoading(sheet, state, path) {
+    /**
+     * ★★ round 156（A ✓，用户点名的"卡顿"主因 ✓）：骨架放进**列表区域内部** ✓，
+     *   **绝不动工具栏与面包屑** ✗ —— 换目录时那一栏必须一直在、而且**还是同一个节点** ✓
+     *   （用户原话："点进更深一级工作目录的时候，新建/粘贴/上传/选择那一栏会消失再快速回来，
+     *   返回也是如此"✗）。以前这里第一行就是 `sheet.body.replaceChildren()` ✗ ⇒
+     *   工具栏被卸载 ⇒ 骨架屏那一屏整栏消失 ⇒ 网络回来后又重建、弹回来 ✗。
+     *   见 `ensureBrowserFrame`（那一层的唯一建造者 ✓）。
+     */
+    var host = ensureBrowserFrame(sheet, state)
+    host.replaceChildren()
+    var box = document.createElement('div')
+    box.className = 'dshm-loading'
+
+    var line = document.createElement('div')
+    line.className = 'dshm-loading-line'
+    line.setAttribute('data-dshm-loading', '1')
+    box.appendChild(line)
+
+    var hint = document.createElement('div')
+    hint.className = 'dshm-loading-hint'
+    hint.textContent = '条目很多时，电脑要把每一项都读一遍，可能要几秒 —— 页面没有卡住。'
+    hint.style.display = 'none'
+    box.appendChild(hint)
+
+    // 骨架：几根灰条，说明"一个列表正在来"（比一句"读取中"更像在干活）
+    for (var i = 0; i < 5; i++) {
+      var row = document.createElement('div')
+      row.className = 'dshm-skel'
+      row.setAttribute('aria-hidden', 'true')
+      for (var j = 0; j < 3; j++) row.appendChild(document.createElement('i'))
+      box.appendChild(row)
+    }
+    host.appendChild(box)
+
+    var started = Date.now()
+    var paint = function () {
+      var elapsed = (Date.now() - started) / 1000
+      line.textContent = '读取 ' + shortPath(path) + ' … ' + elapsed.toFixed(1) + ' 秒'
+      if (elapsed > 3 && hint.style.display === 'none') hint.style.display = ''
+    }
+    paint()
+    var timer = setInterval(paint, 100)
+    return function stop() {
+      clearInterval(timer)
+    }
+  }
+
+  /** 拉取并渲染一个目录。 */
+  function loadDirectory(sheet, state, path) {
+    // 切目录 = 换了一批条目：把选中集合清掉。
+    // 不清的后果是"已选 3 项"底下**没有任何一行打勾** —— 那三项属于上一个目录，
+    // 而用户看到的只有当前这一屏，会以为勾选丢了、甚至以为删除点坏了。
+    // 同一个目录的刷新（删完、上传完、粘贴完）**保留**选中集合，那正是批量操作的动线。
+    if (path !== state.path) {
+      // 换了目录 = 换了一批条目：显示窗口回到第一屏（同一个目录的刷新则保留，
+      // 否则"删完一项又缩回 200 行"会把用户刚展开的位置吞掉）✓
+      state.rendered = 0
+      if (state.selecting === true) {
+        state.selected = {}
+        state.confirmDelete = false
+      }
+    }
+    var stopLoading = renderLoading(sheet, state, path)
+
+    callLocalEndpoint(state.getTunnel, 'mobile/files/list', { path: path }).then(
+      function (listing) {
+        stopLoading()
+        var resolved = String(listing.path || path)
+        // ★ 第一次读取（或回到根）时，用宿主返回的**真实路径**校准根。
+        //   为什么必须校准：macOS 的 /tmp 是 /private/tmp 的符号链接，宿主返回的是
+        //   解析后的路径，于是 `state.path !== state.root` **永远成立** ——
+        //   表现为"已经在根目录了却还显示「上级」"，点下去还会请求工作区之外的父目录。
+        // ★★ round 148（实测后改的判据 ✓）：改成"**读回来的这一级**是不是根"✓
+        //   （`samePath(resolved, state.root)` ✓ —— 认 `/private` 孪生写法 ✓）。
+        //   原来那句 `state.path === state.root` 比的是**上一屏**的路径，两处都会错 ✗
+        //   （两处都是 148 这一轮实测出来的 ✓，见 `samePath` 与探针读数 ✓）：
+        //     ① 「点进子目录」那一下 `state.path` 还停在根上 ⇒ 条件成立 ⇒ **根被校准成子目录** ✗
+        //        （子目录里那颗「↑ 上级」于是永远不出现 —— 验收 F-3 量到 `synthetic:true` 就是它 ✓）；
+        //     ② 揭示动线（卡片「在文件面板中打开」✓）从子目录进来 ⇒ 根**始终没校准** ✗
+        //        （实测 `state.root` = 工作区表的 `/var/…`，宿主回的是 realpath 的 `/private/var/…` ✗
+        //         ⇒ 逐级退到工作区根时判据仍说"还有级"⇒ 会**爬出工作区** ✗）。
+        //   一句同时修好两处 ✓：读回来的这一级**就是**根 ⇒ 记下宿主的写法 ✓。
+        if (samePath(resolved, state.root)) state.root = resolved
+        state.path = resolved
+        // ★ 记下这一级的**上一级**（宿主给的 `listing.parent` ✓）：面包屑那颗「↑ 上级」与
+        //   返回键的 `backUpOneLevel` 都拿它当落点 ✓（同一份数据 ✓ —— 别自己按字符串猜 ✗）。
+        state.parent = listing.parent === null || listing.parent === undefined ? null : listing.parent
+        // ★ 宿主现在只回 `{name,type,size}`（省掉每项约 135 字节：重复的绝对路径
+        //   与客户端从不读取的 mtime/权限位）—— 路径在这儿拼：
+        //   `join(目录, 名字)` 与宿主那侧 `join(real, name)` 完全一致 ✓。
+        //   旧宿主仍会带 `path`，那就直接用（**双向兼容**，不必等重启）✓。
+        listing.entries = (listing.entries || []).map(function (entry) {
+          if (entry.path !== undefined) return entry
+          return { name: entry.name, type: entry.type, size: entry.size, path: joinPath(resolved, entry.name) }
+        })
+        renderListing(sheet, state, listing)
+        // ★ round 128：卡片「打开所在目录」可能指名要落到**某一行** ✓ ——
+        //   目录跳过去还不算完，"那一行到底在哪"才是用户在意的事 ✓（见 focusNamedRow ✓）。
+        focusNamedRow(sheet, state)
+      },
+      function (error) {
+        stopLoading()
+        /**
+         * ★★ round 156（A ✓）：失败态也把**错误行渲染在列表区域内** ✓ ——
+         *   工具栏与面包屑**照旧留着** ✓（用户仍然能点"刷新 / 新建 / 上传"✓），
+         *   只有列表区换成了那一行错误 ✗（以前是整屏重建成"工具栏 + 错误行"✗ ⇒
+         *   工具栏被卸载又重建，观感就是"那一栏闪了一下"✗）。
+         */
+        var host = ensureBrowserFrame(sheet, state)
+        updateCrumb(sheet, state)
+        syncToolbar(sheet, state)
+        host.replaceChildren()
+        host.appendChild(messageRow('读取失败：' + describeError(error)))
+        // 列表没渲染出来 → 底栏的「已选 N 项」没有对应的行可看，收掉它（工具栏里的
+        // 「完成」还在，用户想重进多选态仍然可以）
+        if (state.selecting === true) setSelecting(sheet, state, false)
+      },
+    )
+  }
+
+  /**
+   * 大目录底部的统计 + 「继续显示 N 项」。
+   *
+   * 统计（`共 N 项 · 目录 X / 文件 Y · 已显示 M`）本身就是**加载态的一部分**：
+   * 用户点进一个大目录，第一件想知道的是"这里到底有多少东西" ✓。
+   * 追加是**往现有列表里 append**，不重渲染整屏 —— 否则每点一次都要重造几千个节点 ✗。
+   */
+  function listingFooter(sheet, state, list, entries, total) {
+    var wrap = document.createElement('div')
+    wrap.className = 'dshm-more'
+    var dirs = 0
+    for (var i = 0; i < total; i++) {
+      if (entries[i].type === 'directory') dirs += 1
+    }
+    var info = document.createElement('div')
+    info.className = 'dshm-more-info'
+    info.setAttribute('data-dshm-listing-info', '1')
+    var more = toolButton('', function () {
+      var from = state.rendered
+      var to = Math.min(total, from + FILE_RENDER_STEP)
+      for (var k = from; k < to; k++) list.appendChild(entryRow(sheet, state, entries[k]))
+      state.rendered = to
+      refresh()
+    })
+    more.setAttribute('data-dshm-more', '1')
+    var refresh = function () {
+      info.textContent =
+        '共 ' + total + ' 项（目录 ' + dirs + ' / 文件 ' + (total - dirs) + '）· 已显示 ' + state.rendered + ' 项'
+      var left = total - state.rendered
+      if (left <= 0) {
+        more.style.display = 'none'
+      } else {
+        more.style.display = ''
+        more.textContent = '继续显示 ' + Math.min(FILE_RENDER_STEP, left) + ' 项'
+      }
+    }
+    wrap.appendChild(info)
+    wrap.appendChild(more)
+    refresh()
+    return wrap
+  }
+
+  /**
+   * ★★ round 156（A ✓）：**文件浏览器那一层只建一次** ✓ —— 工具栏（`browserToolbar` ✓）
+   *   与面包屑（`crumbRow` ✓）常驻 ✓，切目录只换**列表区域**（`state.listHost` ✓）。
+   *
+   * 为什么要"只建一次"✗（用户点名的"卡顿"主因 ✓）：
+   *   以前 `renderLoading` / `renderListing` / 失败分支**各自** `sheet.body.replaceChildren()` ✗
+   *   ⇒ 每切一次目录（或返回一级 ✓）那一栏都被**卸载 → 消失（换成骨架屏 ✓）→ 重建 → 弹回来** ✗。
+   *   网络越慢、骨架屏这一屏停留越久，"消失再回来"越显眼 ✓（用户原话就是这一句 ✓）。
+   *
+   * 判据是"工具栏**还是** body 的孩子" ✓（不是"我们建过没有" ✗）：
+   *   body 会被别的视图整屏换掉 ✓（工作区列表 / 预览 / 设置 —— 那是**换屏**，不是切目录 ✓，
+   *   照旧整屏重建 ✓），那时旧帧自然不在了 ⇒ 这里重建一份 ✓（那时 `state` 也是新的 ✓）。
+   *
+   * @returns 列表区域的容器（加载骨架 / 条目 / 错误行都画在它里面 ✓，面包屑**之下** ✓）。
+   */
+  function ensureBrowserFrame(sheet, state) {
+    var body = sheet.body
+    if (state.toolbar !== undefined && state.toolbar !== null && state.toolbar.parentNode === body) {
+      return state.listHost
+    }
+    body.replaceChildren()
+    var bar = browserToolbar(sheet, state)
+    var crumb = crumbRow(sheet, state)
+    var host = document.createElement('div')
+    host.className = 'dshm-file-area'
+    host.setAttribute('data-dshm-fs-area', '1')
+    state.toolbar = bar
+    state.crumb = crumb
+    state.listHost = host
+    body.appendChild(bar)
+    body.appendChild(crumb)
+    body.appendChild(host)
+    syncToolbar(sheet, state)
+    return host
+  }
+
+  /**
+   * ★★ round 156（A ✓）：工具栏上"随状态变"的那几处**就地刷新** ✓（不重建整条工具栏 ✗）：
+   *   `data-selecting` / 「粘贴 N 项」+ 可点性 / 「选择 ⇄ 完成」那颗。
+   *   `setSelecting` 里已经会改「选择」那颗 ✓，这里再对一遍是**幂等**的 ✓ ——
+   *   两份写法指向同一个结果，不会各说各话 ✓（改完目录状态就一致 ✓）。
+   */
+  function syncToolbar(sheet, state) {
+    var bar = state.toolbar
+    if (bar === undefined || bar === null) return
+    bar.dataset.selecting = state.selecting === true ? '1' : '0'
+    if (state.pasteButton !== undefined && state.pasteButton !== null) {
+      var clip = state.clipboard
+      state.pasteButton.textContent = clip === undefined ? '粘贴' : '粘贴 ' + clip.paths.length + ' 项'
+      state.pasteButton.disabled = clip === undefined
+    }
+    if (state.selectToggle !== undefined && state.selectToggle !== null) {
+      state.selectToggle.textContent = state.selecting === true ? '完成' : '选择'
+      state.selectToggle.dataset.on = state.selecting === true ? '1' : '0'
+      state.selectToggle.setAttribute('aria-label', state.selecting === true ? '退出多选' : '多选')
+    }
+  }
+
+  /**
+   * ★★ round 156（A ✓）：面包屑**只更新路径文字 + 「↑ 上级」的可见性** ✓，
+   *   **绝不重建整行** ✗（重建一次就是"闪一下"✓）。
+   *
+   * 那颗「↑ 上级」的可点性用的是**点的那一刻**的 `state.parent` ✓ ——
+   * 与旧实现闭包里的 `listing.parent` 是**同一份数据** ✓（由 `loadDirectory` 收列表时写下 ✓，
+   * 见那里 round 148 的说明 ✓）⇒ 146-③ / 146-④ 的逐级后退判据一个字没变 ✓。
+   * ★ 用内联 `display` 而不是 `hidden` 属性 ✗：`.dshm-crumb-up` 自己有 `display: inline-flex` ✓，
+   *   作者样式会盖掉 `[hidden]` 的 UA 规则 ⇒ 那样"藏了还在"✗（F-3 会量到一颗 32 高的按钮 ✓）。
+   */
+  function updateCrumb(sheet, state) {
+    var row = state.crumb
+    if (row === undefined || row === null) return
+    var up = row.querySelector('.dshm-crumb-up')
+    if (up !== null) up.style.display = state.path === state.root ? 'none' : ''
+    var text = row.querySelector('.dshm-crumb-path')
+    if (text === null) return
+    // ★ 根目录时相对路径恰好是 `/`（一个斜杠等于没信息 ✗）⇒ 换成压缩后的绝对路径 ✓
+    //   （用户那句"现在的路径显示不出来"就是它 ✓ —— 说明留在 `crumbRow` 里 ✓）。
+    var crumbText = relativeTo(state.root, state.path)
+    if (crumbText === '/' || crumbText === '' || crumbText === '.') crumbText = shortPath(state.path)
+    text.textContent = crumbText
+    text.title = state.path
+  }
+
+  /** 渲染一个目录的完整界面：工具栏 + 面包屑（**常驻** ✓）+ 条目（只换列表区 ✓）。 */
+  function renderListing(sheet, state, listing) {
+    var host = ensureBrowserFrame(sheet, state)
+    updateCrumb(sheet, state)
+    syncToolbar(sheet, state)
+    host.replaceChildren()
+
+    // 目录在前、文件在后，同类按名称自然序（`numeric: true` 让 IMG_2 排在 IMG_10 前面）。
+    // 宿主返回的是目录项的原始顺序，手机上混排时"找一个文件夹"要靠肉眼扫 —— 这是通行约定。
+    var entries = (listing.entries || []).slice().sort(function (a, b) {
+      var aDir = a.type === 'directory' ? 0 : 1
+      var bDir = b.type === 'directory' ? 0 : 1
+      if (aDir !== bDir) return aDir - bDir
+      return String(a.name).localeCompare(String(b.name), 'zh', { numeric: true })
+    })
+    if (entries.length === 0) {
+      host.appendChild(messageRow('这个目录是空的。'))
+      // 空目录里没有可勾的东西：多选态当场收掉，否则底栏会挂着一条「已选 0 项」
+      if (state.selecting === true) setSelecting(sheet, state, false)
+      return
+    }
+    var list = document.createElement('div')
+    list.className = 'dshm-file-list'
+    /**
+     * ★ 只渲染"窗口"内的行：实测 1500 项 = 1.65 万 DOM 节点、20000 项 = **22 万节点** ——
+     * 桌面浏览器上 0.5 秒能画完，但手机 WebView 上那是几秒的卡顿 + 一大块内存，
+     * 而用户一屏只看得到十来行 ✗。所以：第一屏先给 `FILE_RENDER_STEP` 行，
+     * 其余的用底部「继续显示」按需追加（DOM 只留用户真的要看的）✓。
+     */
+    var total = entries.length
+    var shown = Math.max(FILE_RENDER_STEP, state.rendered === undefined ? 0 : state.rendered)
+    if (shown > total) shown = total
+    state.rendered = shown
+    for (var i = 0; i < shown; i++) {
+      list.appendChild(entryRow(sheet, state, entries[i]))
+    }
+    // ★ 统计 + 「继续显示」放在**列表上方**（紧贴面包屑），不是底部：
+    //   15000 项的目录里，底部那个按钮要滚过 200 行才看得见 —— 那等于没有 ✗（截图里发现的）。
+    //   放上面则一进目录就能看到"一共多少、已显示多少、还能继续"，而且点它时列表在下方长，
+    //   按钮本身不会跟着跑 ✓。
+    if (total > shown) {
+      host.appendChild(listingFooter(sheet, state, list, entries, total))
+    }
+    host.appendChild(list)
+    // 条目清单是「全选」与"删除哪些"的唯一依据（顺序即屏幕上的顺序）
+    state.entries = entries
+    // 多选态要跨渲染保留：删完一批常常紧接着删下一批。
+    // 底栏是 DOM、选中集合是状态，每次重渲染必须把两者重新对上（否则计数会停在旧值）。
+    if (state.selecting === true) {
+      renderSelectionBar(sheet, state)
+      updateSelectUI(sheet, state)
+    }
+  }
+
+  /**
+   * 工具栏：上级 / 新建文件夹 / 粘贴 / 在电脑上打开 / 刷新 / 多选。
+   *
+   * ★★ round 156（A ✓）：这条工具栏**只建一次** ✓（`ensureBrowserFrame` 是唯一的建造者 ✓）——
+   *   随状态变的那几处由 `syncToolbar` **就地**刷新 ✓，**不再重建整条** ✗
+   *   （重建 = 换目录时那一栏"消失再回来"✗，用户点名的就是它 ✓）。
+   */
+  function browserToolbar(sheet, state) {
+    var bar = document.createElement('div')
+    bar.className = 'dshm-files-toolbar'
+    bar.dataset.selecting = state.selecting === true ? '1' : '0'
+
+    /**
+     * ★★ round 146：**「← 工作区」这一颗删掉了** ✗✓（用户："目前文件区有返回工作目录按键，
+     *   删掉他，让其他按键在一行"✓）。
+     *
+     * 那件事现在由谁承担 ✓（能力没丢 ✗）：
+     *   · **面包屑最左边那颗「↑ 上级」** ✓（子目录里才有 ✓，一次上**一级目录** ✓）；
+     *   · **安卓返回键** ✓（子目录里逐级上走 ✓、到工作区根才关面板回聊天 ✓）；
+     *   · **侧滑** ✓（一次直接关掉面板 ✓ —— 与返回键**刻意不同** ✗，见 `backOutOfView` ✓）。
+     * ★ 代价说清 ✓：**从子目录一步跳回"工作区列表"的入口没有了** ✗ —— 那正是用户点名删的 ✓；
+     *   现在要逐级「↑ 上级」✓，或关掉面板重开（列表本来就是它的首屏 ✓）。
+     */
+
+    // 标签用"新建"而不是"新建文件夹"：264px 宽下后者会把工具条挤成两行，
+    // 而这一行按钮越少、每多一行就越挤占列表的可见高度。完整语义放 aria-label。
+    var mkdir = toolButton('新建', function () {
+      inlinePrompt(sheet, state, '新文件夹名称', '', function (name) {
+        return callLocalEndpoint(state.getTunnel, 'mobile/files/mkdir', { path: joinPath(state.path, name) })
+      })
+    })
+    mkdir.setAttribute('aria-label', '新建文件夹')
+    mkdir.title = '新建文件夹'
+    bar.appendChild(mkdir)
+
+    var clip = state.clipboard
+    var pasteLabel = clip === undefined ? '粘贴' : '粘贴 ' + clip.paths.length + ' 项'
+    var paste = toolButton(pasteLabel, function () {
+      if (state.clipboard === undefined) {
+        setNote('先在条目上选「复制」或「剪切」，再回到目标目录点「粘贴」。')
+        return
+      }
+      callLocalEndpoint(state.getTunnel, 'mobile/files/paste', {
+        sources: state.clipboard.paths,
+        target: state.path,
+        mode: state.clipboard.mode,
+      }).then(
+        function (result) {
+          var skipped = (result && result.skipped) || []
+          var done = (result && result.done) || []
+          setNote(
+            '已' + (state.clipboard && state.clipboard.mode === 'move' ? '移动' : '复制') + ' ' + done.length + ' 项' +
+              (skipped.length > 0 ? '；跳过同名 ' + skipped.join('、') : ''),
+          )
+          if (state.clipboard.mode === 'move') state.clipboard = undefined
+          loadDirectory(sheet, state, state.path)
+        },
+        function (error) {
+          setNote('粘贴失败：' + describeError(error))
+        },
+      )
+    })
+    if (state.clipboard === undefined) paste.disabled = true
+    // ★ round 156：留给 `syncToolbar` 就地改文案 / 可点性 ✓（不再靠重建工具栏 ✗）
+    state.pasteButton = paste
+    bar.appendChild(paste)
+
+    bar.appendChild(toolButton('上传', function () {
+      uploadFiles(sheet, state)
+    }))
+
+    // 多选入口：与底部操作栏的「取消」是同一个模式的两种出口。
+    // 按钮**同时是模式指示器**（选择 ⇄ 完成）：手机上"我现在在不在多选态"
+    // 必须一眼可见，否则整行点击不展开操作会被当成界面坏了。
+    var selectToggle = toolButton(state.selecting === true ? '完成' : '选择', function () {
+      setSelecting(sheet, state, state.selecting !== true)
+    })
+    selectToggle.setAttribute('aria-label', state.selecting === true ? '退出多选' : '多选')
+    selectToggle.title = '多选'
+    selectToggle.dataset.on = state.selecting === true ? '1' : '0'
+    state.selectToggle = selectToggle
+    bar.appendChild(selectToggle)
+
+    return bar
+  }
+
+  /**
+   * 面包屑：显示当前路径；上级目录名可点。
+   *
+   * ★★ round 156（A ✓）：**只建一次** ✓ —— 路径文字与「↑ 上级」的可见性由
+   *   `updateCrumb` 就地更新 ✓（见那里 ✓）。落点取**点的那一刻**的 `state.parent` ✓
+   *   （逐级后退的判据与 `sheet.backUpOneLevel` 是**同一把尺子** ✓，见那里的说明 ✓）。
+   */
+  function crumbRow(sheet, state) {
+    var row = document.createElement('div')
+    row.className = 'dshm-crumb'
+
+    var up = document.createElement('button')
+    up.type = 'button'
+    up.className = 'dshm-crumb-up'
+    up.textContent = '↑ 上级'
+    up.addEventListener('click', function () {
+      loadDirectory(sheet, state, state.parent === null || state.parent === undefined ? state.root : state.parent)
+    })
+    row.appendChild(up)
+
+    // 路径本身可点 → 复制**当前目录的绝对路径**。
+    // 与条目上的「复制路径」是一对：那个复制"这个文件"，这个复制"我现在在哪" ——
+    // 后者是"把 agent 指到某个目录"时最常用的那串字。
+    // 用 button 而不是 span：手机上只有真正的可点元素才有正确的点击反馈。
+    var text = document.createElement('button')
+    text.type = 'button'
+    text.className = 'dshm-crumb-path'
+    // ★ 在**工作区根目录**时，相对路径恰好是 `/` —— 一个斜杠等于没信息 ✗。
+    //   这是我早先修"符号链接导致根目录也显示上级"时引入的：那次用宿主返回的真实路径
+    //   校准了 `state.root`，于是 `relativeTo(root, path)` 在根目录变成 `/`（以前是完整绝对路径）。
+    //   用户的原话是"现在的路径显示不出来" —— 元素可见、颜色正常，只是**内容没信息** ✓。
+    //   现在：根目录显示压缩后的绝对路径（末两段），子目录仍显示相对路径（更短更好认）。
+    var crumbText = relativeTo(state.root, state.path)
+    if (crumbText === '/' || crumbText === '' || crumbText === '.') crumbText = shortPath(state.path)
+    text.textContent = crumbText
+    text.title = state.path
+    text.setAttribute('aria-label', '复制当前目录路径')
+    text.addEventListener('click', function () {
+      void copyText(state.path).then(function (how) {
+        if (how === undefined) {
+          setNote('浏览器不允许自动复制 —— 长按下面这段手动复制：' + state.path)
+          return
+        }
+        setNote('已复制目录路径：' + state.path)
+      })
+    })
+    row.appendChild(text)
+
+    // 两个高频动作放在这里（而不是工具条里）：路径行右侧本来就空着，
+    // 而工具条每多一个按钮就多占一行 —— 手机上那一行很贵。
+    var refresh = iconButton('刷新', ICON_REFRESH, function () {
+      loadDirectory(sheet, state, state.path)
+    })
+    row.appendChild(refresh)
+
+    var desktop = iconButton('在电脑上打开', ICON_DESKTOP, function () {
+      openOnComputer(sheet, state, state.path)
+    })
+    row.appendChild(desktop)
+    return row
+  }
+
+  /** 一个小方形图标按钮（用于路径行右侧）。 */
+  function iconButton(label, icon, run) {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'dshm-icon-btn'
+    button.setAttribute('aria-label', label)
+    button.title = label
+    button.innerHTML = icon
+    button.addEventListener('click', run)
+    return button
+  }
+
+  /**
+   * 一个条目：图标 + 名称 + 大小/时间；点一下展开它的操作。
+   *
+   * 用"就地展开操作"而不是弹菜单：手机上弹菜单要么太小要么挡住列表，
+   * 就地展开还能让用户看清自己操作的是哪一项。
+   */
+  function entryRow(sheet, state, entry) {
+    var wrapper = document.createElement('div')
+    wrapper.className = 'dshm-file'
+    // 供**工具**（shoot-ui 的场景脚本、浏览器验收）稳定定位一个条目：
+    // 类名与文案都会随改版变，这两个属性是刻意留的契约。
+    wrapper.setAttribute('data-dshm-fs-entry', '1')
+    wrapper.setAttribute('data-dshm-fs-kind', entry.type === 'directory' ? 'dir' : 'file')
+    wrapper.setAttribute('data-dshm-path', entry.path)
+    wrapper.dataset.selecting = state.selecting === true ? '1' : '0'
+    wrapper.dataset.selected = state.selected[entry.path] === undefined ? '0' : '1'
+
+    var head = document.createElement('button')
+    head.type = 'button'
+    head.className = 'dshm-file-head'
+
+    // 勾选圈（行首，仅多选态可见；见 `data-selecting` 的 CSS）
+    var check = document.createElement('span')
+    check.className = 'dshm-file-check'
+    check.textContent = '\u2713'
+    check.setAttribute('aria-hidden', 'true')
+    head.appendChild(check)
+
+    var icon = document.createElement('span')
+    icon.className = 'dshm-file-icon'
+    icon.dataset.kind = entry.type === 'directory' ? 'directory' : 'file'
+    icon.innerHTML = entry.type === 'directory' ? ICON_FOLDER_SM : entry.type === 'symlink' ? ICON_LINK : ICON_FILE
+    head.appendChild(icon)
+
+    var name = document.createElement('span')
+    name.className = 'dshm-file-name'
+    name.textContent = entry.name
+    head.appendChild(name)
+
+    var meta = document.createElement('span')
+    meta.className = 'dshm-file-meta'
+    meta.textContent = entry.type === 'directory' ? '目录' : formatSize(entry.size)
+    head.appendChild(meta)
+
+    var actions = document.createElement('div')
+    actions.className = 'dshm-file-actions'
+    var expanded = false    /**
+     * 整行点击在多选态下**改变含义**：勾选/取消，而不是进目录或展开操作。
+     *
+     * 这是多选态最要紧的一条：手机上"点一下"既是进目录又是展开操作，
+     * 若多选态还保留这两个行为，勾选就只能靠那颗 20px 的小圆圈 —— 太容易点错，
+     * 而这里的代价是**误删**。所以整行都是勾选热区。
+     */
+    var toggleSelection = function () {
+      if (state.selected[entry.path] === undefined) state.selected[entry.path] = entry
+      else delete state.selected[entry.path]
+      // 选中集合变了 → 之前那次「再点一次确认删除」作废（防的是"改了选择却删了旧的"）
+      state.confirmDelete = false
+      applyRowSelection(state, wrapper, entry.path)
+      updateSelectUI(sheet, state)
+    }
+    head.addEventListener('click', function () {
+      if (state.selecting === true) {
+        toggleSelection()
+        return
+      }
+      if (entry.type === 'directory') {
+        // 目录：点名称进目录；点右侧箭头才展开操作。这里用"长按展开"更稳妥，
+        // 但长按在部分 WebView 里会被系统菜单抢走，所以给一个显式的展开按钮。
+        loadDirectory(sheet, state, entry.path)
+        return
+      }
+      /**
+       * 文件：点一下**直接预览**（用户第 1 点："实现文件预览"）。
+       *
+       * 原来点文件是展开下面那排操作按钮 —— 那是"管理"的动作，而现在最常见的是
+       * "先看看这是什么" ✓。操作没有丢：右侧「⋯」还是原来那排（复制路径/下载/重命名/…）✓，
+       * 而且预览页里也放了「下载」与「在电脑上打开」✓。
+       */
+      /**
+       * ★ round 117（用户决定）：文件点一下**默认走 DSH 自带预览** ✓ ——
+       * "我建议我们现在起都是用 dsh 预览" ✓。
+       *
+       * 为什么这是对的（上一轮已经量到的事实 ✓）：
+       *   · DSH 预览是**渲染好的**（Markdown / KaTeX / 代码 / 图片 / PDF 全支持 ✓）；
+       *   · 我们自家的渲染器只覆盖一部分类型 ✓，PDF 还得靠"在电脑上打开"绕 ✗；
+       *   · 两条路并存意味着"同一件事有两种表现"✗ —— 那正是打磨不动的根源 ✓。
+       *
+       * 桥不可用 / 打不开时**如实说明并回退**到自家预览 ✓ ——
+       * 不能让用户点了没反应 ✗（旧宿主、还没重启 DSH 都会走到这条路 ✓）。
+       * ★★ round 157（B ✓）：把这一屏的 `state` **一起递进去** ✓ —— 面板为此收起时，
+       *   它要给"预览关掉之后"留下**返回点**（至少 `state.path` = 当前目录 ✓，
+       *   用户要的是"回到文件列表并**停在原目录**"✓，不是回工作区根 ✗）。
+       */
+      if (openFileInDshPreview(sheet, entry, state) === true) return
+      renderFilePreview(sheet, state, entry)
+    })
+
+    wrapper.appendChild(head)
+
+    // 目录也需要操作（重命名/复制/删除），所以额外给一个"⋯"按钮
+    var more = document.createElement('button')
+    more.type = 'button'
+    more.className = 'dshm-file-more'
+    more.textContent = '\u22EF'
+    more.setAttribute('aria-label', '操作 ' + entry.name)
+    more.addEventListener('click', function (event) {
+      if (event !== undefined) event.stopPropagation()
+      // 多选态下这个按钮由 CSS 收起；万一样式没生效也不该展开单项操作（那时整行是勾选）
+      if (state.selecting === true) {
+        toggleSelection()
+        return
+      }
+      // ★ 从预览页点「⋯」时先回到文件列表：不然那排按钮会渲染在**预览页的下面**，
+      //   而用户看到的是"点了没反应" ✗（视图不同步是这类双视图最常见的坑）。
+      if (sheet.currentView === 'preview' && typeof sheet.restoreFiles === 'function') sheet.restoreFiles()
+      expanded = !expanded
+      actions.dataset.open = expanded ? '1' : '0'
+      if (expanded && actions.childNodes.length === 0) fillFileActions(actions, sheet, state, entry)
+    })
+    head.appendChild(more)
+
+    wrapper.appendChild(actions)
+    return wrapper
+  }
+
+  /** 展开后的操作按钮：手机内预览 / 复制路径 / 下载（仅文件）/ 重命名 / 复制 / 剪切 / 删除。 */
+  function fillFileActions(actions, sheet, state, entry) {
+    /**
+     * ★ round 117：**「手机内预览」** ✓ —— 点文件现在默认交给 DSH 预览了 ✓，
+     * 所以自家那套渲染器必须留一个**明确的入口** ✓（DSH 打不开的类型、桥不可用的旧宿主、
+     * 或者断网时都还能用 ✓）。没有它，自家预览就等于被删掉了 ✗。
+     */
+    if (entry.type !== 'directory') {
+      actions.appendChild(
+        toolButton('手机内预览', function () {
+          renderFilePreview(sheet, state, entry)
+        }),
+      )
+    }
+    // 「复制路径」放第二个：手机上这个面板最常见的用途就是"把电脑上某个文件的路径拿到手"，
+    // 好粘到别处去用（比如粘进聊天框让 agent 去读它）。
+    // ★ 它与下面的「复制」**不是一回事**：那个是在面板内部把文件复制一份、再到别的目录「粘贴」。
+    actions.appendChild(toolButton('复制路径', function () {
+      void copyText(entry.path).then(function (how) {
+        if (how === undefined) {
+          setNote('浏览器不允许自动复制 —— 长按下面这段手动复制：' + entry.path)
+          return
+        }
+        setNote('已复制路径：' + entry.path)
+      })
+    }))
+    if (entry.type !== 'directory') {
+      actions.appendChild(toolButton('下载', function () {
+        downloadEntry(sheet, state, entry)
+      }))
+    }
+    actions.appendChild(toolButton('重命名', function () {
+      inlinePrompt(sheet, state, '新名称', entry.name, function (name) {
+        return callLocalEndpoint(state.getTunnel, 'mobile/files/rename', { path: entry.path, name: name })
+      })
+    }))
+    actions.appendChild(toolButton('复制', function () {
+      state.clipboard = { mode: 'copy', paths: [entry.path] }
+      setNote('已复制「' + entry.name + '」——进入目标目录后点「粘贴」。')
+      loadDirectory(sheet, state, state.path)
+    }))
+    actions.appendChild(toolButton('剪切', function () {
+      state.clipboard = { mode: 'move', paths: [entry.path] }
+      setNote('已剪切「' + entry.name + '」——进入目标目录后点「粘贴」。')
+      loadDirectory(sheet, state, state.path)
+    }))
+    actions.appendChild(toolButton('删除', function () {
+      // 二次确认：手机上误删代价太大，不做原生 confirm（WebView 里可能被屏蔽）
+      var button = this
+      if (button.dataset.confirm !== '1') {
+        button.dataset.confirm = '1'
+        button.textContent = '再点一次确认删除'
+        return
+      }
+      callLocalEndpoint(state.getTunnel, 'mobile/files/remove', {
+        path: entry.path,
+        recursive: entry.type === 'directory',
+      }).then(
+        function () {
+          setNote('已删除「' + entry.name + '」')
+          loadDirectory(sheet, state, state.path)
+        },
+        function (error) {
+          setNote('删除失败：' + describeError(error))
+        },
+      )
+    }))
+  }
+
+  // ── 多选批量操作 ─────────────────────────────────────────────────────
+  //
+  // ## 为什么值得单独一套状态
+  //
+  // 手机上没有 shift 连选、没有框选，也**没有回收站**：一次误删就是真的没了。
+  // 所以这里的每一条设计都在为"少点错一次"服务：
+  //   · 进多选态要显式点「选择」（不会因为长按/滑动手势误入）；
+  //   · 多选态下整行点击 = 勾选（热区是整个 48px 行，不是那颗 20px 的圈）；
+  //   · 删除要**再点一次**（沿用单项删除的确认模式：原生 `confirm` 在部分 WebView 里被屏蔽）；
+  //   · 选中集合一变，之前那次"已确认"立刻作废 —— 防的是"改了选择却删掉了旧的"。
+  //
+  // ## 数据面为什么是串行
+  //
+  // 宿主 `mobile/files/remove` 只接受**单个** path（`mobile/files/paste` 才收数组），
+  // 所以删除只能在客户端循环。**不并发**：宿主侧是真实文件操作，串行既可预期，
+  // 报错也能定位到具体哪一项（并发跑完只知道"有几个失败"，不知道是哪个）。
+  // 移动则反过来 —— `paste` 本来就收 `sources[]`，直接复用既有的
+  // "剪贴板 + 到目标目录点粘贴"动线，不另造一套。
+
+  /** 退出多选态：底栏收起、端侧通道开关还原。**不删除任何元素。** */
+  function exitSelectMode(sheet) {
+    // 一起清掉 body 上的模式标记（见 setSelecting）：所有出口都走这里，
+    // 于是不必在五个出口各清一次（漏一个就会留下"看着还在多选"的假状态）
+    if (document.body !== null && document.body !== undefined) delete document.body.dataset.dshmSelecting
+    if (sheet === undefined || sheet === null) return
+    if (sheet.selectFoot !== undefined) {
+      sheet.selectFoot.hidden = true
+      sheet.selectFoot.replaceChildren()
+    }
+    // 端侧通道开关是手机上唯一的授权入口：这里只收起，绝不 remove
+    if (sheet.capabilityElement !== undefined) sheet.capabilityElement.style.display = ''
+  }
+
+  /**
+   * 进出多选态。
+   *
+   * 进入时把底部固定区让给操作栏（端侧开关收起），退出时还原 —— 两端都在这里，
+   * 免得某条退出路径漏还原，留下"开关再也回不来"的界面。
+   */
+  function setSelecting(sheet, state, on) {
+    state.selecting = on === true
+    // 每次进出都清空：模式关掉后还留着选中集合，下次进模式会先看到一批
+    // "不知道什么时候勾上的"条目 —— 而它们马上就要被删。
+    state.selected = {}
+    state.confirmDelete = false
+    if (state.selecting) {
+      sheet.selectFoot.hidden = false
+      sheet.capabilityElement.style.display = 'none'
+      renderSelectionBar(sheet, state)
+      // 模式标记挂到 body（与面板的 `body[data-dshm-files]` 同一套约定）：
+      // 验收与探针要能**一个属性**问出"现在在不在多选态"，而不是靠数勾选圈
+      if (document.body !== null && document.body !== undefined) document.body.dataset.dshmSelecting = '1'
+    } else {
+      state.selectUI = undefined
+      exitSelectMode(sheet)
+    }
+    if (state.selectToggle !== undefined) {
+      state.selectToggle.textContent = state.selecting ? '完成' : '选择'
+      state.selectToggle.dataset.on = state.selecting ? '1' : '0'
+      state.selectToggle.setAttribute('aria-label', state.selecting ? '退出多选' : '多选')
+    }
+    if (sheet.body !== undefined && sheet.body !== null) {
+      var rows = sheet.body.querySelectorAll('.dshm-file')
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].dataset.selecting = state.selecting ? '1' : '0'
+        rows[i].dataset.selected = '0'
+      }
+    }
+    updateSelectUI(sheet, state)
+    // 进模式时给一句说明；**退出时不清提示行** —— 那条行里可能正躺着
+    // 「已删除 2 项」这样的结果，清掉等于把刚做完的事擦掉
+    if (state.selecting) setNote('多选：点条目勾选；底部可全选 / 删除 / 移动。')
+  }
+
+  /** 只更新一行的勾选外观（不重建列表，滚动位置与展开状态都不受影响）。 */
+  function applyRowSelection(state, wrapper, path) {
+    wrapper.dataset.selected = state.selected[path] === undefined ? '0' : '1'
+    wrapper.dataset.selecting = state.selecting === true ? '1' : '0'
+  }
+
+  /** 选中的条目，按**屏幕上的顺序**（删除/移动的落地顺序就按用户看到的来）。 */
+  function selectedEntries(state) {
+    var entries = state.entries || []
+    var out = []
+    for (var i = 0; i < entries.length; i++) {
+      if (state.selected[entries[i].path] !== undefined) out.push(entries[i])
+    }
+    return out
+  }
+
+  /**
+   * 底部操作栏：`已选 N 项` · 全选 · 删除 · 移动 · 取消。
+   *
+   * 它临时**顶掉**端侧通道开关的位置（见 `setSelecting`）。布局上分成两行：
+   * 264px 宽下面板里，把计数和四颗按钮挤在一行会让「再点一次确认删除 3 项」
+   * 折成三行、把文件列表挤掉半屏。
+   */
+  function renderSelectionBar(sheet, state) {
+    var foot = sheet.selectFoot
+    foot.replaceChildren()
+
+    var row1 = document.createElement('div')
+    row1.className = 'dshm-select-row'
+    var count = document.createElement('span')
+    count.className = 'dshm-select-count'
+    count.id = 'dshm-select-count'
+    row1.appendChild(count)
+    foot.appendChild(row1)
+
+    var row2 = document.createElement('div')
+    row2.className = 'dshm-select-row'
+
+    var all = toolButton('全选', function () {
+      var entries = state.entries || []
+      var every = entries.length > 0
+      for (var i = 0; i < entries.length; i++) {
+        if (state.selected[entries[i].path] === undefined) every = false
+      }
+      state.selected = {}
+      if (!every) {
+        for (var j = 0; j < entries.length; j++) state.selected[entries[j].path] = entries[j]
+      }
+      state.confirmDelete = false
+      if (sheet.body !== undefined && sheet.body !== null) {
+        var rows = sheet.body.querySelectorAll('.dshm-file')
+        for (var k = 0; k < rows.length; k++) {
+          var path = rows[k].getAttribute('data-dshm-path')
+          rows[k].dataset.selected = state.selected[path] === undefined ? '0' : '1'
+        }
+      }
+      updateSelectUI(sheet, state)
+    })
+    row2.appendChild(all)
+
+    var remove = toolButton('删除', function () {
+      deleteSelected(sheet, state)
+    })
+    remove.dataset.tone = 'danger'
+    remove.id = 'dshm-select-delete'
+    row2.appendChild(remove)
+
+    var move = toolButton('移动', function () {
+      moveSelected(sheet, state)
+    })
+    move.id = 'dshm-select-move'
+    row2.appendChild(move)
+
+    row2.appendChild(toolButton('取消', function () {
+      setSelecting(sheet, state, false)
+    }))
+
+    foot.appendChild(row2)
+    state.selectUI = { count: count, all: all, remove: remove, move: move }
+  }
+
+  /** 刷新操作栏上的计数与可点状态（选中集合每次变化都要走一遍）。 */
+  function updateSelectUI(sheet, state) {
+    var ui = state.selectUI
+    if (ui === undefined || ui === null) return
+    var picked = selectedEntries(state)
+    var total = (state.entries || []).length
+    ui.count.textContent = '已选 ' + picked.length + ' 项'
+    ui.all.textContent = total > 0 && picked.length === total ? '取消全选' : '全选'
+    ui.remove.disabled = picked.length === 0 || state.busy === true
+    ui.move.disabled = picked.length === 0 || state.busy === true
+    // 「再点一次」的待确认态：由状态驱动（而不是按钮自己的 dataset），
+    // 这样"改了选择之后确认作废"只需要把 state 归零
+    ui.remove.dataset.confirm = state.confirmDelete === true ? '1' : '0'
+    ui.remove.textContent =
+      state.confirmDelete === true ? '再点一次确认删除 ' + picked.length + ' 项' : '删除'
+  }
+
+  /**
+   * 删除选中的条目。
+   *
+   * 二次确认用**再点一次同一个按钮**（与单项删除一致）：手机上误删代价太大，
+   * 而原生 `confirm` 在部分 WebView 里被屏蔽 —— 那种"点了没反应"的失败最难排查。
+   *
+   * 串行逐项删除、逐项收集结果，最后汇总成一句：`成功 N 项；失败 M 项：<原因>`。
+   * 成功的从选中集合里摘掉、**失败的保持勾选**，用户可以就着这份选择重试。
+   */
+  function deleteSelected(sheet, state) {
+    var picked = selectedEntries(state)
+    if (picked.length === 0) {
+      setNote('还没有选中任何条目。')
+      return
+    }
+    if (state.confirmDelete !== true) {
+      state.confirmDelete = true
+      updateSelectUI(sheet, state)
+      setNote('再点一次「删除」确认：将删除选中的 ' + picked.length + ' 项（目录连同内容）。')
+      return
+    }
+    state.confirmDelete = false
+    state.busy = true
+    updateSelectUI(sheet, state)
+
+    var removed = []
+    var failed = []
+    var chain = Promise.resolve()
+    picked.forEach(function (entry, index) {
+      chain = chain.then(function () {
+        if (state.selectUI !== undefined) state.selectUI.count.textContent = '删除中 ' + (index + 1) + '/' + picked.length + '：' + entry.name
+        return callLocalEndpoint(state.getTunnel, 'mobile/files/remove', {
+          path: entry.path,
+          recursive: entry.type === 'directory',
+        }).then(
+          function () {
+            removed.push(entry.path)
+          },
+          function (error) {
+            failed.push(entry.name + '（' + describeError(error) + '）')
+          },
+        )
+      })
+    })
+    chain.then(function () {
+      for (var i = 0; i < removed.length; i++) delete state.selected[removed[i]]
+      state.busy = false
+      setNote(
+        failed.length === 0
+          ? '已删除 ' + removed.length + ' 项'
+          : '成功 ' + removed.length + ' 项；失败 ' + failed.length + ' 项：' + failed.join('；'),
+      )
+      // 刷新当前目录：删掉的不再出现，剩下的保持勾选（多选态不退出，便于接着操作）。
+      // 这一步也会重建底栏，所以计数不用手工改。
+      loadDirectory(sheet, state, state.path)
+    })
+  }
+
+  /**
+   * 移动选中的条目：写进剪贴板（`mode:'move'`）并退出多选态，让用户进目标目录点「粘贴」。
+   *
+   * 为什么不在这里弹"选目标目录"：面板只有一级列表、没有目录树控件，
+   * 而**粘贴那条动线已经存在且被测过**（工具栏的「粘贴 N 项」+ 宿主 `pasteInto(sources[])`）。
+   * 多造一套目录选择器等于把"移动"变成第二条实现，两套迟早不一致。
+   */
+  function moveSelected(sheet, state) {
+    var picked = selectedEntries(state)
+    if (picked.length === 0) {
+      setNote('还没有选中任何条目。')
+      return
+    }
+    var paths = []
+    for (var i = 0; i < picked.length; i++) paths.push(picked[i].path)
+    state.clipboard = { mode: 'move', paths: paths }
+    setSelecting(sheet, state, false)
+    setNote('已选中 ' + paths.length + ' 项待移动 —— 进入目标目录后点「粘贴」。')
+    loadDirectory(sheet, state, state.path)
+  }
+
+  /**
+   * 手机 → 电脑的**上传**（分块）。
+   *
+   * 为什么分块：隧道单帧有上限（`MAX_FRAME_BYTES`），而且手机上大文件一次性读进内存
+   * 很容易被系统回收。按 1 MiB 切片、边读边送，进度写在面板底部。
+   *
+   * 与下载对称：目标路径同样受**工作区根**约束（见宿主 `writeChunk`），
+   * 所以上传不会变成"往电脑任意位置写文件"的后门。
+   */
+  function uploadFiles(sheet, state) {
+    var input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = true
+    input.style.display = 'none'
+    input.addEventListener('change', function () {
+      var files = input.files === null ? [] : Array.prototype.slice.call(input.files)
+      input.remove()
+      if (files.length === 0) return
+      var done = 0
+      var failed = 0
+      // 串行上传：并行会让进度提示互相覆盖，也会同时占满隧道的流上限
+      var chain = Promise.resolve()
+      files.forEach(function (file) {
+        chain = chain.then(function () {
+          return uploadOne(state, file, function (sent) {
+            setNote(
+              '上传 ' + file.name + '：' + Math.round((sent / Math.max(1, file.size)) * 100) + '%（' +
+                formatSize(sent) + ' / ' + formatSize(file.size) + '）',
+            )
+          }).then(
+            function () {
+              done += 1
+            },
+            function (error) {
+              failed += 1
+              setNote('上传「' + file.name + '」失败：' + describeError(error))
+            },
+          )
+        })
+      })
+      chain.then(function () {
+        setNote('上传完成：成功 ' + done + ' 个' + (failed > 0 ? '，失败 ' + failed + ' 个' : ''))
+        loadDirectory(sheet, state, state.path)
+      })
+    })
+    document.body.appendChild(input)
+    input.click()
+  }
+
+  /** 上传单个文件：按 1 MiB 切片，逐块送到 `mobile/files/write`。 */
+  function uploadOne(state, file, onProgress) {
+    var CHUNK = 1024 * 1024
+    var target = joinPath(state.path, file.name)
+    var offset = 0
+    var step = function () {
+      // 空文件也要发一块：否则"上传一个空文件"会什么都不做（真实会遇到的边界）
+      if (offset > 0 && offset >= file.size) return Promise.resolve()
+      var slice = file.slice(offset, offset + CHUNK)
+      return slice.arrayBuffer().then(function (buffer) {
+        var bytes = new Uint8Array(buffer)
+        // 逐字符转换：`String.fromCharCode.apply` 在 1 MiB 上会超参数上限
+        var binary = ''
+        for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+        return callLocalEndpoint(state.getTunnel, 'mobile/files/write', {
+          path: target,
+          offset: offset,
+          data: btoa(binary),
+          truncate: offset === 0,
+        })
+      }).then(function () {
+        offset += CHUNK
+        if (onProgress !== undefined) onProgress(Math.min(offset, file.size))
+        return step()
+      })
+    }
+    return step()
+  }
+
+  /**
+   * 分块把一个文件读成字节 ✓（隧道单帧有上限 ✓，所以按 1 MiB 一段拉 ✓）。
+   *
+   * ★ 文件面板的「下载」与交付卡片上的「下载」**共用这一份** ✓ ——
+   *   任务点名"卡片的下载要复用同一条通道"✗，两处各抄一份 CRC 迟早会漂移 ✓。
+   *
+   * @param getTunnel 取隧道 ✓。
+   * @param path 电脑上的绝对路径 ✓。
+   * @param onProgress 每段回调一次 `(offset, chunk)` ✓（不给也行 ✓）。
+   * @returns Promise&lt;Uint8Array&gt; ✓。
+   */
+  function readRemoteFileBytes(getTunnel, path, onProgress) {
+    var chunks = []
+    var offset = 0
+    var step = function () {
+      return callLocalEndpoint(getTunnel, 'mobile/files/read', {
+        path: path,
+        offset: offset,
+        length: 1024 * 1024,
+      }).then(function (chunk) {
+        chunks.push(base64ToBytes(chunk.data))
+        offset = chunk.offset + chunk.bytes
+        if (typeof onProgress === 'function') onProgress(offset, chunk)
+        if (chunk.eof === true || chunk.bytes === 0) return undefined
+        return step()
+      })
+    }
+    return step().then(function () {
+      return concatBytes(chunks)
+    })
+  }
+
+  /**
+   * 下载一个文件到手机。
+   *
+   * 分块拉取（隧道单帧有上限 ✓），全部到齐后按**两条路**落地 ✓：
+   *   · **有壳**（APK ✓）⇒ 交给 `DshmShell.saveFile` ✓ —— 壳用 MediaStore 写进系统的
+   *     「下载」目录 ✓。这条是**唯一**在 WebView 里真的能落地的路 ✓：blob + `<a download>`
+   *     会被 WebView 整条丢掉 ✗（用户真机反馈的"提示成功但文件没到手机"就是它 ✗）。
+   *   · **没壳**（纯浏览器 / 桌面端 ✓）⇒ 保持原行为 ✓（Blob + `<a download>` ✓ ——
+   *     那里它是好用的 ✓，别动 ✗）。
+   *
+   * ★ 并且**不再无条件说"下载成功"** ✗：有壳时先如实说"已交给手机保存" ✓，
+   *   等壳的回调回来才说"已保存到「下载」：<文件名>" ✓ / 失败原因 ✓（见 `handleShellSaveCallback` ✓）。
+   */
+  function downloadEntry(sheet, state, entry) {
+    var note = document.getElementById('dsh-mobile-sheet-note')
+    var total = entry.size
+    readRemoteFileBytes(state.getTunnel, entry.path, function (offset) {
+      if (note !== null) {
+        note.textContent = '下载中 ' + Math.round((offset / Math.max(1, total)) * 100) + '%（' + formatSize(offset) + ' / ' + formatSize(total) + '）'
+      }
+    }).then(
+      function (bytes) {
+        if (shellBridge() !== undefined) {
+          shellSaveBytes(entry.name, bytes)
+          return
+        }
+        var blob = new Blob([bytes], { type: 'application/octet-stream' })
+        var url = URL.createObjectURL(blob)
+        var anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = entry.name
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        setTimeout(function () {
+          URL.revokeObjectURL(url)
+        }, 60_000)
+        if (note !== null) note.textContent = '已交给浏览器保存「' + entry.name + '」（' + formatSize(total) + '）'
+      },
+      function (error) {
+        if (note !== null) note.textContent = '下载失败：' + describeError(error)
+      },
+    )
+  }
+
+  /** 在电脑上打开当前目录：优先用应用列表，旧宿主退回 DSH 的 openWorkspacePath。 */
+  function openOnComputer(sheet, state, path) {
+    var targets = state.targets
+    if (targets === undefined) {
+      openWorkspacePath(state.getTunnel, path, 'reveal').then(
+        function () {
+          setNote('已在电脑的访达中显示。')
+        },
+        function (error) {
+          setNote('打开失败：' + describeError(error))
+        },
+      )
+      return
+    }
+    var fm = targets.fileManager || {}
+    var apps = targets.apps || []
+    // 终端优先：从文件管理器里最常想做的是"在这个目录开个终端"
+    var terminal = undefined
+    for (var i = 0; i < apps.length; i++) {
+      if (/terminal|iterm|warp|ghostty|kitty|konsole|命令提示符|终端/i.test(apps[i].id + ' ' + apps[i].label)) {
+        terminal = apps[i]
+        break
+      }
+    }
+    var chosen = terminal !== undefined ? terminal : fm
+    var action = terminal !== undefined ? 'open' : 'reveal'
+    callLocalEndpoint(state.getTunnel, 'mobile/openInApp/open', {
+      app: String(chosen.id || ''),
+      path: path,
+      action: action,
+    }).then(
+      function () {
+        setNote('已在电脑上用「' + String(chosen.label || chosen.openLabel || '访达') + '」打开（独立进程，不随 DSH 退出）。')
+      },
+      function (error) {
+        setNote('打开失败：' + describeError(error))
+      },
+    )
+  }
+
+  /** 就地输入（重命名 / 新建文件夹）——不用原生 prompt：WebView 里可能被屏蔽。 */
+  function inlinePrompt(sheet, state, label, initial, submit) {
+    // 输入框会顶掉整个列表：多选态在这里没有对象了，底栏也必须一起收掉
+    state.selecting = false
+    state.selected = {}
+    state.confirmDelete = false
+    state.selectUI = undefined
+    exitSelectMode(sheet)
+    sheet.body.replaceChildren()
+    var box = document.createElement('div')
+    box.className = 'dshm-prompt'
+
+    var title = document.createElement('div')
+    title.className = 'dshm-prompt-label'
+    title.textContent = label
+    box.appendChild(title)
+
+    var input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'dshm-prompt-input'
+    input.value = initial
+    box.appendChild(input)
+
+    var row = document.createElement('div')
+    row.className = 'dshm-prompt-actions'
+
+    var confirm = toolButton('确定', function () {
+      var value = String(input.value || '').trim()
+      if (value.length === 0) {
+        setNote('名称不能为空。')
+        return
+      }
+      confirm.disabled = true
+      confirm.textContent = '执行中…'
+      Promise.resolve()
+        .then(function () {
+          return submit(value)
+        })
+        .then(
+          function () {
+            setNote('完成。')
+            loadDirectory(sheet, state, state.path)
+          },
+          function (error) {
+            confirm.disabled = false
+            confirm.textContent = '确定'
+            setNote('失败：' + describeError(error))
+          },
+        )
+    })
+    row.appendChild(confirm)
+    row.appendChild(toolButton('取消', function () {
+      loadDirectory(sheet, state, state.path)
+    }))
+    box.appendChild(row)
+
+    sheet.body.appendChild(box)
+    setTimeout(function () {
+      try {
+        input.focus()
+        input.select()
+      } catch (error) {
+        void error
+      }
+    }, 50)
+  }
+
+  /** 回到一级工作区列表。 */
+  function renderWorkspaceListFromState(sheet, state) {
+    sheet.setTitle('电脑文件目录')
+    openFilesSheet(sheet, state.getTunnel)
+  }
+
+  // ── 小工具 ─────────────────────────────────────────────────────────
+
+  /** 面板里的一个按钮。 */
+  function toolButton(label, run) {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'dshm-tool'
+    button.textContent = label
+    button.addEventListener('click', run)
+    return button
+  }
+
+  /** 一行提示文本。 */
+  function messageRow(text) {
+    var row = document.createElement('div')
+    row.className = 'dshm-ws-path'
+    row.style.padding = '10px 8px'
+    row.textContent = text
+    return row
+  }
+
+  /**
+   * 把一段文本放进手机剪贴板。返回**用上了哪条路**（便于如实反馈）。
+   *
+   * 为什么要有回退：`navigator.clipboard` 要求安全上下文 + 用户手势，
+   * 手机浏览器（Via 这类 WebView 外壳尤其）经常直接不可用；而 `document.execCommand('copy')`
+   * 虽然过时，在旧 WebView 里反倒是唯一能用的那条。
+   *
+   * ★ 两条都失败时**把文本显示出来**让用户长按复制。
+   *   "复制失败"却不给替代路径，等于把功能变成死路 —— 而手机上连控制台都没有，
+   *   用户既不知道为什么失败，也没有别的办法把那串路径弄出来。
+   */
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard !== undefined && navigator.clipboard.writeText !== undefined) {
+        await navigator.clipboard.writeText(text)
+        return 'clipboard'
+      }
+    } catch (error) {
+      void error
+    }
+    try {
+      var area = document.createElement('textarea')
+      area.value = text
+      area.setAttribute('readonly', '')
+      area.style.cssText = 'position:fixed;top:-1000px;left:0;opacity:0'
+      document.body.appendChild(area)
+      area.select()
+      if (typeof area.setSelectionRange === 'function') area.setSelectionRange(0, text.length)
+      var copied = document.execCommand('copy')
+      area.remove()
+      if (copied === true) return 'execCommand'
+    } catch (error) {
+      void error
+    }
+    return undefined
+  }
+
+  /** 把一条操作反馈写到面板底部固定区的提示行（不打断浏览）。 */
+  function setNote(text) {
+    var note = document.getElementById('dsh-mobile-sheet-note')
+    if (note !== null) note.textContent = text
+    /**
+     * ★★ round 138：端侧能力那几颗胶囊搬进设置页之后 ✓，它们的反馈**不能只写文件面板那一行** ✗
+     *   —— 用户在**左侧设置页**里点开关时，那一行根本不在屏幕上 ✓（文件面板关着 ✓），
+     *   于是"已允许通知 ✓"与"告诉电脑失败：…"✗ 全都石沉大海 ✓。
+     *   所以：**凡是屏幕上存在的**能力分组提示行，都写一份 ✓（一处都没有就什么都不做 ✓）。
+     *
+     * 判据是"元素在不在 DOM 里" ✓：两个挂载点（齿轮那一页 / 左侧第 5 个导航项 ✓）
+     * 各自渲染自己的那一行 ✓ —— 谁在屏幕上，谁就会拿到这条文案 ✓。
+     * 为什么不做成"给每个开关传一个回调"✗：`buildCapabilitySwitches` 里有 12 处反馈
+     * （成功/失败/权限三条路 ✓），逐个接线既啰嗦又容易漏 ✓；而"写进所有活着的提示行"
+     * 一句话就够 ✓，而且**行为一点没变** ✓（文件面板那份照旧拿到 ✓）。
+     */
+    var capsNotes = document.querySelectorAll('[data-dshm-caps-note="1"]')
+    for (var i = 0; i < capsNotes.length; i++) capsNotes[i].textContent = text
+  }
+
+  /** 错误文案 + 稳定 code（手机上没控制台，"未知错误"和"没权限"要能区分）。 */
+  function describeError(error) {
+    var message = String(error && error.message ? error.message : error)
+    var code = error && error.code ? '（' + error.code + '）' : ''
+    return message + code
+  }
+
+  function joinPath(directory, name) {
+    return directory.replace(/\/+$/, '') + '/' + name
+  }
+
+  /** 把一个绝对路径拆成"所在目录 + 文件名" ✓（卡片「打开所在目录」要从这里进面板 ✓）。 */
+  function splitFilePath(path) {
+    var value = String(path === undefined || path === null ? '' : path)
+    var slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'))
+    if (slash <= 0) return { dir: value, name: '' }
+    return { dir: value.slice(0, slash), name: value.slice(slash + 1) }
+  }
+
+  /**
+   * ★ 把「打开所在目录」指名的**那一行**滚到可见并标一下 ✓（round 128 ✓）。
+   *
+   * 判据是"用户看得见那一行" ✓，不是"我们设了什么状态" ✗ —— 所以做两件事：
+   * `scrollIntoView({block:'center'})` ✓ + 打一个 `data-dshm-focus` 给 CSS 高亮 ✓。
+   * 名字对不上（目录里没有它 / 大目录只渲染了前 200 行 ✓）就**什么都不做** ✓ ——
+   * 不假装找到 ✗（目录本身已经跳过去了 ✓，那一屏仍然是用户要的 ✓）。
+   */
+  function focusNamedRow(sheet, state) {
+    var name = String(state.focusName === undefined || state.focusName === null ? '' : state.focusName)
+    if (name === '') return false
+    state.focusName = ''
+    var rows = sheet.body.querySelectorAll('[data-dshm-path]')
+    for (var i = 0; i < rows.length; i++) {
+      var nameEl = rows[i].querySelector('.dshm-file-name')
+      if (nameEl === null || String(nameEl.textContent || '') !== name) continue
+      rows[i].dataset.dshmFocus = '1'
+      try {
+        rows[i].scrollIntoView({ block: 'center' })
+      } catch (error) {
+        void error
+      }
+      return true
+    }
+    return false
+  }
+
+  /**
+   * ★★ round 148：两条路径是不是**同一个目录** ✓（只为"到没到工作区根"这一件事服务 ✓）。
+   *
+   * 为什么不能逐字比较 ✗：macOS 上 `/tmp` `/var` `/etc` 都是 `/private/…` 的符号链接 ✓，
+   * 宿主回的是 realpath（`/private/var/…` ✓），而工作区表里记的常是短写法（`/var/…` ✓）。
+   * 揭示动线（卡片「在文件面板中打开」✓）上这两种写法**同时**在场 ✓（148 这轮实测 ✓）：
+   *   `state.root` = `/var/…/bigdir-demo`，宿主回的 `listing.path` / `listing.parent`
+   *   = `/private/var/…/bigdir-demo` ✓ ⇒ 逐字比较永远不等 ⇒ 会一路爬出工作区 ✗。
+   * ★ 这里**只认 `/private` 这一种孪生写法** ✓，别的一个字都不归一化 ✗：
+   *   宁可漏判（当两个目录看 ✓），也不错把两个不同的目录当成同一个 ✗。
+   */
+  function samePath(a, b) {
+    var left = String(a === undefined || a === null ? '' : a).replace(/\/+$/, '')
+    var right = String(b === undefined || b === null ? '' : b).replace(/\/+$/, '')
+    if (left === right) return true
+    return '/private' + left === right || left === '/private' + right
+  }
+
+  function relativeTo(root, path) {
+    if (path === root) return '/'
+    if (path.indexOf(root) === 0) return path.slice(root.length) || '/'
+    return path
+  }
+
+  function formatSize(bytes) {
+    var value = Number(bytes) || 0
+    if (value < 1024) return value + ' B'
+    if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB'
+    if (value < 1024 * 1024 * 1024) return (value / 1024 / 1024).toFixed(1) + ' MB'
+    return (value / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+  }
+
+  /** base64 → Uint8Array（下载拼装用）。 */
+  function base64ToBytes(text) {
+    var binary = atob(String(text || ''))
+    var bytes = new Uint8Array(binary.length)
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+
+  /** 把分块读来的几段字节拼成一整块 ✓（顺序就是数组顺序 ✓ —— 下载与预览共用这一份 ✓）。 */
+  function concatBytes(chunks) {
+    var total = 0
+    var i
+    for (i = 0; i < chunks.length; i++) total += chunks[i].length
+    var merged = new Uint8Array(total)
+    var at = 0
+    for (i = 0; i < chunks.length; i++) {
+      merged.set(chunks[i], at)
+      at += chunks[i].length
+    }
+    return merged
+  }
+
+  /**
+   * 读 DSH 侧栏里被标记为"激活"的工作区标题。
+   *
+   * DSH 给激活的工作区行加 `*_folderActive` 类。用标题而不是 id 去和工作区列表
+   * 对齐，是因为标题是 DSH 唯一直接暴露在 DOM 上的关联字段（会话 id 既不在
+   * URL 里，也不在列表数据里——见 `conversationTitle` 的说明）。
+   */
+  function activeWorkspaceTitle() {
+    var column = dshSidebarColumn()
+    if (column === null) return ''
+    var all = column.querySelectorAll('*')
+    for (var i = 0; i < all.length; i++) {
+      if (classHasSuffix(all[i], '_folderActive')) {
+        var row = all[i]
+        while (row !== null && row !== undefined && row.parentNode !== column) {
+          if (classHasSuffix(row, '_projectRow')) {
+            // 标题在行内的 *_title 元素里；行的 innerText 还含时间等噪声，故取子元素。
+            var titles = row.querySelectorAll('*')
+            for (var j = 0; j < titles.length; j++) {
+              if (classHasSuffix(titles[j], '_title')) {
+                return String(titles[j].textContent || '').trim()
+              }
+            }
+            return String(row.textContent || '').trim()
+          }
+          row = row.parentNode
+        }
+      }
+    }
+    return ''
+  }
+
+  /** 一级里的一行工作区：标题 + 路径 + 快捷「打开方式…」。 */
+  function workspaceRow(sheet, workspace, activeTitle, targets, getTunnel) {
+    // 整行是一个按钮：图标 + 标题（可带"当前"徽标）+ 路径 + 右箭头。
+    // 旧版是"标题一行 / 路径一行 / 一个占满宽的大按钮"，四个工作区就撑满一屏；
+    // 现在每行 ~58px，一屏能看六七个，而且**点哪里都行**（不用瞄准那个按钮）。
+    var row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'dshm-ws'
+
+    var icon = document.createElement('span')
+    icon.className = 'dshm-ws-icon'
+    icon.innerHTML = ICON_FOLDER_SM
+    row.appendChild(icon)
+
+    var main = document.createElement('div')
+    main.className = 'dshm-ws-main'
+
+    var title = document.createElement('div')
+    title.className = 'dshm-ws-title'
+    var name = document.createElement('span')
+    name.className = 'dshm-ws-name'
+    name.textContent = String(workspace.title || '(未命名工作区)')
+    title.appendChild(name)
+    if (activeTitle !== '' && workspace.title === activeTitle) {
+      var badge = document.createElement('span')
+      badge.className = 'dshm-ws-badge'
+      badge.textContent = '当前'
+      title.appendChild(badge)
+    }
+    main.appendChild(title)
+
+    var path = document.createElement('div')
+    path.className = 'dshm-ws-path'
+    path.textContent = shortPath(String(workspace.path || ''))
+    path.title = String(workspace.path || '')
+    main.appendChild(path)
+    row.appendChild(main)
+
+    var chevron = document.createElement('span')
+    chevron.className = 'dshm-ws-chevron'
+    chevron.innerHTML = ICON_CHEVRON
+    row.appendChild(chevron)
+
+    row.addEventListener('click', function () {
+      // `targets !== undefined` 同时代表"宿主支持插件自有的隧道端点"——
+      // `mobile/openInApp/*` 与 `mobile/files/*` 是同一版宿主一起提供的。
+      if (targets !== undefined) {
+        renderFileBrowser(sheet, workspace, targets, getTunnel)
+        return
+      }
+      // 旧宿主：没有文件接口，只能执行"在电脑上打开"这一个基础动作
+      row.disabled = true
+      setNote('正在让电脑打开…')
+      openWorkspacePath(getTunnel, String(workspace.path || ''), undefined).then(
+        function () {
+          setNote('已让电脑打开「' + String(workspace.title || '') + '」')
+          row.disabled = false
+        },
+        function (error) {
+          setNote('打开失败：' + String(error && error.message ? error.message : error))
+          row.disabled = false
+        },
+      )
+    })
+    return row
+  }
+
+  /**
+   * 调用 `session/openWorkspacePath` 让**电脑**打开某个目录（旧宿主的兜底路径）。
+   *
+   * typert 的入参信封是 `{args:{request:{...}}}`：`session/openWorkspacePath(request, signal)`
+   * 的参数名是 `request`（非可选），因此必须显式给出——省略会被 DSH 网关判为
+   * `gateway/arguments-invalid: missing "request"`（`session/list` 的 `_request` 则相反，
+   * 它是可选参数，**必须**显式给空对象，否则同样报 missing）。
+   */
+  async function openWorkspacePath(getTunnel, path, action) {
+    var tunnel = getTunnel()
+    if (tunnel === undefined || tunnel === null) throw new Error('隧道未建立')
+    var request = { path: path }
+    if (action !== undefined) request.action = action
+    var response = await tunnel.rpc('session/openWorkspacePath', { args: { request: request } }, undefined)
+    var result = response === undefined || response === null ? undefined : response.result
+    if (result === undefined || result === null) throw new Error('电脑没有返回结果')
+    if (result.ok !== true) {
+      var error = result.error || {}
+      throw new Error(String(error.message || error.code || '未知错误'))
+    }
+    return result.value
+  }
+
+  /**
+   * 返回当前可挂载节点的父节点。
+   *
+   * 顺序是 `head` → `documentElement`：只要文档开始解析，documentElement 就一定存在，
+   * 因此这个函数不会返回 null。样式挂在 <html> 上同样生效。
+   */
+  function ensureDomRoot() {
+    return document.head ?? document.documentElement
+  }
+
+  /**
+   * 布局探针：窄屏下检查中栏是否真的占了几乎整个视口。
+   * 上游若调整了类名，我们的覆盖会静默失效——探针的目的就是让失效可见，而不是让用户面对一个挤成一团的界面。
+   */
+  function probeLayout() {
+    if (window.innerWidth >= 1024) return { ok: true }
+    var center = document.querySelector('[class*="centerCol"]')
+    if (center === null) return { ok: false, reason: '未找到 DSH 中栏元素（页面结构可能已变化）' }
+    var ratio = center.getBoundingClientRect().width / window.innerWidth
+    return ratio >= 0.9 ? { ok: true, ratio: ratio } : { ok: false, ratio: ratio, reason: '中栏宽度不足视口的 90%' }
+  }
+
+  // ───────────────────────────── 启动 ─────────────────────────────
+
+  async function boot() {
+    var native = globalThis.__DSH_MOBILE__
+    /**
+     * ★ P1a：**票据里的指纹必须先固化** ✓ —— `readStoredHost()` 要按"当前源对应的指纹"
+     * 取配置 ✓，而配对当次那个指纹只有票据里有 ✓（目录里可能还没有这台 ✓）。
+     * 顺序调换是安全的 ✓：两个都是纯读 ✓（原来的顺序只是巧合 ✓）。
+     */
+    var fromUrl = readUrlConfig()
+    if (fromUrl !== undefined && validHostFingerprint(fromUrl.pinnedHostFingerprint)) {
+      pageTicketFingerprint = fromUrl.pinnedHostFingerprint
+    }
+    var stored = readStoredHost()
+    var config = fromUrl !== undefined ? Object.assign({}, stored, fromUrl) : stored
+
+    // 注入诊断与配对界面所需的接口
+    globalThis.__DSH_MOBILE_BOOT__ = {
+      version: PROTOCOL_VERSION,
+      formatFingerprint: formatFingerprint,
+      getConfig: function () {
+        return config
+      },
+      /** 手机浏览器首次配对：写入配置并重载，使连接使用固定指纹。 */
+      pair: function (params) {
+        storeHost(params)
+        location.reload()
+      },
+      /** 忘记当前电脑（下次打开需重新配对）。 */
+      forget: function () {
+        // ★ 两边一起删 ✓（只删本机的话，下次启动会从壳的库里恢复回来 ✗）
+        removeIdentityKey(STORAGE_KEY)
+        removeIdentityKey(DEVICE_KEY)
+        location.reload()
+      },
+      probeLayout: probeLayout,
+      /**
+       * ★★ **原生时钟驱动网页的入口** ✓ —— 前台服务的 `Handler` 每 15s / 4s 注入一次 ✓。
+       *
+       * 契约（跨单约定 ✓，名字一个字母都不许改 ✗）：
+       *   · `tick('ping')` / `tick('poll')` ✓；其它（含不传 ✓）**一律当 `'ping'`** ✓；
+       *   · **返回一个字符串** ✓（`'ping'` / `'poll'` / `'no'` 之类，给人念的 ✓）；
+       *   · **永不抛** ✗（原生那段注入是裸 IIFE ✓，抛出去在手机上没有任何痕迹 ✗）。
+       *
+       * 实现在 `mobileTick` ✓ —— 它只负责认 kind / 记账 / 分派 ✓，
+       * 真正干活的仍然是页面原有的那两份实现 ✓（`sendKeepalivePing` ✓ / `devicePollTick` ✓）。
+       * ★ 挂在这里而不是新开一个全局 ✗：`__DSH_MOBILE_BOOT__` 是网页与原生之间**既有**的那条
+       *   通道 ✓（`.shell` ✓、`.state()` ✓ 早就在上面 ✓）—— 第二个全局 = 第二个事实来源 ✗
+       *   （"名字撞车/两套入口"这个坑本项目踩过 ✓，见 §五 第 14 条 ✓）。
+       */
+      tick: mobileTick,
+      /**
+       * ★ 原生壳（APK）这条线的自证入口（round 115）✓。
+       *
+       * 为什么要把内部函数露出来：安全区那件事是**两半配合**的 ✓ —— 壳报尺寸、
+       * 网页让位 ✓。而"壳报了、网页会不会照做"在无头浏览器里原先**验不了** ✗
+       * （没有壳 ✓），于是每一轮都只能等真机 ✓。有了这个入口，验收里可以
+       * **冒充壳**（塞一个假 `window.DshmShell` ✓）再断言网页的反应 ✓。
+       *
+       * ★ 名字**必须**叫 `apk` 而不是 `shell` ✗ —— `shell` 已经被 `installShell`
+       *   的返回值占着了（见本文件后面那句 `__DSH_MOBILE_BOOT__.shell = shell` ✓，
+       *   它指的是**网页外壳**，不是 APK ✗）。第一版用了 `shell` ✓，
+       *   结果被覆盖 ✓，验收里报的是 `api.pull is not a function` ✗ ——
+       *   一个"名字撞车"伪装成"功能没实现"的典型 ✓。
+       */
+      apk: {
+        present: function () {
+          return shellBridge() !== undefined
+        },
+        insets: function () {
+          return shellJson('insets')
+        },
+        platform: function () {
+          return shellJson('platform')
+        },
+        pull: function () {
+          return pullShellInsets()
+        },
+        apply: function (value) {
+          return applyShellInsets(value)
+        },
+        notify: function (title, body) {
+          return shellNotify(title, body)
+        },
+        permission: function () {
+          return notifyPermissionState()
+        },
+        requestPermission: function () {
+          return requestNotifyPermission()
+        },
+        /**
+         * ★ 保活时钟的读数（验收 / 排障 ✓）—— 与设置页「后台保活」那一行**同源** ✓
+         *   （两边都读 `keepAliveStats` 与同一对文本函数 ✓，不另算一份 ✗）。
+         *
+         * 为什么需要它：`tick` 本身在**纯浏览器**里也能被调用 ✓（注入那段 IIFE 就是那么写的 ✓），
+         * 但"它到底认了哪个 kind / 有没有真的驱动 / 前置判断挡没挡住"从返回值里只看得见一半 ✓
+         * —— 这里一次把账本与那一行文本都给出来 ✓（返回值是可序列化的纯数据 ✓，
+         * 验收里 `Runtime.evaluate` 直接读 ✓）。
+         */
+        keepAlive: function () {
+          return {
+            pingTicks: keepAliveStats.pingTicks,
+            pollTicks: keepAliveStats.pollTicks,
+            lastPingAt: keepAliveStats.lastPingAt,
+            lastPollAt: keepAliveStats.lastPollAt,
+            /**
+             * ★ 最近一次**收到**原生 tick 的时刻 ✓（与上面那两个"真的干了活"分开 ✓）。
+             *   验收判据就靠这一对 ✓：让原生戳若干次 ⇒ 这两个数**必须往前走** ✓
+             *   （而 `lastPingAt` / `lastPollAt` 要隧道真连上才会动 ✓ ——
+             *    两个方向合起来才说明"原生时钟活着"且"活真的干了"✓）。
+             */
+            lastPingTickAt: keepAliveStats.lastPingTickAt,
+            lastPollTickAt: keepAliveStats.lastPollTickAt,
+            /** ★ 原生时钟催过几次重拨 ✓ + 最近时刻 / 最近一次为什么没催 ✓（真机实验要分的那四种情形 ✓）。 */
+            redials: keepAliveStats.redials,
+            lastRedialAt: keepAliveStats.lastRedialAt,
+            lastRedialVerdict: keepAliveStats.lastRedialVerdict,
+            lastTickResult: keepAliveStats.lastTickResult,
+            text: keepAliveDiagnosticText(),
+          }
+        },
+        /** 预览的入场动画 / 收起键（验收用 ✓ —— 这两件事在无头浏览器里没法"等它自己发生"✓）。 */
+        previewEnter: function () {
+          // ★ 显式调用**跳过冷却** ✓ —— 验收里是"人工放一遍来看看"✓，
+          //   不是真实打开 ✓（真实打开那条由冷却保护 ✓，见 playDshPreviewEnter ✓）。
+          dshmPreviewEnterAt = 0
+          dshmPreviewEnterPlayed = false
+          playDshPreviewEnter()
+          return true
+        },
+        /** 入场动画一共放了几遍 ✓（验收断言"一次打开只放一遍" ✓）。 */
+        previewPlays: function () {
+          return dshmPreviewPlays
+        },
+        clickCollapse: function () {
+          return clickDshCollapseControl()
+        },
+        lastClose: function () {
+          return dshmLastCloseResult
+        },
+        /**
+         * ★ 前台自愈的**判据**（不改状态、不导航 ✓）—— 验收用它钉住
+         *   "被拒绝 / 从未连上 ⇒ 不许重载" ✓：真重载在无头里会把页面刷掉、
+         *   读不到现场 ✓，判据可以当场读 ✓（与线上走**同一个** `selfHealDecision` ✓）。
+         * 返回值：'reload' | 'skip:no-shell' | 'skip:not-visible' | 'skip:connected' |
+         *        'skip:device-rejected' | 'skip:never-connected' | 'skip:throttled' | 'skip:error'
+         */
+        healVerdict: function (reason) {
+          return selfHealDecision(reason === undefined ? '(验收)' : String(reason))
+        },
+        /**
+         * ★ 系统返回这条线的自证入口（round 121）✓。
+         *
+         * 验收脚本按老办法**冒充壳**（塞一个假的 `window.DshmShell` ✓）——
+         * 而"装钩子"这件事本身**只认有没有桥** ✓ ⇒ 必须走 `installBackHook`
+         * 而不是直接调内部函数 ✗，否则验的就不是线上那条路 ✓。
+         * `back()` 就是壳在返回时调用的**同一个** `dshmBack` ✓。
+         */
+        installBackHook: function () {
+          return installBackHook()
+        },
+        back: function () {
+          return dshmBack()
+        },
+        /** 网页**认为**现在有没有可返回的东西 ✓（验收用它对齐"壳收到的那个布尔" ✓）。 */
+        backAvailable: function () {
+          return backAvailableNow()
+        },
+        /** 上一次推给壳的值 ✓（`null` = 还没推过 ✓）。 */
+        backReported: function () {
+          return dshmBackReported
+        },
+        /**
+         * ★ 两个候选槽这条线的自证入口（round 131）✓。
+         *
+         * 为什么要有它：`reportEndpointSlots` 的两个**生产调用点**一个在 `boot()` 里
+         * （页面刚加载、无头验收里那会儿还没有假壳 ✗）、一个在 `connected` 事件里
+         * （真隧道、时序不肯配合 ✗）。验收脚本按本文件的老办法**冒充壳**（塞 `DshmShell` ✓），
+         * 因此需要一个"现在就走**线上那条路**报一次"的入口 ✓ ——
+         * 它调的就是 `reportEndpointSlots` 本身 ✓，不是另写一份 ✗。
+         * `slots()` 暴露**推导结果**（验收要断言"学校在前 / 没有明文 / 都以 /mobile/app 结尾" ✓，
+         * 而不是只看桥被调了几次 ✓）；`storedHost()` 暴露 `readStoredHost` 的判定结果 ✓
+         * （跨源放宽那条断言必须能看见"配置到底有没有被丢" ✓）。
+         */
+        reportSlots: function (configLike) {
+          /**
+           * ★ round 139：改成走 `prepareEndpointSlots` ✓ —— 也就是**线上那两处调用点
+           * 走的同一个函数** ✓（先备好 manifest 那条来源，再上报 ✓），
+           * 而不是"验收走一份、线上走另一份"✗。
+           * 返回：无壳 ⇒ **同步 null** ✓；manifest 已取到 ⇒ 同步数组 ✓；否则 Promise ✓
+           * （验收侧的 `Runtime.evaluate` 是 `awaitPromise: true` ✓ ⇒ 直接 `await` 即可 ✓）。
+           */
+          return prepareEndpointSlots(configLike)
+        },
+        slots: function (configLike) {
+          return derivePageSlots(configLike)
+        },
+        /** manifest 里那条学校地址 ✓（`null` = 没拿到 ✓）—— 验收/排障要能问"到底读到没有"✓。 */
+        manifestBaseUrl: function () {
+          return manifestBaseUrl
+        },
+        storedHost: function () {
+          var stored = readStoredHost()
+          return stored === undefined ? null : stored
+        },
+        /** 壳那个身份库里现在有哪些键 ✓（排障用 ✓ —— 值不回传，私钥不上屏 ✗）。 */
+        vaultKeys: function () {
+          var vault = vaultRead()
+          return vault === null ? null : Object.keys(vault)
+        },
+        /** 显式跑一次"从壳恢复身份" ✓（验收用 ✓ —— 生产路径在装载点自己调 ✓）。 */
+        restoreIdentity: function () {
+          return restoreIdentityFromVault()
+        },
+        /**
+         * ★ 身份 vault 这条线的**验收入口**（round 131 补 ✓）。
+         *
+         * 为什么必须直通生产函数、而不是在验收脚本里另写一份假实现 ✗：
+         * 要钉住的是"**这一份**写入口真的会镜像进壳的库 ✓ / 删除真的发显式 `null` ✓"——
+         * 只有调**同一个**函数才说明问题 ✓（本项目对"同一个概念两套实现"零容忍 ✓）。
+         *
+         * `storeHost` 是**真实调用链**上的那一环 ✓：`__DSH_MOBILE_BOOT__.pair()` 与
+         * `boot()` 末尾配对落盘都用它 ✓ ⇒ 验收里调它一次，走的就是线上那条路 ✓。
+         * `identityWrite` 直通 `writeIdentityKey`（全文件**唯一**写入口 ✓）——
+         * 之所以需要它：真实的删除点（设置面板「解除配对」✓ / `forget()` ✓）
+         * 后面都跟着 `location.reload()` ✗，在验收里走不完 ✓，
+         * 而"删除必须发**显式 null**、不能把键从补丁里省掉"这条契约必须被钉住 ✓。
+         */
+        storeHost: function (config) {
+          storeHost(config)
+          return true
+        },
+        identityWrite: function (key, value) {
+          return writeIdentityKey(key, value)
+        },
+        /**
+         * ★★ P1a 多宿主这条线的**验收入口** ✓ —— 全部直通生产函数 ✓（同一个概念不许两套实现 ✓）：
+         *   · `identityRead(base)`   —— 按当前源对应指纹读一条身份键 ✓（旧键回退也在里面 ✓）；
+         *   · `currentFingerprint()` —— "当前源对应哪个指纹" ✓（`null` = 定不下来 ✓）；
+         *   · `migrateLegacy()`      —— 显式跑一次旧键迁移 ✓（返回迁移到的指纹 / `null` ✓ —— 幂等读数靠它 ✓）；
+         *   · `hosts()` / `hostsActive()` —— 宿主目录与"当前"标记 ✓；
+         *   · `hostRecord(record)`   —— 走唯一写入口记一条宿主 ✓（面板那几条断言要用 ✓）。
+         */
+        identityRead: function (base) {
+          return readIdentityKeyValue(base)
+        },
+        currentFingerprint: function () {
+          var fingerprint = currentHostFingerprint()
+          return fingerprint === undefined ? null : fingerprint
+        },
+        migrateLegacy: function () {
+          return migrateLegacyIdentityKeys()
+        },
+        /**
+         * 显式跑一次"宿主明确拒绝这台设备"那条路 ✓（验收用 ✓ —— 与 `restoreIdentity` 同一个口径 ✓）。
+         * 它调的是**生产函数本身** ✓：真机上这条路随后会 `location.replace` 回配对页 ✓
+         * （验收里那个替换是 no-op ✓）。要钉的是"**只清当前宿主**"✓ —— 别把另一台也清了 ✗。
+         */
+        deviceRejection: function (code, detail) {
+          return handleDeviceRejection(undefined, code, detail)
+        },
+        hosts: function () {
+          return hostsRead()
+        },
+        hostsActive: function () {
+          var active = activeHostFingerprint()
+          return active === undefined ? null : active
+        },
+        hostRecord: function (record) {
+          return hostRecordUpsert(record)
+        },
+        /**
+         * 「连接与设备」那一屏里"电脑"那一组的**行模型 + 真实渲染产物** ✓（验收用 ✓）。
+         * `rows` 是纯数据 ✓，`group` 是**生产渲染函数**（`buildHostsGroup` ✓）造出来的元素 ✓
+         * —— 断言因此能打在"面板真的画了什么"上 ✓，而不是打在"某个字符串存在"上 ✓。
+         */
+        hostsPanel: function () {
+          return { rows: hostsPanelRows(), group: buildHostsGroup() }
+        },
+      },
+      /** 最近一笔滑动导航的判定（验收脚本读它，避免"只看结果猜原因" ✓）。 */
+      swipe: function () {
+        return swipeNavigationState
+      },
+      /**
+       * 诊断：某个坐标点会被判成哪个区域、命中的是哪个元素。
+       *
+       * 手机上没有控制台，"滑了没反应"这三个字背后可能是：被吞、被取消、
+       * 或者**区域判错**（本轮就是最后这一种 ✗）。这个函数让三种原因都能一句话说清 ✓。
+       */
+      swipeAreaAt: function (x, y) {
+        var detector = swipeNavigationState.areaOf
+        var node = document.elementFromPoint(x, y)
+        return {
+          node: typeof describeNode === 'function' ? describeNode(node) : String(node && node.tagName),
+          area: typeof detector === 'function' && node !== null ? detector(node) : 'other',
+        }
+      },
+      /**
+       * 诊断：某个坐标**会不会被当成"横向滚动区域"而不抢手势**，以及是哪一层、滚多远。
+       * 手机上排障就靠它 ✓（"在表格里滑却拉起了边栏"这类问题，一眼能看出是不是守卫漏了 ✓）。
+       */
+      swipeTerritoryAt: function (x, y) {
+        var detector = swipeNavigationState.territoryOf
+        var node = document.elementFromPoint(x, y)
+        if (typeof detector !== 'function' || node === null) return { node: describeNode(node), blocked: false }
+        var verdict = detector(node)
+        return {
+          node: describeNode(node),
+          blocked: verdict !== null,
+          reason: verdict === null ? '' : verdict.reason,
+          owner: verdict === null ? '' : verdict.node,
+        }
+      },
+      /** 预览桥的状态（验收脚本读它：桥在不在、注入了哪些服务、有几个会话可选 ✓）。 */
+      previewBridge: function () {
+        var bridge = dshPreview()
+        if (bridge === undefined) return { ready: false }
+        try {
+          return { ready: true, state: bridge.state() }
+        } catch (error) {
+          return { ready: true, state: { error: String(error && error.message ? error.message : error) } }
+        }
+      },
+      /** 公式渲染的状态（验收脚本读它：地址、状态、已渲染数量、排队数、失败原因 ✓）。 */
+      math: function () {
+        return {
+          state: TEMML_STATE.state,
+          source: TEMML_STATE.source,
+          url: TEMML_STATE.url,
+          error: TEMML_STATE.error,
+          rendered: TEMML_STATE.rendered,
+          pending: TEMML_STATE.queue === undefined ? 0 : TEMML_STATE.queue.length,
+        }
+      },
+      /** 设计 token 桥的状态（验收脚本读它，而不是去猜我们吃的是哪个值 ✓）。 */
+      theme: function () {
+        return themeBridgeState
+      },
+      state: function () {
+        return tunnel === undefined ? 'idle' : tunnel.lastState
+      },
+      /** 当前端点与全部候选（诊断页 / 排障用）。 */
+      endpoint: function () {
+        return tunnel === undefined ? null : (tunnel.activeEndpoint || null)
+      },
+      endpoints: function () {
+        return tunnel === undefined ? [] : tunnel.endpoints.slice()
+      },
+    }
+
+    // ── 移动端外壳：**只在手机页面上安装** ─────────────────────────────
+    //
+    // ★ 这里出过一次真实事故（用户反馈"你意外修改了电脑端的 UI"）：
+    //   `boot.js` 由 `tapIndex` 注入到 **所有**页面，包括电脑端的 `http://127.0.0.1:3080/`。
+    //   而原先这里没有做表面判断，于是电脑端也长出了自建手机顶栏——因为自建顶栏的样式
+    //   写在媒体查询**之外**（它本来就该只在手机表面存在），窄屏守卫拦不住它。
+    //   同一个文件里 `installPlaceholderTransport()` 是做了 `isMobileSurface()` 判断的，
+    //   外壳这一路漏了。
+    //
+    //   **规矩：凡是"给手机加的东西"，安装前必须先问 isShellSurface()。**
+    //   电脑端的判断依据是 `location.pathname` 既不是 `/mobile/app`、也没有 `mobile=1`、
+    //   且视口不窄——三者都不成立才认为是手机表面。
+    var mobileSurface = isShellSurface()
+
+    // 布局适配失败绝不能影响连接：它只是外观，而连接是功能。
+    // 这里显式隔离异常——曾经因为样式安装抛错（document.head 为 null）而中断了后面的
+    // 隧道建立，表现成"界面打开了但一直连不上"，排查成本很高。
+    var shell
+    if (mobileSurface) {
+      try {
+        // 传取值函数而不是隧道对象：外壳在隧道创建**之前**就要装好（否则首屏是裸的 DSH 布局），
+        // 而按钮的处理函数要等到用户点击时才真正用隧道。
+        shell = installShell(function () {
+          return tunnel
+        })
+        // ★ round 144：把同一个取值函数递给调试面板 ✓（见 dshmTunnelProbe 的说明 ✓）
+        dshmTunnelProbe = function () {
+          return tunnel
+        }
+      } catch (error) {
+        console.error('[dsh-mobile] 移动端外壳安装失败（不影响连接）：', error)
+      }
+      if (shell !== undefined) globalThis.__DSH_MOBILE_BOOT__.shell = shell
+      document.addEventListener('DOMContentLoaded', function () {
+        setTimeout(function () {
+          var probe = probeLayout()
+          if (!probe.ok) {
+            console.warn('[dsh-mobile] 移动端布局适配可能已失效：', probe.reason, probe.ratio)
+            document.body.dataset.dshMobileLayoutBroken = '1'
+          }
+        }, 800)
+      })
+    }
+
+    /**
+     * ★ 把两个候选槽上报给壳 ✓（round 131 ✓）—— 调用点**只有两处** ✓：
+     *   · 这里（启动流程之后 ✓）：壳拿到"学校优先 / Tailscale 兜底"这两个默认链接 ✓；
+     *   · `tunnel.onState` 的 `connected` 那支 ✓（再报一次 = 把**当前地址**写回壳 ✓，
+     *     壳据此知道"这次是哪条路走通的" ✓）。
+     * 没有桥时它自己就是 no-op ✓（纯浏览器/桌面端一个字都不做 ✓）。
+     * ⚠️ 上报**绝不触发导航** ✗✗（否则"重载 → 上报 → 重载"就是死循环 ✗，见函数注释 ✓）。
+     *
+     * ★★ round 139：改走 `prepareEndpointSlots` ✓ —— 它先取一次 manifest 的 `phoneBaseUrl`
+     * 再上报 ✓（学校槽的第四条来源 ✓，见那段长注释 ✓）。没有壳时它**同步返回 null** ✓，
+     * 所以"纯浏览器里一个字都不做"这条一点没变 ✓（连 fetch 都不会发 ✓）。
+     */
+    void prepareEndpointSlots(config)
+
+    if (config === undefined || config.tunnelUrl === undefined) {
+      // 未配对：不安装传输层，让页面按 DSH 原生方式工作（用户可先在本机浏览器里完成配对）
+      console.info('[dsh-mobile] 尚未配对，未启用加密隧道。请在电脑端生成配对码后用手机扫码。')
+      // 标记 boot 结束并放行等待者：此后占位层会把调用**交还 DSH 原生传输**。
+      // 这一步是"电脑打开手机外壳路径不再卡死"的关键——没有它，调用会永久挂起。
+      tunnelReady.bootFinished = true
+      tunnelReady.resolve()
+      return
+    }
+
+    // 首次配对：先提交公钥，电脑端才能显示指纹供人工比对
+    if (config.pairingTicket !== undefined) {
+      var deviceForClaim = await loadOrCreateDeviceKey()
+      await submitPairingClaim(config, deviceForClaim)
+    }
+
+    // 本次加载是不是"首次配对"（URL 里带票据）。配对成功后要做一次性重载，
+    // 让 DSH 客户端在一个**已经连通**的传输层上启动——原因见 onState 里的长注释。
+    var pairedThisLoad = config.pairingTicket !== undefined
+    var RELOAD_AFTER_PAIR_KEY = 'dsh-mobile.reloadedAfterPair'
+
+    var tunnel = new Tunnel({
+      tunnelUrl: config.tunnelUrl,
+      // ★ 必须把候选列表传进去。第一版漏了这一行：候选算出来了却只交给 Tunnel
+      //   单个 tunnelUrl，于是回退永远只有一个候选（验证时才暴露出来）。
+      tunnelUrls: config.tunnelUrls,
+      pairingTicket: config.pairingTicket,
+      pinnedHostFingerprint: config.pinnedHostFingerprint,
+    })
+    tunnel.onState(function (state) {
+      tunnel.lastState = state
+      /**
+       * ★★ 状态回传（网页 → 原生 ✓）：**只在状态真的变化时**发一次 ✓。
+       *
+       * 为什么**不**每次 tick 都发 ✗：tick 是 4 秒 / 15 秒一次 ✓，次次都发就是刷屏 ✓
+       *   （壳那边每收到一条都要贴着常驻通知改文案 ✓，纯属白干 ✓）。
+       * 为什么放在**这里**而不是 tick 里 ✗：`onState` 是"状态变了"的**唯一**触发点 ✓
+       *   （`emitState` 由连接/断开/待确认那几处调 ✓），语义正好对上 ✓。
+       * 这里**无条件调** ✓、不看返回值 ✓ —— "要不要真的发"由 `reportKeepAliveState`
+       *   自己按 JSON 串去重 ✓（同一个状态重复 emit ⇒ 它自己会挡住 ✓）。
+       *   ⇒ "什么时候该发"**只有一个判据** ✓，不会出现两处各判一半 ✗。
+       */
+      reportKeepAliveState()
+      // ★ 本页"曾经连上过"的唯一置位点 ✓（前台自愈的前置条件，见 selfHealDecision ✓）
+      if (state === 'connected') pageEverConnected = true
+
+      /**
+       * ★ 连上之后再上报一次 ✓（第二处、也是**最后一处**调用点 ✓）。
+       *
+       * 这一次的意义是"把**当前地址**写回壳" ✓：启动那一次上报时壳还不知道哪条路真的通 ✓，
+       * 而这一刻页面自己就是从可用地址加载出来的 ✓ ⇒ 壳手里的两个默认链接与"实际走通的那个"
+       * 对齐 ✓（换槽判据因此不会指着一条已经不存在的路 ✓）。
+       * 放在**最前面**：下面 `pairedThisLoad` 那一支可能 `location.replace` 走人 ✓，
+       * 上报是同步的、必须抢在导航之前完成 ✓（且它自己**不会**引发导航 ✗✗）。
+       *
+       * ★ round 139：`prepareEndpointSlots` 在这一支里**是同步的** ✓ ——
+       *   启动那一次早就把 manifest 取回来了 ✓ ⇒ `manifestBaseUrlSettled` 为真 ✓ ⇒
+       *   直接走同步那一支 ✓（上面那条"抢在导航之前"的要求因此仍然成立 ✓）。
+       *   只有"启动那一次 fetch 失败过"这种少见情形才会在这里多等一次 fetch ✓（几毫秒 ✓）。
+       */
+      if (state === 'connected') void prepareEndpointSlots(config)
+
+      /**
+       * ★ P1a：连上了 ⇒ 把这台宿主记进目录、标成当前 ✓（`lastState` / `lastSeenAt` ✓）。
+       * 纯追加信息 ✓：异常绝不许影响连接 ✗（这里显式吞掉 ✓ —— 与"布局失败不影响连接"同一条纪律 ✓）。
+       */
+      if (state === 'connected') {
+        try {
+          noteHostConnected(config)
+        } catch (error) {
+          void error
+        }
+      }
+
+      // ── 首次配对成功后的**一次性重载** ─────────────────────────────
+      //
+      // 为什么必须这么做：配对期间隧道要等电脑端点"允许"，这段窗口里 DSH 客户端
+      // 已经在拉初始数据（工作区列表、会话列表）。这些请求注定失败，而 DSH 的 store
+      // 失败后**不会自己重新订阅** —— 于是出现最迷惑人的状态：隧道随后连上了
+      // （在页面里直接发请求全都正常），侧栏却永远只有"新会话 / 工作区 / 未分组 / 设置"。
+      // 实测复现：`workspace/follow` 返回 4 个工作区、`session/list` 返回 59 个会话，
+      // 而侧栏 0 行。
+      //
+      // 重载后票据已用掉、配置已落盘，隧道立刻连上，DSH 一次就把数据拉全。
+      // 用 sessionStorage 做一次性门闩：只重载一次，不会形成重载循环。
+      if (state === 'connected' && pairedThisLoad) {
+        pairedThisLoad = false
+        try {
+          if (sessionStorage.getItem(RELOAD_AFTER_PAIR_KEY) !== '1') {
+            sessionStorage.setItem(RELOAD_AFTER_PAIR_KEY, '1')
+            // 去掉 ?pair= 再重载：票据是一次性的，留着它只会让下一次连接走
+            // "待确认"分支（那个分支在确认后依然会短暂拒绝连接）。
+            location.replace(location.pathname)
+          }
+        } catch (error) {
+          void error
+        }
+      }
+
+      // 把状态与最后错误写进 localStorage：手机上没有控制台，
+      // 而诊断页（/mobile/debug?html=1）能读到它——这是把线索从界面里带出来的唯一通道。
+      try {
+        // 只留"最后一次状态"是不够的：真实故障是"连上→断开→重连"的**序列**，
+        // 而单看最后一帧只能看到 disconnected，看不出发生了什么。
+        // 因此这里追加成一个小环形缓冲（最近 40 条），诊断页按顺序展示。
+        var LINE = 'dsh-mobile.tunnelLog'
+        var entry = {
+          at: new Date().toISOString(),
+          state: state,
+          error: (globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.lastError) || null,
+          attempt: tunnel.attempt,
+          // 当前走的是哪个端点（局域网直连 / 中继）——"连不上"时第一个要看的信息
+          endpoint: tunnel.activeEndpoint || null,
+        }
+        var log = []
+        try { log = JSON.parse(localStorage.getItem(LINE) || '[]') } catch (e) { log = [] }
+        if (!Array.isArray(log)) log = []
+        log.push(entry)
+        if (log.length > 40) log = log.slice(-40)
+        localStorage.setItem(LINE, JSON.stringify(log))
+        localStorage.setItem('dsh-mobile.lastTunnel', JSON.stringify(entry))
+      } catch (error) { void error }
+    })
+    globalThis.__DSH_MOBILE_BOOT__.tunnel = tunnel
+
+    // 关键：把 DSH 的全部业务流量接进加密隧道
+    globalThis.__DSH_TRANSPORT__ = {
+      fetch: async function (input, init) {
+        var url = typeof input === 'string' ? input : input.url
+        var path = new URL(url, location.href)
+        var endpoint = path.pathname.replace(/^\/api\//, '')
+        var body = init && init.body !== undefined ? init.body : undefined
+        // 页面交给我们的 body 就是 DSH 的 client-request 信封；直接交给隧道，
+        // 宿主按同一信封解析（不再重复解包/改名）。
+        var envelope = body === undefined ? {} : JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))
+        // 沿用 DSH 自己的 rpcId（它要校验响应 id 与请求 id 相同），见 Tunnel.prototype.rpc 的说明
+        var response = await tunnel.rpc(envelope.method, envelope.payload, envelope.rpcId)
+        if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {
+          console.warn('[dsh-mobile] rpcId 不一致（会导致 DSH 拒绝该响应）：发出', envelope.rpcId, '收到', response.rpcId)
+        }
+        return new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+      openStream: function (endpoint, payload) {
+        return tunnel.openStream(endpoint, payload)
+      },
+      // 声明本页独占 Host：手机就是操作者本人，避免 DSH 走"远端浏览器"的降级分支
+      ownsHost: true,
+    }
+    // 放行启动期间排队等待的调用（占位传输层已把 globalThis 上的对象替换为上面这个）
+    tunnelReady.resolve()
+
+    // 配对成功后票据只在首次连接使用，随后清除，避免长期留在 URL 与配置里
+    if (fromUrl !== undefined) {
+      storeHost({
+        baseUrl: config.baseUrl,
+        tunnelUrl: config.tunnelUrl,
+        pinnedHostFingerprint: config.pinnedHostFingerprint,
+      })
+      try {
+        history.replaceState(null, '', location.pathname)
+      } catch (error) {
+        void error
+      }
+    }
+
+    try {
+      await tunnel.connect()
+      console.info(
+        '[dsh-mobile] 加密隧道已建立；宿主指纹 ' +
+          formatFingerprint(tunnel.hostFingerprint || '') +
+          '；能力位 ' +
+          JSON.stringify(tunnel.capabilities || {}),
+      )
+    } catch (error) {
+      // 配对等待不是失败，是流程的正常一环（电脑还没点"允许此设备"）。
+      // 早期这里一律按"隧道建立失败"报红，手机端一打开就是满屏 error，
+      // 而它其实只是"还没被批准"——红字会把人引向完全错误的方向。
+      if (error !== null && error !== undefined && error.code === 'mobile/pairing-pending') {
+        console.info('[dsh-mobile] 已在电脑端登记，等待你在电脑上点「允许此设备」…（会自动重试）')
+        if (typeof tunnel.emitState === 'function') tunnel.emitState('awaiting-approval')
+      } else {
+        console.error('[dsh-mobile] 隧道建立失败：', error)
+      }
+      globalThis.__DSH_MOBILE_BOOT__.lastError = String(error && error.message ? error.message : error)
+    } finally {
+      // 无论成功失败都要放行：真实传输层自己会重试连接，
+      // 排队中的调用交给它处理（失败表现为可读的错误，而不是永久挂起）。
+      // bootFinished 同时置位：此后若仍没有可用隧道，占位层会交还原生传输。
+      tunnelReady.bootFinished = true
+      tunnelReady.resolve()
+    }
+  }
+
+  // 暴露给测试与排障
+  globalThis.__DSH_MOBILE_INTERNALS__ = {
+    b64u: b64u,
+    unb64u: unb64u,
+    hkdf: hkdf,
+    sealFrame: sealFrame,
+    openFrame: openFrame,
+    parseFrame: parseFrame,
+    /**
+     * ★ round 184：本页最近一次"帧长不匹配"的时刻（0 = 没见过 ✓）。
+     *
+     * ★ 写成**函数**而不是属性 ✗：属性会在定义这一刻把 0 快照下来 ✓，之后永远读 0 ✗
+     *   （测试就再也打不红了 ✓）。它是 `selfHealDecision` 据以判定"该重载"的那个量 ✓。
+     */
+    frameDesyncAt: function () {
+      return frameDesyncAt
+    },
+    ReplayWindow: ReplayWindow,
+    transcriptHash: transcriptHash,
+    fingerprintOf: fingerprintOf,
+    formatFingerprint: formatFingerprint,
+    verifyHostSignature: verifyHostSignature,
+    FrameType: FrameType,
+    FrameFlags: FrameFlags,
+  }
+
+  /**
+   * 隧道就绪的等待句柄。
+   *
+   * 占位传输层用它把"启动期间的调用"挂起，而不是让它们失败：
+   * 手机页面加载与隧道建立是并行的，先到的请求排队即可。
+   * 失败（未配对、握手被拒、网络断了）也要 resolve——否则调用方会永远挂着，
+   * 界面表现为"转圈不报错"，比直接报错更难排障。
+   */
+  var tunnelReady = { resolve: null, promise: null, bootFinished: false }
+  tunnelReady.promise = new Promise(function (resolve) { tunnelReady.resolve = resolve })
+
+  function waitForTunnel() {
+    return tunnelReady.promise.then(function () {
+      return globalThis.__DSH_TRANSPORT__
+    })
+  }
+
+  /**
+   * 同步安装"占位传输层"。
+   *
+   * 为什么必须同步：DSH 的客户端连接层在**它自己的插件启动时**读取
+   * `globalThis.__DSH_TRANSPORT__`，那可能早于我们异步的 boot() 完成
+   * （读配置、生成设备密钥都是异步的）。如果等 boot() 才安装，DSH 就会退回
+   * 默认的 `fetch('/api/...')`，于是手机把业务请求发到未鉴权的 HTTP 端点上拿 401。
+   *
+   * ## 关键：必须"惰性自愈"，不能"装了就永久挂起"（真实事故）
+   *
+   * 早期实现是"挂起直到 tunnelReady 被 resolve，然后转发"。问题出在
+   * **tunnelReady 可能永远不 resolve**：只要 `boot()` 走了"尚未配对"分支就直接 return，
+   * 不会创建隧道、也不 resolve……于是**每一个** DSH 调用都永久挂起。
+   *
+   * 这造成过一个极难看的现象：在**电脑**上打开 `/mobile/app`（手机外壳路径，判定为手机场景）
+   * 时，页面标题是对的、界面却一直"重连中"、所有控件无响应——
+   * 因为整个客户端都在等一个永远不会到来的隧道。而且主线程被挂起的请求占满，
+   * 连 DevTools 的求值都超时，看起来像"页面卡死"。
+   *
+   * 现在的语义（每个调用各自判定，惰性）：
+   *   1. 已经有真实隧道 → 直接转发给它（既有行为不变）；
+   *   2. 还没就绪、但 boot() 仍在进行 → 排队等它（手机首屏与隧道并行，这是需要的）；
+   *   3. boot() 已结束却没有隧道（未配对 / 非手机场景）→ **交还 DSH 原生传输**，
+   *      即什么都不做、不安装本层，让页面按 DSH 原本的方式工作。
+   *
+   * 这样"是不是手机"就不再是一个必须在启动瞬间猜对的判断题：即使猜错（例如电脑
+   * 打开了手机外壳路径），页面也只是退回原生行为，而不会卡死。
+   */
+  function installPlaceholderTransport() {
+    if (globalThis.__DSH_TRANSPORT__ !== undefined) return
+
+    /**
+     * 等待上限：超过就放弃等待并交还原生传输。
+     *
+     * 为什么必须有上限：手机在电脑端点"允许"之前隧道是连不上的，界面**应该**表现为
+     * "等待批准"并重试——这是设计。但"无限等待"会让每个调用永久挂起，
+     * 于是界面既不报错也不响应（真实故障："重连中"，所有控件点不动）。
+     * 有上限之后，超时的调用会拿到明确失败，界面至少能给出可读提示。
+     */
+    var WAIT_LIMIT_MS = 60000
+
+    /** 解析当前应当使用的传输层；undefined 表示"用 DSH 原生"。 */
+    function resolveTransport() {
+      var current = globalThis.__DSH_TRANSPORT__
+      if (current !== undefined && current.placeholder !== true) return current
+      if (tunnelReady.bootFinished) return undefined // 没有隧道 → 交给原生
+      return Promise.race([
+        waitForTunnel(),
+        new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve(undefined)
+          }, WAIT_LIMIT_MS)
+        }),
+      ]).then(function (resolved) {
+        return resolved !== undefined && resolved.placeholder !== true ? resolved : undefined
+      })
+    }
+
+    globalThis.__DSH_TRANSPORT__ = {
+      fetch: function (input, init) {
+        return Promise.resolve(resolveTransport()).then(function (transport) {
+          if (transport === undefined) {
+            // 交还原生：直接调页面的 fetch（DSH 默认行为）
+            return globalThis.fetch(input, init)
+          }
+          return transport.fetch(input, init)
+        })
+      },
+      openStream: function (endpoint, payload) {
+        // 流式接口必须同步返回异步迭代器：把"解析传输层"包进迭代器
+        return {
+          [Symbol.asyncIterator]: function () {
+            var inner
+            var resolve = function () {
+              if (inner === undefined) {
+                inner = Promise.resolve(resolveTransport()).then(function (transport) {
+                  if (transport === undefined) {
+                    throw new Error('dsh-mobile: 无隧道可用，且该端点不支持原生回退（流式接口）')
+                  }
+                  return transport.openStream(endpoint, payload)
+                })
+              }
+              return inner
+            }
+            return {
+              next: function () {
+                return resolve().then(function (stream) {
+                  return stream[Symbol.asyncIterator]().next()
+                })
+              },
+              return: function () {
+                if (inner === undefined) return Promise.resolve({ done: true })
+                return inner.then(function (stream) {
+                  var iterator = stream[Symbol.asyncIterator]()
+                  return iterator.return === undefined ? { done: true } : iterator.return()
+                })
+              },
+            }
+          },
+        }
+      },
+      // 与真实传输层保持一致：手机就是操作者本人，DSH 不应走"远端浏览器"降级分支
+      ownsHost: true,
+      placeholder: true,
+    }
+  }
+
+  /**
+   * 手机场景判定。
+   *
+   * 判据（任一成立即可）：
+   *  - 路径是插件的应用外壳 `/mobile/app`（当前做法，路径本身即标记）；
+   *  - URL 带 `mobile=1`（早期壳路由的标记，保留以兼容已收藏的地址）；
+   *  - 本地已存配对配置（已配对的手机再次打开任意 DSH 页面）。
+   *
+   * 为什么不再依赖 `/`：插件曾用 `path:'/'` 抢占 DSH 的根路由来提供外壳，
+   * 而 `/` 正是 token/cookie 认证的唯一入口——结果是任何浏览器都 401 死循环。
+   * 现在外壳在插件自己的前缀下，`/` 完全归 DSH。
+   */
+  /** 附件上传的单次上限。超过就明确拒绝，而不是让帧超限后抛一个看不懂的错。 */
+  var FILE_UPLOAD_LIMIT_BYTES = 24 * 1024 * 1024
+
+  /** 把 fetch 的 body（Blob / ReadableStream / 字节）统一读成 Uint8Array。 */
+  async function readBodyBytes(body) {
+    if (body === undefined || body === null) return new Uint8Array(0)
+    if (body instanceof Uint8Array) return body
+    if (body instanceof ArrayBuffer) return new Uint8Array(body)
+    if (typeof Blob !== 'undefined' && body instanceof Blob) return new Uint8Array(await body.arrayBuffer())
+    if (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) {
+      var reader = body.getReader()
+      var parts = []
+      var total = 0
+      for (;;) {
+        var step = await reader.read()
+        if (step.done === true) break
+        parts.push(step.value)
+        total += step.value.length
+      }
+      var merged = new Uint8Array(total)
+      var at = 0
+      for (var i = 0; i < parts.length; i++) {
+        merged.set(parts[i], at)
+        at += parts[i].length
+      }
+      return merged
+    }
+    return new Uint8Array(await new Response(body).arrayBuffer())
+  }
+
+  /** 分块转换，避免 `String.fromCharCode.apply` 在 MB 级数据上超参数上限。 */
+  function bytesToBase64(bytes) {
+    var binary = ''
+    var CHUNK = 0x8000
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
+    }
+    return btoa(binary)
+  }
+
+  /** 构造一个"够用"的 Response：消费方只用到 `status` 与 `text()`。 */
+  function uploadResponse(status, result) {
+    return {
+      status: status,
+      ok: status >= 200 && status < 300,
+      text: function () {
+        return Promise.resolve(JSON.stringify(result))
+      },
+    }
+  }
+
+  /**
+   * 安装 `__DSH_FILE_UPLOAD__`：让**附件上传走我们的加密隧道**。
+   *
+   * ## 为什么必须装这个钩子
+   *
+   * 手机上选一张照片时，DSH 的附件流程走的是**二进制 POST**
+   * `POST /api/session/uploadFileBinary?sessionId=…&name=…`（`content-type: octet-stream`）。
+   * 没有这个钩子时它会开一个 **Web Worker** 直接在页面源上 `fetch` —— 而那条路
+   * 在手机上会撞上 DSH 自己的 cookie 栅栏（**401**），于是"发照片"永远失败，
+   * 而且报错与真实原因（没走隧道）看起来毫无关系。
+   *
+   * 装了钩子后 DSH 改用我们提供的 carrier，我们把字节经隧道发给
+   * `fileUploads/upload`（DSH 自己的端点，我们只做转发），拿到回执原样返回。
+   *
+   * ## 两个实现要点
+   *
+   * 1. **必须在脚本加载时同步安装**：DSH 的 `FileUploadRuntime` 在插件启动时
+   *    **只读一次** `globalThis.__DSH_FILE_UPLOAD__`，而我们的隧道握手是异步的。
+   *    所以这里不直接持有隧道，而是通过 `waitForTunnel()` 惰性等待——
+   *    与占位传输层同一套语义（未配对时会交还原生行为）。
+   * 2. **返回的是裸 `RemoteResult`**：DSH 那边 `JSON.parse(body)` 后要求
+   *    `{ok, value|error}` 的形状（不是我们内部那种 `{type,rpcId,result}` 信封），
+   *    所以要把 `envelope.result` 拆出来。
+   */
+  // ── 端侧通道（电脑 → 手机）的手机侧实现**已摘除** ──────────────────────
+  //
+  // 宿主侧（`mobile/device/*` 四个端点、默认全禁、只投递一次、过期作废、结果有界）
+  // 已完整实现并有 89 条单测覆盖，**保留**。
+  //
+  // 手机侧这一跳在最后三轮里做了三处修复（传输层没有 `.rpc`、DOM 就绪前先记账、
+  // 授权条自动消失）而**验证始终未通过**：授权条在本机探针里查不到，
+  // 而 `localStorage` 显示 `askOnce` 确实跑过。最后一轮的诊断结论是
+  // "跑到了但结果不可见"，方向已缩小，但**没有查完**。
+  //
+  // 按"未验证的代码不进树"的规矩把它摘掉：留着它会让下一次部署带入一段
+  // 每 4 秒发一次注定失败轮询、且掩盖真实状态的代码。
+  //
+  // 恢复方法（下一轮从零开始，别在旧实现上猜）：
+  //   1. 先设 `globalThis.__DSHM_DEVICE_DEBUG__ = true`（页面脚本之前注入），
+  //      让轮询失败打日志——这一步上一轮**做对了**，是唯一产生有效信息的动作；
+  //   2. 用 `localStorage` 的键（`dsh-mobile.deviceAsk.show`）判断 `askOnce` 是否跑到；
+  //   3. 再决定是"调用失败"还是"安装链路没走到"——这两个方向要查的地方完全不同。
+  //
+  // 骨架（宿主侧契约已定，照它写即可）：
+  //   · 轮询 `mobile/device/pending` 取回 `{calls, capabilities}`；
+  //   · 取到 `show` 就显示横幅，然后 `mobile/device/result {id, ok, detail}` 回报；
+  //   · 首次征询用户（**授权条不要自动消失**——它是征询意见，不是通知）；
+  //   · 征得同意后调 `mobile/device/enable {capability:'show', enabled:true}`。
+  //   注意 `waitForTunnel()` 给的是**传输层**，只有 `fetch`/`openStream`，**没有 `.rpc`**。
+
+  /**
+   * 端侧通道（电脑 → 手机）：轮询取请求、征询一次、执行并回报。
+   *
+   * ## 方向
+   *
+   * 隧道一直是"手机 → 电脑"。反过来最省事的做法是**手机主动来取**：每几秒问一次
+   * "有没有我的请求"。于是**不需要新增协议**——加密、能力门禁、审计全部照旧。
+   *
+   * ## 两个关键点（都是踩过才明白的）
+   *
+   * 1. **`waitForTunnel()` 给的是传输层**，只有 `fetch`/`openStream`，**没有 `.rpc`**。
+   *    直接调 `.rpc` 会抛错；而这里若把异常静默吞掉，症状就是"什么都不发生"。
+   *    所以：自己构造 client-request 信封（与附件钩子同一套），并且失败要能看见。
+   *
+   * 2. **"问过了"必须记在"用户答过"上，而不是"弹过了"**。
+   *    配对成功后页面会**重载一次**，把 DOM 全部冲掉——若在"弹出时"就记账，
+   *    授权条会被重载抹掉、而记账还在，于是**它再也不会出现**，
+   *    能力永远停在未启用。这正是我前三轮反复修不对的原因：
+   *    症状始终是"授权条查不到"，而真因是"它出现过、被重载抹掉了、又不再出现"。
+   */
+  // 页面一加载就写一行，这样"黑框有没有出现"本身就是第一个可判定信号
+  try {
+    // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
+    //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
+    //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
+    var BOOT_STAMP = 'BUILD-0929101439'
+    /**
+     * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
+     *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
+     *   （手机上排障只能靠屏幕上的字 ✓。）
+     */
+    setTimeout(function () {
+      try {
+        var safeTop = getComputedStyle(document.documentElement).getPropertyValue('--dshm-safe-top').trim()
+        var probe = document.createElement('div')
+        probe.style.cssText = 'position:absolute;left:-9999px;top:0;height:env(safe-area-inset-top,0px);'
+        document.body.appendChild(probe)
+        var envTop = probe.getBoundingClientRect().height
+        probe.remove()
+        var preview = document.querySelector('[class*="_preview"]')
+        var pad = preview === null ? '(还没有预览层)' : Math.round(parseFloat(getComputedStyle(preview).paddingTop) || 0) + 'px'
+        var keyboard = getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard').trim()
+        var composer = document.querySelector('[class*="composerSeat"], [class*="composerStack"]')
+        var composerBottom =
+          composer === null ? '(无输入区)' : Math.round(composer.getBoundingClientRect().bottom) + 'px'
+        var shell = shellBridge()
+        // ★ 先**拉一次**壳的 insets ✓（round 115）：这一行是"壳有没有生效"的唯一判据 ✓，
+        //   而推送可能还没到 ✗ —— 读之前先补一下，屏幕上的字才可信 ✓。
+        pullShellInsets()
+        var shellInsets = shellJson('insets')
+        // ★ 报**生效值**（max(变量, env) ✓）—— 与设置页那一行同一个读法 ✓
+        safeTop = safeTopPx() + 'px'
+        var safeSource =
+          shellInsets !== null && shellInsets.seen === true
+            ? '壳实测'
+            : envTop > 0
+              ? '浏览器 env()'
+              : '无'
+        debugBoxLine(
+          '[shell] 壳版本=' +
+            (shell !== undefined ? String(shell.version()) : '（不是 APK，是浏览器 ✓）') +
+            '｜视口=' + window.innerWidth + '×' + window.innerHeight +
+            '｜通知=' + notifyPermissionState() + (shell !== undefined ? '（原生）' : '（浏览器）'),
+        )
+        debugBoxLine(
+          '[layout] 安全区：变量=' + (safeTop || '(空)') + '（来源=' + safeSource + '） env=' + Math.round(envTop) +
+            'px 预览层上内边距=' + pad +
+            '｜键盘：变量=' + (keyboard || '(空)') + ' 输入区底边=' + composerBottom +
+            '（弹输入法后这一行会自己刷新 ✓）',
+        )
+
+        /**
+         * ★★ round 120：**让手机把欢迎页那个「预览版」徽标的真实几何念出来** ✓。
+         *
+         * 为什么要在真机上量 ✗：同一段 CSS 在无头里量出来是 **52×20 的正常小胶囊** ✓，
+         * 而用户手机上它被**拉高变形** ✗（截图 ✓）—— 我在电脑上复现不了 ✗，
+         * 上一轮"按猜到的结构钉死几何"因此**没起作用**✗。
+         * 这一行只在**那个徽标存在时**（欢迎页 ✓）才打印 ✓，读一次就能定位 ✓。
+         * 读法：手机打开 `.../mobile/app?debug=1` → 看 `[badge]` 那一行 ✓。
+         */
+        try {
+          var badgeNodes = document.querySelectorAll('[class*="previewBadge"]')
+          if (badgeNodes.length > 0) {
+            var badge = badgeNodes[0]
+            var br = badge.getBoundingClientRect()
+            var bcs = getComputedStyle(badge)
+            var bparent = badge.parentElement
+            var pr = bparent === null ? null : bparent.getBoundingClientRect()
+            debugBoxLine(
+              '[badge] rect=' + Math.round(br.width) + '×' + Math.round(br.height) +
+                ' @' + Math.round(br.left) + ',' + Math.round(br.top) +
+                '｜display=' + bcs.display + ' alignSelf=' + bcs.alignSelf +
+                ' height=' + bcs.height + ' maxH=' + bcs.maxHeight + ' minH=' + bcs.minHeight +
+                ' lh=' + bcs.lineHeight + ' fs=' + bcs.fontSize +
+                ' pad=' + bcs.padding + ' inline=' + String(badge.getAttribute('style') || '(无)') +
+                '｜父=' + (bparent === null ? '?' : String(bparent.className || bparent.tagName).split(' ')[0]) +
+                (pr === null ? '' : ' ' + Math.round(pr.width) + '×' + Math.round(pr.height) + ' flex=' + getComputedStyle(bparent).display + '/' + getComputedStyle(bparent).alignItems),
+            )
+          }
+        } catch (badgeError) {
+          void badgeError
+        }
+      } catch (error) {
+        debugBoxLine('[layout] 安全区自检失败：' + String(error && error.message ? error.message : error))
+      }
+    }, 1500)
+
+    // ★ 框里明说"它不挡触摸、以及想滚动/复制该怎么关" ✓ —— 用户报"链接点不开"时，
+    //   没人会想到是这个框 ✗（它就长成一屏日志 ✓）。
+    var BOOT_DEBUG_NOTE =
+      '[boot] ' + BOOT_STAMP + ' | 调试已开启 ' + location.pathname + location.search +
+      '（这个框不挡触摸 ✓；要滚动或复制文字，请用 ?debug=0 关掉调试再刷新）'
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { debugBoxLine(BOOT_DEBUG_NOTE) })
+    else debugBoxLine(BOOT_DEBUG_NOTE)
+  } catch (error) {
+    void error
+  }
+
+  /**
+   * ──────────── ★★ 原生时钟驱动网页：登记处 + 让位判据（方案 B′ 的网页侧一半）────────────
+   *
+   * ## 这一块治的是哪件事（用户报的"退出 App 就断联" ✓）
+   *
+   * 网页层的保活与轮询**全部**是页面自己的定时器 ✓（15s Ping ✓、4s 端侧轮询 ✓）——
+   * 而 App 退到后台之后**页面被冻结** ✗ ⇒ 定时器不跑 ✗ ⇒ 空闲隧道被中间设备回收 ✗、
+   * 就算连接还在，回调也跑不了 ⇒ **通知发不出去** ✗（真机确认，见 `10-交接文档.md` §六 ✓）。
+   *
+   * 已定方案 B′ ✓（用户拍板 ✓）：**前台服务提供"活着的进程"、`moveTaskToBack` 提供
+   * "活着的 WebView"、原生 `Handler` 提供"活着的时钟"** ✓ ——
+   * **加密与业务仍然是网页层这一份** ✓：协议 / 密钥 / 证书 / TOFU / 审计**一行都不重写** ✓，
+   * 宿主侧**零改动** ✓。原生只多做一件事：**定时来"戳"网页** ✓，让网页用**它自己已有的
+   * 那套实现**干活 ✓。这里就是那个"被戳"的落点 ✓。
+   *
+   * ## 跨单契约（名字一个字母都不许改 ✗）
+   *
+   *   · 原生 → 网页：`globalThis.__DSH_MOBILE_BOOT__.tick('ping' | 'poll')` ✓
+   *     原生 `KeepAliveService` 注入的就是这一条 ✓（每 15s 一次 ping ✓、每 4s 一次 poll ✓）：
+   *       (function(){try{var b=window.__DSH_MOBILE_BOOT__;if(b&&typeof b.tick==='function')return b.tick('ping')}catch(e){}return 'no'})()
+   *     `kind` 只认 `'ping'` / `'poll'` ✓，其它（含不传 ✓）**一律当 `'ping'`** ✓；
+   *     **返回一个字符串** ✓（给人念的 ✓）；**永远不许抛** ✗（注入是一段裸 IIFE ✓，
+   *     抛出去只会静默消失在 logcat 里 ✗）。实现在 `mobileTick` ✓。
+   *   · 网页 → 原生：`window.DshmShell.setKeepAliveState(String json)` ✓
+   *     形如 `{"connected":true,"endpoint":"10.34.255.229:3443","retry":0}` ✓
+   *     （实现在 `reportKeepAliveState` ✓；**没壳时静默 no-op** ✓）。
+   *
+   * ## 三条不许松的口径（每一条都写在各自的函数里 ✓）
+   *   ① 两个触发源（页面定时器 ✓ / 原生 tick ✓）**共用同一份实现** ✗ 绝不抄第二份 ✓
+   *      —— 这个项目为"双份维护"吃过大亏 ✓（`07-…:251/285`："双份维护时我自己删掉了两行"✗）；
+   *   ② 不 connected 时**绝不取待办** ✓（`takePending` 是"取走即标记为已投递" ✓、
+   *      TTL 只有 120 秒 ✓ ⇒ 取回来的待办**弹不出来就永久丢** ✗✗，而且两端都不报错 ✓）；
+   *      ★ 但同一时刻**要驱动既有那套重连** ✓（后台里页面自己的退避定时器被冻结 ✗ ⇒
+   *      不接上这一半的话，"断在后台"就永远回不来 ✗）—— 见 `nativeClockRedial` ✓；
+   *   ③ 状态回传**只在状态真的变化时**发 ✓（每次 tick 都发就是刷屏 ✗）。
+   */
+
+  /**
+   * 让位租约（毫秒）= "**原生时钟还活着**"的判据 ✓。
+   *
+   * ## 为什么是"租约"而不是"收到一次 tick 就永久让位" ✗✗
+   *   原生那一侧**可能根本没在跑** ✓：老 APK 没有前台服务 ✓、服务被系统/厂商 ROM 杀掉 ✓、
+   *   用户还没装新 APK ✓ —— 都是真实可能 ✓（当前就处在"网页层先落地、APK 后装"的中间态 ✓）。
+   *   永久让位的话，页面自己的定时器就**再也不跑** ✗ ⇒ 端侧通知彻底停摆 ✓，
+   *   而屏幕上**什么都不会说** ✗（"静默失效"本项目零容忍 ✓）。
+   *   ⇒ 所以是租约：原生在驱动 ⇒ 页面这一路让位 ✓；原生停摆 ⇒ 页面**自动接手** ✓。
+   *
+   * ## 为什么是 30 秒
+   *   最慢那一路是 15s 的 ping ✓ ⇒ 30 秒 = **两个周期** ✓：
+   *   原生正常时页面这一路**永远不会**在这个窗口里插一脚 ✓（不双跑 ✓）；
+   *   原生一停，最多 30 秒后页面自己接回来 ✓（端侧通道不会出现"没人轮询"✗）。
+   *
+   * ★ 租约的基准是"**真的干了活**"的时刻 ✓（`lastPingDrivenAt` / `lastPollDrivenAt` ✓），
+   *   **不是**"收到 tick"的时刻 ✗ —— 见 `mobileTick` 里那段说明 ✓
+   *   （否则"原生每 4 秒戳一次、但每次都因为没连上而不干活"会把页面自己那一路也一起冻住 ✗）。
+   */
+  var NATIVE_CLOCK_LEASE_MS = 30000
+
+  /**
+   * ★★ 保活时钟的**唯一一本账** ✓（设置页「后台保活」那一行 ✓、验收读数 ✓ 都读它 ✓）。
+   *
+   * 为什么要记账 ✗：真机上"**原生注入的 JS 在后台到底还执不执行**"是方案 B′ 的**命门** ✓
+   * （`25-壳侧保活与通知-勘察与方案.md` §4.5 就是先做这个实测 ✓），
+   * 而手机上既没有控制台、也没有 logcat ✓ ⇒ 没有这几个数就只能靠猜 ✗
+   * （本项目"看不到界面就盲改 CSS、连引 4 次回归"就是这么来的 ✓）。
+   */
+  var keepAliveStats = {
+    /** 收到过几次原生 tick ✓ —— ★ **计数 > 0 就是"原生时钟真的在驱动"的直接证据** ✓。 */
+    pingTicks: 0,
+    pollTicks: 0,
+    /** 最近一次**收到**原生 tick 的时刻 ✓（两种各记一份 ✓ —— 见 `mobileTick` ✓）。 */
+    lastPingTickAt: 0,
+    lastPollTickAt: 0,
+    /** 最近一次**真的干了活**的时刻 ✓（ping 真发出去了 ✓ / poll 真跑了一轮 ✓）—— 诊断行读它 ✓。 */
+    lastPingAt: 0,
+    lastPollAt: 0,
+    /**
+     * ★ 最近一次原生 tick 的**驱动时刻** ✓（= 让位租约的基准 ✓，与"收到"分开记 ✗）。
+     *   只有 `mobileTick` 会写它 ✓ —— 页面自己那一路**绝不写** ✗：
+     *   写了自己就会把自己压住 ✓（15s 的 ping 撞上 30s 的租约 ⇒ 变成 30s 才发一发 ✗）。
+     */
+    lastPingDrivenAt: 0,
+    lastPollDrivenAt: 0,
+    /** 最近一次 tick 的返回串 ✓（与 `tick` 的返回值同源 ✓ —— 真机排障时念这一行 ✓）。 */
+    lastTickResult: '（还没收到过原生 tick）',
+    /**
+     * ★★ 原生时钟**催过几次重拨** ✓ + 最近一次的时刻与"这一发为什么没催" ✓。
+     *
+     * 为什么必须记 ✗：真机实验要能分开**三种情形** ✓ ——
+     *   · 原生**没戳**（tick 计数 0 ✓）；
+     *   · 戳了但**连不上**（tick 涨 + `redials` 涨 + 隧道仍不是 connected ✓）；
+     *   · **连上了**（隧道状态 ✓）；
+     * 再加第四种：戳了、但既有机制说"**已放弃**"✓（`paused` ✓ —— 那是在等用户手动 ✓，
+     * 不是"原生没干活"✗）。没有这几个数，这四种在屏幕上一模一样 ✗。
+     */
+    redials: 0,
+    lastRedialAt: 0,
+    lastRedialVerdict: '（还没催过）',
+  }
+
+  /** "多久以前"的人话 ✓（诊断行专用 ✓：`从未` / `刚刚` / `12 秒前` / `3 分前` ✓）。 */
+  function keepAliveAgoText(at) {
+    if (!at) return '从未'
+    var ms = Date.now() - at
+    if (ms < 0) ms = 0
+    if (ms < 1000) return '刚刚'
+    if (ms < 60000) return Math.round(ms / 1000) + ' 秒前'
+    return Math.round(ms / 60000) + ' 分前'
+  }
+
+  /**
+   * ★★ 「后台保活」那一行的读数 ✓ —— 设置页「端侧诊断」那一组里 ✓，
+   * 也是**真机排障唯一**的抓手 ✓（手机上既没有控制台、也没有 logcat ✓）。
+   *
+   * 它要回答两个问题（**按重要性排** ✓，别把顺序搞反 ✗）：
+   *   ① **原生时钟到底有没有在驱动** ✓ —— 判据 = 本页收到过几次原生 tick ✓。
+   *      "注入的 JS 在后台到底还执不执行"是方案 B′ 的**命门** ✓
+   *      （`25-壳侧保活与通知-勘察与方案.md` §4.5 第一步就是实测它 ✓），
+   *      这个计数是它的**直接证据** ✓（不是推断 ✓）。
+   *   ② **活到底干了没有** ✓ —— 最近一次 ping / poll 的时刻 ✓。
+   *      ★ 必须与"收到 tick"**分开看** ✓：原生可能每 4 秒戳一次、而每次都因为
+   *      没连上而**不干活** ✓（`poll:offline` ✓）—— 只看 tick 数会误判成"一切正常"✗。
+   * 末尾那个"最近一次 tick"就是 `tick` 的**返回串本身** ✓（与原生 logcat 里那行同源 ✓，
+   * 用户念出来即可对齐两端 ✓）。
+   */
+  function keepAliveDiagnosticText() {
+    var total = keepAliveStats.pingTicks + keepAliveStats.pollTicks
+    var head
+    if (total > 0) {
+      head =
+        '原生驱动 ✓ 本页收到 ' + String(total) + ' 次 tick（ping ' + String(keepAliveStats.pingTicks) +
+        ' / poll ' + String(keepAliveStats.pollTicks) + '）'
+    } else if (shellBridge() !== undefined) {
+      // ★ 有壳却一次都没收到 ⇒ 这就是"原生那一半还没到位"✓（老 APK / 服务没起来 ✓）。
+      //   括号里那句是给用户看的**安抚 + 事实**：页面自己那一路还在跑 ✓，功能没停 ✓。
+      head = '未见原生 tick（页面自身定时器在跑）'
+    } else {
+      head = '无壳（纯浏览器：没有原生时钟这回事）'
+    }
+    return (
+      head +
+      '｜隧道 ' + keepAliveTunnelState() +
+      /**
+       * ★★ 催重拨那一截 ✓ —— 真机实验靠它把**四种情形**分开 ✓（见 `keepAliveStats` 那段 ✓）：
+       *   原生没戳（tick 数 0）/ 戳了连不上（tick+催重拨都涨、隧道仍不是 connected）/
+       *   连上了（隧道 connected）/ 已放弃（`paused` ✓ —— 在等用户手动，不是原生没干活 ✗）。
+       */
+      '｜催重拨 ' + String(keepAliveStats.redials) + ' 次（最近 ' +
+        keepAliveAgoText(keepAliveStats.lastRedialAt) + ' · ' + keepAliveStats.lastRedialVerdict + '）' +
+      '｜最近 ping ' + keepAliveAgoText(keepAliveStats.lastPingAt) +
+      '｜最近 poll ' + keepAliveAgoText(keepAliveStats.lastPollAt) +
+      '｜最近一次 tick：' + keepAliveStats.lastTickResult
+    )
+  }
+
+  /**
+   * 上面那一行的语气 ✓：原生真驱动过 ⇒ `ok` ✓；有壳却一次 tick 都没收到 ⇒ `warn` ✓
+   * （**那正是要看的那个状态** ✓，不该藏起来 ✗）；没有壳 ⇒ 不表态 ✓
+   * （纯浏览器里"后台保活"这件事根本不存在 ✓，标个黄点只会误导 ✓）。
+   */
+  function keepAliveDiagnosticTone() {
+    if (keepAliveStats.pingTicks + keepAliveStats.pollTicks > 0) return 'ok'
+    return shellBridge() !== undefined ? 'warn' : undefined
+  }
+
+  /** 现在这条隧道是什么状态 ✓（读**既有**的 `__DSH_MOBILE_BOOT__.state()` ✓ —— 不新造第二个事实来源 ✗）。 */
+  function keepAliveTunnelState() {
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var state = api !== undefined && typeof api.state === 'function' ? api.state() : undefined
+      return typeof state === 'string' && state.length > 0 ? state : 'idle'
+    } catch (error) {
+      return 'unknown'
+    }
+  }
+
+  /**
+   * **页面自己那一路定时器**这一发该不该跑 ✓（原生在驱动 ⇒ 让位 ✓）。
+   *
+   * 判据只有一个：这一类活儿**最近一次真的由原生驱动**是在多久以前 ✓
+   * （`lastPollDrivenAt` / `lastPingDrivenAt` ✓，两种**分开记账** ✗ 不许合成一个时间戳 ✓
+   * —— 原生可能只驱动其中一路 ✓：设计上"隧道没连上就不驱动 poll"✓，
+   * 那时若两路共用一个时间戳，15 秒一次的 ping 会把 4 秒一次的轮询**永远压住** ✗✗）。
+   *
+   * @returns true = 页面这一发照跑 ✓；false = 原生正在驱动，这一发**直接让开** ✓。
+   */
+  function keepAliveShouldRun(kind) {
+    var drivenAt = kind === 'poll' ? keepAliveStats.lastPollDrivenAt : keepAliveStats.lastPingDrivenAt
+    if (!drivenAt) return true
+    return Date.now() - drivenAt >= NATIVE_CLOCK_LEASE_MS
+  }
+
+  /**
+   * 把"这一发没连上"接到**既有那套重连**上 ✓，并给出一个**给人念**的串 ✓。
+   *
+   * 为什么要有这个包装 ✗：`mobileTick` 的 ping / poll **两条分支**都要做同一件事——
+   * "没连上 ⇒ 催一次既有重拨 ✓，并把结论写进返回串 ✓"。两处各写一遍就是双份实现 ✗
+   * （本项目为零容忍 ✓），所以规则只在这里写一次 ✓。
+   *
+   * 返回串的口径（四档 ✓，真机排障时**一眼分得开** ✓）：
+   *   · `<kind>:redial` —— ★ 真的催了一发既有重拨 ✓（`nativeClockRedial` 回了 `'redial'` ✓）；
+   *   · `<kind>:paused` —— ★ 自动重连**已放弃**（5 轮 / 20 秒用完 ✓）⇒ 在等用户手动 ✓
+   *     （原生戳**也不许**推翻这个决定 ✗，所以这一发什么都不做 ✓）；
+   *   · `<kind>:budget` —— 总预算刚到时**触发了既有那条放弃路径** ✓（与退避定时器体同一个出口 ✓）；
+   *   · `<kind>:offline` —— 别的"没连上" ✓（链路活着 / 已经有拨号在飞 / 明确关掉了自动重连 ✓）
+   *     —— 这一档**照旧**是原来那句串 ✓（`'poll:offline'` 一个字母没改 ✓）。
+   */
+  function keepAliveRedialText(kind, tunnel) {
+    var none = kind + ':offline'
+    if (tunnel === undefined || tunnel === null || typeof tunnel.nativeClockRedial !== 'function') return none
+    var verdict
+    try {
+      verdict = String(tunnel.nativeClockRedial())
+    } catch (error) {
+      // ★ 这一层也绝不抛 ✗（`tick` 的最外层虽然也兜着 ✓，但这里离得近、写清楚更好查 ✓）
+      return kind + ':error'
+    }
+    if (verdict === 'redial') return kind + ':redial'
+    if (verdict === 'paused' || verdict === 'budget') return kind + ':' + verdict
+    return none
+  }
+
+  /** 上一次报给壳的状态串 ✓（"只在变化时发"的去重键 ✓，见 `reportKeepAliveState` ✓）。 */
+  var lastKeepAliveReport = null
+
+  /**
+   * 当前端点写成 **`host:port`** ✓（契约里的例子就是 `10.34.255.229:3443` ✓）。
+   *
+   * 为什么不直接把 `tunnel.activeEndpoint` 原样发出去 ✗：它是一条**完整 URL** ✓
+   * （`wss://10.34.255.229:3443/mobile/ws` ✓，见 `openEndpoint` 之后那一处赋值 ✓），
+   * 而壳那一侧是把它**写进常驻通知给人念的** ✓ —— 协议前缀与路径对用户是噪音 ✓，
+   * 契约例子给的也正是 authority ✓。取不到 / 不是合法 URL ⇒ 原样兜底 ✓（**绝不编**✗）。
+   */
+  function keepAliveEndpointText(tunnel) {
+    if (tunnel === undefined || tunnel === null || typeof tunnel.activeEndpoint !== 'string') return null
+    var raw = tunnel.activeEndpoint
+    try {
+      var parsed = new URL(raw)
+      return parsed.host !== '' ? parsed.host : raw
+    } catch (error) {
+      return raw
+    }
+  }
+
+  /**
+   * ★★ 状态回传：网页 → 原生（`DshmShell.setKeepAliveState(json)` ✓）。
+   *
+   * 谁在等它：常驻通知的文案要在"**已连接 / 正在重连**"之间切换 ✓
+   * （用户要能一眼看到"到底还连着没有" ✓，也避免"假活"✗ —— 通知一直在、其实早断了 ✗）。
+   *
+   * ## 三条口径
+   *   ① **只在状态真的变化时发** ✓：去重键就是那个 JSON 串本身 ✓
+   *      ⇒ 调用方（隧道 `onState` ✓）**无条件调**即可 ✓，不需要各自再判一次 ✓
+   *      （"什么时候该发"只有一个判据 ✓，本项目对"两处各判一半"零容忍 ✗）；
+   *   ② **没壳 ⇒ 静默 no-op** ✓：没有桥就没有"壳那边"这回事 ✓，绝不因此抛错 ✗
+   *      （这条路的验收脚本就是用**纯浏览器**跑的 ✓）；
+   *   ③ 键**就这三个** ✓（`connected` / `endpoint` / `retry` ✓）—— 契约怎么写的就怎么发 ✓，
+   *      多塞一个键等于把解析风险推给原生那一单 ✗（那边是 Java 侧 `JSONObject` ✓）。
+   *
+   * @returns 真发出去的那个 JSON 串 ✓；没壳 / 没变化 / 桥抛错 ⇒ `null` ✓（**绝不抛** ✗）。
+   */
+  function reportKeepAliveState() {
+    var bridge = shellBridge()
+    // ★ 照抄 `shellNotify` 那条既有桥的写法 ✓（判"有没有壳" + `typeof` 判方法 ✓ + try/catch ✓）
+    //   —— 全文件只有这一种"怎么调壳"的写法 ✗，不许在这里发明第二套 ✓。
+    if (bridge === undefined || typeof bridge.setKeepAliveState !== 'function') return null
+    var json
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var tunnel = api !== undefined ? api.tunnel : undefined
+      var live = tunnel !== undefined && tunnel !== null
+      json = JSON.stringify({
+        connected: keepAliveTunnelState() === 'connected',
+        // 壳侧只用来写文案 ✓ ⇒ 地址取"当前真的走通的那条" ✓，写成 host:port ✓
+        // （`activeEndpoint` 是完整 URL ✓，转换与理由见 `keepAliveEndpointText` ✓）
+        endpoint: keepAliveEndpointText(tunnel),
+        // `retry` = 自动重连已经试了几轮 ✓（`Tunnel.attempt` ✓：连上即清零 ✓，见 `noteDialSuccess` ✓）
+        retry: live && typeof tunnel.attempt === 'number' ? tunnel.attempt : 0,
+      })
+    } catch (error) {
+      return null
+    }
+    if (json === lastKeepAliveReport) return null
+    lastKeepAliveReport = json
+    try {
+      bridge.setKeepAliveState(json)
+      return json
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * ★★ **原生时钟的入口** ✓ —— `tick('ping')` / `tick('poll')` ✓（跨单契约见上 ✓）。
+   *
+   * 它自己**不干活** ✗，只做三件事：
+   *   ① 认 `kind`（只认 `'poll'` ✓，其它一律当 `'ping'` ✓）；
+   *   ② 记账（收到几次 ✓、最近一次是什么时候 ✓、返回串是什么 ✓ —— 见 `keepAliveStats` ✓）；
+   *   ③ **分派给页面原有的那一份实现** ✓（ping ⇒ `Tunnel.sendKeepalivePing` ✓；
+   *      poll ⇒ `devicePollEntry` ✓ = `installDeviceChannel` 里那个 `devicePollTick` ✓）。
+   *
+   * ## ★★ poll 的前置判断（这一条会**静默丢通知** ✗，所以写在最显眼处 ✓）
+   *
+   * `takePending` 是"**取走即标记为已投递**"✓（`packages/host/src/device-calls.ts:174` ✓），
+   * 而 TTL 只有 120 秒 ✓ ⇒ 待办一旦被取走、却没能在屏幕上弹出来，就是**永久丢** ✗✗——
+   * **两端都不报错** ✓，事后连痕迹都没有 ✓（本项目吃过这一类亏 ✓）。
+   * ⇒ 所以这里**先判一次连接状态** ✓：不是 `connected` 就**绝不进 `poll()`** ✓
+   *   （取待办那半一个字都不动 ✗）。判据用页面自己的 `state()` ✓
+   *   （与前台自愈 `selfHealDecision` 里读的是**同一个** `state()` ✓，不新造判据 ✗）。
+   *
+   * ## ★★ 但"不取待办"≠"什么都不做" —— 重连那半要接上 ✓
+   *
+   * 后台里页面自己的重连也靠 `setTimeout` 退避 ✓，而它**同样被冻结** ✗ ⇒
+   * 只判连接状态就返回的话，**断在后台的连接永远回不来** ✗✗
+   * （"后台不断联"的本体恰恰是"断了能自己回来"✓）。所以两条分支在"没连上"时
+   * 都调一次 `keepAliveRedialText` ✓ ⇒ `tunnel.nativeClockRedial()` ✓ ——
+   * **判据、预算、计数全部复用既有那套** ✓（见那个函数的长注释 ✓），
+   * 它说"还没到点 / 正在连 / 已放弃"就**什么都不做** ✓。
+   *
+   * ## ★ 为什么"收到 tick"与"真的驱动"要分开记账 ✗
+   *   原生**可能每 4 秒都戳一下、但每次都不是 `connected`** ✓（它那边的健康检查与网页的状态
+   *   不一定同拍 ✓）⇒ 若把"收到 tick"当作让位租约的基准 ✓，页面自己那一路轮询就会被
+   *   **永久压住** ✗ —— 而页面那一路还兼着"按需重拨"的作用 ✓（`rpc` → `dialNow(false)` ✓，
+   *   `Tunnel.prototype.rpc` 开头那句 `await this.dialNow(false)` ✓：
+   *   4 秒一轮的轮询本来就是端侧的重连驱动之一 ✓）。
+   *   ⇒ 只有真驱动了才刷新租约 ✓（`lastPollDrivenAt` / `lastPingDrivenAt` ✓）。
+   *
+   * @returns 一个**给人念**的串 ✓（原生把它写进 logcat / 通知 ✓）：
+   *   `'ping'`（发了 ✓）/ `'ping:offline'`（没连上、也没催重拨 ✓）/ `'ping:redial'`（没连上 ⇒ **催了一发既有重拨** ✓）/
+   *   `'ping:paused'` / `'ping:budget'`（自动重连已放弃 / 刚到预算 ✓ —— 原生戳不再拨 ✓）/
+   *   `'poll'`（驱动了一轮 ✓）/ `'poll:offline'` / `'poll:redial'` / `'poll:paused'` / `'poll:budget'`（同上 ✓）/
+   *   `'poll:busy'`（上一轮还没完 ✓）/ `'poll:unsupported'`（宿主没有那条端点 ✓）/
+   *   `'no'`（没有隧道 / 通道没装 / 出了任何意外 ✓）。**永不抛** ✗。
+   */
+  function mobileTick(kind) {
+    // ★ 只认 'poll' ✓，其它（含不传 / 传错 ✓）一律当 'ping' ✓ —— 契约原话 ✓。
+    var what = kind === 'poll' ? 'poll' : 'ping'
+    var result = 'no'
+    try {
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var tunnel = api !== undefined ? api.tunnel : undefined
+      if (what === 'ping') {
+        // ★ 记账先做 ✓：**不管这一发能不能真干活** ✓ —— 这个计数就是"原生注入的 JS
+        //   在后台到底还执不执行"的证据 ✓，把它记在"发成功"后面就等于把证据丢了 ✗。
+        keepAliveStats.pingTicks += 1
+        keepAliveStats.lastPingTickAt = Date.now()
+        if (tunnel === undefined || tunnel === null || typeof tunnel.sendKeepalivePing !== 'function') {
+          result = 'no'
+        } else if (tunnel.sendKeepalivePing() === true) {
+          keepAliveStats.lastPingDrivenAt = Date.now()
+          result = 'ping'
+        } else {
+          // 没连上（socket 不在 OPEN ✓）⇒ 前置判断把它挡住了 ✓，**这一帧一个字都没发** ✓。
+          // ★★ 但"发不出去"不等于"没事干" ✗：后台里页面自己的重连也靠退避定时器 ✓，
+          //   而它**同样被冻结** ✗ ⇒ 这一发顺手把**既有那套重连**点一次 ✓
+          //   （判据与上限全在 `nativeClockRedial` 里 ✓，这里只是接上 ✓）。
+          result = keepAliveRedialText('ping', tunnel)
+        }
+      } else {
+        keepAliveStats.pollTicks += 1
+        keepAliveStats.lastPollTickAt = Date.now()
+        if (devicePollEntry === null) {
+          // 没装端侧通道（不是手机表面 ✓ / 没有 document ✓）⇒ 真的没什么可做 ✓
+          result = 'no'
+        } else if (keepAliveTunnelState() !== 'connected') {
+          /**
+           * ★★ 取待办那半**一个字都不动** ✗：不 connected ⇒ **绝不** `poll()` ✓
+           *   （`takePending` 取走即投递 + TTL 120s ⇒ 取回来弹不出去就**永久丢** ✓ —— 见上 ✓）。
+           * ★★ 重连那半**接上** ✓：后台里页面自己的退避定时器被冻结 ✗ ⇒
+           *   靠这一发把**既有那套重连**点着 ✓（`nativeClockRedial` ✓）——
+           *   这正是 B′ 的另一半价值 ✓："断了能自己回来"✓，而不只是"维持没断的连接"✓。
+           */
+          result = keepAliveRedialText('poll', tunnel)
+        } else {
+          var driven = devicePollEntry()
+          result = driven === 'poll' ? 'poll' : 'poll:' + String(driven)
+          if (driven === 'poll') keepAliveStats.lastPollDrivenAt = Date.now()
+        }
+      }
+    } catch (error) {
+      // ★★ **永不抛** ✗：注入是裸 IIFE ✓，抛出去在手机上没有任何痕迹 ✗
+      //   （最坏的一种失败 ✓）⇒ 一律降级成串 'no' ✓，细节留在 `lastTickResult` ✓。
+      result = 'no'
+    }
+    // 认不出来的串（`devicePollEntry` 以后回了什么新东西 ✓）也照样回给原生 ✓ —— 只记不拦 ✓
+    keepAliveStats.lastTickResult = String(result)
+    return String(result)
+  }
+
+  /**
+   * 端侧轮询的**入口登记** ✓（`tick('poll')` 读它 ✓）。
+   *
+   * 为什么用"登记"而不是让 `mobileTick` 直接调 `poll` ✗：`poll` 只活在
+   * `installDeviceChannel` 的作用域里 ✓（它要用那个函数里的 `log` / `drawBar` /
+   * `ASK_ORDER` / `answerKey` ✓），而 `mobileTick` 在模块作用域 ✓ ——
+   * 登记是**唯一**能把它们接起来、又**不抄第二份实现**的办法 ✓。
+   * 没装（纯浏览器 / 不是手机表面 ✓）⇒ 保持 `null` ✓ ⇒ `tick('poll')` 回 `'no'` ✓。
+   */
+  var devicePollEntry = null
+
+  function installDeviceChannel() {
+    // ★ 入口与每个 guard 都留痕。用 debugBoxLine 而**不是**本函数内的 log()：
+    //   “函数没进来”与“进来了但被 guard 挡掉”与“日志包装自己失效”是三件事，
+    //   原先它们在屏幕上都表现为“什么都没有”。
+    debugBoxLine('[device] installDeviceChannel 进入')
+    if (typeof document === 'undefined' || typeof localStorage === 'undefined') {
+      debugBoxLine('[device] 无 document/localStorage，跳过')
+      return
+    }
+    // 只在手机表面启动：`direct.test.ts` 会执行本文件（带假 DOM），
+    // 在那里也 setInterval 会让测试进程永不退出（症状是 npm test 卡满超时、无失败信息）
+    if (!isShellSurface()) {
+      debugBoxLine('[device] isShellSurface=false 跳过 | pathname=' + location.pathname)
+      return
+    }
+    debugBoxLine('[device] 守卫通过，开始装载')
+    // 按能力逐个征询：答完一条再问下一条（`show` 与 `notify` 分开同意，
+    // 因为 notify 还要申请系统通知权限，用户可能只想给其中一个）
+    // 端侧能力清单（顺序 = 逐项征询的顺序）。新增一项要同时改三处：
+    // 宿主 device-calls.ts 的 DEVICE_CAPABILITIES、这里的执行分支 `runCall`、以及询问文案。
+    var ASK_ORDER = ['show', 'notify', 'clipboard', 'vibrate', 'open']
+    /** 每项能力在征询时的问法与在开关/反馈里的短名。 */
+    var CAPABILITY_TEXT = {
+      show: { ask: '允许电脑在这台手机上显示提醒？', short: '提醒' },
+      notify: { ask: '允许电脑给这台手机发系统通知？', short: '通知' },
+      clipboard: { ask: '允许电脑把文字放进这台手机的剪贴板？', short: '剪贴板' },
+      vibrate: { ask: '允许电脑让这台手机震动？', short: '震动' },
+      open: { ask: '允许电脑把链接推送到这台手机上？', short: '打开链接' },
+    }
+    // ★ 这个标志必须**声明**。它原先只有赋值（`unsupported = true`）和读取
+    //   （`if (unsupported) return`），却从未 `var` 过，而本文件是 'use strict' ——
+    //   于是定时器里**第一句**就抛 ReferenceError，而且抛在 `poll()` 之前：
+    //   端侧通道从来没有轮询过一次。电脑侧 enabled 永远为空、审批推送永远没有
+    //   落点、授权条永远不弹 —— 全部由这一行解释。
+    //   未捕获的定时器异常只进控制台，手机上完全看不见，所以它能活到今天：
+    //   唯一的破案工具是 scripts/repro-boot.mjs（把手机屏幕搬到电脑上跑）。
+    var unsupported = false
+    /** Service Worker 注册（用于系统通知；失败则为 null，通知自动退回横幅）。 */
+    var swRegistration = null
+    try {
+      log('启动：secureContext=' + String(window.isSecureContext) + ' 有serviceWorker=' + String(typeof navigator !== 'undefined' && navigator.serviceWorker !== undefined))
+      if (typeof navigator !== 'undefined' && navigator.serviceWorker !== undefined) {
+        void navigator.serviceWorker
+          .register('/mobile/sw.js', { scope: '/mobile/' })
+          .then(function (registration) {
+            swRegistration = registration
+            log('SW 已注册 ✓ scope=' + registration.scope + ' | Notification.permission=' + (typeof Notification === 'undefined' ? '无Notification' : Notification.permission))
+          })
+          .catch(function (error) {
+            log('SW 注册失败 ✗ ' + String(error && error.name ? error.name : error) + ' ' + String(error && error.message ? error.message : ''))
+          })
+      }
+    } catch (error) {
+      log('Service Worker 不可用', error)
+    }
+    var answerKey = function (capability) {
+      return 'dsh-mobile.deviceAsk.' + capability
+    }
+    var enabledKey = function (capability) {
+      return 'dsh-mobile.deviceEnabled.' + capability
+    }
+    // `?debug=1` 同时打开端侧通道的调试（手机没有控制台，所以**写到屏幕上**，
+    // 与附件钩子共用同一个调试框）。这样"Service Worker 到底注册上没有"这类问题
+    // 不用再靠猜——用户念一行字就能定位（PDF 那次就是这么解决的）。
+    var DEBUG_ON = DEBUG_BOX_ON || globalThis.__DSHM_DEVICE_DEBUG__ === true
+    debugBoxLine('[device] 调试开关 DEBUG_BOX_ON=' + String(DEBUG_BOX_ON) + ' DEBUG_ON=' + String(DEBUG_ON))
+    function debugLine(text) {
+      if (!DEBUG_ON) return
+      try {
+        var box = document.getElementById('dshm-upload-debug')
+        if (box === null) {
+          box = document.createElement('pre')
+          box.id = 'dshm-upload-debug'
+          box.style.cssText =
+            'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);z-index:300;' +
+            'max-height:40vh;overflow:auto;margin:0;padding:10px;border-radius:10px;font-size:11px;' +
+            'line-height:1.5;color:#fff;background:rgba(0,0,0,.85);white-space:pre-wrap;word-break:break-all'
+          document.body.appendChild(box)
+        }
+        box.textContent = (box.textContent + '\n' + text).slice(-1600)
+      } catch (error) {
+        void error
+      }
+    }
+    function log() {
+      var text = [].slice.call(arguments)
+        .map(function (part) {
+          return typeof part === 'string' ? part : (part && part.message) || String(part)
+        })
+        .join(' ')
+      // ★ 直接走顶层那个 `debugBoxLine`，**不再自带第二份写入实现**。
+      //   原先这里是 `debugLine(...)`，比 debugBoxLine 多一道 `if (!DEBUG_ON) return`。
+      //   于是出现了最难查的一种形态：同一个调试框里，一部分行能出来、另一部分
+      //   永远不出来，看上去就像“那些代码没执行”——而两者之间只隔了几行赋值
+      //   （真实现象：`[device] installDeviceChannel 进入` 和 `守卫通过` 都看得见，
+      //    紧接着的启动行却永远缺席，逼得我往“函数没被调用”的方向查了两轮）。
+      //   一个调试框只留一个写入器，就不存在第二道可以被静默关掉的门。
+      debugBoxLine('[device] ' + text.slice(0, 300))
+      if (DEBUG_ON) console.warn('[dsh-mobile][device]', text)
+    }
+
+    // ★ 这一行必须放在 `log` / `DEBUG_ON` **之后**。
+    //   第一版插在 `var DEBUG_ON` 之前，而 var 只提升声明不提升赋值 ——
+    //   debugLine 里 `if (!DEBUG_ON) return` 于是直接吞掉，手机屏幕上什么都没有
+    //   （真实现象：调试框里只有一行“[boot] … 调试已开启”，再无下文）。
+    //   仪表自己静默失效，比没有仪表更坏。
+    // ★ 每次装载都打一行带**构建戳**的启动行。手机上没有控制台，
+    //   而“新代码到底有没有到手机上”是这个项目的头号排查难题 ——
+    //   原先 BOOT_STAMP 是写死的常量，屏幕上永远显示同一个值，等于没用 ✗。
+    //   顺带把端侧的同意记录一起打出来：这样“用户答应过没有”与
+    //   “代码有没有跑”一眼就能分开，不用再靠猜。
+    var consentLine = []
+    for (var ci = 0; ci < ASK_ORDER.length; ci++) {
+      var capName = ASK_ORDER[ci]
+      consentLine.push(capName + '=' + String(localStorage.getItem(enabledKey(capName))))
+    }
+    log(BOOT_STAMP + ' 端侧通道已装载 | 端侧同意记录 ' + consentLine.join(' '))
+
+    /** 经传输层调一个隧道内端点。 */
+    async function call(transport, method, payload) {
+      var request = {
+        type: 'client-request',
+        rpcId: 'dev-' + b64u(crypto.getRandomValues(new Uint8Array(8))),
+        method: method,
+        payload: payload,
+      }
+      var response = await transport.fetch('/api/' + method, { method: 'POST', body: JSON.stringify(request) })
+      var envelope = await response.json()
+      return envelope && envelope.result ? envelope.result : undefined
+    }
+
+    /** 画一个底部条。`sticky` 表示"等人回答"，点掉才消失。 */
+    function drawBar(tone, text, buttons, sticky) {
+      // ★ 文件面板打开时**不显示授权征询条**：面板底部固定区里就是那两个开关，
+      //   而这条浮动条会正好盖住面板头部与第一行（实测 y=60..168 压住 head 0..103）。
+      //   关掉面板后轮询（4 秒一轮）会重新征询，所以不会因此丢掉这次提问。
+      if (
+        tone === 'ask' &&
+        document.body !== null &&
+        document.body !== undefined &&
+        (document.body.dataset.dshmFiles === 'open' || document.querySelector('[data-dshm-settings="1"]') !== null)
+      ) {
+        // 文件面板开着时同理：它底部固定区里就是那些开关 ✓；
+        // 原生整屏设置开着时也先不打扰（关掉之后 4 秒一轮的轮询会重新征询 ✓）。
+        return null
+      }
+      // ★ 授权条与提醒横幅**分属两个槽**，互不顶掉。
+      //   原先共用一个槽、画之前先删旧的，于是"来了一条提醒"和"弹了一次权限征询"
+      //   会互相覆盖——用户可能因此**错过一条提醒**（验收脚本正是这么发现的：
+      //   结果回报 displayed，但页面上已经查不到那条横幅了）。
+      var slot = tone === 'ask' ? '[data-dshm-askbar]' : '[data-dshm-banner]'
+      var previous = document.querySelector(slot)
+      if (previous !== null) previous.remove()
+      var bar = document.createElement('div')
+      bar.setAttribute(tone === 'ask' ? 'data-dshm-askbar' : 'data-dshm-banner', tone)
+      // 授权条放在提醒横幅**上方**，两者同时出现时都能看到
+      if (tone === 'ask') bar.style.top = 'calc(var(--dshm-top-h, 52px) + 84px)'
+      // ★ 放在**顶部**（顶栏下方），不放底部。
+      //   原来放 `bottom` 且授权条常驻不消失 —— 它会**盖住输入区与消息区**，
+      //   而"答案才记账"又让它在每次刷新后重新弹出：用户于是"看不到自己发的消息"。
+      //   移到顶部之后，无论它停多久都不可能遮挡输入与消息。
+      bar.style.cssText =
+        'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);z-index:200;' +
+        'padding:14px 16px;border-radius:14px;font-size:15px;line-height:1.65;color:#fff;word-break:break-word;' +
+        'background:' + (tone === 'ask' ? '#2b2b2b' : '#2d6cdf') + ';' +
+        'border:1px solid rgba(255,255,255,.16);box-shadow:0 10px 30px rgba(0,0,0,.45)'
+      var line = document.createElement('div')
+      line.textContent = text
+      bar.appendChild(line)
+      if (buttons.length > 0) {
+        var row = document.createElement('div')
+        row.style.cssText = 'display:flex;gap:8px;margin-top:10px'
+        for (var i = 0; i < buttons.length; i++) {
+          var button = document.createElement('button')
+          button.textContent = buttons[i].label
+          button.style.cssText =
+            'flex:1;padding:11px;border:0;border-radius:10px;font-size:15px;color:#fff;background:' +
+            (buttons[i].primary === true ? '#2d6cdf' : '#555')
+          button.addEventListener('click', buttons[i].onClick)
+          row.appendChild(button)
+        }
+        bar.appendChild(row)
+      }
+      if (sticky !== true) {
+        setTimeout(function () {
+          bar.remove()
+        }, 15000)
+      }
+      document.body.appendChild(bar)
+      return bar
+    }
+
+    function buzz() {
+      try {
+        if (navigator.vibrate) navigator.vibrate(120)
+      } catch (error) {
+        log('震动不可用', error)
+      }
+    }
+
+    // ★ 这条原先**一个字都不打**：隧道没就绪时每 4 秒静默跳过，
+    //   于是“通道在跑但什么都没发生”与“通道根本没跑”在手机屏幕上完全一样 ✗。
+    var pollTicks = 0
+    var lastPollSummary = null
+    /**
+     * ★★ round 153（用户真机反馈的噪声源 ✓）：**同类"轮询失败"只记一行** ✓。
+     *
+     * 为什么必须有 ✗：自动重连放弃之后，这一条 4 秒一轮的轮询会**每轮都失败** ✓
+     *   （`rpc` → `dialNow(false)` 被"自动已放弃"挡下 ⇒ 同一个错误 ✓），
+     *   调试框于是被"轮询失败"刷屏 ✗ —— 而"放弃"这件事在设置页「隧道」那一行
+     *   与页面提示条里**已经说清楚了** ✓，不需要每 4 秒重复一遍 ✗。
+     * 判据：去重键 = 错误文本本身 ✓（换了一种失败 ⇒ 仍然单独记一行 ✓）；
+     *   轮询**成功**一次就把键清掉 ✓（之后真的又坏了 ⇒ 值得再记一行 ✓）。
+     */
+    var lastPollErrorKey = null
+    /**
+     * ★★ 并发护栏：上一轮还没跑完 ⇒ 第二个触发源**直接让开** ✓（两个触发源共用它 ✓）。
+     *
+     * 存的是**起飞时刻**（0 = 没有在飞 ✓），不是布尔 ✗ —— 理由见 `devicePollTick` 里
+     * "超时兜底"那段 ✓：一次挂死绝不许变成"端侧通道永久停摆"✗。
+     * 它活在本函数的闭包里 ✓ —— `installDeviceChannel` 全文件只有一个调用点 ✓
+     * （`isMobileSurface()` 那一支 ✓），所以不存在"两份标志各管一半"✗。
+     */
+    var pollInFlightAt = 0
+    /**
+     * 一轮轮询最多算"在飞"多久 ✓（超过 ⇒ 认定挂死，放行新的 ✓，见 `devicePollTick` ✓）。
+     * 15 秒 = 4 秒周期的近四倍 ✓：正常的轮询（等隧道 3 秒上限 + 一次 RPC ✓）远在它之内 ✓，
+     * 只有**真的挂住**才会撞上 ✓ —— 那一支存在的意义是"不把通道永久锁死"✗，
+     * 不是"给轮询设超时"✓（给 RPC 设超时是另一件事 ✓，本轮不碰 ✓）。
+     */
+    var POLL_INFLIGHT_MAX_MS = 15000
+    /**
+     * 等隧道，但**绝不无限等**。
+     *
+     * `waitForTunnel()` 内部是 `tunnelReady.promise.then(...)`，而那个 promise
+     * 一旦因为某条启动分支没走到就**永远不会 resolve**（本项目踩过这个坑，见
+     * installPlaceholderTransport 的注释）。那样 `await` 会把整个 poll 永久挂住：
+     * 不打日志、不报错、不再轮询 —— 而“挂死”与“压根没开始跑”在手机屏幕上一模一样。
+     * 所以给它一个上限，并且把超时这件事本身说出来。
+     */
+    function waitForTunnelOrTimeout(ms) {
+      return Promise.race([
+        waitForTunnel(),
+        new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve('__timeout__')
+          }, ms)
+        }),
+      ])
+    }
+    async function poll() {
+      pollTicks++
+      var index = pollTicks
+      var transport = await waitForTunnelOrTimeout(3000)
+      if (transport === '__timeout__') {
+        if (pollTicks <= 5) log('轮询#' + index + ' 等隧道超时（3s）—— tunnelReady 从未 resolve')
+        return
+      }
+      if (transport === undefined || transport.placeholder === true) {
+        if (pollTicks <= 5) {
+          log('轮询#' + index + ' 隧道未就绪（placeholder=' + String(transport && transport.placeholder) + '）')
+        }
+        return
+      }
+
+      // ① 取待办并执行（只有已启用的能力会被宿主投递过来）
+      var result = await call(transport, 'mobile/device/pending', { args: {} })
+      if (result === undefined || result.ok !== true) {
+        // 宿主还没重启（端点不存在）→ **别再每 4 秒试一次**。
+        // 那只是噪音，而且会让人误以为"功能在跑"。
+        unsupported = true
+        clearInterval(timer)
+        log('!! 已停止轮询：mobile/device/pending 未返回 ok（重启 DSH 后刷新本页即可）result=' + JSON.stringify(result))
+        debugBoxLine('[device] !! 端侧通道已停摆（上面那行就是原因）')
+        return
+      }
+      // ★ 电脑侧会“忘事”：宿主的已允许记在**内存**里（device-calls.ts 的 Map），
+      //   DSH 一重启就清空 —— 审批推送于是被静默丢弃（notify / show 都不可用，
+      //   deviceCall 返回 not-ok，界面上了无痕迹）。端侧 localStorage 才是持久记忆，
+      //   所以每轮都跟电脑侧的 enabled 对一次账，缺什么补什么。
+      var hostEnabled = result.value ? result.value.enabled : undefined
+      if (Object.prototype.toString.call(hostEnabled) === '[object Array]') {
+        for (var e = 0; e < ASK_ORDER.length; e++) {
+          var missing = ASK_ORDER[e]
+          if (localStorage.getItem(enabledKey(missing)) !== 'yes') continue
+          if (hostEnabled.indexOf(missing) !== -1) continue
+          log('[enable] 电脑侧没有 ' + missing + ' 的授权，重新声明一次')
+          void call(transport, 'mobile/device/enable', { args: { capability: missing, enabled: true } })
+        }
+      }
+      var summary = '待办' + String(result.value && result.value.calls ? result.value.calls.length : 0) +
+        '条 电脑侧已启用=' + JSON.stringify(result.value ? result.value.enabled : null)
+      // ★ 前 3 轮**无条件**打出来：只按“内容变化”打的话，第一轮如果恰好和上一轮
+      //   相同（例如本地 localStorage 与电脑侧都是空），屏幕上就一条都没有 ——
+      //   于是“问了但没变化”和“根本没问”又混在一起了。
+      if (summary !== lastPollSummary || pollTicks <= 3) {
+        lastPollSummary = summary
+        log('轮询#' + index + ' 通 ' + summary)
+      }
+      var calls = result.value ? result.value.calls || [] : []
+      for (var i = 0; i < calls.length; i++) {
+        await runCall(transport, calls[i])
+      }
+
+      // ② 征询下一个还没答复的能力（**答案才记账**，所以重载后会再问一次）
+      for (var j = 0; j < ASK_ORDER.length; j++) {
+        var capability = ASK_ORDER[j]
+        if (localStorage.getItem(answerKey(capability)) !== null) continue
+        if (document.body === null) return
+        if (document.querySelector('[data-dshm-askbar]') !== null) return
+        askAbout(transport, capability)
+        return
+      }
+      // ★ round 153：这一轮**走通了** ⇒ 清掉去重键 ✓（下一类失败值得单独记一行 ✓）。
+      lastPollErrorKey = null
+    }
+
+    /** 执行一条请求并回报结果。 */
+    async function runCall(transport, callInfo) {
+      var ok = false
+      var detail = 'unsupported'
+      var text = String(callInfo.text || '（电脑发来一条消息）')
+      try {
+        if (callInfo.capability === 'show') {
+          drawBar('info', text, [], false)
+          buzz()
+          ok = true
+          detail = 'displayed'
+        } else if (callInfo.capability === 'clipboard') {
+          // 三条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
+          // 复制成功就完事；失败就把文本摆到横幅上让用户长按复制 —— **绝不静默失败**。
+          var how = await copyText(text)
+          if (how === undefined) {
+            drawBar('info', '电脑想放进剪贴板，但浏览器不允许自动复制。长按选中下面这段：\n' + text, [], false)
+            detail = 'banner-manual'
+          } else {
+            drawBar('info', '已放进手机剪贴板（' + String(text).slice(0, 60) + '）', [], false)
+            detail = 'copied:' + how
+          }
+          buzz()
+          ok = true
+        } else if (callInfo.capability === 'vibrate') {
+          // text 是毫秒数。夹在 50..2000：太短感觉不到，太长像故障。
+          var ms = Number(String(text).trim())
+          if (!isFinite(ms) || ms <= 0) ms = 200
+          ms = Math.max(50, Math.min(2000, Math.round(ms)))
+          var vibrated = false
+          try {
+            if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+              vibrated = navigator.vibrate(ms) === true
+            }
+          } catch (error) {
+            log('震动失败', error)
+          }
+          detail = vibrated ? 'vibrated:' + ms + 'ms' : 'vibrate-unsupported'
+          ok = true
+        } else if (callInfo.capability === 'open') {
+          // ★ 只把链接**摆出来**，不直接 window.open：弹窗拦截器只放行用户手势里的打开，
+          //   轮询触发的调用没有手势，直接开会**被静默拦掉**（最坏的一种失败）。
+          //   这里画一条带链接的横幅，用户点那一下本身就是手势 ✓
+          var target = String(text).trim()
+          var link = document.createElement('a')
+          link.href = /^https?:\/\//i.test(target) ? target : 'https://' + target
+          link.textContent = target.length > 60 ? target.slice(0, 60) + '…' : target
+          link.target = '_blank'
+          link.rel = 'noopener noreferrer'
+          link.style.cssText = 'color:#8ab4ff;text-decoration:underline;word-break:break-all'
+          var bar = drawBar('info', '电脑推来一个链接，点一下在手机上打开：', [], false)
+          if (bar !== null && bar !== undefined) {
+            var line = document.createElement('div')
+            line.style.cssText = 'margin-top:6px'
+            line.appendChild(link)
+            bar.appendChild(line)
+          }
+          // 链接横幅停留久一点：15 秒对"看到→点开"来说太短
+          if (bar !== null && bar !== undefined) {
+            setTimeout(function () {
+              bar.remove()
+            }, 60000)
+          }
+          detail = 'link-shown'
+          ok = true
+        } else if (callInfo.capability === 'notify') {
+          // ★ 权限状态**有壳就问壳** ✓：WebView 里 `Notification.permission` 要么不存在、
+          //   要么恒为 default/denied ✗ —— 拿它当判据会一直误判成"没申请"✗。
+          var permissionState = notifyPermissionState()
+          log('[notify] 权限=' + permissionState + '（来源=' + (shellBridge() !== undefined ? '原生壳' : '浏览器') + '）有SW=' + String(typeof navigator !== 'undefined' && navigator.serviceWorker !== undefined))
+          var notified = false
+          // ★ 标题/正文必须在这里先算好。
+          //   原先它们写在下面的 `else if` 分支里，而手机上走的是 SW 分支 ——
+          //   `var` 只提升声明、不提升赋值，于是 postMessage 发的是 undefined：
+          //   通知退化成标题 'DSH'、正文全空，而这边 notified = true、日志还写着
+          //   “已 postMessage 给 SW” ✓ —— 一条从不报错的静默错。
+          var parts = String(text).split('：')
+          var title = parts.length > 1 ? parts[0] : '来自电脑'
+          var body = parts.length > 1 ? parts.slice(1).join('：') : String(text)
+          /**
+           * ★ **APK 里优先走原生通知** ✓ —— 这一条是 round 115 为"通知权限没获取"加的 ✓。
+           *
+           * 为什么不能只走下面那套 ✗：`new Notification()` 与
+           * `ServiceWorkerRegistration.showNotification()` 都属于 **Web Notification API** ✓，
+           * 而 **Android WebView 不实现它** ✗ —— 在 APK 里这两条分支**必然都不成立** ✓，
+           * 每条通知都退回页面横幅 ✓，用户看到的就是"通知完全没有"✗（他报的就是这个 ✓）。
+           * 壳那边（`MainActivity.ShellBridge#notify`）发的是**真的系统通知** ✓，
+           * 权限也走安卓原生的运行时权限 ✓ —— 那才是 WebView 里唯一存在的路 ✓。
+           */
+          var nativeResult = shellNotify(title, body)
+          if (nativeResult === 'ok') {
+            notified = true
+            log('[notify] 走原生通知 ✓（壳）')
+          } else if (nativeResult !== null) {
+            log('[notify] 原生通知未发出：' + nativeResult + '（下面会给"开启系统通知"按钮 ✓）')
+          }
+          try {
+            // 手机上**必须走 Service Worker**：Android 版 Chrome 不支持 new Notification()，
+            // 而且它要求站点有 SW 才给通知权限（见宿主侧 /mobile/sw.js 的注释）。
+            // ★ 不能只看 `swRegistration.active` —— 刚注册时它往往还是 null（尚未 active），
+            //   于是通知被静默跳过、退回横幅（真实现象：权限已 granted 却收不到通知）。
+            //   正确做法是等 `navigator.serviceWorker.ready`（它会等到有可用的 active worker）。
+            if (
+              typeof navigator !== 'undefined' &&
+              navigator.serviceWorker !== undefined &&
+              typeof Notification !== 'undefined' &&
+              Notification.permission === 'granted'
+            ) {
+              var registration = await navigator.serviceWorker.ready
+              var worker = registration.active ?? registration.waiting ?? registration.installing
+              log('[notify] SW ready | active=' + String(registration.active !== null) + ' worker=' + String(worker !== null && worker !== undefined))
+              if (worker !== null && worker !== undefined) {
+                worker.postMessage({ kind: 'notify', title: title, body: body })
+                notified = true
+                log('[notify] 已 postMessage 给 SW')
+              }
+            } else if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+              // 短标题 + 正文：Android 的通知观感几乎全看这一处 ——
+              // 一整行长文字挤在标题栏会显得又窄又乱 ✗（用户反馈过）。
+              new Notification(title.slice(0, 40), {
+                body: body.slice(0, 220),
+                // 同一 tag：连续几条审批会**替换**上一条，而不是堆成一片
+                tag: 'dsh-mobile-device',
+                // 通知被点开时聚焦页面（手机上通常直接切到浏览器）
+                requireInteraction: false,
+              })
+              notified = true
+            }
+          } catch (error) {
+            log('通知发送失败，退回横幅', error)
+          }
+          if (!notified) {
+            log('[notify] 原生与 Web 两条路都没成，退回横幅')
+            // 权限被拒或环境不支持：**不能静默失败**，退回横幅并如实回报走了哪条路。
+            // 权限仍是 default 时给一个按钮 —— 申请权限必须在用户手势里，这里是唯一的机会。
+            // ★ 判据用上面那个 `permissionState` ✓（有壳时它来自原生 ✓，
+            //   用 `Notification.permission` 判断在 WebView 里永远是 default ✗ → 按钮永远在 ✓）。
+            var canAsk = permissionState === 'default'
+            drawBar(
+              'info',
+              text,
+              canAsk
+                ? [
+                    {
+                      label: '开启系统通知',
+                      primary: true,
+                      onClick: function () {
+                        try {
+                          requestNotifyPermission()
+                          log('[notify] 已请求权限（' + (shellBridge() !== undefined ? '原生壳' : '浏览器') + '）——有壳时结果会异步回来 ✓')
+                        } catch (error) {
+                          log('通知权限申请失败', error)
+                        }
+                      },
+                    },
+                  ]
+                : [],
+              false,
+            )
+            buzz()
+            detail = canAsk ? 'banner-fallback(permission-default)' : 'banner-fallback'
+          } else {
+            detail = 'notified'
+          }
+          ok = true
+        }
+      } catch (error) {
+        detail = String(error && error.message ? error.message : error)
+      }
+      log('[call] ' + String(callInfo.capability) + ' → ' + String(detail))
+      await call(transport, 'mobile/device/result', { args: { id: callInfo.id, ok: ok, detail: detail } })
+    }
+
+    /** 就某个能力征询一次；用户答了才记账。 */
+    function askAbout(transport, capability) {
+      var label = (CAPABILITY_TEXT[capability] || {}).ask || '允许电脑使用「' + capability + '」？'
+      drawBar(
+        'ask',
+        label,
+        [
+          {
+            label: '允许',
+            primary: true,
+            onClick: function () {
+              localStorage.setItem(answerKey(capability), 'yes')
+              localStorage.setItem(enabledKey(capability), 'yes')
+              removeAskBar()
+              // 「允许」本身是**用户手势**：通知权限必须在这里申请（否则浏览器会拒绝弹窗）
+              if (capability === 'notify' && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+                try {
+                  void Notification.requestPermission()
+                } catch (error) {
+                  log('通知权限申请失败', error)
+                }
+              }
+              void call(transport, 'mobile/device/enable', { args: { capability: capability, enabled: true } })
+            },
+          },
+          {
+            label: '不用',
+            onClick: function () {
+              localStorage.setItem(answerKey(capability), 'no')
+              localStorage.setItem(enabledKey(capability), 'no')
+              removeAskBar()
+              // ★ 必须**同时告诉宿主**：否则宿主仍把它算作"已允许"，
+              //   会继续投递这类请求（客户端虽不执行，但 check:prod 会显示"已允许"——
+              //   那是一条会误导排查的状态）。这正是 §23.10 记的"两处都要改"。
+              void call(transport, 'mobile/device/enable', { args: { capability: capability, enabled: false } })
+              // ★ 拒绝之后**当场说明怎么反悔**。
+              //   授权是"答一次就定"的（见 05 文档 §23.10 那个已知缺陷），
+              //   而界面上暂时没有管理入口——如果这时什么都不说，用户点完「不用」
+              //   就再也没机会改了，而且不知道为什么。宁可用一句大白话说清楚限制。
+              // ⚠️ 上一版这里写的是"在地址栏输入 javascript:localStorage.clear()" ——
+              //    **那条建议实际做不到**：现代浏览器从地址栏粘贴 `javascript:` 会被剥掉，
+              //    而手机上也没有控制台。所以改成指向一个真正可用的入口。
+              // ★★ round 143：**只改一个词** ✗✓ —— 面板底部那行入口现在叫「**端侧能力**」✓
+              //    （round 138 起 ✓），而这句话里还写着旧名字「端侧通道」✗ ——
+              //    用户点完「不用」看到的"怎么反悔"指引，指向的是一个**屏幕上根本不存在的词** ✗。
+              //    ★ 句子里另外那半句"点右上角的文件夹按钮"**仍然准确** ✓（那是**聊天页**右上角的 📁 ✓，
+              //      不是本轮删掉的那颗齿轮 ✗），所以一个字都没动它 ✓。
+              drawBar('info', '已设为「不用」。想改的话：点右上角的文件夹按钮，面板底部就是「端侧能力」。', [], false)
+            },
+          },
+        ],
+        true,
+      )
+    }
+
+    function removeAskBar() {
+      var bar = document.querySelector('[data-dshm-askbar]')
+      if (bar !== null) bar.remove()
+    }
+
+    /**
+     * ★★ 端侧轮询**那一轮**的**唯一实现** ✓ —— 两个触发源共用 ✓：
+     *   ① 页面自己的 4 秒定时器 ✓；② **原生时钟**注入的 `tick('poll')` ✓
+     *   （App 退到后台、页面定时器被冻结时靠的就是它 ✓）。
+     *
+     * ## 为什么"一轮只能有一个在飞"✗✗（这不是洁癖 ✓）
+     *
+     * 宿主的 `takePending` 是"**取走即标记为已投递**"✓（`packages/host/src/device-calls.ts:174` ✓），
+     * 而它内部是**同步**遍历 ✓（Node 单线程 ⇒ 两条并发请求拿到的是**互不相交**的两半 ✓、
+     * **不会重复投递** ✓）。所以"两条并发 poll 里有一条拿到空集合"**本身不是问题** ✓
+     * —— 这一点先澄清 ✓，免得把力气花错地方 ✗。
+     *
+     * **真正的问题是另一半** ✗：每一条被取走的待办，都要等 `runCall` **跑完**才算
+     * "弹到用户眼前了" ✓（`drawBar` / `copyText` / `navigator.vibrate` 都是异步 ✓），
+     * 而"已取走、还没弹出来"的这段时间正是**唯一会永久丢**的窗口 ✓（TTL 120 秒 ✓，过期即清 ✓，
+     * 两端都不报错 ✗）。**并发的第二条** poll 会把落在窗口里的条数**翻倍** ✓ ——
+     * 而它买到的只是"某一轮早了几十毫秒"✗。⇒ 收益极小、风险翻倍 ⇒ **加护栏** ✓。
+     *
+     * ## 超时兜底（★ 不许省 ✗）
+     *   `poll()` 里 `await` 的是隧道的 RPC ✓（`rpc` 的 pending **没有超时**✓，
+     *   只靠链路关闭时的 `failPending` 结算 ✓）⇒ 万一它挂住不返回 ✓，
+     *   一个纯布尔的"在飞"标志就会**永久**挡住后面每一轮 ✓ ——
+     *   症状是"端侧通道静默停摆"✗（屏幕上什么都不说 ✗，正是本项目最恨的一类 ✗）。
+     *   ⇒ 超过 `POLL_INFLIGHT_MAX_MS` 就认定上一轮挂死 ✓、**放行新的** ✓：
+     *     最坏情形退化回改动前的行为（一轮一个 ✓），**绝不会更坏** ✓。
+     *
+     * @returns 一个给人念的串 ✓：`'poll'`（真驱动了一轮 ✓）/ `'busy'`（上一轮还没完 ✓）/
+     *          `'unsupported'`（宿主没有那条端点，通道已停 ✓）。
+     */
+    function devicePollTick() {
+      if (unsupported) return 'unsupported'
+      if (pollInFlightAt !== 0 && Date.now() - pollInFlightAt < POLL_INFLIGHT_MAX_MS) return 'busy'
+      var ticket = Date.now()
+      pollInFlightAt = ticket
+      // 记账：这是**真的跑了一轮**的时刻 ✓（诊断行读它 ✓）—— 与 `mobileTick` 的
+      // "收到几次原始 tick"分开 ✓，两个数一起看才能分清"原生在戳"与"活真的干了"✓。
+      keepAliveStats.lastPollAt = ticket
+      void poll().then(
+        function () {
+          // ★ 只清**自己那一张**票 ✓：超时兜底放行过新一轮时 ✗，
+          //   旧这一轮的收尾**绝不许**把新一轮的"在飞"标志抹掉 ✓。
+          if (pollInFlightAt === ticket) pollInFlightAt = 0
+        },
+        function (error) {
+          if (pollInFlightAt === ticket) pollInFlightAt = 0
+          /**
+           * ★★ round 153：**同类失败只记一行** ✓（见 `lastPollErrorKey` 那段 ✓）——
+           *   键是错误文本本身 ✓；同一句话再来就不再写 ✓（调试框不再被刷屏 ✓）。
+           */
+          var key = String(error && error.message ? error.message : error)
+          if (key === lastPollErrorKey) return
+          lastPollErrorKey = key
+          log('轮询失败', error)
+        },
+      )
+      return 'poll'
+    }
+    /**
+     * ★ 把这一轮的入口**登记**给原生时钟 ✓（`tick('poll')` 读的就是它 ✓）。
+     *
+     * 为什么是登记、而不是在 `mobileTick` 里另写一份轮询 ✗：`poll` 只活在这个函数的作用域里 ✓
+     * （它要用这里的 `log` / `drawBar` / `ASK_ORDER` / `answerKey` ✓），
+     * 而 `mobileTick` 在模块作用域 ✓ —— 登记是**唯一**既能接上、又不抄第二份实现的办法 ✓。
+     * 没装（纯浏览器 / 不是手机表面 ✓）⇒ `devicePollEntry` 保持 `null` ✓ ⇒ `tick('poll')` 回 `'no'` ✓。
+     */
+    devicePollEntry = devicePollTick
+
+    var timer = setInterval(function () {
+      /**
+       * ★★ 原生在驱动 ⇒ 页面这一路**让位** ✓（判据见 `keepAliveShouldRun` ✓）。
+       *
+       * 为什么让位 ✗（而不是"两边都跑、反正幂等"✓）：
+       *   · 双跑会把上面那段说的"已取走、还没弹出来"的窗口**翻倍** ✓ ——
+       *     这是唯一会**永久丢通知**的窗口 ✓，幂等救不了它 ✗（`takePending` 取走就没了 ✓）；
+       *   · 租约到期（原生停摆 / 老 APK ✓）这里**自动接手** ✓ ⇒ 不会出现"两边都不轮询"✗。
+       * ★ 判据落在每一发上 ✓（不是"启动时停表"✗）—— 理由同 ping 那处 ✓。
+       */
+      if (!keepAliveShouldRun('poll')) return
+      devicePollTick()
+    }, 4000)
+  }
+
+  /**
+   * ★★ 回到前台**自愈**（round 119，用户真机反馈 —— 这一条是 APK 体感最差的那个）✓。
+   *
+   * 用户原话："APK 端……当 app 在后台运行的时候会**断开连接**（表现为**帧长不同步**）……
+   *   web 端遇到这个情况可以直接刷新，APK 端因为没法刷新只能**退出重进**，这很影响体验" ✗✓。
+   *
+   * ★ 为什么这里必须**重载页面**，而不是只重连 socket ✗：
+   *   "帧长不同步"说的不是"连接断了" ✓，而是**帧长解析器的状态与宿主对不上了** ✗ ——
+   *   重连一条新 socket，解析器还是旧的那一个 ✓（它不知道自己错在哪一帧 ✓）。
+   *   而 web 上用户按一下刷新之所以立刻好，正是因为它把**整个解析器重建**了 ✓。
+   *   所以这里替用户按一下那个刷新键 ✓ —— 这是唯一确定有效的恢复方式 ✓。
+   *
+   * 三条自我保护（否则会变成"服务端一挂就刷新循环"✗）：
+   *   ① 只在**壳（APK）里**做 ✓（纯浏览器保持原样 ✓：那里的用户自己会刷新 ✓）；
+   *   ② 必须**真的不在 connected** 才动手 ✓（干净连接上一次都不刷 ✓）；
+   *   ③ **15 秒内最多自愈一次** ✓（防循环 ✓），并且把原因写进调试框 ✓（不静默 ✗）。
+   */
+  /** ★ 本页生命周期里**曾经连上过**吗 ✓（前台自愈的前置条件，见下 ✓）。 */
+  var pageEverConnected = false
+  /** 上次自愈重载的时间（15 秒节流 ✓）。 */
+  var lastSelfHealAt = 0
+  /** 本文档是否已经在壳派发 insets 时补过一次身份（最多一次 ✓，见那个监听器 ✓）。 */
+  var vaultBackfilled = false
+
+  /**
+   * 前台自愈的**判据**（只回答"该不该重载"✓：不改状态、不导航 ✓）。
+   *
+   * 返回 `'reload'` 或 `'skip:<原因>'` ✓ —— `installForegroundSelfHeal` 与验收入口
+   * （`__DSH_MOBILE_BOOT__.apk.healVerdict` ✓）读的是**同一个**函数 ✓。
+   */
+  function selfHealDecision(reason) {
+    try {
+      if (shellBridge() === undefined) return 'skip:no-shell'
+      if (document.visibilityState !== 'visible') return 'skip:not-visible'
+      var api = globalThis.__DSH_MOBILE_BOOT__
+      var state = api !== undefined && typeof api.state === 'function' ? String(api.state()) : 'unknown'
+      /**
+       * ★★ round 184：**帧长解析器错过位**也要重载 ✓ —— 这一条必须排在 `skip:connected` **前面** ✗✗。
+       *
+       * 为什么 ✗：用户 2026-09-29 报"小退再进以后发消息提示帧长不同步、消息上不了手机界面"✓，
+       * 而那种时候 `state` **恰恰是一直是 `connected`** ✓（socket 活着、RPC 也通 ✓，
+       * 坏的只有解析器 ✗）⇒ 下面那条 `skip:connected` 会把自愈**永远挡掉** ✗，
+       * 页面就卡在"看着像好的、其实再也不更新"✓ —— 用户只能靠"退出重进"自救 ✗
+       * （**而这正是保活轮之前的默认行为** ✓：以前按返回就是退出 ⇒ 重进必然整页重载 ✓
+       *   ⇒ 这一类故障被**顺带治好了 20 个月** ✓；改成"退到后台"之后它才露出来 ✓）。
+       *
+       * ★ 为什么重载仍是唯一解 ✓：新开一条 socket **不会**重建解析器 ✗（见类注释 ✓）。
+       * ★ 为什么不会变成"刷新循环" ✗：`frameDesyncAt` 是内存态 ✓ ⇒ 重载即清零 ✓；
+       *   且这里只在**回到前台**那两个触发点被问到 ✓，外加 15 秒节流 ✓（下一行 ✓）。
+       */
+      if (frameDesyncAt !== 0) return 'reload'
+      if (state === 'connected') return 'skip:connected'
+      /**
+       * ★★ 身份已作废（宿主明确拒绝 ✓）⇒ **绝不重载** ✗：
+       *   重载改不了"这台设备不被认"这个事实 ✓，只会把用户刚打开的设置页 / 正在输入的地址刷掉 ✗
+       *   —— 用户报的"进入设置页会自动被重新刷新退回到主页"✗ 就是它 ✓。
+       */
+      if (deviceRejected) return 'skip:device-rejected'
+      /**
+       * ★★ 收紧到"**本页曾经连上过**"✓：
+       *   只有真正的"连上过又掉了"才值得替用户按刷新 ✓。**从未连上**的情形
+       *   （配对中 / 电脑没开 / 地址填错 / 网络不通 ✓）重载一次都修不好任何东西 ✗，
+       *   却会把配对界面、刚打开的面板、正在输入的地址一起刷掉 ✗。
+       */
+      if (!pageEverConnected) return 'skip:never-connected'
+      if (Date.now() - lastSelfHealAt < 15000) return 'skip:throttled'
+      void reason
+      return 'reload'
+    } catch (error) {
+      return 'skip:error'
+    }
+  }
+
+  function installForegroundSelfHeal() {
+    if (shellBridge() === undefined) return
+    var healIfStale = function (reason) {
+      try {
+        if (selfHealDecision(reason) !== 'reload') return
+        lastSelfHealAt = Date.now()
+        try {
+          debugBoxLine('[heal] 回到前台 → 自动重载页面 ✓（' + reason +
+            (frameDesyncAt !== 0 ? ' · 起因：本页见过帧长不匹配 ⇒ 解析器错过位，只有整页重载能修 ✓' : ' · 起因：隧道不在 connected') + '）')
+        } catch (ignored) {
+          void ignored
+        }
+        location.reload()
+      } catch (error) {
+        void error
+      }
+    }
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState !== 'visible') return
+        // ★ 先给既有的 socket 级重连 1.2 秒机会 ✓ —— 它自己修好了就什么都不用做 ✓
+        setTimeout(function () {
+          healIfStale('visibilitychange')
+        }, 1200)
+      })
+      // 壳在 onResume 时会派发这个事件 ✓（见 MainActivity.applyInsetsToPage ✓）
+      window.addEventListener('dshm-shell-insets', function () {
+        /**
+         * ★ 顺手把身份**再补一次**进壳的库 ✓（每个文档最多一次 ✓）。
+         *
+         * 为什么非补不可 ✗：壳那边写身份库要过一道"当前页面主机名 == 壳记着的地址"的闸
+         * （MainActivity.isTrustedPage ✓），不一致就**只记日志、静默丢弃** ✗
+         * —— 而**新源的第一帧加载期间**，"壳记着的地址"还指着**上一个源** ✗ ⇒
+         * 启动那一刻的写入会被丢掉 ✓（vaultSet 是 void ✓，网页这边**收不到任何失败回执** ✗✗）。
+         * 而壳在 onPageFinished 之后**一定会**再派发一次这个事件 ✓（applyInsetsToPage() ✓）
+         * —— 那一刻闸必定放行 ✓ ⇒ 这里补一次就落定了 ✓。
+         * 没有壳时这个监听器根本不存在 ✓（纯浏览器里 vault 本来也不存在 ✓）。
+         */
+        if (!vaultBackfilled) {
+          vaultBackfilled = true
+          try {
+            backfillIdentityVault()
+          } catch (error) {
+            void error
+          }
+        }
+        setTimeout(function () {
+          healIfStale('壳 onResume')
+        }, 1200)
+      })
+    } catch (error) {
+      void error
+    }
+  }
+
+  function installFileUploadHook() {
+    if (globalThis.__DSH_FILE_UPLOAD__ !== undefined) return
+    globalThis.__DSH_FILE_UPLOAD__ = {
+      fetch: async function (input, init) {
+        // ★ 三种形态都要认：字符串、`URL` 实例（只有 `.href`）、`Request`（只有 `.url`）。
+        //   真实现象：DSH 传进来的是 **URL 实例**，我原来只认 `typeof === 'string'` 与 `.url`，
+        //   两次都取到空串 → `new URL('', 基准)` 得到基准本身 →
+        //   调试里先后看到 `/mobile/app` 与 `/`，而 `sessionId`/`name` 全是空。
+        var raw =
+          typeof input === 'string'
+            ? input
+            : input && typeof input.href === 'string'
+              ? input.href
+              : input && typeof input.url === 'string'
+                ? input.url
+                : String(input || '')
+        // ★ 基准必须是**站点根**，不能是 `location.href`。
+        //   用 `location.href`（= `/mobile/app`）当基准时，相对路径会被拼到 `/mobile` 下面，
+        //   **查询串（sessionId / name）一起丢掉** → 上传打到一个没有会话的空地址，
+        //   DSH 报 `resume failed for session ""` / `cannot encode an empty path segment`。
+        //   真实现象（用户手机上抓到的调试输出）：
+        //     上传钩子被调用：/mobile/app  name=null   ← 路径与 name 都不对
+        //     读到 251825 字节                        ← 字节其实是好的，问题只在地址解析
+        var url = new URL(raw, location.origin + '/')
+        // 手机上没有控制台，所以调试开关做成 **URL 参数**（`?debug=1`）——加在地址后面刷新即可。
+        // 打开后会记录：钩子有没有被调用、传的是什么、响应是什么。
+        // 排查"电脑能传 PDF、手机不能"这类问题时，"钩子到底被调用了吗"是第一个必须确定的事实：
+        // 没被调用 → 问题在 DSH 客户端那条流程里（我改不了）；
+        // 被调用了 → 再往下看响应。
+        var DEBUG = DEBUG_BOX_ON
+        /** 把一行调试信息显示**在屏幕上**（手机没有控制台，console.log 看不到）。 */
+        var showDebug = function (text) {
+          if (!DEBUG) return
+          var box = document.getElementById('dshm-upload-debug')
+          if (box === null) {
+            box = document.createElement('pre')
+            box.id = 'dshm-upload-debug'
+            box.style.cssText =
+              'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);z-index:300;' +
+              'max-height:40vh;overflow:auto;margin:0;padding:10px;border-radius:10px;font-size:11px;' +
+              'line-height:1.5;color:#fff;background:rgba(0,0,0,.85);white-space:pre-wrap;word-break:break-all'
+            document.body.appendChild(box)
+          }
+          box.textContent = (box.textContent + '\n' + text).slice(-1500)
+        }
+        showDebug(
+          '上传钩子被调用：' + url.pathname + '  name=' + String(url.searchParams.get('name')) +
+            '\n  raw=' + String(raw).slice(0, 160) + '  inputType=' +
+            (typeof input === 'string' ? 'string' : input && input.constructor ? input.constructor.name : String(typeof input)),
+        )
+        var sessionId = url.searchParams.get('sessionId') || ''
+        var name = url.searchParams.get('name') || undefined
+        var bytes
+        try {
+          bytes = await readBodyBytes(init === undefined ? undefined : init.body)
+        } catch (error) {
+          showDebug('读取内容失败：' + String(error && error.message ? error.message : error))
+          return uploadResponse(400, { ok: false, error: { code: 'mobile/upload-unreadable', message: '无法读取待上传内容：' + String(error && error.message ? error.message : error), details: {} } })
+        }
+        showDebug('读到 ' + bytes.length + ' 字节')
+        if (bytes.length > FILE_UPLOAD_LIMIT_BYTES) {
+          showDebug('超过单次上限 ' + FILE_UPLOAD_LIMIT_BYTES + ' 字节，已拒绝')
+          var mb = Math.round(FILE_UPLOAD_LIMIT_BYTES / 1048576)
+          return uploadResponse(413, { ok: false, error: { code: 'mobile/upload-too-large', message: '文件超过 ' + mb + ' MB 的单次上限（可改用「电脑文件目录」里的上传）', details: {} } })
+        }
+        var transport = await waitForTunnel()
+        if (transport === undefined || transport.placeholder === true) {
+          return uploadResponse(503, { ok: false, error: { code: 'mobile/offline', message: '与电脑的加密隧道尚未建立', details: {} } })
+        }
+        var request = {
+          type: 'client-request',
+          rpcId: 'upload-' + b64u(crypto.getRandomValues(new Uint8Array(8))),
+          method: 'fileUploads/upload',
+          payload: {
+            args: {
+              agentId: sessionId,
+              request: name === undefined ? { data: bytesToBase64(bytes) } : { data: bytesToBase64(bytes), name: name },
+            },
+          },
+        }
+        try {
+          var response = await transport.fetch('/api/fileUploads/upload', { method: 'POST', body: JSON.stringify(request) })
+          var envelope = await response.json()
+          showDebug('响应：' + JSON.stringify(envelope.result).slice(0, 400))
+          return uploadResponse(200, envelope.result)
+        } catch (error) {
+          return uploadResponse(502, { ok: false, error: { code: 'mobile/upload-failed', message: String(error && error.message ? error.message : error), details: {} } })
+        }
+      },
+    }
+  }
+
+  function isMobileSurface() {
+    try {
+      if (location.pathname === '/mobile/app' || location.pathname === '/mobile/app/') return true
+      if (new URLSearchParams(location.search).get('mobile') === '1') return true
+    } catch (error) {
+      void error
+    }
+    return readStoredHost() !== undefined
+  }
+
+  /**
+   * 是否安装**自建外壳**（顶栏 / 抽屉 / 电脑文件目录面板）。
+   *
+   * 比 `isMobileSurface()` 更严，因为外壳会往页面里**加可见元素**，而 `isMobileSurface()`
+   * 只需要判断"业务流量是否该走隧道"（那是不可见的）。多出来的一条是**视口必须够窄**：
+   *
+   *   外壳的样式只在 `@media (max-width: 1023px)` 里改写 DSH 的三栏布局，
+   *   在更宽的窗口里装了外壳，就会得到"手机顶栏 + 电脑三栏"的混搭——两边都不对。
+   *
+   * 这条守卫不是理论洁癖：`localStorage` 按**源**隔离，而电脑上调试配对页
+   * （`/mobile?mobile=1`）时会在电脑的源里留下配对配置，之后 `isMobileSurface()`
+   * 就恒为真 —— 于是电脑端也会长出手机顶栏（用户报过的"意外修改了电脑端 UI"）。
+   * 显式手机路径（`/mobile/app`、`?mobile=1`）仍然无条件安装，那是操作者的明确意图。
+   */
+  function isShellSurface() {
+    try {
+      if (location.pathname === '/mobile/app' || location.pathname === '/mobile/app/') return true
+      if (new URLSearchParams(location.search).get('mobile') === '1') return true
+    } catch (error) {
+      void error
+    }
+    return isMobileSurface() && window.innerWidth < 1024
+  }
+
+  // ★ 整段包 try/catch 并**把异常写到屏幕上**。
+  //   这是一个裸 IIFE：中间任何一句抛错都会让它后面的语句**全部不执行**，
+  //   而错误只进浏览器控制台 —— 手机上永远看不到。上面的 [boot] 那行能出来，
+  //   只说明脚本走到了 3637 行，不代表再往后也走得到。
+  //
+  // ★ 身份恢复必须**最早**做（round 131）✗：`isMobileSurface()` 自己就会 `readStoredHost()`
+  //   ✓ —— 若等到 `boot()` 里才从壳的库恢复，这一步会先判成"这个源没配对" ✗，
+  //   于是占位传输层根本不装 ✓，等 `boot()` 再恢复过来已经晚了一整段启动流程 ✗。
+  //   它自己包了 try/catch ✓，没有壳时就是纯粹的 no-op ✓。
+  try {
+    /**
+     * ★★ P1a：**旧键一次性迁移必须在恢复之前** ✗ —— 恢复要按"当前源对应的指纹"取 ✓，
+     * 而老用户手机上那个指纹只写在**旧键** `dsh-mobile.host` 里 ✓ ⇒ 先迁移（改名 ✓、
+     * 顺手建目录 + 标当前 ✓）再恢复 ✓，否则老用户会"刷新一下就掉配对"✗。
+     * 它自己保证幂等 ✓（旧键已不在 ⇒ 一次也不动 ✓）。
+     * 另外把本页票据里的指纹也固化下来 ✓（配对那一页没有目录、只有票据 ✓）。
+     */
+    var earlyUrlConfig = readUrlConfig()
+    if (earlyUrlConfig !== undefined && validHostFingerprint(earlyUrlConfig.pinnedHostFingerprint)) {
+      pageTicketFingerprint = earlyUrlConfig.pinnedHostFingerprint
+    }
+    migrateLegacyIdentityKeys()
+    restoreIdentityFromVault()
+    // ★ 反向也要补齐 ✓：本机有、壳的库没有的身份键（升级前配的对就是这一种 ✗）⇒ 补进去 ✓
+    backfillIdentityVault()
+  } catch (error) {
+    console.warn('[dsh-mobile] 从壳恢复身份失败（不影响页面）：', error)
+  }
+  debugBoxLine('[boot] 装载点：isMobileSurface=' + String(isMobileSurface()))
+  try {
+  if (isMobileSurface()) {
+    installPlaceholderTransport()
+    // 必须**同步**安装：DSH 的附件运行时在插件启动时只读一次这个全局
+    installFileUploadHook()
+    installForegroundSelfHeal()
+    // 端侧通道（电脑 → 手机）：轮询式，晚一点启动没关系
+    installDeviceChannel()
+  }
+  } catch (error) {
+    debugBoxLine('[boot] 启动期异常：' + String(error && error.stack ? error.stack : error).slice(0, 400))
+    try { console.error('[dsh-mobile] 启动期异常', error) } catch (ignored) { void ignored }
+  }
+
+  boot().catch(function (error) {
+    console.error('[dsh-mobile] 启动失败：', error)
+    // 启动失败同样要标记结束：占位层否则会把所有调用永久挂起（界面表现为"卡死"）
+    tunnelReady.bootFinished = true
+    tunnelReady.resolve()
+    // 把失败原因挂到诊断接口上：手机上无法看控制台，这行是用户/排障唯一的线索来源
+    if (globalThis.__DSH_MOBILE_BOOT__ !== undefined) {
+      globalThis.__DSH_MOBILE_BOOT__.lastError = String(error && error.message ? error.message : error)
+    }
+  })
+})()

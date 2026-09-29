@@ -11,12 +11,21 @@ apps/shell/.dart_tool/
 native/android/build/
 dist/
 
-# ── TypeScript 编译产物（由 `npm run build` 生成；不入库，见 14-项目评估 T1）──
-# ★ 规则必须**精确到这两个目录**：`packages/bridge/lib/`（桥的浏览器半，**手写**、连 src 都没有）
-#   与 `apps/shell/lib/`（Flutter 的 Dart 源码目录）都是**源码**，绝不能被 `packages/*/lib/` 这种宽规则吞掉。
-#   代价（已知且可接受）：全新 clone 后必须先 `npm run build` 才能安装插件（`install-host-plugin.mjs` 从 lib 复制）。
-packages/host/lib/
-packages/protocol/lib/
+# ── TypeScript 编译产物（由 `npm run build` 生成）──
+# ★★ 2026-09-29 起：`packages/host/lib/` 与 `packages/protocol/lib/` 改成**入库** ✓
+#   （原先这两行把它们排除在外 ✓，理由见 `14-项目评估与整改清单.md` 的 T1 ✓）。
+#   **为什么改** ✗：官方插件管理（0.17 的 `@deepseek-ai/dsh-plugin-manager` ✓）从 git 装包时
+#   **只取仓库里的东西、不会替你构建** ✗ ⇒ `lib/` 不在仓库里就加载不了 ✓
+#   （`dsh.bundle.patch` 指向的 `cordis.patch.yml` 在 ✓，而 `main: lib/cordis.js` 不在 ✗）。
+#   ★ 代价（如实 ✓）：以后改完 `src` 必须**连 `lib/` 一起提交** ✓，
+#     否则"仓库里那份"与"本机那份"会分叉 ✗。
+#   ★ 这与 `14` 号里那条"不入库"的结论**相反** ✓ —— 是本轮为**可安装性**做的取舍 ✓，
+#     **别再照 14 号那条改回去** ✗（改了以后"官方装不上"，而症状是"装完加载不了"✗，很难查 ✓）。
+#   ★ `packages/client/src/boot.js` 是**源码** ✓：它由 `build-lib.mjs` 拷进
+#     `packages/host/lib/boot.js` ✓，那一份是**产物** ⇒ 随 lib 入库 ✓。
+# ★ 但 `packages/bridge/lib/`（桥的浏览器半，**手写**、连 src 都没有 ✓）与
+#   `apps/shell/lib/`（Flutter 的 Dart 源码目录 ✓）**仍是源码** ✓
+#   —— 它们本来就不在上面那两条规则里 ✓（那两条是**精确路径**，不是 `packages/*/lib/` ✓）。
 
 # ── 浏览器走查工具的临时产物（harness 生成，不入库）──
 .playwright-mcp/
