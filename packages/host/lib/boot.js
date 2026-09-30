@@ -8960,6 +8960,49 @@
       '[data-composer-card="true"] button[class*="_primary"] { background-color: rgb(103, 158, 254) !important; }',
       'button[class*="_workspace"], button[class*="_seat"] { border-radius: 16px !important; }',
       '[data-composer-card="true"] button[class*="_trigger"] { border-radius: 24px !important; }',
+      /**
+       * ★★ round 192：**0.15 的两件控件**（用户要的是"0.15 的控件"✓）。
+       *
+       * ① 自绘的「添加附件」键（DOM 由 `syncAttachButton()` 挂 ✓）——
+       *    规格**照抄 0.15 那颗的产物** ✓（`.uV2eYG_add` 与 0.2.0 的 `.yhfFVG_add` 规则
+       *    **逐字相同** ✓：28×28 / `border-radius:999px` / `background:var(--dsw-specific-selector)`
+       *    / `color:var(--dsw-alias-label-primary)` / `display:grid` + `place-items:center` ✓）
+       *    ⇒ 我们这条只写同一个 id ✓（一个字节的哈希都不认 ✓）。
+       * ② 模型钮回到 0.15 的"**只有图标**"形态 ✓：0.17+ 原生就靠这两条变量开关 ✓
+       *    （`.…_triggerLabel{display:var(--dsh-composer-model-text-display,block)}`、
+       *      `.…_triggerIcon{display:var(--dsh-composer-model-icon-display,none)}` ✓，
+       *      实测 0.15 那个钮就是 `46×28` + 图标 `16×16` 可见 + 文字 `display:none` ✓），
+       *    作用域只到**输入卡片那一行的直接子级** ✓（`--dsh-composer-model-*` 只被模型钮消费 ✓）。
+       * ③ 模型面板的行高/字号回到 0.15 ✓（产物实测：0.15 `.…_cell{height:40px;font-size:14px}`
+       *    / `.…_option{height:38px;min-height:38px}` ✓ ↔ 0.2.0 是 `34px/13px` 与 `34px` ✓）。
+       *    ★ 作用域**只认那个面板自己的 aria-label** ✓ —— 绝不写全局 `[role="menu"]` ✗
+       *      （别的菜单会一起被改 ✗）。★ 代价写清楚：它认的是**中文文案** ✗，
+       *      换成英文界面这条会**静默失效**（退化成 DSH 原样 ✓ 不会改坏 ✓）。
+       */
+      '#dshm-attach {',
+      '  corner-shape: round; background: var(--dsw-specific-selector);',
+      '  width: 28px; height: 28px; color: var(--dsw-alias-label-primary);',
+      '  cursor: pointer; border: none; border-radius: 999px; flex: none;',
+      '  place-items: center; display: grid; padding: 0;',
+      '}',
+      '#dshm-attach:hover { background: var(--dsw-alias-interactive-bg-hover-solid); }',
+      '#dshm-attach:disabled { opacity: .5; cursor: default; }',
+      '[data-composer-card="true"] > [class*="_row"] {',
+      '  --dsh-composer-model-text-display: none !important;',
+      '  --dsh-composer-model-icon-display: block !important;',
+      '}',
+      '[aria-label="模型与推理等级"] [class*="_cell"] {',
+      '  height: 40px !important; font-size: 14px !important;',
+      '}',
+      /* ★ 模型清单是**子菜单** ✓（实测：点开「模型」那颗 cell 之后弹的是 `aria-label="模型"` 的
+         `role="menu"` ✓），但它**挂在顶层菜单的 DOM 里** ✓（实测 `closest('[aria-label="模型与推理等级"]')`
+         非空 ✓）⇒ **顶层这一个作用域就够** ✓，不再多认一个文案 ✗（越窄越好 ✓）。
+         ★ 代价：认的是**中文文案** ✗（换英文界面 ⇒ 静默失效、退回 DSH 原样 ✓ 不会改坏 ✓）。 */
+      '[aria-label="模型与推理等级"] [class*="_option"] {',
+      /* ★ 字号**不写** ✗ —— 0.15 与 0.2.0 的 option 字号本来**逐字相同**（实测都是 13.3333px，
+         两边都没给 `font-size` ✓）；给它钉 14px 是**发明** ✗（第一版就是这么写的 ✓）。 */
+      '  height: 38px !important; min-height: 38px !important;',
+      '}',
       /* ★★ round 125：底部**手势小白条**会压住输入区最底下那一行 ——
          也就是这条自绘状态栏（「上下文用量」那一行）✗（用户真机反馈，约 40% 字高被盖 ✓）。
          真机实测：navigationBars.bottom = systemGestures.bottom =
@@ -12154,6 +12197,9 @@
           //   没有那个标记就找不到顶栏 ✓）。它自己幂等 ✓，认不到入口就只做清理 ✓。
           tagLineageEntry()
           syncStatsBar(statsBar)
+          // ★ round 192：自绘的「添加附件」键也挂在同一条观察者上 ✓
+          //   （输入区每次重绘都会把我们塞进去的那个节点摘掉 ✗ —— 与状态栏同一个坑 ✓）
+          syncAttachButton()
           /**
            * ★ 设置弹窗开/关也要**当场**报给壳（round 137 ✓）—— 它是第 4 层可返回的东西 ✓。
            *   这里只是**兜底** ✓：真正吃紧的那条路是 `settingsWatch`（不去抖 ✓，见下 ✓），
@@ -13264,6 +13310,106 @@
     bar.sepB.style.display = hasTime && hasUsage ? '' : 'none'
     bar.element.dataset.on = hasContext || hasTime || hasUsage ? '1' : '0'
     bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
+  }
+
+  /** 自绘的「添加附件」键（全文档只有一个 ✓；建一次、之后只挪 ✓）。 */
+  var attachButton = null
+
+  /**
+   * ★★ 自绘「添加附件」键（round 192）：0.2.0 把 0.15 那颗独立的回形针**并进了**
+   *   「添加文件或调用指令」✗（用户要的是 **0.15 的控件** ✓）。
+   *
+   * ## 只**转发**，DSH 的节点一个字节都不动 ✓
+   *
+   * 0.15 那颗键当年就干一件事：`fileInputRef.current.click()` ✓。而那颗**隐藏的**
+   * `input[type=file][multiple]` 在 0.2.0 里**原封不动还在** ✓（就在输入卡片那一排里 ✓，
+   * 链路 `onPickFiles → intakeFiles → addFiles` 也没变 ✓）⇒ 我们只点它 ✓。
+   * 壳那半也早就好了：`MainActivity.onShowFileChooser`（`REQUEST_FILE_CHOOSER=4712` ✓）
+   * ⇒ 点下去真能弹系统选择器 ✓。
+   *
+   * ## 几处判据都有读数（每条都是踩出来的 ✓）
+   *
+   * · **位置**：插在那一排**第一个按钮**（「添加文件或调用指令」）后面 ✓ —— 与 0.15 的排布
+   *   `[+] [📎] …` 一致 ✓（间距由 DSH 自己的 `gap` 给 ✓，我们不加 margin ✗）；
+   * · **0.15 那边不能再加一颗** ✗：0.15 那一排里**直接子级按钮有 2 个**（指令 + 添加附件 ✓ 实测 ✓），
+   *   0.2.0 只有 **1 个**（实测 ✓）⇒ 判据是"直接子级按钮 ≥ 2 ⇒ 原生那颗还在 ⇒ 只做清理" ✓
+   *   （★ 必须数**直接子级** ✗ —— `querySelectorAll('button')` 会把 `modes` 里那颗访问模式键
+   *     也数进来 ⇒ 两版都 ≥ 2 ⇒ 永远不加 ✗，第一版就栽在这 ✓）；
+   * · **认不出就收掉 + 写一行** ✓（绝不静默 ✗）；这一排**每次 DSH 重绘都会把我们摘掉** ✓
+   *   ⇒ 挂进现成那套去抖观察者 ✓（`schedule()` 里 `syncStatsBar` 之后 ✓，与状态栏同一条命 ✓）。
+   */
+  function attachAnchor() {
+    var card = document.querySelector('[data-composer-card="true"]')
+    if (card === null || card === undefined) return null
+    var input = card.querySelector('input[type=file]')
+    if (input === null || input === undefined) return null
+    var tools = input.parentElement
+    if (tools === null || tools === undefined) return null
+    var direct = []
+    for (var i = 0; i < tools.children.length; i++) {
+      if (tools.children[i].tagName === 'BUTTON') direct.push(tools.children[i])
+    }
+    if (direct.length === 0) return null
+    // 原生那颗还在（0.15）⇒ 不加我们的 ✓
+    if (direct.length >= 2) return { tools: tools, anchor: null, input: input }
+    return { tools: tools, anchor: direct[0], input: input }
+  }
+
+  /** 回形针图标（自绘 ✓ —— 不抄 DSH 的 svg 资产 ✗）。 */
+  function buildAttachIcon() {
+    var ns = 'http://www.w3.org/2000/svg'
+    var svg = document.createElementNS(ns, 'svg')
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('width', '16')
+    svg.setAttribute('height', '16')
+    svg.setAttribute('aria-hidden', 'true')
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '1.4')
+    svg.setAttribute('stroke-linecap', 'round')
+    var path = document.createElementNS(ns, 'path')
+    path.setAttribute('d', 'M10.6 4.6v6.9a2.6 2.6 0 0 1-5.2 0V6.3a1.5 1.5 0 0 1 3 0v5.6')
+    svg.appendChild(path)
+    return svg
+  }
+
+  function buildAttachButton() {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.id = 'dshm-attach'
+    button.setAttribute('aria-label', '添加附件')
+    button.appendChild(buildAttachIcon())
+    /**
+     * ★ 只**转发**给 DSH 那颗隐藏 input ✓，并且**挡住冒泡** —— 输入卡片自己挂着 onClick
+     *   （欢迎页那一下 = 选工作区 ✓）⇒ 不挡的话点附件会顺手弹出工作区选择器 ✗。
+     */
+    var forward = function (event) {
+      if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
+      var found = attachAnchor()
+      if (found === null) {
+        debugBoxLine('[attach] ✗ 认不出输入卡片或那颗隐藏的 input[type=file] ⇒ 这一次点不了')
+        return
+      }
+      found.input.click()
+    }
+    button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
+    button.addEventListener('click', forward)
+    return button
+  }
+
+  /** 同步一次（幂等 ✓ —— 位置没变就一个字节都不写 ✓，与 `syncStatsBar` 同一条纪律 ✓）。 */
+  function syncAttachButton() {
+    var found = attachAnchor()
+    var button = attachButton
+    if (found === null || found.anchor === null) {
+      // 认不出（或 0.15 那边原生那颗还在）⇒ 把我们自己的收掉 ✓
+      if (button !== null && button.parentElement !== null) button.parentElement.removeChild(button)
+      return
+    }
+    if (button === null) button = attachButton = buildAttachButton()
+    if (button.parentElement !== found.tools || button.previousElementSibling !== found.anchor) {
+      found.anchor.insertAdjacentElement('afterend', button)
+    }
   }
 
   /**
@@ -19042,7 +19188,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930093349'
+    var BOOT_STAMP = 'BUILD-0930094726'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
