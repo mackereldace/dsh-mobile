@@ -680,11 +680,21 @@ const problems = []
  *     （= 修之前的行为 ✓，每 50ms 重放一次 ✓，撤掉时把标记拨回来 ✓）
  *     ⇒ 实测 **恰好 189-①～⑧ 红、189-⑨ 与其余全绿** ✓（两次都是 399 条 ✓：
  *     正常 395 ✓ / 4 ✗（那 4 条是与本节无关的既有红 ✓）、变异 387 ✓ / 12 ✗ ✓）。
+ * ★★ round 190（2026-09-30 用户真机："断联重连以后…点手动重连，**确实已经重连上了**，
+ *   但是**橙色按钮不消失**"✗）加到 **389** ✓（**+2 条** ✓，只加不减 ✓）：
+ *   · `152-⑰`（1 条 ✓）：**"出过状况、却一次都没数过失败"**（`offlineDispatched` / `failStreak` /
+ *     `autoPaused` **全假** ✓、橙色提示是 **DSH 自己**亮的 ✓）时手动重连连上 ⇒ **必须派发 `online`** ✓
+ *     —— 旧判据（只认 `offlineDispatched`）在这一档**必红** ✗；
+ *   · `152-⑰` 收尾（1 条 ✓）：`noteDialSuccess` / 退避基数 / 拨号替身都还原 ✓、页面仍是活连接 ✓。
+ *   ★ 变异开关：`ML_MUTATE_OLD_ONLINE=1` ⇒ 把 `noteDialSuccess` 换回**旧判据**（只看 `offlineDispatched` ✓）
+ *     ⇒ 期望**恰好 152-⑰ 红** ✓（收尾那条仍绿 ✓ —— 它只验"还原干净" ✓）。
+ *   ★ 那颗橙色提示**在不在**只**记录不判定** ✗：实测它在无头夹具里两种情形都可能不立刻消失 ✓
+ *     （夹具把 DSH 自己那套 pump 的世代搅乱 ✓）—— 确定性判定的只有"事件有没有派发" ✓。
  *   ★ 跑法（本机实测用的那一套 ✓）：`DSH_BIN=<0.2.0 的 bin.js> node scripts/check-mobile-layout.mjs`
  *     —— 桌面版 0.2.0 下会话夹具与本节都成立 ✓；默认那台 0.1.5-rc.1 上**会话行夹具本身**
  *     就打不开会话 ⇒ 155/157/158/189 会一起红（**既有问题，与本轮无关** ✗，见交单）。
  */
-const EXPECTED_MIN_CHECKS = 387
+const EXPECTED_MIN_CHECKS = 389
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -12592,6 +12602,129 @@ try {
       pendRestored.error === undefined && pendRestored.live === true,
       '★ 第 156-B④ 条（非假绿的旁证）：这一节结束后页面**又被拨回了一条活连接** ✓（后面几节都在这张页面上跑 ✓ —— 也让"上面那三条不是在死页面上量到的"有据可查 ✓）',
       `活链路=${JSON.stringify(pendRestored.live)}｜预算=${JSON.stringify(pendRestored.budget)}ms｜已放弃=${JSON.stringify(pendRestored.paused)}`,
+    )
+    /** ★ 变异开关（**只在刻意验证 152-⑰ 时开** ✓，默认关 ✓）：见那一条的说明 ✓。 */
+    if (process.env['ML_MUTATE_OLD_ONLINE'] === '1') {
+      await evaluate(`(function(){ globalThis.__dshm190Mutate = true; return 'on' })()`)
+      console.log('  · [190 变异] noteDialSuccess 已换回**旧判据**（只看 offlineDispatched ✗）⇒ 期望恰好 152-⑰ 红 ✓')
+    }
+    /**
+     * ★★ round 190（2026-09-30 用户真机 ✓）：「我断联重连以后…点手动重连，**确实已经重连上了**，
+     *   但是**橙色按钮不消失**」✗ —— 根因：`noteDialSuccess()` **旧判据只认 `offlineDispatched`** ✗
+     *   （= 我们自己替 DSH 按过 `offline` 才回 `online` ✓），而 **DSH 自己的连接层也会自己发现断线** ✓
+     *   ⇒ 那颗橙色提示是**它自己**亮的 ✓，我们这边可能一次 `offline` 都没派发过 ⇒
+     *   连上了却没人告诉 DSH"回来了" ✗✗。
+     *   修法（已落地 ✓）：`Tunnel.hadTrouble`（`scheduleReconnect()` 最前面 / `noteDialFailure()` 置位 ✓）+
+     *   `noteDialSuccess()` **先算**"上一次是不是干净连接"（**在清计数之前** ✗）⇒ 出过状况就回 `online` ✓。
+     *
+     * ★ 这一条量的是**那一档真机状态** ✓ —— `offlineDispatched` / `failStreak` / `autoPaused` **全是假** ✓、
+     *   只有"出过状况"（`hadTrouble`）为真 ✓ ⇒ **旧判据在这一档必红** ✗：
+     *   ① 关掉活连接 ⇒ `scheduleReconnect()` 把 `hadTrouble` 置位 ✓（此刻**一次失败都还没数** ✓ ——
+     *      这正是它与 152-①～⑨ 那一路的区别 ✗：那一路会数满 5 轮、并由**我们**派发 `offline` ✓）；
+     *   ② **橙色提示由 DSH 自己亮** ✓（页面自己派一个 `offline` ✓ —— 与真机上"它自己的连接层
+     *      发现 transport 断了"同形 ✓；我们**不走** `dispatchShellNetworkEvent` ⇒ `offlineDispatched` 保持假 ✓）；
+     *   ③ 点那颗橙色提示（= 用户做的那一下 ✓）⇒ 真拨号 + 真握手 + **经隧道问电脑一句、应答真的回来** ✓；
+     *   ④ **必须派发 `online`** ✓（不然 DSH 那套永远停在"重连中" ✗）、`hadTrouble` 归零 ✓、活链路在 ✓。
+     *   ★ 橙色提示**在不在**这里只**记录**、不判定 ✗ —— 实测它在无头夹具里两种情形都可能不立刻消失
+     *     （夹具把 DSH 自己那套 pump 的世代搅乱了 ✓，读数见交单 ✓）；这一节能**确定性**判定的是
+     *     **事件有没有派发** ✓ —— 那正是用户那条的机制 ✓。真机上的"提示消失"由主线在验收卡里点明去看 ✓。
+     */
+    const recoveredOnline = asJson(await evaluate(`(async function(){
+      try{
+        var t = globalThis.__DSH_MOBILE_BOOT__.tunnel
+        function lamp(){ var all=document.querySelectorAll('button')
+          for(var i=0;i<all.length;i++){ if(String(all[i].getAttribute('aria-label')||'').indexOf('立即重连')>=0) return true }
+          return false }
+        /* 前置：先真的有一条活连接 ✓（没有就补一次真拨号 ✓，与上面两节同一套做法 ✓）。 */
+        if(!t.hasLiveSocket()){ globalThis.__dshmRcWsMode='real'; try{ await t.dialNow(true) }catch(e){ void e } }
+        /* 让自动那一轮慢下来 ⇒ 用户那一下先到 ✓（base 原值随后还原 ✓）。 */
+        globalThis.__dshmRcPrevBase190 = t.config.reconnectBaseMs
+        t.config.reconnectBaseMs = 4000
+        /* ★ "一次 offline 都没派发过 + 还没数过失败"这一档 ✓ */
+        t.offlineDispatched = false
+        t.failStreak = 0
+        t.autoPaused = false
+        t.autoReconnectDeadline = undefined
+        t.hadTrouble = false
+        globalThis.__dshmRcNet = []
+        /* ② DSH 自己发现断线（页面自己派一个 offline ✓ —— 不走我们的派发函数 ✓） */
+        window.dispatchEvent(new Event('offline'))
+        var lampBefore = lamp()
+        /* ① 关掉活连接 ⇒ scheduleReconnect()（它第一行就置 hadTrouble ✓） */
+        if(t.socket!==undefined){ try{ t.socket.close() }catch(e){} }
+        var deadline = Date.now()+2500
+        while(Date.now()<deadline && t.hadTrouble!==true){ await new Promise(function(r){ setTimeout(r,50) }) }
+        var afterDrop = { hadTrouble:t.hadTrouble===true, failStreak:t.failStreak, paused:t.autoPaused===true,
+          offlineDispatched:t.offlineDispatched===true, lamp:lamp(), net:globalThis.__dshmRcNet.slice() }
+        /* ★★ 变异（只在刻意验证这一条时开 ✓，默认关 ✓）：把 noteDialSuccess 换回**旧判据** ✓
+           —— 只看 offlineDispatched ✓（= 用户在真机上遇到的那份实现 ✓）。 */
+        if (globalThis.__dshm190Mutate === true) {
+          var proto = Object.getPrototypeOf(t)
+          globalThis.__dshm190RealSuccess = proto.noteDialSuccess
+          proto.noteDialSuccess = function(){
+            var recovered = this.offlineDispatched === true
+            this.failStreak = 0; this.autoPaused = false; this.autoReconnectDeadline = undefined
+            this.awaitingApproval = false; this.hadTrouble = false
+            if (!recovered) return
+            this.offlineDispatched = false
+            try { if (typeof Event === 'function') window.dispatchEvent(new Event('online')) } catch(e){}
+          }
+        }
+        /* ③ 手动重连那一下：真的点那颗橙色提示 ✓（与用户做的一模一样 ✓） */
+        globalThis.__dshmRcWsMode = 'real'
+        var via = 'dialNow'
+        var btn = null
+        var all = document.querySelectorAll('button')
+        for(var i=0;i<all.length;i++){ if(String(all[i].getAttribute('aria-label')||'').indexOf('立即重连')>=0){ btn=all[i]; break } }
+        if(btn!==null){ try{ btn.click(); via='click' }catch(e){ void e } }
+        var deadline2 = Date.now()+9000
+        while(Date.now()<deadline2 && !t.hasLiveSocket()){ await new Promise(function(r){ setTimeout(r,100) }) }
+        /* 硬证据：经隧道问电脑一句（连上 ≠ 拨了一下 ✓） */
+        var rpc = 'error'
+        try{
+          var transport = globalThis.__DSH_TRANSPORT__
+          var r = await transport.fetch('/api/mobile/device/pending', { method:'POST',
+            body: JSON.stringify({ type:'client-request', rpcId:'online190', method:'mobile/device/pending', payload:{ args:{} } }) })
+          rpc = 'http:' + String(r.status)
+        }catch(e){ rpc = 'error:' + String(e&&e.message?e.message:e) }
+        var net = globalThis.__dshmRcNet.slice()
+        return JSON.stringify({
+          via:via, live:t.hasLiveSocket()===true, rpc:rpc, net:net,
+          online:net.filter(function(x){return x==='online'}).length,
+          offline:net.filter(function(x){return x==='offline'}).length,
+          lampBefore:lampBefore, lampAfter:lamp(), afterDrop:afterDrop,
+          hadTrouble:t.hadTrouble===true, failStreak:t.failStreak, paused:t.autoPaused===true,
+          offlineDispatched:t.offlineDispatched===true, mutated:globalThis.__dshm190Mutate===true,
+        })
+      }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) } })()`))
+    check(
+      recoveredOnline.error === undefined &&
+        recoveredOnline.afterDrop !== undefined && recoveredOnline.afterDrop.hadTrouble === true &&
+        recoveredOnline.afterDrop.failStreak === 0 && recoveredOnline.afterDrop.paused === false &&
+        recoveredOnline.afterDrop.offlineDispatched === false &&
+        recoveredOnline.live === true && recoveredOnline.rpc === 'http:200' &&
+        recoveredOnline.online >= 1 && recoveredOnline.hadTrouble === false,
+      '★★ 第 152-⑰ 条：**"出过状况、却一次都没数过失败"（橙色提示是 DSH 自己亮的 ✓）时手动重连连上 ⇒ 必须派发 `online`** ✓ —— 不然 DSH 那套永远停在"重连中"、橙色按钮**不消失** ✗（用户真机原话："确实已经重连上了，但是橙色按钮不消失"✗；旧判据只看 `offlineDispatched` ⇒ 这一条**必红** ✗）',
+      `断开后 hadTrouble=${JSON.stringify(recoveredOnline.afterDrop?.hadTrouble)}（failStreak=${JSON.stringify(recoveredOnline.afterDrop?.failStreak)}、已放弃=${JSON.stringify(recoveredOnline.afterDrop?.paused)}、我们按过offline=${JSON.stringify(recoveredOnline.afterDrop?.offlineDispatched)}）｜橙色提示 断开时=${JSON.stringify(recoveredOnline.lampBefore)} → 连上后=${JSON.stringify(recoveredOnline.lampAfter)}（★只记录不判定 ✗）｜连上=${JSON.stringify(recoveredOnline.live)}｜RPC=${JSON.stringify(recoveredOnline.rpc)}｜窗口事件=${JSON.stringify(recoveredOnline.net)}（online ${JSON.stringify(recoveredOnline.online)} 次 ✓）｜走=${JSON.stringify(recoveredOnline.via)}｜变异=${JSON.stringify(recoveredOnline.mutated)}`,
+    )
+    /** 收尾：把这一条用到的夹具还原 ✓（noteDialSuccess 若被变异过则换回来 ✓、base 还原 ✓、排程清掉 ✓）。 */
+    const restored190 = asJson(await evaluate(`(function(){
+      try{
+        var t = globalThis.__DSH_MOBILE_BOOT__.tunnel
+        if (globalThis.__dshm190RealSuccess !== undefined) {
+          Object.getPrototypeOf(t).noteDialSuccess = globalThis.__dshm190RealSuccess
+          delete globalThis.__dshm190RealSuccess
+        }
+        if (globalThis.__dshmRcPrevBase190 === undefined) delete t.config.reconnectBaseMs
+        else t.config.reconnectBaseMs = globalThis.__dshmRcPrevBase190
+        t.clearReconnectTimer()
+        globalThis.__dshmRcWsMode = 'real'
+        return JSON.stringify({ live:t.hasLiveSocket()===true, mutatedLeft:globalThis.__dshm190RealSuccess!==undefined, base:t.config.reconnectBaseMs })
+      }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) } })()`))
+    check(
+      restored190.error === undefined && restored190.live === true && restored190.mutatedLeft === false,
+      '★ 第 152-⑰ 条收尾：`noteDialSuccess` / 退避基数 / 拨号替身**都还原** ✓，页面仍然是一条**活连接** ✓（后面几节还要用它 ✓）',
+      `活链路=${JSON.stringify(restored190.live)}｜变异残留=${JSON.stringify(restored190.mutatedLeft)}｜退避基数=${JSON.stringify(restored190.base)}`,
     )
     /**
      * ⑧ 还原：真 `WebSocket` / 退避基数 / 候选端点表 / 窗口监听 / 设置弹窗 / 抽屉 ✓
