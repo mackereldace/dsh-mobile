@@ -9288,14 +9288,28 @@
              于是手机看不到，我希望你放在手机的『轨迹』右边" ✓。
              改法：**高度归零**（布局上仍等于不存在 ✓ —— 它后面那行标签的位置一个像素不变 ✓），
              但盒子留在 DOM 里，好让那一个入口能被 CSS 拎到标签行右端 ✓。 */
-      '  [class*="titleRow"] {',
+      /* ★★ round 191（2026-09-30，用户报的）：上面这两条**原来没加作用域** ✗✗ ——
+         写的是裸 `[class*="titleRow"]` ⇒ **全文档生效** ✗。而 `titleRow` 只是 CSS Modules 的
+         **局部名** ✓，0.2.0 里**别的组件也用它** ✓（grep 产物实测 ✓）：
+          · `dsh-client-ui-plugin-manager` 的 `…_titleRow` —— **插件卡片那一行**，里面装着插件名
+            （`.ZVcBiW_cardTitle` ✓）⇒ 整行被压成 0 高 + 子树集体隐身 ⇒ 用户原话
+            "插件页深色**看不见插件名字**"✗✗；
+          · `dsh-client-ui-sidebar-documentpreview` / `…-sidebar-terminal` 各有一个 `…_titleRow`
+            ⇒ 那两处标题同样被藏 ✗ = 用户说的"**其他的显示也有问题**"✓；
+          · 只有 `dsh-client-ui-conversation` 的那一个才是我们本来想动的 ✓。
+         ⇒ 处置：加**我们自己的作用域** `[data-dshm-topheader]` ✓（`tagTopHeader()` 打的 ✓，
+           0.2.0 上它打在真正的 `<header>` 上 ✓）⇒ 顶栏那一行的行为**逐字不变** ✓，
+           别处一律不再受影响 ✓。★ 仍然只认结构/属性，不认哈希 ✓。 */
+      '  [data-dshm-topheader] [class*="titleRow"] {',
       '    height: 0 !important; min-height: 0 !important; overflow: visible !important;',
       '    padding: 0 !important; margin: 0 !important; border: 0 !important;',
       '  }',
       /* ★ 标题行里的**非子代理部分照旧藏掉** ✓（标题文字 / 面包屑按钮 / headerActions…）：
          整棵子树先默认隐身 ✓，只有被我们打了 `data-dshm-lineage` 的那一个入口再显回来 ✓
          （`visibility` 能被后代翻回来 ✓ —— `display:none` 不行 ✗，所以不能用它当默认）。 */
-      '  [class*="titleRow"] * { visibility: hidden !important; }',
+      /* ★ round 191：同样**必须带 `[data-dshm-topheader]` 作用域** ✗ —— 否则别的组件那些
+         `…_titleRow` 的**整棵子树会集体隐身** ✓（插件名就是这么消失的 ✓）。 */
+      '  [data-dshm-topheader] [class*="titleRow"] * { visibility: hidden !important; }',
       /* 有入口时：链上每一层**只留"通往入口的那一个孩子"**✓，其余 `display:none` ✓ ——
          它们虽然隐身，**盒子还在**，而下面那条把 `overflow` 放开了（必须放开，否则入口被裁 ✗）
          ⇒ 不收干净就会把内容撑出可视区 ✗（"页面能左右拖"那类问题 ✓）。 */
@@ -10838,22 +10852,6 @@
     }
 
     /**
-     * 从某个节点往上找**第一个会生成盒子**的祖先 ✓（判据 = 计算值 `display !== 'contents'` ✓）。
-     *
-     * ★ 为什么必须按"有没有盒子"找 ✗：DSH 的**插槽包装层**是 `display: contents` ✓ ——
-     *   给它写 `padding-top` / `position` / 宽高**一律无效** ✗（它不生成盒子 ✓）。
-     *   本项目已经为此栽过**三次** ✓（最近一次见 `tagTopHeader` 的说明 ✓）。
-     */
-    function firstBoxedAncestor(node) {
-      var walk = node === null || node === undefined ? null : node.parentElement
-      while (walk !== null && walk !== undefined) {
-        if (lineageGeneratesBox(walk)) return walk
-        walk = walk.parentElement
-      }
-      return null
-    }
-
-    /**
      * 给 DSH 的**顶栏本体**打标记，供 CSS 让出我们自建顶栏的高度。
      *
      * ★ 原先 CSS 直接写 `[class*="header"] { padding-top: … !important }` —— **太宽了**：
@@ -10877,21 +10875,40 @@
      *   反证 ✓：把标记手工挪到真正的 `<header>` ⇒ `padding-top` 立刻 100px、header 0..136、`tabs` 落到 110..135
      *   ⇒ **从我们顶栏底下出来了** ✓✓。
      *
-     * 三条判据（按优先级 ✓，都**不认类名** ✗ —— 哈希前缀会随版本变 ✓）：
-     *   ① `titleRow.closest('header')` ✓ —— 语义最准（0.2.0 上就是那个 `<header>` ✓）；
-     *   ② 否则往上找**第一个有盒子的祖先** ✓（`firstBoxedAncestor` ✓，兼容"没有 header 元素"的布局 ✓）；
-     *   ③ 都没有 ⇒ 沿用原来的"整屏宽 + 有高度 + 不在对话框里"兜底 ✓。
+     * 判据（按优先级 ✓，都**不认类名** ✗ —— 哈希前缀会随版本变 ✓）：
+     *   ① 在全部 `*_titleRow` 里挑**第一个处于 `<header>` 内**的那一行 ✓ —— 语义最准
+     *      （0.2.0 上会话头就是 `header > … > div.titleRow` ✓）；
+     *      ★ round 191：**不能只取第一个** ✗ —— 别处（插件卡片 / 侧栏预览 / 终端 ✓）也有
+     *      同名局部类 ✓，取第一个会把标记打到**插件卡片**上 ✗（实测见 `tagTopHeader` 里的说明 ✓）；
+     *   ② 一个都找不到 ⇒ 沿用原来的"整屏宽 + 有高度 + 不在对话框里"兜底 ✓
+     *      （兼容没有 `header` 元素的布局 ✓）。
      * ★ 并且**幂等摘旧标记** ✗：DSH 一重渲染就换元素 ✓，不摘就会留下一个**没盒子**的旧标记，
      *   而 CSS 认的是"有没有这个属性"⇒ 旧标记会让让位规则继续打在错的地方 ✗（"标记只打不摘"正是这次现场 ✓）。
      */
     function tagTopHeader() {
       if (document.body === null || document.body === undefined) return
-      var titleRow = document.querySelector('[class*="titleRow"]')
-      var header = null
-      if (titleRow !== null && titleRow !== undefined) {
-        if (typeof titleRow.closest === 'function') header = titleRow.closest('header')
-        if (header === null || header === undefined) header = firstBoxedAncestor(titleRow)
+      /**
+       * ★★ round 191（2026-09-30，用户报的"插件页看不见插件名字"✗）：**这里也得挑对那一行** ✗✗ ——
+       *  原来写的是 `document.querySelector('[class*="titleRow"]')` ✓ = 全文档**第一个** `*_titleRow` ✗，
+       *  而 `titleRow` 只是 CSS Modules 的**局部名** ✓ —— 插件页上第一个是**插件卡片的**
+       *  `ZVcBiW_titleRow` ✓ ⇒ `closest('header')` 为 null ⇒ 落到 `firstBoxedAncestor` ✓
+       *  ⇒ 标记打在 `div.ZVcBiW_cardMain` 上 ✗（实测就是这个读数 ✓）⇒ 那条"整行压 0 高 + 子树隐身"
+       *  的规则**继续命中插件卡片** ✗ ⇒ 只把 CSS 加作用域**只修好一半** ✗（第一张卡的插件名照样看不见 ✓）。
+       *  ⇒ 判据改成：**只在 `<header>` 里的那一行**才算顶栏标题行 ✓（0.2.0 实测：会话页那一行
+       *    在 `header.ST7X_W_header` 里 ✓，而插件卡片 / 侧栏预览 / 终端那三处都**不在** header 里 ✓）；
+       *    一个都找不到时**照样走原来那条兜底** ✓（"整屏宽 + 有高度 + 不在对话框里" ✓，
+       *    兼容没有 `header` 元素的布局 ✓）；仍然**不认哈希** ✓。
+       */
+      var rows = document.querySelectorAll('[class*="titleRow"]')
+      var titleRow = null
+      for (var r = 0; r < rows.length; r++) {
+        if (typeof rows[r].closest === 'function' && rows[r].closest('header') !== null) {
+          titleRow = rows[r]
+          break
+        }
       }
+      var header = null
+      if (titleRow !== null && titleRow !== undefined) header = titleRow.closest('header')
       if (header === null || header === undefined) {
         var all = document.querySelectorAll('[class*="header"]')
         for (var i = 0; i < all.length; i++) {
@@ -19025,7 +19042,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930092505'
+    var BOOT_STAMP = 'BUILD-0930093349'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
