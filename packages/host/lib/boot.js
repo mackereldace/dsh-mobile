@@ -8979,9 +8979,15 @@
        *      （别的菜单会一起被改 ✗）。★ 代价写清楚：它认的是**中文文案** ✗，
        *      换成英文界面这条会**静默失效**（退化成 DSH 原样 ✓ 不会改坏 ✓）。
        */
+      '#dshm-attach-host {',
+      '  position: fixed; left: 0; top: 0; width: 0; height: 0; margin: 0; padding: 0; z-index: 260;',
+      '  overflow: visible; pointer-events: none; display: block;',
+      '}',
+      '#dshm-attach-host[data-dshm-on="0"] { display: none; }',
       '#dshm-attach {',
+      '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
-      '  width: 28px; height: 28px; color: var(--dsw-alias-label-primary);',
+      '  width: 28px; height: 28px; box-sizing: border-box; color: var(--dsw-alias-label-primary);',
       '  cursor: pointer; border: none; border-radius: 999px; flex: none;',
       '  place-items: center; display: grid; padding: 0;',
       '}',
@@ -13314,6 +13320,48 @@
 
   /** 自绘的「添加附件」键（全文档只有一个 ✓；建一次、之后只挪 ✓）。 */
   var attachButton = null
+  /**
+   * ★★ round 193：**跟在我们后面那一颗**（= 权限键 ✓）—— 我们给它让出 28px 的位。
+   *
+   * 为什么要让 ✗：这颗键现在**不在 DSH 的 flex 行里**了 ✓（见 `attachHost` 的说明 ✓），
+   *   所以那一排的排布完全按 DSH 自己的来 ✓ ⇒ 我们占的那 28px 在**排布上不存在** ✗。
+   *   实测两次，读数是两个不同的形状 ✓：
+   *     · 旧一轮实测（我们插进 DOM 之后）：`tools` 宽 **116px**、权限键在 `x=104` ✓；
+   *     · round 193 实测（React 已把插入的节点摘掉）：`tools` 宽 **80px**、
+   *       权限键在 `x=68` ✓ ⇒ 若直接按"锚点钮的左缘"摆我们的键，
+   *       我们的键就**压在权限键上**（两颗 28px 完全重叠 ✓，`attachRect x=32` = 锚点自身 ✓）✗。
+   *   ⇒ 必须**量出来**、并把后续兄弟节点整体右移一个钮宽 ✓ —— 而不是假设"那一排里已经有我们的位"✗。
+   * ★ 移除时一定要**把内联值还回去** ✓（我们只写 `margin-left`，且记住写没写过 ✓）：
+   *   这是 DSH 的节点 ✓，留一条内联样式就是"污染"✗（本项目铁律 ✓）。
+   */
+  var attachShiftedNode = null
+
+  /** 取"锚点那颗钮**之后**、同一排里的第一颗按钮" ✓（= 需要右移的那一颗 ✓）。 */
+  function attachShiftTarget(found) {
+    /**
+     * ★ 实测（round 193）：锚点后面**第一个带按钮的后代**才是那颗权限键 ✓ ——
+     *   锚点的兄弟里先是那颗隐藏的 `input[type=file]`（0×0 ✓ 不是按钮 ✓），
+     *   再往后是 `div.…_modes`（**容器** ✓，权限键在它**里面** ✓）。
+     *   ⇒ 只看兄弟会漏掉它 ✓（第一次读数是"让位没发生、我们的键压在权限键上" ✗）。
+     */
+    var node = found.anchor === null ? null : found.anchor.nextElementSibling
+    while (node !== null && node !== undefined) {
+      if (node.tagName === 'BUTTON') return node
+      if (node.querySelector !== undefined) {
+        var inner = node.querySelector('button')
+        if (inner !== null) return inner
+      }
+      node = node.nextElementSibling
+    }
+    return null
+  }
+
+  /** 撤销让位（把内联 `margin-left` 还给 DSH ✓）。 */
+  function clearAttachShift() {
+    if (attachShiftedNode === null) return
+    if (attachShiftedNode.style !== undefined) attachShiftedNode.style.removeProperty('margin-left')
+    attachShiftedNode = null
+  }
 
   /**
    * ★★ 自绘「添加附件」键（round 192）：0.2.0 把 0.15 那颗独立的回形针**并进了**
@@ -13329,14 +13377,15 @@
    *
    * ## 几处判据都有读数（每条都是踩出来的 ✓）
    *
-   * · **位置**：插在那一排**第一个按钮**（「添加文件或调用指令」）后面 ✓ —— 与 0.15 的排布
-   *   `[+] [📎] …` 一致 ✓（间距由 DSH 自己的 `gap` 给 ✓，我们不加 margin ✗）；
+   * · **位置**：锚在那一排**第一颗按钮**（「添加文件或调用指令」）上 ✓ —— 与 0.15 的排布
+   *   `[+] [📎] …` 一致 ✓（间距由 JS 量、按 `gap` 让位 ✓，写成 DSH 节点上的 `margin-left` ✓）；
    * · **0.15 那边不能再加一颗** ✗：0.15 那一排里**直接子级按钮有 2 个**（指令 + 添加附件 ✓ 实测 ✓），
    *   0.2.0 只有 **1 个**（实测 ✓）⇒ 判据是"直接子级按钮 ≥ 2 ⇒ 原生那颗还在 ⇒ 只做清理" ✓
    *   （★ 必须数**直接子级** ✗ —— `querySelectorAll('button')` 会把 `modes` 里那颗访问模式键
    *     也数进来 ⇒ 两版都 ≥ 2 ⇒ 永远不加 ✗，第一版就栽在这 ✓）；
-   * · **认不出就收掉 + 写一行** ✓（绝不静默 ✗）；这一排**每次 DSH 重绘都会把我们摘掉** ✓
-   *   ⇒ 挂进现成那套去抖观察者 ✓（`schedule()` 里 `syncStatsBar` 之后 ✓，与状态栏同一条命 ✓）。
+   * · **认不出来就收掉 + 写一行** ✓（绝不静默 ✗）；位置同步挂在现成那套去抖观察者上 ✓
+   *   （`schedule()` 里 `syncStatsBar` 之后 ✓，与状态栏同一条命 ✓），
+   *   拖动/推挤期间另有一条**按帧**的跟手循环 ✓（见 `attachFollowFrame` ✓）。
    */
   function attachAnchor() {
     var card = document.querySelector('[data-composer-card="true"]')
@@ -13360,8 +13409,22 @@
     var ns = 'http://www.w3.org/2000/svg'
     var svg = document.createElementNS(ns, 'svg')
     svg.setAttribute('viewBox', '0 0 16 16')
-    svg.setAttribute('width', '16')
-    svg.setAttribute('height', '16')
+    /**
+     * ★★ round 193：视觉尺寸 `16 → 20` ✓（用户："你这个键**好像画的略小**"✗）。
+     *
+     * 只改**呈现尺寸** ✓，`viewBox` 与 `d` 一个字都不动 ✗ —— 于是回形针的**形状**
+     * 与 0.15 那颗逐点相同 ✓，变大的只是它在 28px 圆钮里的占比 ✓。
+     * 三档都量过（描边内视觉盒 ✓，同一套 `getBBox` 读数 ✓）：
+     *   `16` → **5.2×9.5px**（线宽 1.4px ✓，改前 ✓）；
+     *   `18` → **5.85×10.69px**（线宽 1.58px ✓）；
+     *   `20` → **6.5×11.88px**（线宽 1.75px ✓，改后 ✓）。
+     * `18` 只比原来大 12.5% ✓（真机缩放下几乎看不出来 ✓）；`20` 是 **+25%** ✓
+     * 且仍留 4px 内边距（28 − 20 ✓）⇒ 取 `20` ✓。
+     * ★ 为什么不动那颗键自己的 28×28 ✓：它与左边那颗「添加文件或调用指令」
+     *   **同规格**（实测两颗都是 28×28 ✓），改钮就是改排布 ✗。
+     */
+    svg.setAttribute('width', '20')
+    svg.setAttribute('height', '20')
     svg.setAttribute('aria-hidden', 'true')
     svg.setAttribute('fill', 'none')
     svg.setAttribute('stroke', 'currentColor')
@@ -13380,8 +13443,10 @@
     button.setAttribute('aria-label', '添加附件')
     button.appendChild(buildAttachIcon())
     /**
-     * ★ 只**转发**给 DSH 那颗隐藏 input ✓，并且**挡住冒泡** —— 输入卡片自己挂着 onClick
-     *   （欢迎页那一下 = 选工作区 ✓）⇒ 不挡的话点附件会顺手弹出工作区选择器 ✗。
+     * ★ 只**转发**给 DSH 那颗隐藏 input ✓。
+     *   round 193 起这颗键**不在输入卡片里了** ✓（见 `attachHost` 的说明 ✓）⇒
+     *   输入卡片自己那条 `onClick`（欢迎页那一下 = 选工作区 ✓）**天然收不到** ✓；
+     *   这一句 `stopPropagation` 留着是**为了不依赖那个巧合** ✓（万一以后又放进去了 ✓）。
      */
     var forward = function (event) {
       if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
@@ -13397,19 +13462,152 @@
     return button
   }
 
+  /** 我们自己的宿主（`document.body` 直挂 ✓，**绝不进 DSH 的 React 树** ✗）。 */
+  function attachHost() {
+    var host = document.querySelector('#dshm-attach-host')
+    if (host !== null && host !== undefined) return host
+    if (document.body === null || document.body === undefined) return null
+    host = document.createElement('div')
+    host.id = 'dshm-attach-host'
+    host.setAttribute('data-dshm-on', '0')
+    document.body.appendChild(host)
+    return host
+  }
+
+  /** 最近一次量到的锚点位置（跟手循环用它判"要不要继续跑" ✓）。 */
+  var attachLastBox = ''
+  /** 跟手帧句柄（同一时刻只排一次 ✓；位置不再变就自己停 ✓）。 */
+  var attachFrame = null
+  /** 已经连续多少帧"没有新变化"（连续 3 帧即停 ✓ —— 过渡动画跑完就是这个形状 ✓）。 */
+  var attachSteady = 0
+
+  /**
+   * 把自绘附件键**摆到锚点那颗钮上**（只写 `left/top` ✓，一个节点都不重建 ✓）。
+   *
+   * @returns 'placed' 摆好了 ✓ / 'miss' 锚点认不出 ✓ / 'none' 宿主都还建不了 ✓。
+   */
+  function placeAttachButton() {
+    var host = attachHost()
+    var button = attachButton
+    if (host === null || button === null) return 'none'
+    var found = attachAnchor()
+    if (found === null || found.anchor === null) {
+      clearAttachShift()
+      if (host.getAttribute('data-dshm-on') !== '0') host.setAttribute('data-dshm-on', '0')
+      return 'miss'
+    }
+    var rect = found.anchor.getBoundingClientRect()
+    /**
+     * ★ 判据用**量到的 rect** ✓：锚点没盒子（`display:none` / 还没布局 ✓）或跑到视口外
+     *   ⇒ 我们跟着收起 ✓ —— 绝不"猜"该不该显示 ✗。收起时**也要把让位还回去** ✓，
+     *   否则那一排会平白多出 28px（那正是"权限键横跳"的另一种形态 ✗）。
+     */
+    if (!(rect.width > 0) || !(rect.height > 0) || rect.bottom < -8 || rect.top > window.innerHeight + 8) {
+      clearAttachShift()
+      if (host.getAttribute('data-dshm-on') !== '0') host.setAttribute('data-dshm-on', '0')
+      return 'miss'
+    }
+    /**
+     * ★ 只有**我们真的把键摆出去**了才让位 ✓（先摆好、再让位 ✓）——
+     *   顺序写反的话，让位那一下会把锚点自己推走 ✓，量到的位置就整体偏一个钮宽 ✗。
+     * ★ 摆的位置是**锚点右缘 + 那一排自己的 gap** ✓（不是锚点左缘 ✗）——
+     *   左缘 = **压在锚点上面**（两颗 28px 完全重叠 ✓，实测 `attachRect x=32` = 锚点自身 ✓）。
+     *   gap **量**出来、不写死 ✗（DSH 换主题/换密度时它会变 ✓；实测那一排是 `gap: 8px` ✓）。
+     */
+    var gap = 8
+    try {
+      var parsedGap = parseFloat(globalThis.getComputedStyle(found.tools).columnGap)
+      if (isNaN(parsedGap) === false && parsedGap >= 0) gap = parsedGap
+    } catch (error) {
+      void error
+    }
+    var left = Math.round((rect.right + gap) * 100) / 100
+    var top = Math.round(rect.top * 100) / 100
+    var box = left + '|' + top
+    if (box !== attachLastBox) {
+      button.style.left = left + 'px'
+      button.style.top = top + 'px'
+      attachLastBox = box
+      attachSteady = 0
+    } else {
+      attachSteady += 1
+    }
+    if (host.getAttribute('data-dshm-on') !== '1') host.setAttribute('data-dshm-on', '1')
+    /**
+     * 让位：后续那一颗按钮（= 权限键 ✓）右移"一个钮宽 + 那个 gap" ✓
+     * —— 与我们占掉的横向空间**逐像素相等** ✓（值没变就一个字节都不写 ✓）。
+     */
+    var next = attachShiftTarget(found)
+    if (next !== attachShiftedNode) {
+      clearAttachShift()
+      attachShiftedNode = next
+    }
+    if (next !== null) {
+      var shift = String(Math.round(rect.width + gap)) + 'px'
+      if (next.style.getPropertyValue('margin-left') !== shift) next.style.setProperty('margin-left', shift)
+    }
+    return 'placed'
+  }
+
+  /**
+   * ★★ round 193：跟手帧循环 —— 抽屉/文件面板**推挤输入区**时，`position: fixed` 的
+   *   附件键**不会自己跟着动** ✗（DSH 那边是把内容列 `transform` 走的 ✓）。
+   *
+   * 为什么不能只靠 120ms 那趟 `schedule` ✓：拖动是**逐帧**的 ✓，
+   * 8Hz 的补偿看起来就是"键在漂"✓（与本项目"控件闪烁"同一类观感问题 ✗）。
+   * 所以拖动/过渡期间按帧量、按帧写 ✓，位置连着 3 帧没变就**自己停** ✓
+   * （不可能出现"常驻 rAF"那种耗电 ✗）。
+   */
+  function attachFollowFrame() {
+    attachFrame = null
+    placeAttachButton()
+    if (attachSteady >= 3) return
+    if (typeof globalThis.requestAnimationFrame === 'function') attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
+  }
+  function scheduleAttachFollow() {
+    if (attachFrame !== null) return
+    if (typeof globalThis.requestAnimationFrame !== 'function') return
+    attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
+  }
+
   /** 同步一次（幂等 ✓ —— 位置没变就一个字节都不写 ✓，与 `syncStatsBar` 同一条纪律 ✓）。 */
   function syncAttachButton() {
-    var found = attachAnchor()
-    var button = attachButton
-    if (found === null || found.anchor === null) {
-      // 认不出（或 0.15 那边原生那颗还在）⇒ 把我们自己的收掉 ✓
-      if (button !== null && button.parentElement !== null) button.parentElement.removeChild(button)
-      return
-    }
-    if (button === null) button = attachButton = buildAttachButton()
-    if (button.parentElement !== found.tools || button.previousElementSibling !== found.anchor) {
-      found.anchor.insertAdjacentElement('afterend', button)
-    }
+    /**
+     * ★★ round 193：**判据从"插进 DSH 那一排"改成"摆到锚点那颗钮上"** ✓。
+     *
+     * ## 修的是什么（用户 2026-09-30 原话）
+     * "回形针的附件键……**一直闪烁** ✗，导致其右边的**权限键左右横跳** ✗"。
+     *
+     * ## 真因（实测读数，不是推断 ✓）
+     * 旧实现是 `found.anchor.insertAdjacentElement('afterend', button)` ✓ ——
+     * **把我们的节点插进 DSH 的 React 树里** ✗✗。而输入区**一直在重渲染** ✓
+     * ⇒ React 认为"这个多出来的兄弟节点"不该在 ⇒ 摘掉它 ✓ ⇒ 我们 120ms 后又插回去 ✓
+     * ⇒ **一摘一插，永远循环** ✗。浏览器里实测（每 300ms 探一次、连探 6 秒 ✓）：
+     *   `add:177ms / remove:378 / add:578 / remove:778 …`——**整整 30 次、周期 200ms** ✓，
+     *   也就是"它有一半时间是消失的"（`presentCount 10/20` ✓）= 肉眼看到的闪烁 ✓。
+     * 而它一进一出就改变那一排的宽度（`tools` 宽 `116 → 80px` ✓）⇒
+     * 紧跟在后面的**权限键左缘 `68 ↔ 104` 跳 36px** ✓ = 用户说的"左右横跳" ✓。
+     * ★ 这条本来就有正解先例 ✓：`[data-dshm-lineage-host]`（子智能体那颗控件 ✓）——
+     *   **挂在我们自己的宿主下 + `position: fixed` 按量到的 rect 定位** ✓（项目铁律：
+     *   不进 DSH 的 React 树 ✗）。
+     *
+     * ## 为什么这样就不会再被摘 ✗
+     * 我们的节点现在整个在 `#dshm-attach-host` 里 ✓（`document.body` 直挂 ✓）——
+     * 那是**我们自己的宿主**，React 的 reconciliation 只碰它自己 props 里那几个兄弟 ✓，
+     * 碰不到我们的 ✓。而且我们**从不移除那个 button** ✓：认不出锚点时只把宿主
+     * `data-dshm-on="0"`（CSS `display:none` ✓）—— 节点身份因此**恒定** ✓
+     * （判据：连续 3 秒 `getElementById('dshm-attach')` 恒为同一个对象 ✓）。
+     */
+    var host = attachHost()
+    if (host === null) return
+    if (attachButton === null) attachButton = buildAttachButton()
+    if (attachButton.parentElement !== host) host.appendChild(attachButton)
+    /**
+     * ★ 锚点那一排**只在输入区存在时才在** ✓；每次同步都重排一次跟手循环 ✓ ——
+     *   `placeAttachButton()` 自己会判"位置变了没有" ✓（没变就让它停 ✓）。
+     */
+    placeAttachButton()
+    if (attachSteady < 3) scheduleAttachFollow()
   }
 
   /**
@@ -19188,7 +19386,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930094726'
+    var BOOT_STAMP = 'BUILD-0930100336'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
