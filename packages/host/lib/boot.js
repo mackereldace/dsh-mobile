@@ -10758,12 +10758,58 @@
            */
           var node = trigger
           var boxed = trigger
+          /**
+           * ★★ 2026-09-30（B ✓）：**DSH 插槽根** —— `display:contents` 那一层的孩子 ✓。
+           *
+           * 为什么单独记它：两个版本里"入口"指的其实是**同一个东西** —— DSH 插槽包装层
+           * （`div[data-slot]`，`display:contents`）里的那个根 `div` ✓
+           * （0.1.5 是 `ZKlsPq_root` ✓、0.2.0 是 `Z0Zh9q_root` ✓，**都是插槽的孩子** ✓）。
+           * 老代码能撞对纯属巧合：它与"面包屑以下最外层有盒子的那层"在 0.1.5 上恰好重合 ✓；
+           * 0.2.0 换了挂载点之后就不重合了 ✗ ⇒ 入口被认成 `headerActions`（**高了一层** ✓，
+           * 多出来的兄弟节点全靠 `visibility` 兜着 ✓，不是不能用，而是名不副实 ✓）。
+           * ⇒ 判据改成**结构性的**：往上走时，谁的父层是 `display:contents`，谁就是插槽根 ✓
+           * （与 `lineageGeneratesBox` 同一条语义 ✓，仍然不认哈希类名 ✓）。
+           * 找不到插槽根时退回 `boxed` ✓（老行为 ✓，什么都不做也不会崩 ✓）。
+           */
+          var lineageSlotRoot = null
           while (node !== null && node !== undefined && node.parentElement !== null && node.parentElement !== header) {
             if (classHasSuffix(node.parentElement, '_crumbSeg')) { entry = boxed; break }
-            node = node.parentElement
+            /**
+             * ★★ 2026-09-30（B ✓）：**DSH 0.2.0 把子智能体入口搬出了面包屑** ✗✗ ——
+             *   真机读数（桌面版 0.2.0 + 手机 400x869，adb + CDP 量的 ✓）：
+             *     header > titleRow > titleCluster > headerActions > div[data-slot]
+             *       > div.Z0Zh9q_root > button.Z0Zh9q_trigger[aria-haspopup=tree]
+             *   这条路径上**一个 crumbSeg 都没有** ✗ ⇒ 旧循环一路走到 header 也没收手 ✓
+             *   ⇒ `entry` 恒为 null ⇒ 一个标记都不打 ⇒ 标题行里**所有**直接孩子被 CSS 藏掉 ✗
+             *   ⇒ 手机上那颗「N 个子智能体」**整颗消失** ✓（用户 2026-09-30 报的就是这个 ✓）。
+             *
+             *   补的这条收手条件与面包屑那条**同义** ✓：走到"再上一级就是标题行的直接孩子"
+             *   那一步就停 ✓ —— 此时取**插槽根** ✓（0.2.0 上是 `div.Z0Zh9q_root` ✓，
+             *   `display:flex` 有盒子 ✓ ⇒ 位置与尺寸都量得到 ✓）。
+             *   ★ 判据仍然**不认哈希类名** ✓：只认 `_titleRow` 这半截后缀 ✓
+             *     （0.1.5 / 0.2.0 都叫 `*_titleRow` ✓），版本再换也照样认得 ✓。
+             */
+            var lineageParent = node.parentElement
+            var lineageAbove = lineageParent === null || lineageParent === undefined ? null : lineageParent.parentElement
+            if (lineageAbove !== null && lineageAbove !== undefined && classHasSuffix(lineageAbove, '_titleRow')) {
+              entry = lineageSlotRoot === null ? boxed : lineageSlotRoot
+              break
+            }
+            if (!lineageGeneratesBox(lineageParent)) lineageSlotRoot = node
+            node = lineageParent
             if (lineageGeneratesBox(node)) boxed = node
           }
         }
+      }
+
+      /**
+       * ★★ 2026-09-30（B ✓）：**找得到触发键、却认不出入口那一层 ⇒ 必须出声** ✗ ——
+       *   今天这次（DSH 0.2.0 换了结构）就是这么静默发生的 ✓：一个标记都没打、
+       *   标题行被 CSS 掏空 ✓，而屏幕上**没有任何提示** ✗ —— 只能等用户自己发现"入口没了" ✓。
+       *   有触发键、却没有入口 ⇒ 打一行到**屏幕上那个调试框** ✓（`noteLineageOnce` 自带去重 ✓）。
+       */
+      if (trigger !== null && trigger !== undefined && (entry === null || entry === undefined)) {
+        noteLineageOnce('找得到子智能体触发键，但认不出入口那一层（DSH 结构可能变了）⇒ 本轮不打标记')
       }
 
       /** 这一轮该打标记的祖先链（从入口的父节点一直到标题行 ✓）。 */
@@ -18423,7 +18469,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930043352'
+    var BOOT_STAMP = 'BUILD-0930051629'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
