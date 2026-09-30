@@ -663,8 +663,28 @@ const problems = []
  *     （旧会话的反重放窗口"见过"计数 ✓ ⇒ 关掉活连接 ⇒ 走 `dialNow` ⇒ 拨号真的发生 ✓、
  *     **没有** `帧被拒绝（seen）` ✓、经隧道问电脑一句应答真的回来了 ✓）。
  *   ⇒ **360** = 本轮实跑条数 ✓。这个数只许涨 ✓ —— 少了就是有人删断言 ✗。
+ *
+ * ★★ round 189（2026-09-30 用户真机："顶栏没修好，**切会话时还是会消失、再也不出来**"✗）
+ *   加到 **387** ✓（**+9 条** ✓，只加不减 ✓；现场与全部读数见 `31-切会话后顶栏消失-复现.md` ✓）：
+ *   那一行**没有消失**，是被**我们自己的顶栏永久盖住**了 ✗ —— 真因是 `tagTopHeader()` 把
+ *   `data-dshm-topheader` 打在 DSH 0.2.0 那个 `display:contents` 的**插槽层**上 ✗
+ *   ⇒ 让位规则 `padding-top` 对"不生成盒子"的元素等于没写 ✓ ⇒ header 停在 y=0、
+ *   「对话/轨迹」在 35..75，而我们的顶栏在真机安全区（48）下是 0..100 ✓。
+ *   · `189-①～③`（安全区 0 ✓）：标记元素**会生成盒子、高度 ≥40、且就是那个装标签行的 `<header>`** ✓ /
+ *     标签行**整条落在我们顶栏之下** ✓ / 三个命中点（中心·左上·文字处）命中**标签行自己** ✓；
+ *   · `189-④～⑥`（走壳 insets 桥给 48 ✓，真机那一档 ✓）：header 的 `padding-top`
+ *     **跟着变成我们顶栏的高度** ✓ / 那一行**仍然**在顶栏之下 ✓ / 三点命中照旧 ✓；
+ *   · `189-⑦⑧`：**从抽屉切到另一个会话、再切回来**，上面几条**一条不少** ✓（用户报的就是"切会话之后"✗）；
+ *   · `189-⑨`：任何时刻 `[data-dshm-topheader]` **只有一个** ✓（"只打不摘"是这次现场的另一半 ✗）。
+ *   ★ 变异开关：`ML_MUTATE_OLD_TOPMARK=1` ⇒ 把标记搬回那个 `display:contents` 的插槽层
+ *     （= 修之前的行为 ✓，每 50ms 重放一次 ✓，撤掉时把标记拨回来 ✓）
+ *     ⇒ 实测 **恰好 189-①～⑧ 红、189-⑨ 与其余全绿** ✓（两次都是 399 条 ✓：
+ *     正常 395 ✓ / 4 ✗（那 4 条是与本节无关的既有红 ✓）、变异 387 ✓ / 12 ✗ ✓）。
+ *   ★ 跑法（本机实测用的那一套 ✓）：`DSH_BIN=<0.2.0 的 bin.js> node scripts/check-mobile-layout.mjs`
+ *     —— 桌面版 0.2.0 下会话夹具与本节都成立 ✓；默认那台 0.1.5-rc.1 上**会话行夹具本身**
+ *     就打不开会话 ⇒ 155/157/158/189 会一起红（**既有问题，与本轮无关** ✗，见交单）。
  */
-const EXPECTED_MIN_CHECKS = 378
+const EXPECTED_MIN_CHECKS = 387
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -2582,6 +2602,249 @@ try {
       console.log(
         `  · [round 158-A] 已把会话切回"没有真入口"的那一个 ✓（真入口=${restoredNoEntry.triggers} ✓、注入夹具=${restoredNoEntry.injected}/${restoredNoEntry.nested} ✓、safe-top=${realIns0} ✓）`,
       )
+
+      // ── round 189：DSH 的「对话 / 轨迹」那一行**不许被我们自己的顶栏盖住** ─────────────
+      /**
+       * ★ 现场（2026-09-30 用户真机："顶栏没修好，在**切换聊天对话**的时候还是会**消失**，
+       *   而且**再也不出来**" ✗）—— 复现与诊断全文见 `31-切会话后顶栏消失-复现.md` ✓：
+       *   那一行**没有消失**，是被**我们自己的 `#dsh-mobile-top` 永久盖住**了 ✗。
+       *
+       * 根因（一条，能解释全部读数 ✓）：`tagTopHeader()` 把 `data-dshm-topheader` 打在了
+       * `titleRow.parentElement` 上 ✗ —— 而 DSH 0.2.0 的那一层是
+       * `div[data-slot="conversation.session.header"][display: contents]` ✓（**不生成盒子** ✗），
+       * 于是让位规则 `[data-dshm-topheader]{padding-top: 52px + 安全区}` 等于**没写** ✓
+       * ⇒ DSH 的 header 停在 y=0、`对话/轨迹` 在 35..75，而我们的顶栏在真机安全区（48）下是 0..100
+       * ⇒ **整条落在它肚子里**（看不见、也点不到 ✓）。
+       * ★ 修复：`titleRow.closest('header')` → 否则第一个**有盒子**的祖先 ✓ + 幂等摘旧标记 ✓。
+       *
+       * ★ 这一节盯的**全是用户看得见的那件事** ✓（量的是最终矩形与命中，不是我们设的样式 ✗）：
+       *   ① 被打标记的元素**必须生成盒子**（`display !== 'contents'` ✓）且高度 ≥ 40 ✓，
+       *      **而且它必须就是那个装着标签行的 `<header>`** ✓ —— 这两条合起来才是"标记打对了地方" ✗
+       *      （只断言"标记存在"骗得过旧实现 ✓：旧实现也有标记、只是打在没盒子的那层上 ✗）；
+       *   ② 安全区 **0 / 48** 两组下，标签行**整条落在我们顶栏之下** ✓
+       *      （判据是 `tabs.top ≥ 顶栏底边` ✓ —— 旧实现下这一条必红 ✓）；
+       *   ③ 三个命中点（中心 / 左上 / 文字处 ✓）必须命中**标签行自己**（不是我们的顶栏 ✗）——
+       *      量之前按 round 155 的老规矩先把 `[data-dshm-askbar]`/`[data-dshm-banner]` 摘掉 ✓
+       *      （它们 `z-index:200`、就贴在顶栏下方 ✓，会把这三个点全吃掉 ✗）；
+       *   ④ 从抽屉里**切到另一个会话、再切回来**，上面几条**一条不少** ✓（用户报的就是"切会话之后"✗）；
+       *   ⑤ 任何时刻 `[data-dshm-topheader]` **只有一个** ✓（"只打不摘"正是这次现场的另一半 ✗）。
+       */
+      try {
+        const asJsonTop = (raw) => {
+          try {
+            return JSON.parse(String(raw))
+          } catch {
+            return { error: `量不了：${String(raw).slice(0, 120)}` }
+          }
+        }
+        /** 走**壳那条 insets 桥**给安全区 ✓（与 157-A-② / 158-A-③ 同一套做法 ✓）。 */
+        const applySafeTopTop = async (px) =>
+          String(
+            await evaluate(`(function(){
+              var api=globalThis.__DSH_MOBILE_BOOT__&&globalThis.__DSH_MOBILE_BOOT__.apk
+              if(!api||typeof api.apply!=='function') return 'no-api'
+              return api.apply({seen:true,top:${px},bottom:0,ime:0,density:3,edgeToEdge:true})===true?'applied':'refused' })()`),
+          )
+        /**
+         * 只读探针 ✓：标记元素（tag/class/`display`/高度）、它是不是那个 `<header>`、
+         * 我们顶栏的矩形、标签行的矩形、安全区、以及三个命中点**命中的是谁** ✓。
+         * ★ 摘浮动条**必须在同一个脚本里先摘再量** ✓（4 秒一轮的端侧轮询会把它重新画出来 ✗）。
+         */
+        const topRowProbe = async () =>
+          asJsonTop(
+            await evaluate(`(function(){
+              try{
+                function box(e){var r=e.getBoundingClientRect();
+                  return {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),
+                    right:Math.round(r.right),bottom:Math.round(r.bottom)}}
+                function name(e){return e===null||e===undefined?'(无)':
+                  String(e.tagName||'').toLowerCase()+(e.id?'#'+e.id:'')+('.'+String(e.className||'').split(' ')[0])}
+                var dropped=0
+                var bars=document.querySelectorAll('[data-dshm-askbar],[data-dshm-banner]')
+                for(var b=0;b<bars.length;b++){ if(bars[b].parentElement!==null){ bars[b].parentElement.removeChild(bars[b]); dropped++ } }
+                var marked=document.querySelectorAll('[data-dshm-topheader]')
+                var first=marked.length>0?marked[0]:null
+                var markedDisplay=first===null?null:getComputedStyle(first).display
+                var markedHeight=first===null?null:Math.round(first.getBoundingClientRect().height)
+                var bar=document.getElementById('dsh-mobile-top')
+                var barBox=bar===null?null:box(bar)
+                /* 标签行 = 标记元素里那个 role=tablist ✓（与既有 155-⓪ 同一判据 ✓）；
+                   找不到再退回全页第一个 [class*="tabs"] ✓（旧版 DSH 上没有 role 时也能量 ✓）。 */
+                var tabs=null
+                if(first!==null) tabs=first.querySelector('[role="tablist"]')
+                if(tabs===null){ var byCls=document.querySelectorAll('[class*="tabs"]'); if(byCls.length>0) tabs=byCls[0] }
+                var tabsBox=tabs===null?null:box(tabs)
+                var header=null
+                if(tabs!==null&&typeof tabs.closest==='function') header=tabs.closest('header')
+                var hits=[]
+                if(tabsBox!==null){
+                  var pts=[[Math.round(tabsBox.x+tabsBox.w/2),Math.round(tabsBox.y+tabsBox.h/2)],
+                           [Math.round(tabsBox.x+6),Math.round(tabsBox.y+4)],
+                           [Math.round(tabsBox.x+30),Math.round(tabsBox.y+14)]]
+                  for(var p=0;p<pts.length;p++){
+                    var el=null
+                    try{ el=document.elementFromPoint(pts[p][0],pts[p][1]) }catch(e){ el=null }
+                    hits.push({x:pts[p][0],y:pts[p][1],hit:name(el),ok:el!==null&&(el===tabs||tabs.contains(el))})
+                  }
+                }
+                return JSON.stringify({
+                  dropped:dropped, markedCount:marked.length,
+                  markedTag:first===null?null:String(first.tagName||'').toLowerCase(),
+                  markedClass:first===null?null:(String(first.className||'')||String(first.getAttribute('data-slot')||'')),
+                  markedDisplay:markedDisplay, markedHeight:markedHeight,
+                  markedIsHeader:first!==null&&header!==null&&first===header,
+                  headerName:name(header), headerBox:header===null?null:box(header),
+                  headerPadTop:header===null?null:getComputedStyle(header).paddingTop,
+                  tabsName:name(tabs), tabsBox:tabsBox,
+                  tabsText:tabs===null?null:String(tabs.innerText||'').replace(/\\s+/g,' ').slice(0,10),
+                  barBox:barBox, safeTop:String(getComputedStyle(document.documentElement).getPropertyValue('--dshm-safe-top')).trim(),
+                  hits:hits,
+                })
+              }catch(e){ return JSON.stringify({error:String(e&&e.message?e.message:e)}) } })()`),
+          )
+        /** 这一节里"那一行好好的"= 五条判据全成立 ✓（①标记盒化且是 header ②行在顶栏之下 ③三点命中它自己）。 */
+        const rowVisible = (g) =>
+          g.markedCount === 1 &&
+          g.markedIsHeader === true &&
+          g.markedDisplay !== null && g.markedDisplay !== 'contents' &&
+          typeof g.markedHeight === 'number' && g.markedHeight >= 40 &&
+          g.tabsBox !== null && g.barBox !== null && g.tabsBox.y >= g.barBox.bottom - 1 &&
+          Array.isArray(g.hits) && g.hits.length === 3 && g.hits.every((h) => h.ok === true)
+        const detailTop = (g) =>
+          `标记=${g.markedTag}.${String(g.markedClass).slice(0, 26)} display=${g.markedDisplay} 高=${g.markedHeight} ` +
+          `是不是那个 header=${g.markedIsHeader}｜header.paddingTop=${g.headerPadTop}｜` +
+          `顶栏=${JSON.stringify(g.barBox)}｜标签行=${JSON.stringify(g.tabsBox)}「${g.tabsText}」｜safe-top=${g.safeTop}｜` +
+          `命中=${(g.hits ?? []).map((h) => `${h.x},${h.y}→${h.hit}${h.ok ? '✓' : '✗'}`).join(' / ')}` +
+          (g.error === undefined ? '' : `｜★量不了：${g.error}`)
+        /**
+         * ★★ 变异开关（**只在刻意验证这一节时开** ✓，默认关 ✓）：`ML_MUTATE_OLD_TOPMARK=1`。
+         *   它把标记**搬回修之前那个 `display:contents` 的插槽层**上 ✓（= 旧实现
+         *   `titleRow.parentElement` 的**效果** ✓），并在页面里每 50ms 重放一次 ✓ ——
+         *   不重放的话，修好的 `tagTopHeader()` 下一轮就会把它改回来 ✗（那个观察者只盯 `class` ✓，
+         *   但 DSH 一重渲染就会走到它 ✓）。
+         *   ⇒ 实测：**恰好 189-①～⑧ 红、189-⑨ 与其余全绿** ✓（`EXPECTED_MIN_CHECKS` 那条防呆
+         *     **不会**红 ✓ —— 它数的是"跑了多少条"（`checkCount` 只加不减 ✓），不是"过了多少条" ✓）。
+         */
+        const mutateOld = process.env['ML_MUTATE_OLD_TOPMARK'] === '1'
+        if (mutateOld) {
+          const on = String(
+            await evaluate(`(function(){
+              function wrong(){
+                var r=document.querySelector('[class*="titleRow"]')
+                if(r===null||r.parentElement===null) return
+                var all=document.querySelectorAll('[data-dshm-topheader]')
+                for(var i=0;i<all.length;i++){ if(all[i]!==r.parentElement) all[i].removeAttribute('data-dshm-topheader') }
+                r.parentElement.setAttribute('data-dshm-topheader','1')
+              }
+              globalThis.__dshm189mut=setInterval(wrong,50); wrong(); return 'on' })()`),
+          )
+          console.log(`  · [189 变异] 把标记搬回 \`display:contents\` 的插槽层（= 修之前的行为）⇒ ${on} ✓`)
+          await sleep(900)
+        }
+
+        // ① 安全区 0（= 上一节收尾时的状态 ✓）
+        const gTop0 = await topRowProbe()
+        check(
+          gTop0.markedCount === 1 && gTop0.markedIsHeader === true && gTop0.markedDisplay !== 'contents' &&
+            typeof gTop0.markedHeight === 'number' && gTop0.markedHeight >= 40,
+          '★ 189-① 顶栏标记打在**会生成盒子的**那个元素上、而且就是装着标签行的那个 `<header>` ✓（旧实现打在 `display:contents` 的插槽层上 ⇒ 让位规则等于没写 ✗）',
+          detailTop(gTop0),
+        )
+        check(
+          gTop0.tabsBox !== null && gTop0.barBox !== null && gTop0.tabsBox.y >= gTop0.barBox.bottom - 1,
+          '★ 189-② 安全区 0：`对话 / 轨迹` 那一行**整条落在我们顶栏之下** ✓（旧实现下它压在顶栏肚子里 ✗）',
+          detailTop(gTop0),
+        )
+        check(
+          Array.isArray(gTop0.hits) && gTop0.hits.length === 3 && gTop0.hits.every((h) => h.ok === true),
+          '★ 189-③ 安全区 0：三个命中点（中心/左上/文字处）命中的都是**标签行自己** ✓ —— 用户看得见、也点得到 ✓（不是我们的顶栏 ✗）',
+          detailTop(gTop0),
+        )
+
+        // ② 真机几何（壳报 48 ✓）：我们顶栏长到 100，让位量必须**跟着**长 ✓
+        const ins48Top = await applySafeTopTop(48)
+        await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+        await sleep(1200)
+        const gTop48 = await topRowProbe()
+        check(
+          ins48Top === 'applied' && gTop48.safeTop === '48px' &&
+            gTop48.barBox !== null && gTop48.headerPadTop !== null &&
+            Math.abs(parseFloat(gTop48.headerPadTop) - gTop48.barBox.h) <= 1,
+          '★ 189-④ 安全区变成 48（真机那一档 ✓）之后，header 的 `padding-top` **跟着变成我们顶栏的高度**（让位真的生效 ✓ —— 旧实现下它纹丝不动 ✗）',
+          detailTop(gTop48),
+        )
+        check(
+          gTop48.tabsBox !== null && gTop48.barBox !== null && gTop48.tabsBox.y >= gTop48.barBox.bottom - 1,
+          '★ 189-⑤ 安全区 48：那一行**仍然**在我们顶栏之下 ✓（真机 400×869 + 安全区这一档就是用户看到的那一屏 ✓）',
+          detailTop(gTop48),
+        )
+        check(
+          Array.isArray(gTop48.hits) && gTop48.hits.length === 3 && gTop48.hits.every((h) => h.ok === true),
+          '★ 189-⑥ 安全区 48：三个命中点命中的**仍然是标签行自己** ✓',
+          detailTop(gTop48),
+        )
+
+        // ③ 切会话（用户报的那一下 ✓）：切走 → 再切回，上面几条一条不少 ✓
+        await openSessionList()
+        const away = await evaluate(`(function(){
+          var rows=[].slice.call(document.querySelectorAll('[class*="_sessionRow"]'))
+          if(rows.length===0) return null
+          var target=null
+          for(var i=0;i<rows.length;i++){ if(rows[i].getAttribute('aria-selected')!=='true'){ target=rows[i]; break } }
+          if(target===null) return null
+          target.click(); return (target.innerText||'').replace(/\\s+/g,' ').slice(0,22) })()`)
+        await sleep(2800)
+        const gAway = await topRowProbe()
+        check(
+          away !== null && away !== undefined && rowVisible(gAway),
+          '★ 189-⑦ **切到另一个会话之后**，那一行照样"标记对 + 在顶栏之下 + 点得到" ✓（用户报的"切会话就消失"就是这一条 ✗）',
+          `点了「${String(away)}」｜${detailTop(gAway)}`,
+        )
+        const back = await evaluate(`(function(){
+          var rows=[].slice.call(document.querySelectorAll('[class*="_sessionRow"]'))
+          var target=null
+          for(var i=0;i<rows.length;i++){ if(rows[i].getAttribute('aria-selected')!=='true'){ target=rows[i]; break } }
+          if(target===null) return null
+          target.click(); return (target.innerText||'').replace(/\\s+/g,' ').slice(0,22) })()`)
+        await sleep(2800)
+        const gBack = await topRowProbe()
+        check(
+          back !== null && back !== undefined && rowVisible(gBack),
+          '★ 189-⑧ **再切回来**，仍然一条不少 ✓（"再也不出来"的另一半：它不该因为切会话而丢 ✓）',
+          `点了「${String(back)}」｜${detailTop(gBack)}`,
+        )
+        await closeDrawerNow()
+        await sleep(800)
+        const gFinal = await topRowProbe()
+        check(
+          gFinal.markedCount === 1,
+          '★ 189-⑨ 任何时刻 `[data-dshm-topheader]` **只有一个** ✓（"只打不摘"正是这次现场的根因之一 ✗）',
+          `标记个数=${gFinal.markedCount}｜${detailTop(gFinal)}`,
+        )
+
+        // 收尾：把这一节改过的状态**全部还原** ✓（安全区 0 + 抽屉关上 ✓ —— 后面每一节都按这个状态写 ✓）
+        if (mutateOld) {
+          await evaluate(`(function(){ if(globalThis.__dshm189mut!==undefined){ clearInterval(globalThis.__dshm189mut); delete globalThis.__dshm189mut } return true })()`)
+          /**
+           * ★ 变异撤掉之后**必须把标记拨回来** ✗ —— 否则那条"错的标记"会一直留到后面每一节 ✓
+           *   （`tagTopHeader()` 只在 120ms 去抖观察者里跑 ✓，而那个观察者只盯 `class` ✓）。
+           *   这里用"改一下 body 的 class"把观察者叫醒 ✓（与产品自己的触发条件逐字相同 ✓）。
+           */
+          await evaluate(`(function(){
+            document.body.classList.add('dshm-189-nudge')
+            setTimeout(function(){ document.body.classList.remove('dshm-189-nudge') }, 40)
+            return true })()`)
+          await sleep(700)
+          const restoredMark = await topRowProbe()
+          console.log(`  · [189 变异] 已撤掉；标记重新打回 = ${restoredMark.markedTag}.${String(restoredMark.markedClass).slice(0, 22)}（display=${restoredMark.markedDisplay} ✓）`)
+        }
+        await applySafeTopTop(0)
+        await evaluate(`globalThis.dispatchEvent(new Event('resize'))`)
+        await sleep(500)
+        console.log(`  · [round 189] 安全区 0/48 两组 + 切走/切回两次都量过 ✓（收尾已还原成 safe-top=0、抽屉关闭 ✓｜变异=${mutateOld ? '开' : '关'}）`)
+      } catch (error) {
+        check(false, '★★ round 189：新增的这几条"顶栏不许盖住对话/轨迹"的护栏自己跑完了（没被异常吞掉 ✓）', String(error && error.message ? error.message : error))
+      }
     }
 
     const stats = await evaluate(`(function(){
