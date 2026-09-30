@@ -3468,6 +3468,19 @@
     this.awaitingApproval = false
     /** ★ 我们是否已经**替 DSH 按下过 `offline`** ✓（只有按过才需要派发 `online` ✓，见 `noteDialSuccess` ✓）。 */
     this.offlineDispatched = false
+    /**
+     * ★★ 2026-09-30（B ✓）：从**上一次干净连接**以来，这条链路是否出过状况 ✓
+     *   （断过 / 拨失败过 / 放弃过 / 等待批准过 ✓）。
+     *
+     * 为什么需要它 ✗✗：用户真机报「断联重连以后触发五次自动重连 ⇒ 点手动重连**确实连上了**，
+     * 但**那颗橙色按钮不消失**」✓。旧的 `noteDialSuccess` **只认 `offlineDispatched`** ✗ ——
+     * 也就是"**只有我们自己按过 `offline`** 才回 `online`" ✓；可 DSH 自己的连接层**也会自己发现断线**
+     * （它是从我们的假 transport 上看到的 ✓）⇒ 它自己就把那颗橙色提示亮起来了 ✓，
+     * 而我们这边可能**一次 `offline` 都没派发过**（或那个标记已被别的路径清掉 ✓）
+     * ⇒ 连上了却**没人告诉 DSH"回来了"** ✗✗ ⇒ 橙色按钮永远挂着 ✓。
+     * ⇒ 判据改成"**只要上一次不是干净连接，成功之后就必须回 `online`**" ✓（幂等、且更宽 ✓）。
+     */
+    this.hadTrouble = false
     /** ★ 此刻是否有一次拨号在飞 ✓（按需重拨靠它去重 ⇒ 绝不并发拨两次 ✗）。 */
     this.dialing = false
     /**
@@ -3815,6 +3828,8 @@
    *     —— 那颗橙色提示因此仍然可点 ✓，用户想再点几下都行 ✓。
    */
   Tunnel.prototype.noteDialFailure = function (error, manual) {
+    /** ★ 2026-09-30：出过状况 ⇒ 记着；下一次连上时必须回 `online`（见 `noteDialSuccess` ✓）。 */
+    this.hadTrouble = true
     var reason = shortReason(error && error.message ? error.message : error)
     if (manual === true) {
       this.autoPaused = true
@@ -3868,15 +3883,34 @@
 
   /** 一次拨号**成功**：计数清零 ✓ + 总预算作废 ✓ + 把先前替 DSH 按下的 `offline` **复原** ✓。 */
   Tunnel.prototype.noteDialSuccess = function () {
+    /**
+     * ★★ 2026-09-30（B ✓）：**先判断"上一次是不是干净连接"** ✗ —— 必须在清计数**之前**算 ✓
+     *   （下面几行会把 `failStreak` / `autoPaused` / `awaitingApproval` 全清掉 ✓）。
+     *
+     * 为什么旧判据不够 ✗✗：旧实现只看 `offlineDispatched` ✓ ＝"我们自己按过 `offline` 才回 `online`" ✓。
+     * 但 **DSH 自己的连接层也会自己发现断线** ✓（它看的是我们的假 transport ✓）⇒ 橙色提示是**它自己**亮的 ✓，
+     * 而我们可能一次都没派发过 `offline` ✓（或那个标记已被别的路径清掉 ✓）
+     * ⇒ 用户手动重连**明明连上了**，却没人告诉 DSH"回来了" ⇒ **橙色按钮不消失** ✗✗（用户真机报的就是这个 ✓）。
+     * 现在放宽成"**出过任何状况**（断过 / 拨败过 / 放弃过 / 等过批准 ✓）⇒ 成功即回 `online`" ✓；
+     * 一路干干净净的首次连接**照旧不派发** ✓（不无谓地打扰 DSH ✓）。
+     */
+    var recovered =
+      this.offlineDispatched === true ||
+      this.autoPaused === true ||
+      this.failStreak > 0 ||
+      this.awaitingApproval === true ||
+      this.hadTrouble === true
     this.failStreak = 0
     this.autoPaused = false
     // ★ round 153：连上了 ⇒ 这一轮"自动阶段"结束，总预算作废（下次断线重新计时 ✓）
     this.autoReconnectDeadline = undefined
     // ★★ round 156（B ✓）：连上了 ⇒ "等你点允许"那一阶段结束 ✓（下一次断线重新判 ✓）
     this.awaitingApproval = false
-    if (this.offlineDispatched !== true) return
+    this.hadTrouble = false
+    if (!recovered) return
     this.offlineDispatched = false
     // ⚠️ 有去必须有回 ✗✗：不派发 online 的话 DSH 那套会**永远**停在 disconnected ✗
+    //   —— 尤其"用户点手动重连连上了"这一路 ✓：橙色提示必须当场消失 ✓。
     dispatchShellNetworkEvent('online')
   }
 
@@ -4433,6 +4467,13 @@
   }
 
   Tunnel.prototype.scheduleReconnect = function () {
+    /**
+     * ★ 2026-09-30：**排重连这件事本身就说明"我们断过"** ✓ ⇒ 记着；
+     *   连上时必须回 `online` ✓（DSH 自己也会把橙色提示亮起来 ✓，别让它挂在那儿 ✗）。
+     *   放在最前面 ✓ —— 连 `autoReconnect === false`（设备被撤销那条路 ✓）也要记 ✓：
+     *   用户随后手动连上，照样该把 DSH 那套拉回 online ✓。
+     */
+    this.hadTrouble = true
     if (this.config.autoReconnect === false) return
     /**
      * ★★ round 152（用户第 1 条）：**自动那一路数到 5 就停** ✗ ——
@@ -18902,7 +18943,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930082518'
+    var BOOT_STAMP = 'BUILD-0930082746'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
