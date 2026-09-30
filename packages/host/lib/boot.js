@@ -11794,6 +11794,22 @@
     }
 
     /**
+     * 从某个节点往上找**第一个会生成盒子**的祖先 ✓（判据 = 计算值 `display !== 'contents'` ✓）。
+     *
+     * ★ 为什么必须按"有没有盒子"找 ✗：DSH 的**插槽包装层**是 `display: contents` ✓ ——
+     *   给它写 `padding-top` / `position` / 宽高**一律无效** ✗（它不生成盒子 ✓）。
+     *   本项目已经为此栽过**三次** ✓（最近一次见 `tagTopHeader` 的说明 ✓）。
+     */
+    function firstBoxedAncestor(node) {
+      var walk = node === null || node === undefined ? null : node.parentElement
+      while (walk !== null && walk !== undefined) {
+        if (lineageGeneratesBox(walk)) return walk
+        walk = walk.parentElement
+      }
+      return null
+    }
+
+    /**
      * 给 DSH 的**顶栏本体**打标记，供 CSS 让出我们自建顶栏的高度。
      *
      * ★ 原先 CSS 直接写 `[class*="header"] { padding-top: … !important }` —— **太宽了**：
@@ -11805,11 +11821,33 @@
      * 改法与 `tagSettingsOverlay` 同一套：**认出那个元素、打我们自己的属性**，
      * CSS 只认属性 ✓。主路径是结构关系（实测 DSH 是 `header > titleRow`），
      * 兜底再按"整屏宽 + 有高度 + 不在任何对话框里"找一次。
+     *
+     * ★★ 2026-09-30（B ✓）：**"主路径"必须认"有盒子的那一层"** ✗✗ —— 真机 + 无头 Chrome 实测
+     *   （`31-切会话后顶栏消失-复现.md` ✓）：DSH 0.2.0 的会话头渲染成
+     *     `header.ST7X_W_header > div[data-slot="conversation.session.header"][display:contents] > div.titleRow`
+     *   ⇒ 旧代码取 `titleRow.parentElement` = **那个 display:contents 的插槽包装层** ✗
+     *   ⇒ 让位规则是 `padding-top`（写在 `[data-dshm-topheader]` 上 ✓）⇒ 对**无盒子**的元素**完全无效** ✗
+     *   ⇒ DSH 真正的 `<header>` **一直没被推下去** ⇒「**对话 / 轨迹**」那一行永远停在我们自己顶栏底下 ✓✗
+     *   （实测读数：`header` 0..76、`tabs` y 35..75、我们顶栏 0..100 ⇒ 三点命中全被我们顶栏吃掉 ✗；
+     *    用户报的"那一行看不见 / 切一下会话就再也不出来"就是它 ✓ —— DSH 重渲染后标记又被重新打错 ✓）。
+     *   反证 ✓：把标记手工挪到真正的 `<header>` ⇒ `padding-top` 立刻 100px、header 0..136、`tabs` 落到 110..135
+     *   ⇒ **从我们顶栏底下出来了** ✓✓。
+     *
+     * 三条判据（按优先级 ✓，都**不认类名** ✗ —— 哈希前缀会随版本变 ✓）：
+     *   ① `titleRow.closest('header')` ✓ —— 语义最准（0.2.0 上就是那个 `<header>` ✓）；
+     *   ② 否则往上找**第一个有盒子的祖先** ✓（`firstBoxedAncestor` ✓，兼容"没有 header 元素"的布局 ✓）；
+     *   ③ 都没有 ⇒ 沿用原来的"整屏宽 + 有高度 + 不在对话框里"兜底 ✓。
+     * ★ 并且**幂等摘旧标记** ✗：DSH 一重渲染就换元素 ✓，不摘就会留下一个**没盒子**的旧标记，
+     *   而 CSS 认的是"有没有这个属性"⇒ 旧标记会让让位规则继续打在错的地方 ✗（"标记只打不摘"正是这次现场 ✓）。
      */
     function tagTopHeader() {
       if (document.body === null || document.body === undefined) return
       var titleRow = document.querySelector('[class*="titleRow"]')
-      var header = titleRow === null || titleRow.parentElement === null ? null : titleRow.parentElement
+      var header = null
+      if (titleRow !== null && titleRow !== undefined) {
+        if (typeof titleRow.closest === 'function') header = titleRow.closest('header')
+        if (header === null || header === undefined) header = firstBoxedAncestor(titleRow)
+      }
       if (header === null || header === undefined) {
         var all = document.querySelectorAll('[class*="header"]')
         for (var i = 0; i < all.length; i++) {
@@ -11824,6 +11862,15 @@
       }
       if (header === null || header === undefined) return
       if (header.dataset === undefined) return
+      /**
+       * ★ 幂等：先把**别的**元素上的旧标记摘干净 ✓ —— "只打不摘"正是这次现场的真凶之一 ✗
+       *   （DSH 重渲染换了元素 ⇒ 旧标记留在那个没盒子的插槽层上 ⇒ 让位规则继续打在错的地方 ✗）。
+       *   摘之前只看 `dataset` 在不在 ✓（假 DOM / 老浏览器上它可能缺席 ✓，绝不抛 ✗）。
+       */
+      var marked = document.querySelectorAll('[data-dshm-topheader]')
+      for (var k = 0; k < marked.length; k++) {
+        if (marked[k] !== header && marked[k].dataset !== undefined) delete marked[k].dataset.dshmTopheader
+      }
       if (header.dataset.dshmTopheader !== '1') header.dataset.dshmTopheader = '1'
     }
 
@@ -19926,7 +19973,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930064259'
+    var BOOT_STAMP = 'BUILD-0930065421'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
