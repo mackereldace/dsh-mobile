@@ -99,6 +99,115 @@ export declare function loadOrCreateHostIdentity(options: {
     directory: string;
     hostName?: string;
 }): HostIdentity;
+/** 一次"从某个锚找 DSH 前端"的尝试（★ 排障信息：用户要看到试了哪几条、各自栽在哪 ✓）。 */
+export interface DistIndexAttempt {
+    /** 这条路的人话名字（日志与 503 文案都会原样显示 ✓）。 */
+    readonly label: string;
+    /** 这条路的锚（安装锚路径 / `argv[1]` / 模块 URL）；本次运行拿不到时是 `'(没有这个锚)'` ✓。 */
+    readonly anchor: string;
+    /** 这条成不成功。 */
+    readonly ok: boolean;
+    /** 失败时是**原因** ✓、成功时是解析到的 `dist/index.html` ✓。 */
+    readonly detail: string;
+}
+/** 前端定位器：`resolve()` 给路径，`problem()` 给"为什么没有"（★ 绝不静默 ✗）。 */
+export interface DistIndexResolver {
+    /**
+     * 解析 DSH 前端的 `dist/index.html`。
+     *
+     * @returns 解析到**且文件确实存在**时是绝对路径 ✓；否则 `undefined` ✓ ——
+     *          但那一定伴随 `problem()` 里一句能念的原因 ✗（不许"返回 undefined 就完事" ✗）。
+     */
+    resolve(): string | undefined;
+    /** 最近一次 `resolve()` 失败的原因（成功时为 `undefined`）✓ —— `/mobile/app` 的 503 文案用它 ✓。 */
+    problem(): string | undefined;
+    /** 最近一次成功时用的锚（诊断用：到底是哪条路救回来的 ✓）。 */
+    anchor(): string | undefined;
+    /** 最近一次尝试的逐条记录（排障与用例用 ✓）。 */
+    attempts(): readonly DistIndexAttempt[];
+}
+/** `createDistIndexResolver` 的输入（三个锚都可注入 ⇒ 三种安装形态都能在单测里验 ✓）。 */
+export interface DistIndexResolverOptions {
+    /** ① 运行中 DSH 的安装锚（`ctx.get('profileContext')?.installAnchor` ✓，见 `readProfileContextInstallAnchor`）。 */
+    installAnchor?: string | undefined;
+    /** ② 正在运行的进程入口（`process.argv[1]` ✓）。 */
+    processEntry?: string | undefined;
+    /** ③ 插件自身的模块地址（`import.meta.url` ✓）。 */
+    moduleUrl?: string | undefined;
+    /** 文件存在性判据（单测注入点；默认 `existsSync` ✓）。 */
+    exists?: ((path: string) => boolean) | undefined;
+    /** 日志出口（默认 `console.log` / `console.warn` ✓）。 */
+    logger?: {
+        log?: ((message: string) => void) | undefined;
+        warn?: ((message: string) => void) | undefined;
+    } | undefined;
+}
+/**
+ * 定位 DSH 前端 `dist/index.html`。
+ *
+ * ## ★★ 2026-09-30 修：锚必须落在"**运行中那套 DSH**"上，不许落在插件自己身上 ✗
+ *
+ * 旧实现只有一条路：`createRequire(import.meta.url)` —— 即**从插件自己的模块位置**解析
+ * `@deepseek-ai/dsh-web-frontend` ✓。它在**拷贝安装**（插件实体在
+ * `<DSH_HOME>/profiles/<profile>/node_modules/@dsh-mobile/host/` 里，生产就是这种 ✓）下是对的 ✓，
+ * 但在**本地路径 / `link:` 安装**（pnpm 建软链；桌面 UI 装本地路径必然如此 ✓）下**必然失败** ✗：
+ * `import.meta.url` 指向的是**仓库**（`…/dsh-mobile/packages/host/lib/cordis.js` ✓），
+ * 从仓库解析前端包必然失败 ⇒ 返回 `undefined` ⇒ 手机端只看到一句"应用外壳不可用"，
+ * 而**日志里没有任何原因** ✗（真机现场：DSH 桌面版 0.2.0-rc.2、profile=`desktop`、
+ * `link:/…/dsh-mobile/packages/host` ⇒ `http://127.0.0.1:19387/mobile` 报外壳不可用 ✗）。
+ *
+ * 这与今天刚修过的 `resolveProfilePatchPath`（见 `setup-config.ts`）是**同一个病** ✓：
+ * "从插件自身位置推断环境"在软链安装下必错 ✗。那里的处方是"**显式传参 + 拿不准就报错**"✓，
+ * 这里照**同一个形状**来 ✓（不新造第二套机制 ✗）：
+ *
+ * | 顺序 | 锚 | 为什么是它 |
+ * |---|---|---|
+ * | ① | `ctx.get('profileContext').installAnchor` | DSH 自己挂上来的**安装锚** = 运行中那套 DSH 的 `package.json` ✓（`readProfileContextInstallAnchor` 有依据 ✓） |
+ * | ② | `process.argv[1]` | 正在运行的进程入口（`dsh` 的 `bin.js` / 桌面版 host 入口 ✓）⇒ 从它旁边必然上溯得到安装目录 ✓ |
+ * | ③ | `import.meta.url` | **拷贝安装**下它是对的 ⇒ 必须保留 ✓（软链安装下会被 ① 或 ② 抢先 ✓） |
+ *
+ * ## 依据（读类型/实现，不猜 ✗）
+ *
+ * · `@deepseek-ai/dsh-app-boot` 的 `ProfileModuleFallbackOptions.installAnchor`
+ *   （`lib/types/profile.d.ts:95-102`）：**"Absolute package.json path of the running dsh installation."** ✓
+ *   —— 同一个锚也是 `resolveBundleDir(binName, packageName, installAnchor, profileDir)` 的**第一**锚 ✓，
+ *   顺序是契约原话："The installation-first order is the contract that `@deepseek-ai/dsh-base`
+ *   (and every other in-box bundle) always comes from the same installation as the running dsh,
+ *   never from a profile-local copy." ✓ ⇒ 前端也该**先**从安装解析 ✓（它必须与运行中的服务端同版本 ✓）。
+ * · 桌面版 0.2.0-rc.2 的 profile-boot 就是把它挂在 ctx 上的（真机现场那套 ✓）：
+ *   `hostCtx.provide('profileContext', { …, installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR, … })`
+ *   而 `INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))` ✓。
+ * · DSH 自己的 README（打包进 `@deepseek-ai/dsh` 的那份 ✓）原话：
+ *   "A resolved application profile supplies its own **installation anchor** for runtime package resolution" ✓。
+ *
+ * ## 绝不静默（本次一并修的 ✗）
+ *
+ * 三条路都失败时：
+ *   1. **打一行能念的日志** ✓（`[dsh-mobile]` 前缀，列出三条路各自的失败原因 ✓，且**只在结论变化时**打一次——
+ *      每个请求打一遍会把日志刷爆 ✗）；
+ *   2. 把这行原因**留在解析器上** ✓ ⇒ `/mobile/app` 的 503 文案带上它
+ *      （`…（未找到 DSH 前端 dist/index.html：<原因>）` ✓）。
+ *
+ * ## 行为不变的部分（别弄坏 ✗）
+ *
+ * · 解析成功 ⇒ 与原实现**同一条路径** ✓（`join(dirname(manifest), 'dist', 'index.html')` ✓）；
+ * · 解析不到 ⇒ 插件**照常工作** ✓（只是手机端拿不到外壳 ✓），返回 `undefined` 而不是抛错 ✓。
+ * · 唯一新增的判据是"**文件得真的在**"✓：解析到前端包但 `dist/index.html` 缺失时按失败处理
+ *   （并说清是哪个文件缺 ✓）—— 原先那种情况下 `getAppShell()` 一样拿不到外壳（`statSync` 会抛 ✓），
+ *   所以行为等价，只是**从静默变成有原因** ✓。
+ */
+export declare function createDistIndexResolver(options?: DistIndexResolverOptions): DistIndexResolver;
+/**
+ * `/mobile/app` 那句"外壳不可用"的 503 文案（★ **必须带上原因** ✗）。
+ *
+ * 为什么单拎出来 ✗：它现在要被用例逐字钉住 ✓（"解析失败时用户到底看到什么"是本次修复的验收之一 ✓），
+ * 而原先那句话里**只有"不可用"、没有任何原因** ✗ —— 用户与排障者都无从下手 ✓。
+ *
+ * @param problem `DistIndexResolver.problem()` 的返回值 ✓。`undefined` 只在"解析到了但读不出来"
+ *                （例如权限 / 读盘竞态）时出现 —— 那时 `index.ts` 的 `getAppShell()` 已经把具体错误
+ *                记进设备审计（`store.record(...)` ✓ 不静默 ✓），所以这里保持原样不加尾巴 ✓。
+ */
+export declare function appShellUnavailableBody(problem: string | undefined): string;
 /**
  * 读 DSH **实际**的监听端口。
  *
@@ -147,6 +256,31 @@ export declare function setupStartupHint(port: number | undefined): string;
  * · 名字必须是**非空字符串**才算数 ✓（拿一个 `{}` 或空串去拼路径＝另一种静默 ✗）。
  */
 export declare function readProfileContextName(ctx: Context): string | undefined;
+/**
+ * ★★ 取"**运行中那套 DSH** 的安装锚"（`profileContext.installAnchor` ✓）——
+ * 前端定位的第 ① 条路（见 `createDistIndexResolver` 的表格 ✓）。
+ *
+ * ## 字段名从哪儿来（读实现与类型，**不猜** ✗）
+ *
+ * 桌面版 0.2.0-rc.2（真机现场那套）的 profile-boot 里，`provide('profileContext', …)` 给的对象是：
+ * `{ name, packageManager?, dir, patchPath, installAnchor, startedBundles, cwd, home, overlays, … }`
+ * —— 其中 `installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR`，
+ * 而 `INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))` ✓
+ * ⇒ 它是**运行中那套 DSH 的 `package.json` 绝对路径** ✓。
+ *
+ * 同一个锚在 `@deepseek-ai/dsh-app-boot` 的类型里也这么定义（`lib/types/profile.d.ts:95-102` ✓）：
+ * "**Absolute package.json path of the running dsh installation.**" ✓ ——
+ * 它正是"运行时包解析的安装锚"（README 原话："A resolved application profile supplies its own
+ * installation anchor for runtime package resolution" ✓）。
+ *
+ * ## 防御写法与 `readProfileContextName` **完全一致** ✓（同一个服务、同一套理由，不另起一套 ✗）
+ *
+ * · `ctx.get` 在**不认识的服务名**上返回 `undefined`（不抛 ✓）：老版本 DSH（例如 0.1.5-rc.1）
+ *   根本没有 `profileContext` 服务 ✗ ⇒ 这里安静地返回 `undefined` ✓，由调用方退到下一条锚 ✓；
+ * · 抛错也吞掉：锚取不到只是"少一条路" ✓，绝不该把整个插件（进而整个 DSH）带下去 ✗；
+ * · 值必须是**非空字符串**才算数 ✓（拿 `{}` / `''` 去 `createRequire` 只会得到另一种静默 ✗）。
+ */
+export declare function readProfileContextInstallAnchor(ctx: Context): string | undefined;
 /** 插件主体。 */
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=cordis.d.ts.map

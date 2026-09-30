@@ -57,6 +57,10 @@ import {
 // ★ 本页那一轮新增的三个入口（**另起一行** import：既有那行一个字符都不动 ✗）
 import { renderSetupPage, SETUP_PAGE_PATH, SETUP_PATH, withEndpointAuthorities } from '../src/setup-config.ts'
 import { readWebServerPort, setupStartupHint } from '../src/cordis.ts'
+// ★ DSH 前端定位那一组（I.）新增的入口 —— 同样**另起一行** import：上面几行一个字符都不动 ✗
+import { realpathSync, symlinkSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { appShellUnavailableBody, createDistIndexResolver, readProfileContextInstallAnchor } from '../src/cordis.ts'
 
 const repoRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
 const installer = join(repoRoot, 'scripts', 'install-host-plugin.mjs')
@@ -1784,6 +1788,404 @@ describe('setup-config：profile 名从 ctx.get(\'profileContext\') 来（真机
     assert.equal(
       (JSON.parse(response.body) as { profilePath: string }).profilePath,
       join(home, 'profiles', 'headless', 'cordis.patch.yml'),
+    )
+  })
+})
+
+// ── I. DSH 前端定位：软链安装下**不许**锚在插件自己身上（2026-09-30 真机事故） ──
+
+/**
+ * ## 这一组守的是什么（真机现场，别怀疑 ✓）
+ *
+ * 用户在 **DSH 桌面版 0.2.0-rc.2（profile = `desktop`，端口 19387）** 上用**本地路径**装了本插件
+ * （`"@dsh-mobile/host": "link:/…/dsh-mobile/packages/host"` ⇒ pnpm 建**软链** ✓）。
+ * 打开 `http://127.0.0.1:19387/mobile` 得到：
+ *
+ *     dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html）
+ *
+ * 根因与 `resolveProfilePatchPath` 是**同一个病** ✓：定位用的是 `createRequire(import.meta.url)`
+ * —— **锚在插件自己身上** ✗。软链安装时 `import.meta.url` 指向**仓库**
+ * （`…/dsh-mobile/packages/host/lib/cordis.js` ✓），从仓库解析 `@deepseek-ai/dsh-web-frontend`
+ * **必然失败** ✗ ⇒ 返回 `undefined` ⇒ 只报"外壳不可用"，而**日志里一个字的原因都没有** ✗。
+ * 生产（**拷贝安装**）没这个问题 ✓ —— 插件实体就在 profile 的 `node_modules` 里 ✓。
+ *
+ * ⇒ 现在按**顺序**试三条锚 ✓（① 运行中 DSH 的安装锚 → ② `process.argv[1]` → ③ 插件自己 ✓），
+ *   并且**失败一定给原因** ✓（一行日志 + 503 文案带上它 ✓）。
+ */
+describe('cordis：DSH 前端定位（软链安装 + 运行中 DSH 的安装锚）', () => {
+  interface ShellRoute {
+    kind: string
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void
+  }
+
+  /**
+   * 造一套"装了某版 DSH 的目录"（**夹具不是真安装** ✓，但目录形状与真的一致 ✓）：
+   *
+   *     <root>/install/package.json                                  ← 安装锚（profileContext.installAnchor ✓）
+   *     <root>/install/lib/bin.js                                    ← 进程入口（process.argv[1] ✓）
+   *     <root>/install/node_modules/@deepseek-ai/dsh-web-frontend/…   ← 真前端（package.json + dist/index.html ✓）
+   *
+   * `exports` 里带上 `./package.json` —— 与真包一致 ✓（0.1.5-rc.2 / 0.2.0-rc.2 的
+   * `@deepseek-ai/dsh-web-frontend/package.json` 都导出了它 ✓，所以 `require.resolve` 这条路走得通 ✓）。
+   */
+  function makeInstallFixture(
+    root: string,
+    options: { withDist?: boolean } = {},
+  ): { installAnchor: string; processEntry: string; distIndex: string; frontendDir: string } {
+    const install = join(root, 'install')
+    const frontendDir = join(install, 'node_modules', '@deepseek-ai', 'dsh-web-frontend')
+    mkdirSync(join(frontendDir, 'dist'), { recursive: true })
+    writeFileSync(
+      join(frontendDir, 'package.json'),
+      JSON.stringify(
+        {
+          name: '@deepseek-ai/dsh-web-frontend',
+          version: '0.2.0-rc.2',
+          exports: { './dist/*': './dist/*', './package.json': './package.json' },
+        },
+        null,
+        2,
+      ),
+    )
+    if (options.withDist !== false) {
+      writeFileSync(
+        join(frontendDir, 'dist', 'index.html'),
+        '<!doctype html><html><head></head><body>fixture-shell</body></html>\n',
+      )
+    }
+    writeFileSync(join(install, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.2' }, null, 2))
+    mkdirSync(join(install, 'lib'), { recursive: true })
+    const processEntry = join(install, 'lib', 'bin.js')
+    // `createRequire` 只用它的**目录**做向上查找 ✓，从不执行它 ✓
+    writeFileSync(processEntry, '// 假入口\n')
+    return {
+      installAnchor: join(install, 'package.json'),
+      processEntry,
+      distIndex: join(frontendDir, 'dist', 'index.html'),
+      frontendDir,
+    }
+  }
+
+  /** 收日志的出口（"不许静默"与"别刷屏"两条都要断言 ✓）。 */
+  function recordingLogger(): {
+    logs: string[]
+    warns: string[]
+    logger: { log: (message: string) => void; warn: (message: string) => void }
+  } {
+    const logs: string[] = []
+    const warns: string[] = []
+    return { logs, warns, logger: { log: (message) => logs.push(message), warn: (message) => warns.push(message) } }
+  }
+
+  /** 真机现场那个模块 URL：`link:` 安装 ⇒ 插件看到的自己是**仓库**里的文件 ✓（老实现就是在这里栽的 ✗）。 */
+  const linkInstalledModuleUrl = pathToFileURL(join(repoRoot, 'packages', 'host', 'lib', 'cordis.js')).href
+
+  /**
+   * 本组专用的临时目录：取 **realpath** 之后再造夹具。
+   *
+   * 为什么必须 ✗：macOS 上 `os.tmpdir()` 给的 `/var/folders/…` 里，`/var` 是指向 `/private/var`
+   * 的**软链** ✓，而 `require.resolve` 会把解析结果 realpath 掉 ⇒ 一边 `/var/…`、一边 `/private/var/…`，
+   * 断言会**假红** ✗（清理仍由 `tempDir` 登记的路径负责 ✓，同一目录、不动既有脚手架 ✓）。
+   */
+  function realTempDir(prefix: string): string {
+    return realpathSync(tempDir(prefix))
+  }
+
+  test('★ readProfileContextInstallAnchor：按**类型里那个字段名**取，畸形值一律当作"没有"（不猜 ✗）', () => {
+    /**
+     * **怎么把它打红**：把字段名改成猜的（例如 `install` / `anchor`）⇒ 第一条断言红；
+     * 或者让它对 `{}` / `''` 也返回一个值 ⇒ 后几条红（拿空串去 createRequire 只会得到另一种静默 ✗）。
+     */
+    const withAnchor = { get: (name: string) => (name === 'profileContext' ? { name: 'desktop', installAnchor: '/opt/dsh/package.json' } : undefined) }
+    assert.equal(readProfileContextInstallAnchor(withAnchor as unknown as Parameters<typeof apply>[0]), '/opt/dsh/package.json')
+    const cases: unknown[] = [undefined, {}, { installAnchor: '' }, { installAnchor: '   ' }, { installAnchor: 42 }, null]
+    for (const value of cases) {
+      const ctx = { get: (name: string) => (name === 'profileContext' ? value : undefined) }
+      assert.equal(
+        readProfileContextInstallAnchor(ctx as unknown as Parameters<typeof apply>[0]),
+        undefined,
+        `${JSON.stringify(value)} 必须当作"没有这个锚"（老 DSH 根本没有 profileContext 服务 ✓）`,
+      )
+    }
+    // `ctx.get` 自己抛错也吞掉：锚取不到只是"少一条路"，绝不该把插件加载带下去 ✗
+    const throwing = {
+      get: () => {
+        throw new Error('服务表炸了')
+      },
+    }
+    assert.equal(readProfileContextInstallAnchor(throwing as unknown as Parameters<typeof apply>[0]), undefined)
+  })
+
+  test('★★ 软链形态（模块 URL 在仓库里）+ 安装锚 ⇒ **解析到前端**（老实现返回裸 undefined ✗）', () => {
+    /**
+     * **怎么把它打红**：把 `createDistIndexResolver` 的第 ① 条锚（`installAnchor`）删掉 ⇒
+     * 只剩"仓库模块地址"这条 ⇒ 立刻返回 `undefined` —— 真机上就是那个 bug ✗。
+     */
+    const root = realTempDir('dshm-dist-link-')
+    const install = makeInstallFixture(root)
+    const io = recordingLogger()
+    const resolver = createDistIndexResolver({
+      installAnchor: install.installAnchor,
+      processEntry: install.processEntry,
+      moduleUrl: linkInstalledModuleUrl,
+      logger: io.logger,
+    })
+    assert.equal(resolver.problem(), undefined, '还没解析过就不该有"原因"')
+    assert.equal(resolver.resolve(), install.distIndex, '★ 必须靠"运行中 DSH 的安装锚"解析到前端（真机就是这条救回来的 ✓）')
+    assert.equal(resolver.problem(), undefined)
+    assert.equal(resolver.anchor(), install.installAnchor)
+    assert.equal(resolver.attempts()[0]?.ok, true, '第 ① 条路就该成功（软链安装下 ③ 必然失败 ✓）')
+    assert.ok(
+      io.logs.some((line) => line.includes(install.distIndex)),
+      `成功也要留一行"从哪儿解析到的"（实际：${io.logs.join(' ｜ ') || '（无）'}）`,
+    )
+    assert.equal(io.warns.length, 0, '成功时不许打警告')
+
+    /**
+     * ★★ 同一现场、**只留插件自己的锚**（= 老实现）⇒ 必须 `undefined` **且带上原因** ✗ ——
+     * "裸 undefined"正是本次要消灭的形状 ✓（真机上它让日志与页面都没有任何线索 ✗）。
+     */
+    const legacy = createDistIndexResolver({ moduleUrl: linkInstalledModuleUrl, logger: io.logger })
+    assert.equal(legacy.resolve(), undefined, '前提：从仓库解析不到前端（老实现就是这样栽的 ✗）')
+    const problem = legacy.problem()
+    assert.notEqual(problem, undefined, '★ 失败**不许**只给 undefined（老实现那样，日志里一个字都没有 ✗）')
+    assert.match(problem ?? '', /试了 3 条路/, '原因里必须说清试了几条路')
+    assert.match(problem ?? '', /installAnchor|profileContext/, '要说清第 ① 条路（运行中 DSH 的安装锚）')
+    assert.match(problem ?? '', /process\.argv\[1\]/, '要说清第 ② 条路（进程入口）')
+    assert.match(problem ?? '', /import\.meta\.url/, '要说清第 ③ 条路（插件自己）')
+    assert.match(problem ?? '', /没有这个锚/, '本次运行拿不到的锚也要列出来（否则用户以为只有两条路 ✗）')
+    assert.match(problem ?? '', /dsh-web-frontend/, '原因里要点明在找哪个包')
+    assert.ok(
+      io.warns.some((line) => line.includes('定位 DSH 前端失败') && line.includes('dsh-web-frontend')),
+      `失败必须打一行能念的日志（实际：${io.warns.join(' ｜ ') || '（无）'}）`,
+    )
+  })
+
+  test('★ 拷贝形态（模块 URL 在 profile 里）⇒ 与原行为**同一条路径**（老布局不许被这次修复改坏 ✓）', () => {
+    /**
+     * **怎么把它打红**：把第 ③ 条锚（`import.meta.url`）从 `sources` 里删掉 ⇒
+     * 插件被**复制**进 profile 的老布局（生产就是它 ✓）就再也解析不出前端 ✗ ——
+     * 那不是修复，是把另一条路弄坏 ✓。
+     */
+    const home = realTempDir('dshm-dist-copy-')
+    const install = makeInstallFixture(home)
+    // DSH 的共享 fallback（真机上正是它 ✓）：`$DSH_HOME/profiles/node_modules` 指到安装里那份 ✓
+    const fallback = join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-web-frontend')
+    mkdirSync(dirname(fallback), { recursive: true })
+    symlinkSync(install.frontendDir, fallback, 'dir')
+    // 插件实体在 profile 里（拷贝安装 ✓）；软链那条路见上一条用例 ✓
+    const pluginDir = join(home, 'profiles', 'web', 'node_modules', '@dsh-mobile', 'host', 'lib')
+    mkdirSync(pluginDir, { recursive: true })
+    const moduleUrl = pathToFileURL(join(pluginDir, 'cordis.js')).href
+
+    // 老实现的那一行（逐字照抄）——"同一条路径"就是拿它当基准 ✓
+    const legacy = join(
+      dirname(createRequire(moduleUrl).resolve('@deepseek-ai/dsh-web-frontend/package.json')),
+      'dist',
+      'index.html',
+    )
+    assert.ok(existsSync(legacy), '前提：老实现（锚在插件自己身上）在**拷贝安装**下解析得到前端 ✓')
+    assert.match(legacy, /dsh-web-frontend\/dist\/index\.html$/)
+
+    const resolver = createDistIndexResolver({ moduleUrl }) // 老 DSH：既没有 profileContext，也没有 argv 锚 ✓
+    assert.equal(resolver.resolve(), legacy, '★ 拷贝安装下必须与老实现**同一条路径**（这就是"行为不变"的判据 ✓）')
+    assert.equal(resolver.problem(), undefined)
+    assert.equal(resolver.anchor(), moduleUrl)
+  })
+
+  test('★ 第 ① 条锚指到没有前端的目录 ⇒ 记下失败、**退到第 ② 条**（进程入口）并成功', () => {
+    /**
+     * **怎么把它打红**：让"某条路失败"直接 `return undefined`（不继续试下一条）⇒ 本用例立刻红 ——
+     * 那正是"一条路不通就整块不可用"的坏形状 ✗（老实现只有一条路，所以必栽 ✓）。
+     */
+    const root = realTempDir('dshm-dist-fallback-')
+    const install = makeInstallFixture(root)
+    const empty = join(root, 'empty')
+    mkdirSync(empty, { recursive: true })
+    const resolver = createDistIndexResolver({
+      installAnchor: join(empty, 'package.json'),
+      processEntry: install.processEntry,
+      moduleUrl: linkInstalledModuleUrl,
+    })
+    assert.equal(resolver.resolve(), install.distIndex, '① 失败后必须继续试 ②（正在运行的进程入口 ✓）')
+    assert.equal(resolver.anchor(), install.processEntry)
+    const attempts = resolver.attempts()
+    assert.equal(attempts[0]?.ok, false, '① 那条确实失败了（要如实记下来 ✓）')
+    assert.match(attempts[0]?.detail ?? '', /dsh-web-frontend/, '失败原因要说清在找哪个包')
+    assert.equal(attempts[1]?.ok, true)
+    assert.equal(resolver.problem(), undefined, '最终成功 ⇒ problem 必须是 undefined（别反过来吓唬用户 ✗）')
+  })
+
+  test('★★ 三条路全失败 ⇒ undefined **且**原因里含"试了哪几条、各自栽在哪"；日志只打一行（不静默、也不刷屏）', () => {
+    /**
+     * **怎么把它打红**：① 把 `problem()` 记的原因去掉（失败只返回 `undefined`）⇒ 前几条断言红；
+     * ② 把"只在结论变化时打日志"改成每次 `resolve()` 都打 ⇒ 最后那条"只打一行"红。
+     */
+    const root = realTempDir('dshm-dist-none-')
+    const empty = join(root, 'empty')
+    mkdirSync(empty, { recursive: true })
+    const anchors = [join(empty, 'package.json'), join(empty, 'bin.js'), pathToFileURL(join(empty, 'cordis.js')).href]
+    const io = recordingLogger()
+    const resolver = createDistIndexResolver({
+      installAnchor: anchors[0],
+      processEntry: anchors[1],
+      moduleUrl: anchors[2],
+      logger: io.logger,
+    })
+    assert.equal(resolver.resolve(), undefined)
+    const problem = resolver.problem() ?? ''
+    assert.match(problem, /试了 3 条路/, '原因里必须说清试了几条路')
+    for (const anchor of anchors) {
+      assert.ok(problem.includes(anchor), `原因里必须出现这条锚本身：${anchor}`)
+    }
+    assert.match(problem, /MODULE_NOT_FOUND/, '要说清各条路**失败在哪**（Node 的错误码 ✓）')
+    assert.equal(io.warns.length, 1, '失败必须打**一行**能念的日志（★ 不静默 ✓）')
+    assert.match(io.warns[0] ?? '', /\[dsh-mobile\]/)
+    assert.match(io.warns[0] ?? '', /dist\/index\.html/)
+    // 每个请求都会调一次 resolve()：结论没变 ⇒ 不许再打（否则日志会被刷爆 ✗）
+    assert.equal(resolver.resolve(), undefined)
+    assert.equal(io.warns.length, 1, '同样的失败只许打一行（结论变化时才再打 ✓）')
+    assert.equal(resolver.attempts().length, 3, '三条路都要留痕（含"本次运行拿不到这个锚"那种 ✓）')
+  })
+
+  test('★ 解析到前端包但 `dist/index.html` 不在 ⇒ 也算失败（并说清缺的是哪个文件 ✓）', () => {
+    /**
+     * **怎么把它打红**：把 `exists(candidate)` 那道判据去掉 ⇒ 会返回一个**不存在**的路径，
+     * 失败被推给 `getAppShell()` 的 `statSync`，503 的"原因"栏就又空了 ✗（本次修的就是"不许静默" ✓）。
+     */
+    const root = realTempDir('dshm-dist-nodist-')
+    const install = makeInstallFixture(root, { withDist: false })
+    const resolver = createDistIndexResolver({ installAnchor: install.installAnchor })
+    assert.equal(resolver.resolve(), undefined)
+    assert.match(resolver.problem() ?? '', /dist\/index\.html/, '要说清缺的是 dist/index.html ✓')
+    assert.match(resolver.problem() ?? '', /不存在|没有/, '要说清"文件不在"')
+  })
+
+  test('★ 503 文案：解析失败时**带上原因**（形状就是验收里那句 ✓）', () => {
+    /**
+     * **怎么把它打红**：把 `appShellUnavailableBody` 里的 `${tail}` 去掉 ⇒
+     * 用户又只剩一句"外壳不可用"，页面上也没有线索 ✗。
+     */
+    assert.equal(
+      appShellUnavailableBody('试了 3 条路都没解析到 @deepseek-ai/dsh-web-frontend：…'),
+      'dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html：试了 3 条路都没解析到 @deepseek-ai/dsh-web-frontend：…）\n',
+    )
+    assert.equal(
+      appShellUnavailableBody(undefined),
+      'dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html）\n',
+      '解析到了但读不出来时保持原样（那条错误由 index.ts 记进设备审计 ✓ 不静默 ✓）',
+    )
+  })
+
+  test('★★ 端到端（真 apply()）：软链形态 + profileContext.installAnchor ⇒ 外壳可用；坏锚 ⇒ 503 **带原因**且日志有声', async () => {
+    /**
+     * **怎么把它打红**：把 `apply()` 里传给 `createDistIndexResolver` 的 `installAnchor` 去掉
+     * （= 只剩 argv / module 两条锚）⇒ 第一条断言立刻红 —— 真机上用户看到的正是那句"外壳不可用" ✗。
+     */
+    const home = realTempDir('dshm-dist-apply-')
+    const install = makeInstallFixture(home)
+
+    /** 起一次**真的** `apply()`（假 ctx），并在**整个生命周期**里收 `console.warn`（解析是懒的：请求时才打日志 ✓）。 */
+    const withShellEnv = async <T>(
+      options: { home: string; installAnchor: string | undefined },
+      body: (env: { call: (method: string, pathname: string) => Promise<{ status: number; body: string }> }) => Promise<T>,
+    ): Promise<{ value: T; warnings: string[] }> => {
+      const routes: ShellRoute[] = []
+      const ctx = {
+        webServer: {
+          register: (route: ShellRoute) => {
+            routes.push(route)
+            return () => {}
+          },
+          registerUpgrade: () => () => {},
+          tapIndex: () => () => {},
+          port: 3711,
+          // 手机外壳必须走 DSH 自己的渲染管线（往 index.html 注入 boot.js 的就是它 ✓）
+          renderIndex: (html: string) => html.replace('<head>', '<head data-dsh-rendered="1">'),
+        },
+        effect: (fn: () => () => void) => {
+          fn()
+        },
+        logger: { info: () => {} },
+        // 只有 `profileContext` 是"有的" ✓（其余服务与本组无关 ✓）
+        get: (name: string) => (name === 'profileContext' ? { name: 'desktop', installAnchor: options.installAnchor } : undefined),
+        on: () => {},
+      } as unknown as Parameters<typeof apply>[0]
+
+      const warnings: string[] = []
+      const originalWarn = console.warn
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((value) => String(value)).join(' '))
+      }
+      try {
+        apply(ctx, { dshHome: options.home, injectShim: false })
+        const route = routes.find((item) => item.path === '/mobile/app')
+        assert.notEqual(route, undefined, '插件没有注册 /mobile/app（手机端就没有外壳入口了）')
+        const call = async (method: string, pathname: string): Promise<{ status: number; body: string }> => {
+          const req = {
+            method,
+            url: pathname,
+            headers: { host: '127.0.0.1:3711' },
+            socket: { remoteAddress: '127.0.0.1' },
+          } as unknown as IncomingMessage
+          let status = 0
+          let text = ''
+          let headersSent = false
+          let finish: (() => void) | undefined
+          const finished = new Promise<void>((resolve) => {
+            finish = resolve
+          })
+          const res = {
+            get headersSent() {
+              return headersSent
+            },
+            writeHead(code: number) {
+              status = code
+              headersSent = true
+            },
+            end(data?: Buffer | string) {
+              text = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+              finish?.()
+            },
+          } as unknown as ServerResponse
+          route?.handler(req, res)
+          await Promise.race([finished, new Promise<void>((resolve) => setTimeout(resolve, 3000))])
+          assert.notEqual(status, 0, `${method} ${pathname} 未产生响应（处理器卡住了）`)
+          return { status, body: text }
+        }
+        const value = await body({ call })
+        return { value, warnings }
+      } finally {
+        console.warn = originalWarn
+      }
+    }
+
+    // ① 好锚（真机上 profileContext 给的就是它 ✓）⇒ 手机端拿到外壳
+    const good = await withShellEnv({ home, installAnchor: install.installAnchor }, async ({ call }) => call('GET', '/mobile/app'))
+    assert.equal(good.value.status, 200, good.value.body)
+    assert.match(good.value.body, /fixture-shell/, '手机端必须拿到 DSH 前端那份 HTML ✓')
+    assert.match(good.value.body, /data-dsh-rendered="1"/, '渲染照旧走 ctx.webServer.renderIndex（注入一个字都不许丢 ✓）')
+    assert.ok(
+      good.warnings.every((line) => !line.includes('定位 DSH 前端失败')),
+      `前端解析成功时不该有"定位失败"的日志（实际：${good.warnings.join(' ｜ ') || '（无）'}）`,
+    )
+
+    // ② 坏锚（指到没有前端的目录）⇒ 503，且**文案里带原因**、日志里也有声
+    const badHome = realTempDir('dshm-dist-apply-bad-')
+    const empty = join(badHome, 'empty')
+    mkdirSync(empty, { recursive: true })
+    const bad = await withShellEnv(
+      { home: badHome, installAnchor: join(empty, 'package.json') },
+      async ({ call }) => call('GET', '/mobile/app'),
+    )
+    assert.equal(bad.value.status, 503)
+    assert.match(bad.value.body, /^dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist\/index\.html：/)
+    assert.match(bad.value.body, /试了 3 条路/, '503 文案必须带上"试了哪几条路"✓')
+    assert.match(bad.value.body, /installAnchor|profileContext/, '也要点明第 ① 条路（运行中 DSH 的安装锚 ✓）')
+    assert.ok(
+      bad.warnings.some((line) => line.includes('定位 DSH 前端失败') && line.includes('试了 3 条路')),
+      `失败必须在日志里留下一行原因（真机上原先一个字都没有 ✗；实际：${bad.warnings.join(' ｜ ') || '（无）'}）`,
     )
   })
 })

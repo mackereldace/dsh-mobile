@@ -146,22 +146,195 @@ extra = []) {
         return [primary, ...extra];
     };
 }
-/**
- * 定位 DSH 前端 index.html。
- *
- * 用 createRequire 锚定 `@deepseek-ai/dsh-web-frontend`（与 DSH web-app 的做法一致），
- * 这样 profile 的依赖布局变化时不会失效；解析不到时返回 undefined，
- * 插件照常工作（只是手机端拿不到应用外壳）。
- */
-function resolveDistIndex() {
-    try {
-        const require = createRequire(import.meta.url);
-        const manifest = require.resolve('@deepseek-ai/dsh-web-frontend/package.json');
-        return join(dirname(manifest), 'dist', 'index.html');
-    }
-    catch {
+/** 前端包名（唯一来源：三条路都在解析它 ✓，别在别处再写一遍 ✗）。 */
+const FRONTEND_PACKAGE = '@deepseek-ai/dsh-web-frontend';
+/** 锚必须是**非空字符串**才算数 ✓（拿 `''` 去 createRequire 只会得到另一种静默 ✗）。 */
+function usableAnchor(value) {
+    if (typeof value !== 'string')
         return undefined;
-    }
+    const trimmed = value.trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+}
+/**
+ * 把解析异常压成**一行**。
+ *
+ * 为什么必须压 ✗：`require.resolve` 的 `Cannot find module` 自带一段 `Require stack:`（多行 ✓），
+ * 而这句话要进 503 响应体与一行日志 —— 带换行会让两边都变得没法念 ✗。
+ *
+ * ★ 还要**掐掉** `Require stack` 那一段 ✓：它列的正是我们的锚本身（紧邻前面已经写了"锚：…"✓），
+ *   留着只会让这句话长一倍、把真正的信息（错误码 + 找不到哪个包）淹掉 ✗。
+ */
+function describeResolutionError(error) {
+    const code = error?.code;
+    const message = error instanceof Error ? error.message : String(error);
+    const withoutStack = message.split('Require stack:')[0] ?? message;
+    const oneLine = withoutStack
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .join(' ');
+    return typeof code === 'string' && !oneLine.includes(code) ? `${code}: ${oneLine}` : oneLine;
+}
+/**
+ * 定位 DSH 前端 `dist/index.html`。
+ *
+ * ## ★★ 2026-09-30 修：锚必须落在"**运行中那套 DSH**"上，不许落在插件自己身上 ✗
+ *
+ * 旧实现只有一条路：`createRequire(import.meta.url)` —— 即**从插件自己的模块位置**解析
+ * `@deepseek-ai/dsh-web-frontend` ✓。它在**拷贝安装**（插件实体在
+ * `<DSH_HOME>/profiles/<profile>/node_modules/@dsh-mobile/host/` 里，生产就是这种 ✓）下是对的 ✓，
+ * 但在**本地路径 / `link:` 安装**（pnpm 建软链；桌面 UI 装本地路径必然如此 ✓）下**必然失败** ✗：
+ * `import.meta.url` 指向的是**仓库**（`…/dsh-mobile/packages/host/lib/cordis.js` ✓），
+ * 从仓库解析前端包必然失败 ⇒ 返回 `undefined` ⇒ 手机端只看到一句"应用外壳不可用"，
+ * 而**日志里没有任何原因** ✗（真机现场：DSH 桌面版 0.2.0-rc.2、profile=`desktop`、
+ * `link:/…/dsh-mobile/packages/host` ⇒ `http://127.0.0.1:19387/mobile` 报外壳不可用 ✗）。
+ *
+ * 这与今天刚修过的 `resolveProfilePatchPath`（见 `setup-config.ts`）是**同一个病** ✓：
+ * "从插件自身位置推断环境"在软链安装下必错 ✗。那里的处方是"**显式传参 + 拿不准就报错**"✓，
+ * 这里照**同一个形状**来 ✓（不新造第二套机制 ✗）：
+ *
+ * | 顺序 | 锚 | 为什么是它 |
+ * |---|---|---|
+ * | ① | `ctx.get('profileContext').installAnchor` | DSH 自己挂上来的**安装锚** = 运行中那套 DSH 的 `package.json` ✓（`readProfileContextInstallAnchor` 有依据 ✓） |
+ * | ② | `process.argv[1]` | 正在运行的进程入口（`dsh` 的 `bin.js` / 桌面版 host 入口 ✓）⇒ 从它旁边必然上溯得到安装目录 ✓ |
+ * | ③ | `import.meta.url` | **拷贝安装**下它是对的 ⇒ 必须保留 ✓（软链安装下会被 ① 或 ② 抢先 ✓） |
+ *
+ * ## 依据（读类型/实现，不猜 ✗）
+ *
+ * · `@deepseek-ai/dsh-app-boot` 的 `ProfileModuleFallbackOptions.installAnchor`
+ *   （`lib/types/profile.d.ts:95-102`）：**"Absolute package.json path of the running dsh installation."** ✓
+ *   —— 同一个锚也是 `resolveBundleDir(binName, packageName, installAnchor, profileDir)` 的**第一**锚 ✓，
+ *   顺序是契约原话："The installation-first order is the contract that `@deepseek-ai/dsh-base`
+ *   (and every other in-box bundle) always comes from the same installation as the running dsh,
+ *   never from a profile-local copy." ✓ ⇒ 前端也该**先**从安装解析 ✓（它必须与运行中的服务端同版本 ✓）。
+ * · 桌面版 0.2.0-rc.2 的 profile-boot 就是把它挂在 ctx 上的（真机现场那套 ✓）：
+ *   `hostCtx.provide('profileContext', { …, installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR, … })`
+ *   而 `INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))` ✓。
+ * · DSH 自己的 README（打包进 `@deepseek-ai/dsh` 的那份 ✓）原话：
+ *   "A resolved application profile supplies its own **installation anchor** for runtime package resolution" ✓。
+ *
+ * ## 绝不静默（本次一并修的 ✗）
+ *
+ * 三条路都失败时：
+ *   1. **打一行能念的日志** ✓（`[dsh-mobile]` 前缀，列出三条路各自的失败原因 ✓，且**只在结论变化时**打一次——
+ *      每个请求打一遍会把日志刷爆 ✗）；
+ *   2. 把这行原因**留在解析器上** ✓ ⇒ `/mobile/app` 的 503 文案带上它
+ *      （`…（未找到 DSH 前端 dist/index.html：<原因>）` ✓）。
+ *
+ * ## 行为不变的部分（别弄坏 ✗）
+ *
+ * · 解析成功 ⇒ 与原实现**同一条路径** ✓（`join(dirname(manifest), 'dist', 'index.html')` ✓）；
+ * · 解析不到 ⇒ 插件**照常工作** ✓（只是手机端拿不到外壳 ✓），返回 `undefined` 而不是抛错 ✓。
+ * · 唯一新增的判据是"**文件得真的在**"✓：解析到前端包但 `dist/index.html` 缺失时按失败处理
+ *   （并说清是哪个文件缺 ✓）—— 原先那种情况下 `getAppShell()` 一样拿不到外壳（`statSync` 会抛 ✓），
+ *   所以行为等价，只是**从静默变成有原因** ✓。
+ */
+export function createDistIndexResolver(options = {}) {
+    const exists = options.exists ?? existsSync;
+    const log = options.logger?.log ?? ((message) => console.log(message));
+    const warn = options.logger?.warn ?? ((message) => console.warn(message));
+    /**
+     * ★ 三条路，**顺序即契约**：先"运行中那套 DSH"（①②），最后才退到"插件自己"（③）✓。
+     * ⚠️ 每条都带 `label`：失败时用户看到的是"试了哪几条、各自栽在哪" ✓，不是一句"没找到" ✗。
+     */
+    const sources = [
+        {
+            label: "运行中 DSH 的安装锚（ctx.get('profileContext').installAnchor）",
+            anchor: usableAnchor(options.installAnchor),
+        },
+        { label: '正在运行的进程入口（process.argv[1]）', anchor: usableAnchor(options.processEntry) },
+        {
+            label: '插件自身位置（import.meta.url；**拷贝安装**下这条路是对的）',
+            anchor: usableAnchor(options.moduleUrl),
+        },
+    ];
+    let latestAttempts = [];
+    let latestProblem;
+    let latestAnchor;
+    /** 上一次**打过日志的结论**（成功给路径、失败给原因）：只在它变了时再打一行 ✓。 */
+    let loggedKey;
+    const resolve = () => {
+        const attempts = [];
+        let path;
+        let anchor;
+        for (const source of sources) {
+            if (source.anchor === undefined) {
+                // 这条锚**本次运行里根本不存在**（老 DSH 没有 profileContext / 进程没有脚本入口 ✓）。
+                // 也要记一条 ✗：否则用户看到"两条路都失败"，却不知道本来还有第三条 ✓。
+                attempts.push({
+                    label: source.label,
+                    anchor: '(没有这个锚)',
+                    ok: false,
+                    detail: '本次运行拿不到这个锚（老版本 DSH 不提供 profileContext，或进程没有脚本入口）',
+                });
+                continue;
+            }
+            let manifest;
+            try {
+                // 与 DSH 自己的 `resolveDistIndex()`（dsh-web-app）**同一个解析方式** ✓：以锚为基准
+                // `require.resolve` 包的 package.json（前端包的 exports 里有 `./package.json` ✓）。
+                manifest = createRequire(source.anchor).resolve(`${FRONTEND_PACKAGE}/package.json`);
+            }
+            catch (error) {
+                attempts.push({ label: source.label, anchor: source.anchor, ok: false, detail: describeResolutionError(error) });
+                continue;
+            }
+            const candidate = join(dirname(manifest), 'dist', 'index.html');
+            if (!exists(candidate)) {
+                attempts.push({
+                    label: source.label,
+                    anchor: source.anchor,
+                    ok: false,
+                    detail: `解析到了前端包（${manifest}）但它旁边没有 ${candidate}`,
+                });
+                continue;
+            }
+            attempts.push({ label: source.label, anchor: source.anchor, ok: true, detail: candidate });
+            path = candidate;
+            anchor = source.anchor;
+            break;
+        }
+        latestAttempts = attempts;
+        latestAnchor = anchor;
+        latestProblem =
+            path === undefined
+                ? `试了 ${attempts.length} 条路都没解析到 ${FRONTEND_PACKAGE}：` +
+                    attempts
+                        .map((item, index) => `${index + 1}) ${item.label}（锚：${item.anchor}）⇒ ${item.detail}`)
+                        .join('；')
+                : undefined;
+        const key = path === undefined ? `fail:${latestProblem ?? ''}` : `ok:${path}`;
+        if (key !== loggedKey) {
+            loggedKey = key;
+            if (path === undefined) {
+                warn(`[dsh-mobile] ★ 定位 DSH 前端失败（手机端拿不到应用外壳 dist/index.html；插件其余功能照常）：${latestProblem ?? ''}`);
+            }
+            else {
+                log(`[dsh-mobile] DSH 前端 dist/index.html = ${path}（锚：${anchor ?? '?'}）`);
+            }
+        }
+        return path;
+    };
+    return {
+        resolve,
+        problem: () => latestProblem,
+        anchor: () => latestAnchor,
+        attempts: () => latestAttempts,
+    };
+}
+/**
+ * `/mobile/app` 那句"外壳不可用"的 503 文案（★ **必须带上原因** ✗）。
+ *
+ * 为什么单拎出来 ✗：它现在要被用例逐字钉住 ✓（"解析失败时用户到底看到什么"是本次修复的验收之一 ✓），
+ * 而原先那句话里**只有"不可用"、没有任何原因** ✗ —— 用户与排障者都无从下手 ✓。
+ *
+ * @param problem `DistIndexResolver.problem()` 的返回值 ✓。`undefined` 只在"解析到了但读不出来"
+ *                （例如权限 / 读盘竞态）时出现 —— 那时 `index.ts` 的 `getAppShell()` 已经把具体错误
+ *                记进设备审计（`store.record(...)` ✓ 不静默 ✓），所以这里保持原样不加尾巴 ✓。
+ */
+export function appShellUnavailableBody(problem) {
+    const tail = problem === undefined ? '' : `：${problem}`;
+    return `dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html${tail}）\n`;
 }
 /**
  * 读 DSH **实际**的监听端口。
@@ -230,6 +403,41 @@ export function readProfileContextName(ctx) {
             return undefined;
         const trimmed = name.trim();
         return trimmed.length === 0 ? undefined : trimmed;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * ★★ 取"**运行中那套 DSH** 的安装锚"（`profileContext.installAnchor` ✓）——
+ * 前端定位的第 ① 条路（见 `createDistIndexResolver` 的表格 ✓）。
+ *
+ * ## 字段名从哪儿来（读实现与类型，**不猜** ✗）
+ *
+ * 桌面版 0.2.0-rc.2（真机现场那套）的 profile-boot 里，`provide('profileContext', …)` 给的对象是：
+ * `{ name, packageManager?, dir, patchPath, installAnchor, startedBundles, cwd, home, overlays, … }`
+ * —— 其中 `installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR`，
+ * 而 `INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))` ✓
+ * ⇒ 它是**运行中那套 DSH 的 `package.json` 绝对路径** ✓。
+ *
+ * 同一个锚在 `@deepseek-ai/dsh-app-boot` 的类型里也这么定义（`lib/types/profile.d.ts:95-102` ✓）：
+ * "**Absolute package.json path of the running dsh installation.**" ✓ ——
+ * 它正是"运行时包解析的安装锚"（README 原话："A resolved application profile supplies its own
+ * installation anchor for runtime package resolution" ✓）。
+ *
+ * ## 防御写法与 `readProfileContextName` **完全一致** ✓（同一个服务、同一套理由，不另起一套 ✗）
+ *
+ * · `ctx.get` 在**不认识的服务名**上返回 `undefined`（不抛 ✓）：老版本 DSH（例如 0.1.5-rc.1）
+ *   根本没有 `profileContext` 服务 ✗ ⇒ 这里安静地返回 `undefined` ✓，由调用方退到下一条锚 ✓；
+ * · 抛错也吞掉：锚取不到只是"少一条路" ✓，绝不该把整个插件（进而整个 DSH）带下去 ✗；
+ * · 值必须是**非空字符串**才算数 ✓（拿 `{}` / `''` 去 `createRequire` 只会得到另一种静默 ✗）。
+ */
+export function readProfileContextInstallAnchor(ctx) {
+    try {
+        const profileContext = ctx.get?.('profileContext');
+        if (typeof profileContext !== 'object' || profileContext === null)
+            return undefined;
+        return usableAnchor(profileContext.installAnchor);
     }
     catch {
         return undefined;
@@ -333,6 +541,25 @@ export function apply(ctx, config = {}) {
             return { source, sha256: createHash('sha256').update(source).digest('hex') };
         }
         : undefined;
+    /**
+     * ★★ DSH 前端定位器（2026-09-30 修 ✗）：锚在**运行中那套 DSH** 上，不是插件自己 ✗。
+     *
+     * 三个锚**在这里一次取齐**、由 `resolve()` 每次现算 ✓：
+     *   ① `profileContext.installAnchor`（运行中那套 DSH 的 `package.json` ✓）；
+     *   ② `process.argv[1]`（正在运行的进程入口 ✓）；
+     *   ③ `import.meta.url`（插件自己 —— **拷贝安装**下这条路是对的 ✓，软链下会被 ①② 抢先 ✓）。
+     *
+     * 传进 `createMobileHost` 的是**函数**（不是算好的路径）⇒ `getAppShell()` 每次请求现算 ✓：
+     * 前端升级 / 安装位置变化都不必重启（与原先的行为一致 ✓）。
+     * 日志只在**结论变化**时打一行 ✓（见 `createDistIndexResolver`），
+     * 失败原因则留在 `distResolver.problem()` 上供 503 文案使用 ✓（绝不静默 ✗）。
+     */
+    const distResolver = createDistIndexResolver({
+        installAnchor: readProfileContextInstallAnchor(ctx),
+        processEntry: process.argv[1],
+        moduleUrl: import.meta.url,
+        logger: { log: (message) => console.log(message), warn: (message) => console.warn(message) },
+    });
     const mobileHost = createMobileHost({
         config: { ...DEFAULT_CONFIG, ...config },
         store,
@@ -350,7 +577,8 @@ export function apply(ctx, config = {}) {
         ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0
             ? {}
             : { phoneBaseUrl: config.phoneBaseUrl }),
-        distIndex: resolveDistIndex,
+        // 传**函数**而不是路径：前端升级 / 安装位置变化不必重启插件（与原先一致 ✓）
+        distIndex: () => distResolver.resolve(),
         renderIndex: (html) => ctx.webServer.renderIndex(html),
         // 自签证书管理器：manifest / 自检 / `/mobile/trust.crt` 都从它取（见上面的长注释）
         tls,
@@ -629,7 +857,12 @@ export function apply(ctx, config = {}) {
             const shell = mobileHost.getAppShell();
             if (shell === undefined) {
                 res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-                res.end('dsh-mobile: 应用外壳不可用（未找到 DSH 前端 dist/index.html）\n');
+                /**
+                 * ★★ 文案里**必须带上原因** ✗（2026-09-30 修）：原先只有一句"外壳不可用"，
+                 * 于是真机上（软链安装 ⇒ 前端定位必然失败 ✗）用户与日志**都没有任何线索** ✗。
+                 * 原因由 `distResolver` 记着（试了哪几条路、各自栽在哪 ✓，见 `createDistIndexResolver`）。
+                 */
+                res.end(appShellUnavailableBody(distResolver.problem()));
                 return;
             }
             // 按 ETag 缓存渲染结果：renderIndex 会跑全部注入，没必要每个请求都做一遍
