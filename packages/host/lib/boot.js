@@ -2487,6 +2487,17 @@
   var STREAM_LOG_TEXT_MAX = 200
 
   /** 读回那份环形记录 ✓（**只有这一个读取实现** ✓：落盘与对外的读取入口都走它 ✓）。 */
+  /**
+   * ★ 最近一次"链路断开"错误的**形状**（只读诊断 ✓）—— 后台回来那一单要看的就是这一位 ✓。
+   *   `{ at, hasCarrier, kind, code }` ✓；从没断过时是 `null` ✓。
+   *   为什么留它 ✗：那个标记会被 DSH 自己**吃掉**（`normalizeConnectionStream` 把带标记的错误
+   *   转成 `RemoteStreamCarrierError` 之后，标记就不在原对象上了 ✗）⇒
+   *   事后再也看不出"我们到底带没带"✓ ⇒ 留一份读数 ✓（变异时它会从 `true` 翻成 `false` ✓）。
+   */
+  var lastLinkOfflineAt = 0
+  var lastLinkOfflineHasCarrier = false
+  var lastLinkOfflineReadyState = -1
+
   function streamLogRead() {
     try {
       var raw = localStorage.getItem(STREAM_LOG_KEY)
@@ -4483,6 +4494,23 @@
          * 效果要等真机复现 + 下面那份流日志念出来才看得清 ✓。
          */
         offline.dshRemoteStreamFailure = { kind: 'carrier' }
+        /**
+         * ★ 顺手把这一笔也记进流日志 ✓ —— 它是**唯一**能事后分清
+         *   "链路断开（该重试 ✓）"与"解析失败（不该重试 ✗）"的地方 ✓：
+         *   两者在 `failStreams` 里长成同一个形状（都被 DSH 包成 `RemoteStreamCarrierError` ✗）。
+         */
+        streamLogPush('(link)', 'close', 'socket 关闭 ⇒ 结算全部流与在途请求 · ' + streamLogFailureText(offline), streamLogReadyState(self))
+        lastLinkOfflineAt = Date.now()
+        /**
+         * ★ 这一位**必须从那个对象上现读** ✗（第一版写死成 `true` ✓）——
+         *   写死的话它就不是读数、而是"我以为"✗：变异实验（把上面那行标记删掉 ✓）
+         *   在日志里翻成了 `carrier=0` ✓，而这里**仍然报 `true`** ✗ ⇒ 自证无效 ✓。
+         */
+        lastLinkOfflineHasCarrier =
+          offline.dshRemoteStreamFailure !== undefined &&
+          offline.dshRemoteStreamFailure !== null &&
+          offline.dshRemoteStreamFailure.kind === 'carrier'
+        lastLinkOfflineReadyState = streamLogReadyState(self)
         self.failStreams(offline)
         self.failPending(offline)
         if (!settled) {
@@ -5026,6 +5054,15 @@
         }
       },
       fail: function (error) {
+        /**
+         * ★★ 流级日志：**宿主单独拒掉这一条流**也在这里 ✓（踩过一次 ✗）——
+         *   实测：`t.openStream('dshm/不存在-的-流', …)` ⇒ 宿主回 `StreamFail` 帧 ⇒
+         *   走的是**本函数** ✓，**不经过** `failStreams` ✗ ⇒
+         *   只在 `failStreams` 里记的话，"这条流死了"会**一条日志都没有** ✗✗
+         *   （而那恰恰是用户"某一块不更新了"的形状 ✓）。
+         *   ★ 只写记录 ✗：`failure` / `done` / `waiter` 三个状态一个字节都没动 ✓。
+         */
+        streamLogPush(endpoint, 'fail', 'id=' + String(streamId) + ' · 单条流被结算 · ' + streamLogFailureText(error), streamLogReadyState(self))
         failure = error
         done = true
         if (waiter !== undefined) {
@@ -5126,11 +5163,16 @@
        *   哪几条一直没回来" ✓，所以流名与 id 都要落在这一条上 ✓。
        *   ★ 只写记录 ✗：`stream.fail(error)` 的入参与顺序一个字节都没动 ✓。
        */
-      streamLogPush(
-        stream === undefined || stream === null ? '(未知流)' : stream.__dshmEndpoint,
-        'fail',
-        'id=' + String(streamId) + ' · ' + streamLogFailureText(error),
-        streamLogReadyState(self),
+      var streamName = stream === undefined || stream === null ? '(未知流)' : stream.__dshmEndpoint
+      /**
+       * ★ 调试框里留一行 ✓（`DEBUG_BOX_ON` 关着时它什么都不做 ✓）——
+       *   真机上用户念得到的就是这一行 ✓（外加只读入口 `streamLog()` 的全文 ✓）。
+       * ★ 落盘那一条由 `state.fail` 记 ✓（**只许有一个落盘点** ✗ ——
+       *   两处都记会把同一条流写两遍 ✓，日志一乱，"到底几条没回来"就数不清了 ✗）。
+       */
+      debugBoxLine(
+        '[stream] ✗ ' + String(streamName) + '（id=' + String(streamId) + '）' +
+          ' · socket.readyState=' + String(streamLogReadyState(self)) + ' · ' + streamLogFailureText(error),
       )
       stream.fail(error)
     })
@@ -9488,6 +9530,26 @@
          那会把面板里的 `…_header`（例如上下文面板的 JObwrW_header）一起推下去 52px，
          表现为"点开面板顶上多一块空白" ✗（用户实测报上来的就是这个）。 */
       '  [data-dshm-topheader] { padding-top: calc(var(--dshm-top-h) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important; }',
+      /**
+       * ★★ round 193：**页面型视图**的让位 ✓（用户："插件详情页的实际显示范围超过汉堡键、
+       *   标题、文件夹那一排 ⇒ 显示不全"✗）。
+       *
+       * ## 命中面先量过 ✗（本项目为"选择器写宽"栽过三次：`[class*="collapsed"]` /
+       *   `[class*="titleRow"]` / `[class*="_panel"]` ✓）
+       * 实测（400×869、插件列表页与插件详情页各一次 ✓）：`section[class*="page"]`
+       * **命中 1 个**（`section.ZVcBiW_page`，`(0,0,400×869)`、`padTop 0` ✓）；
+       * 同一时刻会话页上它命中 **0 个** ✓（`pageSectionCount 0` ✓）。
+       * 而且这条还额外被 `html[data-dshm-no-header="1"]` 闸住 ✓ ——
+       * **只有"这一页确实没有顶栏标题行"时才生效** ✓（会话页有标题行 ⇒ 那一笔被清掉 ✓ ⇒ 这条不命中 ✓）。
+       *
+       * ## 为什么让位打在**页面容器**上、而不是 `header.…_pageHead` ✗
+       * `pageHead` 自己带 `padding-top: 28px` ✓（DSH 自己的值 ✓）——
+       * 覆盖它就得把那个 28px 抄进我们的规则里 ✗（DSH 一改就漂 ✓）。
+       * 打在容器上 ⇒ DSH 的内部间距**一个字节都不动** ✓，整页（含头部 ✓）一起让开 ✓。
+       */
+      '  html[data-dshm-no-header="1"] section[class*="page"] {',
+      '    padding-top: calc(var(--dshm-top-h) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))) !important;',
+      '  }',
       /* 输入框里那个上下文环：**只隐身、不拆除** ——
          它是那块面板的定位锚点，而且面板就渲染在它的父节点里，
          用 `display:none` 会把面板一起干掉（表现为"点了没反应"）✗。
@@ -10922,8 +10984,31 @@
           }
         }
       }
-      if (header === null || header === undefined) return
+      /**
+       * ★★ round 193：**这一页没有顶栏标题行** ⇒ 在 `document.documentElement` 上记一笔 ✓。
+       *
+       * ## 为什么非有它不可（用户 2026-09-30："打开插件页下具体插件**详细**时，实际显示范围
+       *   超过汉堡键、标题、文件夹那一排 ⇒ **显示不全**"✗）
+       * 让位那条规则只打在 `[data-dshm-topheader]` 上 ✓，而**页面型视图没有 `titleRow`** ✗
+       * （实测：插件列表页与插件详情页 `marked` 计数都是 **0** ✓）⇒ **没人让位** ✗ ⇒
+       * `header.…_pageHead`（实测 `(24,0,352×80)` ✓）被我们的顶栏 `#dsh-mobile-top`
+       * （`(0,0,400×52)` ✓）压住 **18304 px²** ✓、`h1.…_pageTitle` 的 9 个采样点**全部**被命中 ✗✓。
+       * ⇒ 这一笔就是"**这页得靠页面容器整体让位**"的唯一事实来源 ✓（CSS 用属性选择器读它 ✓）。
+       * ★ 认的是**结构事实**（"这一页找不到顶栏标题行"✓），不是类名/哈希 ✓；
+       * ★ 有标题行时**必须清掉**这一笔 ✗（否则会话页也会被推下去 52px ✓）。
+       */
+      if (header === null || header === undefined) {
+        if (document.documentElement !== null && document.documentElement !== undefined) {
+          if (document.documentElement.dataset !== undefined && document.documentElement.dataset.dshmNoHeader !== '1') {
+            document.documentElement.dataset.dshmNoHeader = '1'
+          }
+        }
+        return
+      }
       if (header.dataset === undefined) return
+      if (document.documentElement !== null && document.documentElement !== undefined && document.documentElement.dataset !== undefined) {
+        if (document.documentElement.dataset.dshmNoHeader !== undefined) delete document.documentElement.dataset.dshmNoHeader
+      }
       /**
        * ★ 幂等：先把**别的**元素上的旧标记摘干净 ✓ —— "只打不摘"正是这次现场的真凶之一 ✗
        *   （DSH 重渲染换了元素 ⇒ 旧标记留在那个没盒子的插槽层上 ⇒ 让位规则继续打在错的地方 ✗）。
@@ -19201,6 +19286,33 @@
       streamLog: function () {
         return streamLogRead()
       },
+      /**
+       * ★ 断链那一刻的**现场**（只读 ✓，后台回来那一单要的三样 ✓）：
+       *   `offline` 的五个字段 + 当下 `socket.readyState` ✓。
+       *   ★ 为什么给"形状"而不是给 socket 本身 ✗：把 socket 露出去 = 多一个能改它的入口 ✗
+       *     （本项目"第二个事实来源"栽过 ✓）；这里只读一个数 ✓，谁也动不了它 ✓。
+       *   真机上念法：`__DSH_MOBILE_BOOT__.linkOffline()` ⇒
+       *     `null` = 本页还没断过 ✓；否则看 `hasCarrier`（那一单要看的那一位 ✓）。
+       */
+      linkOffline: function () {
+        /**
+         * ★★ 这里踩过一次，记清楚 ✗：本轮先加了一个 `linkOffline`（读 `lastLinkOffline` 那个变量 ✓），
+         *   改名后又留了一条**同名键** ✗ —— 对象字面量里**后写的赢** ✓，
+         *   于是页面里报的是旧那条 ✓、而旧变量已经不在了 ⇒
+         *   `linkOffline threw: lastLinkOffline is not defined` ✗✗
+         *   （症状与"入口没实现"一模一样 ✓，正是本项目"同名/两套入口"那个老坑 ✓）。
+         *   ⇒ 同一个诊断对象里**绝不出现两个同名键** ✗（改完名字要 grep 一遍 ✓）。
+         */
+        if (tunnel === undefined || tunnel === null) return null
+        return {
+          at: lastLinkOfflineAt,
+          hasCarrier: lastLinkOfflineHasCarrier,
+          markerKind: 'carrier',
+          code: 'mobile/link-closed',
+          readyStateAtClose: lastLinkOfflineReadyState,
+          socketReadyStateNow: streamLogReadyState(tunnel),
+        }
+      },
       /** 「模型菜单关掉后把焦点还给输入框」那一条链的计数（四个静默失败点各有一个数 ✓）。 */
       composerFocus: function () {
         return focusKeeperStats
@@ -19778,7 +19890,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930101944'
+    var BOOT_STAMP = 'BUILD-0930102705'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
