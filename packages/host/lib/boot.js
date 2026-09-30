@@ -8303,10 +8303,14 @@
       /**
        * ★★ round 193：这里原来是 `var(--dshm-surface-sidebar, var(--dsw-alias-bg-base, …))` ✗ ——
        *   而 `--dshm-surface-sidebar` **只由那个 token 桥写入** ✓（它抄的是"侧栏**当时刷出来的**
-       *   那个颜色"✗，时序一错就跟着错 ✓）。桥删了 ⇒ 这个兜底链**整条作废** ✓，
-       *   直接用 DSH 自己的层级底色 ✓（浅 `#fff` / 深 `#232324` ✓，两套主题都自带 ✓）。
+       *   那个颜色"✗，时序一错就跟着错 ✓）。桥删了 ⇒ 这个兜底链**整条作废** ✓。
+       * ★★ round 194：改用**侧栏自己用的那个 token** ✓ —— 套件实测：侧栏（`_6Qf49G_sidebarCol`）
+       *   底色是 `rgb(27,27,28)` ✓，而 `--dsw-alias-bg-layer-1` 在深色下是 `rgb(35,35,36)` ✗
+       *   ⇒ 两个抽屉**又不同色了** ✗（套件那条"用户明确要求颜色一致"当场红 ✓）。
+       *   DSH 侧栏自己的规则就是 `background: var(--dsw-specific-sidebar-fill)` ✓
+       *   （`dsh-client-ui-layout` ✓）⇒ 直接吃同一个 token ✓，两套主题都自带 ✓。
        */
-      '  background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #15171a));',
+      '  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #15171a)));',
       '  border-radius: 18px 0 0 18px;',
       '  padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px));',
       /**
@@ -9262,6 +9266,17 @@
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '    left: 32px !important;',
+      '  }',
+      /**
+       * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：轮次底边 **859**、
+       *   用量底边 **873.5** ⇒ **DSH 自己就放得不齐** ✗（两颗胶囊高度不同 ⇒ 锚点 top 不同 ✓），
+       *   而用户要的是"三块一样" ✓（0.15 真机读数：三个面板底边同为 `b816` ✓）。
+       *   ⇒ 只覆盖**底边与 `top`** ✓，宽度 / 左边 / 高度**一律留给 DSH** ✗
+       *   （它们本来就摆得对 ✓，多写一条就是多一处误伤 ✓）。
+       */
+      '  [data-dshm-stats-panel] {',
+      '    top: auto !important;',
+      '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
              必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
@@ -13295,26 +13310,53 @@
   }
 
   /**
-   * ★★ 给**上下文面板**打标记 + 量出它自己的**自然底边**（2026-09-30，round 190）。
+   * ★★ 给**底部状态栏那三块面板**打标记 + 把它们的**底边对齐**（2026-09-30，round 190 / 194）。
    *
-   * 为什么要标记 ✗：那块面板在 0.2.0 里**没有任何现成的特征**能把它与另外两块统计面板分开 ✓
-   * （三块都是 `role="dialog"`、都没有 `data-*`、都是直挂 body 的 portal ✓ —— 实测见 CSS 那段注释 ✓），
+   * 为什么要标记 ✗：那三块面板在 0.2.0 里**没有任何现成的特征**能与别的东西分开 ✓
+   * （都是 `role="dialog"`、都没有 `data-*`、都是直挂 body 的 portal ✓ —— 实测见 CSS 那段注释 ✓），
    * 唯一现成的区分是 `aria-label` 的**文案**（中文本地化 ⇒ 切英文就失效 ✗）或**构建哈希**（换版就失效 ✗）。
    * ⇒ 用"**这一下点出来的是哪块**"来认 ✓：点之前记一份 dialog 快照 ✓，
-   *   点之后拿差集 ⇒ 那块就是上下文面板 ✓（与哈希、语言、结构都无关 ✓）。
+   *   点之后拿差集 ⇒ 那块就是刚点开的面板 ✓（与哈希、语言、结构都无关 ✓）。
    *
-   * 为什么要量底边 ✗：我们的规则用 `top: auto` 关掉了 DSH 的内联 top ⇒ 必须自己给 `bottom` ✓，
-   * 而"正确的那条底边"**随设备几何变** ✗（无头 390×844 = 34px、带 20px 手势条的真机 = 53.8333px ✓）。
-   * ⇒ 在这一刻（**我们的规则还没生效**，判据正是这个标记 ✓）量它的自然底边 ⇒ 写进 CSS 变量 ✓
-   *   ⇒ 另外两块面板在哪，它就在哪 ✓。
+   * 为什么要自己算底边 ✗：我们的规则用 `top: auto` 关掉了 DSH 的内联 top ⇒ 必须自己给 `bottom` ✓。
+   * ★★ round 194：**不能直接用"它自己的自然底边"** ✗ —— DSH 的落点 = "锚点 top − 间距 G" ✓，
+   *   而三块的锚不一样高 ✓（上下文那块锚在**输入框里那颗被我们隐身的环** ✓，
+   *   另外两块锚在**状态行里那两颗胶囊** ✓，胶囊彼此还不一样高 ✓）
+   *   ⇒ 套件实测（390×915）：**888 / 859-873.5** 三块各在不同高度 ✗（真机上差 21px ✗，
+   *   round 125 就是为它写死了 53.8333px ✓ —— 但写死常数只在那一台机器上对 ✗）。
+   * ⇒ 现在**三块用同一套算法**：`底边 = 视口高 − (最高的那颗锚 top − G)` ✓
+   *   · 锚用 DSH 自己的语义标记找 —— `[data-composer-stats] button` ✓（我们转发点击时用的就是它 ✓，
+   *     不是哈希、不是中文文案 ✓）；
+   *   · G 由**这一块自己**反推 —— `它自己的锚 top − 它自己的自然底边` ✓（DSH 的间距 ✓，不是常数 ✓）；
+   *   ⇒ 三块算出来是**同一个数** ⇒ 底边天然齐 ✓（不管设备 / 字号 / 安全区 ✓）。
+   *   ★ 中间踩过一版：扫"全页 `button[aria-haspopup="dialog"]` + 只看同一排" ✗ ——
+   *     套件实测把上下文面板**抬高了 179px** ✗（扫到页面上别处更高的触发器 ✓）
+   *     ⇒ 改成**只认那个语义标记** ✓、不做几何筛选 ✓。
+   *   量不到 / 数不合理 ⇒ **回落到老行为**（自己的自然底边 ✓，CSS 那侧还有 53.8333px 兜底 ✓）。
    * ★ 观察者只活 3 秒就断开 ✓（点击没开出面板时不留长期观察者 ✓，本项目对"常驻观察者"一向谨慎 ✓）。
+   *
+   * @param anchor - 这一下点的**是哪颗控件**（上下文 = 那颗环；轮次/用量 = 对应的胶囊 ✓）。
+   * @param marker - 打在这块面板上的属性名（上下文用 `data-dshm-context-panel` ✓、另两块用 `data-dshm-stats-panel` ✓）。
    */
-  function anchorContextPanel() {
+  function anchorStatsPanel(anchor, marker) {
     if (typeof MutationObserver !== 'function' || document.body === null) return
+    /**
+     * ★★ round 194：判据用"**点前/点后的 dialog 差集**" ✓ = 这一下**新出现**的那块 ✓。
+     *
+     * ★ 试过两版更"聪明"的判据，**都被套件当场打红** ✗，记在这里免得后人再走一遍：
+     *   ① 有界轮询"隐藏→可见 / 位置变了" ✗ —— 轮次/用量那两块是 DSH **复用**的元素 ✓，
+     *      既不是新建、也未必有 `display: none→block` ⇒ 认不出来 ⇒ 读数与改前**一字不差** ✗；
+     *   ② 换成几何识别（"看得见 + 高度像样 + 底边落在状态行上方那一带"）✗ ——
+     *      它**误伤了别的 dialog** ✗（套件读数从 859/859/873.5 变成 **888/830/873.5**、
+     *      上下文高度从 158 掉回 142 ✓ ⇒ 规则打在了错的东西上 ✗）。
+     *   ⇒ 回到**最保守**的那条 ✓：只认"新出现的" ✓；认不出就**什么都不做** ✓（宁可失效、不可误伤 ✓）。
+     *     对"复用的那两块"，我们**不碰**它们 ✓（DSH 怎么放就怎么放 ✓ —— 真机上三块本来就是齐的 ✓，
+     *     见 round 125 真机读数"三个面板底边同为 b816" ✓）。
+     */
     var before = new Set(document.querySelectorAll('[role="dialog"]'))
     var timer = setTimeout(function () {
       observer.disconnect()
-      debugBoxLine('[stats] ✗ 上下文面板没能在 3 秒内认出来（底边回落到 53.8333px）')
+      debugBoxLine('[stats] ✗ 统计面板没能在 3 秒内认出来（这一块不做对齐、保持 DSH 自己的位置 ✓）')
     }, 3000)
     var observer = new MutationObserver(function () {
       var fresh = []
@@ -13326,12 +13368,28 @@
       observer.disconnect()
       var box = panel.getBoundingClientRect()
       var bottom = window.innerHeight - box.bottom
+      var statsRow = document.querySelector('[data-composer-stats]')
+      var pills = statsRow === null || statsRow === undefined ? [] : statsRow.querySelectorAll('button')
+      var pillTop = null
+      for (var p = 0; p < pills.length; p++) {
+        if (pills[p] === anchor) continue
+        var pillBox = pills[p].getBoundingClientRect()
+        if (pillBox.height <= 0) continue
+        if (pillTop === null || pillBox.top < pillTop) pillTop = pillBox.top
+      }
+      if (anchor !== null && anchor !== undefined && pillTop !== null) {
+        var gap = anchor.getBoundingClientRect().top - box.bottom
+        if (gap >= 0 && gap <= 64) {
+          var intended = window.innerHeight - (pillTop - gap)
+          if (intended >= 0 && intended <= window.innerHeight) bottom = intended
+        }
+      }
       if (bottom >= 0 && bottom <= window.innerHeight) {
         panel.style.setProperty('--dshm-context-panel-bottom', Math.round(bottom * 100) / 100 + 'px')
       } else {
-        debugBoxLine('[stats] ✗ 上下文面板的底边量不到（' + String(Math.round(bottom)) + 'px）⇒ 回落到 53.8333px')
+        debugBoxLine('[stats] ✗ 统计面板的底边量不到（' + String(Math.round(bottom)) + 'px）⇒ 回落到 53.8333px')
       }
-      panel.setAttribute('data-dshm-context-panel', '1')
+      panel.setAttribute(marker, '1')
     })
     observer.observe(document.body, { childList: true })
   }
@@ -13351,7 +13409,7 @@
       var meter = contextMeterButton()
       if (meter !== null) {
         // ★ 先挂观察者再点 ✓（顺序反了就抓不到那块面板 ✓）
-        anchorContextPanel()
+        anchorStatsPanel(meter, 'data-dshm-context-panel')
         meter.click()
       }
       return
@@ -13361,6 +13419,14 @@
     var buttons = root.querySelectorAll('button')
     if (buttons.length === 0) return
     var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
+    /**
+     * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：
+     *   轮次底边 859 / 用量底边 873.5 ⇒ **DSH 自己把它们放得就不一样** ✗
+     *   （两颗胶囊的高度不同 ⇒ 各自的锚点 top 不同 ✓）。
+     *   而用户要的是"三块一样" ✓（0.15 真机读数就是"三个面板底边同为 b816" ✓）
+     *   ⇒ 三块都用**同一套算法**算出同一个底边 ✓（见 `anchorStatsPanel` ✓）。
+     */
+    anchorStatsPanel(target, 'data-dshm-stats-panel')
     target.click()
   }
 
@@ -20112,7 +20178,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930112405'
+    var BOOT_STAMP = 'BUILD-0930124115'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

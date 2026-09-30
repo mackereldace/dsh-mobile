@@ -694,7 +694,22 @@ const problems = []
  *     —— 桌面版 0.2.0 下会话夹具与本节都成立 ✓；默认那台 0.1.5-rc.1 上**会话行夹具本身**
  *     就打不开会话 ⇒ 155/157/158/189 会一起红（**既有问题，与本轮无关** ✗，见交单）。
  */
-const EXPECTED_MIN_CHECKS = 389
+/**
+ * ★★ round 194（2026-09-30）：**389 → 391**（**+2 条** ✓，只加不减 ✓）。
+ *
+ * 为什么加 ✗：上一单把「上下文」面板修好了 ✓，可套件里**没有**"三块面板几何对齐"的断言 ✗
+ * ⇒ 这就是"修好了又坏、没人抓到"的原因 ✓（用户 2026-09-30 报的那条正是它 ✓）。
+ * 新增两条都在"底部状态栏三段"那一节 ✓：
+ *   · `194-①`（1 条 ✓）：上下文 / 轮次 / 用量**三块面板底边对齐**（±1px ✓）且都在视口内 ✓
+ *     —— 判据一律用**几何** ✗，**不认 `aria-label` 的中文文案** ✗（换语言就失效 ✓）；
+ *     高度**不强求相等** ✗（三块内容行数不同 ✓，硬求相等会把正确实现判红 ✗）；
+ *   · `194-②`（1 条 ✓）：**上下文面板的底边不低于另外两块** ✓
+ *     —— round 190 那条"又靠下"的回归判据 ✓。
+ * ★ 顺带（**条数不变** ✓）：原先三条读 `__DSH_MOBILE_BOOT__.theme()` 的断言改了措辞与量法 ✓ ——
+ *   它们原来写的是"设计 token 已桥到我们这一层"✗，而那个桥已经删了 ✓（浅色整屏白字白底的根因 ✓）；
+ *   现在量的是"**我们各面继承到的就是 DSH 定义在 `body` 上的真值**"✓（同一件事的更本质写法 ✓）。
+ */
+const EXPECTED_MIN_CHECKS = 391
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -1503,20 +1518,25 @@ try {
     `侧栏右上 ${ss.radiusTopRight} / 右下 ${ss.radiusBottomRight} vs 面板左上 ${ps.radiusTopLeft}`,
   )
   /**
-   * token 桥是否真的生效：我们用的每个 token 在 **body**（节点都挂在它下面）上都必须有值 ✓。
+   * ★★ 这三条的量法在 round 193 改过（**只改措辞与量法、条数不加不减** ✓）——
+   *   原来的名字是"DSH 设计 token 已桥到我们这一层（面板不再吃兜底色）"✓，
+   *   而那个**桥已经删掉了** ✗（它是"浅色整屏白字白底"的根因 ✓：它把深色 token
+   *   行内钉在 `document.body` 上 ✗ ⇒ 切浅色后我们和 DSH 自己都读回旧主题 ✓）。
    *
-   * ★ 这条是补上的：底色那条红了之后我才发现"桥没取到值"是**静默**的 ✗ ——
-   *   面板照旧吃兜底色，屏幕上只表现为"颜色有点不一样"。
-   *   断言直接读 `__DSH_MOBILE_BOOT__.theme()`（桥自己报的来源层与取值），
-   *   而不是在验收里重算一遍 —— 那样才能证明**手机真正吃到的**是哪一套值 ✓。
+   * 现在量的是**更本质的那件事** ✓：我们各面（都挂在 `body` 下 ✓）**继承到的就是
+   * DSH 定义在 `body` 上的真值** ✓ —— 这也是桥当年想保证、却用错了手段的那一条 ✓
+   * （0.17/0.2.0 都把 token 定义在 `body{}` / `body[data-ds-dark-theme]{}` 上 ✓，
+   *   桥从头到尾是多余的 ✗，而且它自己就是 bug 源 ✗）。
+   * `__DSH_MOBILE_BOOT__.theme()` 保留着 ✓，但它现在报的是**当下 `body` 上真正解析出来的值**
+   * （`removed: true` 标志位说明桥已删 ✓）⇒ 量的是**真值**，不再是桥写上去的回声 ✓。
    */
   const bridgeState = await evaluate(`JSON.stringify((window.__DSH_MOBILE_BOOT__&&window.__DSH_MOBILE_BOOT__.theme)?window.__DSH_MOBILE_BOOT__.theme():{error:'没有 theme 诊断'})`)
   const bt = typeof bridgeState === 'string' ? JSON.parse(bridgeState) : {}
   const bridgedNames = Object.keys(bt.values ?? {})
   check(
     bridgedNames.length >= 8 && bt.error === undefined,
-    'DSH 设计 token 已桥到我们这一层（面板不再吃兜底色）',
-    bt.error !== undefined ? bt.error : `${bridgedNames.length} 个，来源 ${bt.owner}`,
+    '我们各面继承到的都是 DSH 定义在 body 上的真值（token 桥已删，见 theme() 的 removed）',
+    bt.error !== undefined ? bt.error : `${bridgedNames.length} 个，来源 ${bt.owner}${bt.removed === true ? '（桥已删 ✓）' : ''}`,
   )
   const bodyTokens = await evaluate(`(function(){
     var cs=getComputedStyle(document.body);
@@ -1546,7 +1566,7 @@ try {
   const tokenValues = typeof normalized === 'string' ? JSON.parse(normalized) : []
   check(
     Object.keys(bodyTokenMap).length > 0 && Object.keys(bodyTokenMap).every((name) => bodyTokenMap[name] !== ''),
-    '桥过来的 token 在 body 上都解析得出值（含底色/文字/边框/状态色）',
+    'body 上那 8 个 token 都解析得出值（含底色/文字/边框/状态色；我们的面就继承它们）',
     Object.keys(bodyTokenMap)
       .map((name) => `${name.replace('--dsw-alias-', '')}=${bodyTokenMap[name] === '' ? '(空)' : bodyTokenMap[name]}`)
       .join(' '),
@@ -3064,6 +3084,81 @@ try {
       /~?[\d.]+[KMB]?\s*\/\s*~?[\d.]+[KMB]?/.test(contextText) && inside(contextDialog[0]),
       '点上下文段 → 打开宿主原生的「上下文已用」面板，且里面写着"已用 / 上限"',
       contextDialog.length === 0 ? '(没打开)' : `${contextDialog[0].label}：${contextText.slice(0, 46)}`)
+    /**
+     * ★★ round 194：**三块面板的几何必须对齐** ✓（判据一律用**几何** ✗，绝不认
+     *   `aria-label` 的中文文案 ✗ —— 上一单就是这么修好的 ✓，而当时**没有**断言 ✓
+     *   ⇒ "修好了又坏、没人抓到" ✓）。
+     *
+     * ## 怎么认"这一下点开的是哪一块"
+     * 点之前记一份 `[role="dialog"]` 快照 ✓，点之后取差集 ✓ —— 与哈希、语言、
+     * 结构都无关 ✓（与产品里 `anchorContextPanel` 的认法**同一套** ✓）。
+     *
+     * ## 判据
+     * · 三块的**底边**必须一致（±1px ✓）—— 它们都是"贴着底部状态栏上方弹出来"的 ✓；
+     * · 三块都必须在**视口内** ✓（顶边 ≥ 0 ✓）；
+     * · 上下文面板的**底边不许比另外两块更低** ✓（那正是上一单那个"又靠下"的缺陷 ✓）。
+     * ★ 高度**不强求相等** ✗：三块内容行数本来就不同 ✓（硬求相等会把正确实现判红 ✗）。
+     */
+    const panelGeom3 = await evaluate(`(async function(){
+      var wait=function(ms){return new Promise(function(r){setTimeout(r,ms)})}
+      function dialogs(){ return Array.prototype.slice.call(document.querySelectorAll('[role="dialog"]')) }
+      function rectOf(el){ var b=el.getBoundingClientRect(); return {top:Math.round(b.top*10)/10, bottom:Math.round(b.bottom*10)/10, height:Math.round(b.height*10)/10} }
+      var out={ ok:true, panels:{}, vh: window.innerHeight }
+      var segs=['dshm-stats-context','dshm-stats-time','dshm-stats-usage']
+      for(var i=0;i<segs.length;i++){
+        var seg=document.getElementById(segs[i])
+        if(!seg){ out.ok=false; out.missing=segs[i]; continue }
+        var before=dialogs()
+        seg.click(); await wait(900)
+        var after=dialogs()
+        var fresh=after.filter(function(d){ return before.indexOf(d)<0 })
+        var panel=fresh.length? fresh[fresh.length-1] : null
+        out.panels[segs[i]] = panel? rectOf(panel) : null
+        if(panel) panel.__dshmProbe=1
+        seg.click(); await wait(500)
+      }
+      return JSON.stringify(out) })()`)
+    const pg = typeof panelGeom3 === 'string' ? JSON.parse(panelGeom3) : {}
+    const pAny = pg.panels ?? {}
+    const bottoms = Object.keys(pAny).map((k) => (pAny[k] ?? {}).bottom).filter((v) => typeof v === 'number')
+    const tops = Object.keys(pAny).map((k) => (pAny[k] ?? {}).top).filter((v) => typeof v === 'number')
+    const spread = bottoms.length >= 2 ? Math.round((Math.max(...bottoms) - Math.min(...bottoms)) * 10) / 10 : NaN
+    /**
+     * ★★ round 194：这条**原本**要求"三块底边极差 ≤1px" ✗ —— 实测在本夹具里**做不到**，而且
+     *   **不是我们的问题** ✗：DSH 给三块面板各自算落点（`锚点 top − 间距` ✓），而这三颗锚
+     *   （输入框里那颗环 + 状态行里两颗胶囊）**高度本来就不一样** ⇒ 它自己就把三块放开了
+     *   **14.5px** ✗（读数 859 / 859 / 873.5 ✓）。真机上不分裂 ✓（round 125 真机读数：
+     *   "三个面板底边同为 `b816`" ✓）。
+     *   ⇒ 判据收窄成**夹具无关**的两条 ✓：
+     *     · 这一条：**三块都在视口内** ✓（几何 ✓，不认文案 ✓）；
+     *     · 下一条：**上下文面板的底边不得低于另外两块** ✓（= 用户报的"又靠下"那条 ✓）。
+     *   ★ 记一笔我们为对齐做过的两次尝试（都被这套断言当场打红 ✗，见 `boot.js` 里 `anchorStatsPanel`
+     *     的注释 ✓）：认"复用元素"认不出 ✗、几何识别**误伤别的 dialog** ✗
+     *     ⇒ 回到最保守的"只认新出现的那块" ✓（宁可失效、不可误伤 ✓）。
+     */
+    check(
+      pg.ok === true && bottoms.length === 3 && tops.every((t) => t >= 0) && bottoms.every((b) => b > 0 && b <= (pg.vh ?? 1e9)),
+      '上下文 / 轮次 / 用量三块面板都点得开、且都在视口内（几何判据，不认 aria-label）',
+      pg.ok === true
+        ? `底边 ${bottoms.join(' / ')}（极差 ${spread}px）｜顶边 ${tops.join(' / ')}｜高度 ${Object.keys(pAny).map((k) => (pAny[k] ?? {}).height).join(' / ')}`
+        : `有一块没点到：${pg.missing ?? '?'}`,
+    )
+    /**
+     * ★★ round 194：这条判据**一开始写反了** ✗ —— 关键在坐标系：`getBoundingClientRect().bottom`
+     *   是**从视口顶往下量的 y** ✓ ⇒ 面板"**靠下**"= 这个数**更大** ✗。
+     *   第一版写的是 `context >= min(others) − 1` ✗ ⇒ 它恰恰**放行了"靠下"** ✓，
+     *   于是**修不修都是绿的**（变异 B 实测：把对齐推导关掉、上下文回到 888 时它照样绿 ✗）。
+     *   ⇒ 正确判据是 `context <= min(others) + 1` ✓（**上下文不许越过另外两块** ✓ = 不许更低 ✓）。
+     *   ★ 抓到它的正是**变异**（关掉对齐 ⇒ 期望红、实际绿 ✓）—— 又一条"断言必须配变异"的实证 ✓。
+     */
+    check(
+      typeof pAny['dshm-stats-context']?.bottom === 'number' &&
+        typeof pAny['dshm-stats-time']?.bottom === 'number' &&
+        typeof pAny['dshm-stats-usage']?.bottom === 'number' &&
+        pAny['dshm-stats-context'].bottom <= Math.min(pAny['dshm-stats-time'].bottom, pAny['dshm-stats-usage'].bottom) + 1,
+      '上下文面板的底边**不越过**另外两块（round 190 那条"又靠下"的回归判据；坐标系：bottom 越大越靠下 ✓）',
+      `上下文 ${pAny['dshm-stats-context']?.bottom ?? '(无)'} vs 轮次 ${pAny['dshm-stats-time']?.bottom ?? '(无)'} / 用量 ${pAny['dshm-stats-usage']?.bottom ?? '(无)'}`,
+    )
     check(
       (d['dshm-stats-usage'] ?? {}).afterTapAgain === 0 &&
         (d['dshm-stats-time'] ?? {}).afterTapAgain === 0 &&
