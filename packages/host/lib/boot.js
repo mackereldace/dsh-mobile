@@ -8928,14 +8928,37 @@
        *
        * ★ 发送键那条**只认输入卡片里的那一个** ✓（`[data-composer-card="true"]` 打头 ✓）——
        *   页面别处的主按钮（各种对话框 ✓）**一个都不碰** ✓。
-       * ★ 类名里的 `uV2eYG_` / `pXSMma_` / `cubgiG_` 是 DSH 的构建哈希 ✓（0.15 与 0.17 实测**同名** ✓）——
-       *   上游换构建就会失配 ⇒ 规则**静默失效、退回 DSH 原样** ✓（不会改坏 ✗），
-       *   与仓库里 `bottom: 53.8333px` / `.JObwrW_panel` 那两处的处置一致 ✓。
        *   `[data-composer-card="true"]` 是**语义标记** ✓，比哈希稳，优先用它 ✓。
+       *
+       * ## ★★ 0.2.0 复测（2026-09-30）：**两条规则压根没生效** ✗ —— 哈希被整批换掉了 ✓
+       *
+       * 用户报"**又不像 0.15 了**"✓。同一套探针（390×844、同一个工作区、都是新对话 ✓）
+       * 在真 0.2.0 上量出来的净差异**还是那四条** ✓ ⇒ 不是"0.2.0 又改了样式" ✗，
+       * 而是**上一轮那四条里有两条的类名在 0.2.0 上对不上了** ✓。产物里的类名映射实测：
+       *   · InputBar：`uV2eYG_`（0.15 与 0.17 **同名** ✓）→ **`yhfFVG_`**（0.2.0 ✓）；
+       *   · HeroShell 工作区 chip：`pXSMma_workspace` → **`bocITq_workspace`**；
+       *   · AgentPresetSeat：`cubgiG_seat` → **`m0vb0q_seat`**。
+       * ⇒ 发送键底色、两个 chip 圆角这两条**静默失效**（正是"又不像了"的全部 ✓ ——
+       *   0.2.0 上量到发送键仍是 `rgb(122,170,255)`、两个 chip 仍是 `8px` ✓）；
+       *   卡片圆角（语义标记 ✓）与 `[class*="_trigger"]`（只认 `_` 之后那半截 ✓）**照旧有效** ✓。
+       * ⇒ 处置：**一条哈希都不再认** ✓ —— 改认"`_` 之后那半截模块键名" ✓
+       *   （`_primary` / `_workspace` / `_seat` / `_trigger` ✓，上游换哈希不再失配 ✓）。
+       *
+       * 0.15 → 0.2.0 的净差异（输入区，**全在这四条里** ✓）：与上表同值 ✓ ——
+       *   卡片 `22 → 28px`、发送键 `rgb(103,158,254) → rgb(122,170,255)`、
+       *   两个 chip `16 → 8px`、卡片内两个 trigger `24 → 8px` ✓（判据同上，一律照 0.15 覆盖 ✓）。
+       * ★ 本轮新量到、**故意不动**的三条 ✗（都不是"0.15 的样式被改了"）：
+       *   · 卡片内控件行间距 `gap 12 → 8px`：0.2.0 把它写在 `@container (width<=560px)` 里 ✓，
+       *     **0.17 就已经如此** ✓（上一轮验收过的就是这个样子 ✓）⇒ 那是上游的**窄屏排布** ✗，
+       *     不是输入框自己的样式；钉死它 = 把整行的疏密一起改掉 ✗（同"宽度 3px"那条判据 ✓）。
+       *   · hero 标题旁那个「预览版」徽章圆角 `24 → 999px`：**不在输入卡片里** ✗（本单范围外 ✓）。
+       *   · 「选择模型」钮 `fontWeight 500 → 400`：0.15 那个位置**没有文字**（`46px`，只有图标 ✓
+       *     ——`triggerLabel` 实测 `display:none` ✓），0.2.0 才显示模型名（`block`，`125.55px` ✓）
+       *     ⇒ 没有"0.15 的字重"可保 ✓，硬凑就是**发明** ✗。
        */
       '[data-composer-card="true"] { border-radius: 22px !important; }',
-      '[data-composer-card="true"] button.uV2eYG_primary { background-color: rgb(103, 158, 254) !important; }',
-      'button.pXSMma_workspace, button.cubgiG_seat { border-radius: 16px !important; }',
+      '[data-composer-card="true"] button[class*="_primary"] { background-color: rgb(103, 158, 254) !important; }',
+      'button[class*="_workspace"], button[class*="_seat"] { border-radius: 16px !important; }',
       '[data-composer-card="true"] button[class*="_trigger"] { border-radius: 24px !important; }',
       /* ★★ round 125：底部**手势小白条**会压住输入区最底下那一行 ——
          也就是这条自绘状态栏（「上下文用量」那一行）✗（用户真机反馈，约 40% 字高被盖 ✓）。
@@ -18943,7 +18966,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930082746'
+    var BOOT_STAMP = 'BUILD-0930090125'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

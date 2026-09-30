@@ -79,7 +79,44 @@ function flatten(node, prefix = '', out = new Map()) {
 function describe(node) {
   const classes = (node.classes ?? []).join('.')
   const slotsAttr = (node.slots ?? []).length ? ` [${(node.slots ?? []).join(' ')}]` : ''
-  return `<${node.tag}${classes ? '.' + classes : ''}>${slotsAttr}`
+  const text = node.innerText ? ` "${node.innerText}"` : ''
+  return `<${node.tag}${classes ? '.' + classes : ''}>${slotsAttr}${text}`
+}
+
+/**
+ * ★★ **语义配对键** ✓ —— 结构位置配对在"新版往输入区里插了控件"时**必然错位** ✗
+ *   （0.15 → 0.17/0.2.0 就插了「访问模式」，先序序号从插入点起全体挪一格 ✓）。
+ *
+ * 类名是 CSS Modules 的哈希 ✓（`uV2eYG_card` → `yhfFVG_card` → 每版都变 ✗），
+ * 但 **`_` 之后那一半是模块自己的键名** ✓（`card` / `primary` / `seat` / `trigger`…），
+ * 上游改样式不会改它 ✓ ⇒ 拿它当身份比拿哈希当身份稳得多 ✓。
+ *
+ * ★ 深度**不进键** ✗ —— 0.2.0 把两个控件多包了一层 `standardControls` ✓，
+ *   带上深度就会让同一个按钮在两边算成两个键 ✓（第一版就是这样漏掉了 trigger / primary ✓）。
+ * ★ 裸节点（没有模块键名、也没有 data-* 的 `<svg>`/`<path>`）必须**带上父节点的键** ✗ ——
+ *   只按"深度 + 标签"配会把**不同分支**的两个 svg 配成一对 ✓
+ *   （第一版把 0.15 加号键的图标和 0.2.0 发送键的箭头配在了一起，读出一个假差异 ✓）。
+ */
+function semanticGroups(payload) {
+  const groups = new Map()
+  /** 深度 → 该深度的键 ✓（裸节点也用**合成后的键**往下传 ⇒ 孙节点还能区分 ✓）。 */
+  const keyAt = []
+  for (const node of payload.subtree ?? []) {
+    const suffixes = (node.classes ?? [])
+      .map((c) => c.slice(c.lastIndexOf('_') + 1))
+      .sort()
+      .join('.')
+    const slots = (node.slots ?? []).join(',')
+    const named = suffixes !== '' || slots !== '' || node.id !== null
+    const self = `${node.tag}|${suffixes}|${slots}`
+    keyAt.length = node.depth
+    const key = named ? self : `${keyAt[node.depth - 1] ?? ''}>${self}`
+    keyAt[node.depth] = key
+    // 同一父下同键的兄弟（多个裸 svg / 多个 trigger）按出现顺序配 ✓
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(node)
+  }
+  return groups
 }
 
 /**
@@ -174,6 +211,10 @@ function diffMode(leftPath, rightPath) {
     const fmt = (x) => (x ? `${x.name} ${x.rect.w}x${x.rect.h} r=${x.computed.borderTopLeftRadius} bg=${x.computed.backgroundColor}` : '(无)')
     console.log(`    [${i}] ${left.label}: ${fmt(a)}`)
     console.log(`        ${right.label}: ${fmt(b)}`)
+    // 名字不同的那一对多半是**换了文案/换了部件** ✓（例如 0.15 的「指令 + 添加附件」在 0.17+ 合成一个 ✓）
+    if (a && b && a.name !== b.name) {
+      console.log(`        ★ 名称不同 ⇒ 这一对多半不是同一个部件，别按序号当同一件比 ✗`)
+    }
   }
 
   console.log(`\n## 结构对齐（不一致 ${shaped.length} 处）`)
@@ -182,7 +223,45 @@ function diffMode(leftPath, rightPath) {
     console.log(`  ${s.kind}[${s.i}]\n      ${left.label}: ${s.left}\n      ${right.label}: ${s.right}`)
   }
 
-  console.log(`\n## 样式差异（共 ${keys.length} 个键，**${changed.length} 个不同**）`)
+  console.log(`\n## ★ 语义配对（类名去哈希后同名 ⇒ 同一个部件 ✓；**不受插入影响** ✓）`)
+  {
+    const gl = semanticGroups(left)
+    const gr = semanticGroups(right)
+    const onlyLeft = [...gl.keys()].filter((k) => !gr.has(k))
+    const onlyRight = [...gr.keys()].filter((k) => !gl.has(k))
+    const both = [...gl.keys()].filter((k) => gr.has(k))
+    console.log(
+      `  同名部件 ${both.length} 个 ／ 只在 ${left.label} 有 ${onlyLeft.length} 个 ／ 只在 ${right.label} 有 ${onlyRight.length} 个`,
+    )
+    let styleDiff = 0
+    for (const key of both) {
+      const la = gl.get(key)
+      const ra = gr.get(key)
+      const n = Math.min(la.length, ra.length)
+      for (let i = 0; i < n; i++) {
+        const a = la[i]
+        const b = ra[i]
+        const fa = flatten(a.computed ?? {}, '')
+        const fb = flatten(b.computed ?? {}, '')
+        const rows = [...new Set([...fa.keys(), ...fb.keys()])]
+          .sort()
+          .filter((k) => JSON.stringify(fa.get(k)) !== JSON.stringify(fb.get(k)))
+        const textDiff = (a.innerText ?? '') !== (b.innerText ?? '') ? ` 文案 ${JSON.stringify(a.innerText ?? '')} → ${JSON.stringify(b.innerText ?? '')}` : ''
+        if (rows.length === 0 && textDiff === '') continue
+        styleDiff += rows.length
+        const name = key.split('|')[2] || key
+        console.log(
+          `  ── ${name}  ${left.label} ${a.rect.w}x${a.rect.h} ／ ${right.label} ${b.rect.w}x${b.rect.h}${textDiff}`,
+        )
+        for (const k of rows) console.log(`        ${k}: ${fa.get(k)} → ${fb.get(k)}`)
+      }
+    }
+    console.log(`  语义配对上的样式差合计 ${styleDiff} 项`)
+    for (const k of onlyLeft) console.log(`  ✗ 只在 ${left.label} 有：${describe(gl.get(k)[0])}`)
+    for (const k of onlyRight) console.log(`  ✗ 只在 ${right.label} 有：${describe(gr.get(k)[0])}`)
+  }
+
+  console.log(`\n## 样式差异（按**结构位置**配对 —— 插了控件就会错位 ✗，只作参考；共 ${keys.length} 个键，**${changed.length} 个不同**）`)
   for (const c of changed) {
     console.log(`  ${c.key}\n      ${left.label}: ${c.left}\n      ${right.label}: ${c.right}`)
   }
@@ -297,6 +376,8 @@ const COLLECT = String.raw`
     slots: [...el.attributes].filter((a) => a.name.startsWith('data-')).map((a) => a.name + '=' + a.value),
     role: el.getAttribute('role'),
     text: (el.childElementCount === 0 ? (el.textContent || '').trim().slice(0, 40) : null),
+    /** ★ 整个控件的可见文字 ✓ —— 用来判"这个部件**有没有文字**"（决定某条样式该不该保 ✓）。 */
+    innerText: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60),
     rect: rect(el),
     computed: styles(el),
   })
@@ -338,7 +419,13 @@ const COLLECT = String.raw`
   /** 子树：输入区里面画了什么 ✓（输入卡片 / 左侧加号 / 右侧发送 / 下面那行统计 ✓）。 */
   const subtree = []
   const walk = (node, depth) => {
-    if (depth > 8) return
+    /**
+     * ★ 深度上限 14（原为 8 ✗）：8 层只到 trailing 那一层 ⇒ **发送键 / 两个 trigger
+     *   （访问模式、选择模型）压根没被收进来** ✗ ⇒ 语义配对漏掉的就是"最该看的那几个控件" ✓。
+     *   输入区整体只有十几层 ✓（祖先链上限也是 14 ✓），放到 14 就能把卡片里的控件收全 ✓。
+     *   ★ 本段属于 String.raw 模板 ⇒ **一个反引号都不能出现** ✗（本轮又栽了一次 ✓）。
+     */
+    if (depth > 14) return
     subtree.push({ depth, ...identify(node, subtree.length) })
     for (const child of node.children) walk(child, depth + 1)
   }
@@ -412,6 +499,27 @@ const COLLECT = String.raw`
       tagsWithComposerRule: [...document.querySelectorAll('style')].filter((t) =>
         (t.textContent || '').includes('data-composer-card'),
       ).length,
+      /**
+       * ★★ 后缀选择器**能命中多宽** ✓ —— 我们那几条覆盖用的是"只认下划线之后那半截"的写法 ✓
+       *   （例如 [class*="_primary"] 这类 ✓），好处是不怕上游换哈希 ✓，
+       *   代价是**可能命中计划外的元素** ✗ ⇒ 这里把整页的命中数按"按钮 / 非按钮"分开数 ✓，
+       *   并在按钮那栏带上类名 ✓ —— "只命中那一个按钮"这件事要能被读数证明 ✓，不靠推 ✓。
+       *   ★ 本段属于 String.raw 模板 ⇒ **反引号一个都不能有** ✗（本轮又栽了一次 ✓）。
+       */
+      suffixHits: (() => {
+        const keys = ['_primary', '_workspace', '_seat', '_trigger', '_card']
+        const out = {}
+        for (const key of keys) {
+          const all = [...document.querySelectorAll('[class*="' + key + '"]')]
+          const buttons = all.filter((el) => el.tagName === 'BUTTON')
+          out[key] = {
+            全部: all.length,
+            按钮: buttons.length,
+            按钮类名: buttons.slice(0, 8).map((el) => [...el.classList].join('.')),
+          }
+        }
+        return out
+      })(),
       htmlAttrs: [...document.documentElement.attributes].map((a) => a.name),
       build: (() => {
         const found = [...document.querySelectorAll('style')].map((t) => (t.textContent || '').match(/BUILD-\d+/)?.[0])
