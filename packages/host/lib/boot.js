@@ -2530,6 +2530,123 @@
     }
   }
 
+  /**
+   * ★★ round 194：**模型钮自证** —— 用户真机上"浅绿图标飘到那一排上面、那一排里它的位置是空的"✗。
+   *
+   * ## 为什么先要这个、而不是直接改 CSS ✗
+   * 400px 的夹具里**复现不出来** ✓（读数：钮 `46×28`、图标 `16×16` **完全在钮内**
+   * （上下各留 6px ✓）、`label` 与 `effort` 都被我们那条变量藏掉 ✓ —— 与 0.15 的形态一致 ✓）。
+   * 也就是说"真机上是另一回事" ✓ —— 而**真机上没有控制台** ✗ ⇒ 只有把现场做成**能念的一行**，
+   * 下一次才定得了案 ✓（与流日志同一条思路 ✓）。
+   *
+   * ## 报什么（每条都对应一种"图标飘出去"的机制 ✓）
+   *   · `trigger`：钮的 rect / `display` / `overflow` / `height` —— **盒子在不在那一排里** ✓；
+   *   · `children`：每个孩子的 rect 与 `display` —— 看清是**文字**露了还是**图标**露了 ✓；
+   *   · `vars`：我们那两条变量在**钮自己**上解析出来的值 ✓（`none` / `block` 对不对 ✓）；
+   *   · `escaped`：**跑出那一排矩形之外**的元素（卡片内 ✓ 最多 6 个 ✓）——
+   *     这一条直接回答"谁飘到上面去了"✓（用户截图里那个浅绿块就是它的候选 ✓）。
+   * 只读 ✓、不改任何东西 ✓；真机上念法：`__DSH_MOBILE_BOOT__.composerModel()` ✓。
+   */
+  var composerModelLoggedAt = 0
+
+  /** 给日志用的短名字 ✓（标签 + id + 第一个类名 ✓）。 */
+  function composerNodeName(el) {
+    if (el === null || el === undefined) return '(空)'
+    var cls = String(el.className || '').split(/\s+/).filter(Boolean)[0] || ''
+    return String(el.tagName || '').toLowerCase() + (el.id ? '#' + el.id : '') + (cls ? '.' + cls : '')
+  }
+
+  function composerModelProbe() {
+    var out = { found: false, at: Date.now() }
+    try {
+      var card = document.querySelector('[data-composer-card="true"]')
+      if (card === null || card === undefined) return out
+      var row = card.querySelector('[class*="_row"]')
+      var trigger = card.querySelector('button[class*="_trigger"][aria-haspopup="menu"]')
+      var rectOf = function (el) {
+        var r = el.getBoundingClientRect()
+        return [Math.round(r.left * 10) / 10, Math.round(r.top * 10) / 10, Math.round(r.width * 10) / 10, Math.round(r.height * 10) / 10]
+      }
+      out.found = true
+      out.card = rectOf(card)
+      out.row = row === null || row === undefined ? null : rectOf(row)
+      if (row !== null && row !== undefined) {
+        var rcs = getComputedStyle(row)
+        out.rowStyle = { display: rcs.display, flexWrap: rcs.flexWrap, gap: rcs.columnGap, justify: rcs.justifyContent, height: rcs.height }
+        out.rowVars = {
+          text: rcs.getPropertyValue('--dsh-composer-model-text-display'),
+          icon: rcs.getPropertyValue('--dsh-composer-model-icon-display'),
+        }
+      }
+      if (trigger === null || trigger === undefined) {
+        out.triggerMissing = true
+        return out
+      }
+      var tcs = getComputedStyle(trigger)
+      out.trigger = rectOf(trigger)
+      out.triggerStyle = {
+        display: tcs.display, overflow: tcs.overflow, height: tcs.height, width: tcs.width,
+        alignItems: tcs.alignItems, position: tcs.position, padding: tcs.padding,
+      }
+      out.vars = {
+        text: tcs.getPropertyValue('--dsh-composer-model-text-display'),
+        icon: tcs.getPropertyValue('--dsh-composer-model-icon-display'),
+      }
+      out.children = []
+      for (var i = 0; i < trigger.children.length; i++) {
+        var child = trigger.children[i]
+        out.children.push({
+          node: composerNodeName(child), rect: rectOf(child),
+          display: getComputedStyle(child).display,
+          overflow: getComputedStyle(child).overflow,
+        })
+      }
+      /**
+       * 跑出那一排的元素 ✓（只在卡片内找 ✓，最多 6 个 ✓）——
+       * 判据用**几何**（rect 越出 row 的上下边 ✓），不认类名 ✗。
+       */
+      var escaped = []
+      if (row !== null && row !== undefined) {
+        var rr = row.getBoundingClientRect()
+        var all = card.querySelectorAll('*')
+        for (var k = 0; k < all.length && escaped.length < 6; k++) {
+          var b = all[k].getBoundingClientRect()
+          if (b.width < 4 || b.height < 4) continue
+          if (all[k] === row) continue
+          /**
+           * ★ 判据是"**跨过那一排的上边**" ✓（第一版写成"整个落在排外" ✗ ⇒
+           *   它把**输入框**也报进来了 ✓ —— 输入框本来就在那一排**上面** ✗，
+           *   那不是"飘出去"，那是版式 ✓）。真正要抓的是"**骑在**排的上边上、
+           *   一半在排里一半在排外"的东西 ✓（用户截图里那块浅绿正是这个形状 ✓）。
+           */
+          if (b.bottom <= rr.top + 0.5) continue
+          if (b.top >= rr.top - 0.5) continue
+          escaped.push({ node: composerNodeName(all[k]), rect: rectOf(all[k]), position: getComputedStyle(all[k]).position, zIndex: getComputedStyle(all[k]).zIndex })
+        }
+      }
+      out.escaped = escaped
+      /**
+       * ★ 一眼判"坏了没有"：钮的盒子塌了（宽 < 20 或高 < 20 ✓）或**有元素跑出那一排** ✓。
+       *   坏的时候写**一行**调试框 ✓（去抖 10 秒一次 ✓，不刷屏 ✗）。
+       */
+      var broken = out.trigger[2] < 20 || out.trigger[3] < 20 || escaped.length > 0
+      out.broken = broken
+      if (broken && Date.now() - composerModelLoggedAt > 10000) {
+        composerModelLoggedAt = Date.now()
+        debugBoxLine(
+          '[composer] 模型钮可疑 ✗：钮=' + JSON.stringify(out.trigger) +
+            ' 变量(文字/图标)=' + String(out.vars.text) + '/' + String(out.vars.icon) +
+            ' 跑出那一排=' + String(escaped.length) + ' 个' +
+            (escaped.length > 0 ? '（' + escaped.map(function (e) { return e.node + JSON.stringify(e.rect) }).join('、') + '）' : ''),
+        )
+      }
+      return out
+    } catch (error) {
+      out.error = String(error && error.message ? error.message : error)
+      return out
+    }
+  }
+
   /** 那一瞬 socket 的 `readyState` ✓（没有 socket 记 -1 ✓，绝不抛 ✗）。 */
   function streamLogReadyState(tunnel) {
     try {
@@ -8236,11 +8353,11 @@
       // ★ F-3：34 → 32 ✓（基准值 = 行内小动作档 ✓）；**手指环境**下由下面那条
       //   `@media (pointer: coarse)` 抬到 40 ✓（它们是"独立主控件"档 ✓）
       '  grid-row: 1 / span 2; width: 32px; height: 32px; border: 0; border-radius: 10px;',
-      '  background: rgba(255,255,255,.06); cursor: pointer;',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.06)); cursor: pointer;',
       '  color: var(--dsw-alias-label-secondary, #a9b0b8); font-size: 15px; line-height: 1;',
       '  display: grid; place-items: center;',
       '}',
-      '#dsh-mobile-sheet-head button:active { background: rgba(255,255,255,.14); }',
+      '#dsh-mobile-sheet-head button:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.14)); }',
       // 设置页打开时把齿轮点亮：它是**开关**（再点一次返回文件视图），点亮才看得出来
       /* 主体：唯一可滚动的区域 */
       '#dsh-mobile-sheet-body {',
@@ -8252,7 +8369,7 @@
       '  flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px;',
       '  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));',
       '  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
-      '  background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.14));',
+      '  background: linear-gradient(180deg, var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.02)), var(--dsw-alias-interactive-bg-active, rgba(0,0,0,.14)));',
       '}',
       '#dsh-mobile-sheet-note {',
       '  font-size: 11.5px; line-height: 16px;',
@@ -8272,10 +8389,10 @@
       // ★ F-3：36 → **32**（基准 = 行内小动作档 ✓），手指环境下抬到 40 ✓（独立主控件 ✓）
       '  min-height: 32px; padding: 0 12px; border-radius: 10px; cursor: pointer;',
       '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
-      '  background: rgba(255,255,255,.05); color: var(--dsw-alias-label-primary, #e8eaed);',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.05)); color: var(--dsw-alias-label-primary, #e8eaed);',
       '  font-family: inherit; font-size: 13px; text-align: left;',
       '}',
-      '.dshm-conn-entry:active { background: rgba(255,255,255,.12); }',
+      '.dshm-conn-entry:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.12)); }',
       '.dshm-conn-entry-label { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }',
       '.dshm-conn-entry-chevron {',
       '  flex: 0 0 auto; display: grid; place-items: center;',
@@ -8338,7 +8455,7 @@
       '  padding: 11px 10px; border: 0; border-radius: 12px; background: transparent;',
       '  cursor: pointer; text-align: left; font: inherit; color: inherit;',
       '}',
-      '.dshm-ws:active { background: rgba(255,255,255,.07); }',
+      '.dshm-ws:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.07)); }',
       '.dshm-ws-icon {',
       '  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;',
       '  display: grid; place-items: center;',
@@ -8435,10 +8552,10 @@
       '  min-height: 32px; padding: 0 13px; border-radius: 999px; cursor: pointer;',
       '  white-space: nowrap; flex: 0 0 auto;',
       '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
-      '  background: rgba(255,255,255,.05);',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.05));',
       '  color: var(--dsw-alias-label-primary, #e8eaed); font-size: 12.5px;',
       '}',
-      '.dshm-tool:active { background: rgba(255,255,255,.12); }',
+      '.dshm-tool:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.12)); }',
       '.dshm-tool[disabled] { opacity: .4; }',
       '.dshm-tool-icon { display: grid; place-items: center; }',
       /* 面包屑 + 右侧图标动作 */
@@ -8469,7 +8586,7 @@
       '  background: transparent; color: var(--dsw-alias-label-secondary, #a9b0b8);',
       '  display: grid; place-items: center;',
       '}',
-      '.dshm-icon-btn:active { background: rgba(255,255,255,.12); }',
+      '.dshm-icon-btn:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.12)); }',
       /* 大目录的加载态：秒表 + 骨架（"在传"与"死了"必须一眼分得开） */
       /* 预览整屏（用户要求："文件预览的时候左移直到占据全屏"）：
          只对**预览态**生效 —— 浏览目录时仍然保留抽屉宽度（要能看到主页面作参照 ✓）。 */
@@ -8485,11 +8602,11 @@
       '.dshm-md li { margin: 3px 0; }',
       '.dshm-md code {',
       '  padding: 1px 5px; border-radius: 5px; font-size: 12.5px;',
-      '  background: rgba(255,255,255,.08); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
+      '  background: var(--dsw-alias-markdown-code-block, rgba(255,255,255,.08)); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
       '}',
       '.dshm-md pre.dshm-md-code {',
       '  position: relative; margin: 10px 0; padding: 10px; border-radius: 10px; overflow-x: auto;',
-      '  background: rgba(255,255,255,.04); border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
+      '  background: var(--dsw-alias-markdown-code-block, rgba(255,255,255,.04)); border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
       '}',
       '.dshm-md pre.dshm-md-code code { padding: 0; background: transparent; font-size: 12px; line-height: 1.6; }',
       '.dshm-md-lang {',
@@ -8510,7 +8627,7 @@
       '  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
       '  padding: 5px 8px; text-align: left;',
       '}',
-      '.dshm-md-table th { background: rgba(255,255,255,.04); font-weight: 600; }',
+      '.dshm-md-table th { background: var(--dsw-alias-markdown-code-block, rgba(255,255,255,.04)); font-weight: 600; }',
       /* 公式：交给 Temml 渲染成 MathML 后由 Chrome 原生绘制 ✓（无字体无 CSS ✓）；
          还没加载完 / 取不到时按**原样 TeX** 显示（等宽小字 ✓）——不吞内容、也不套 markdown 规则 ✓ */
       /**
@@ -8708,7 +8825,7 @@
       '.dshm-md-math[data-display="1"] { display: block; margin: 10px 0; overflow-x: auto; text-align: center; }',
       '.dshm-md-math[data-dshm-math="pending"], .dshm-md-math[data-dshm-math="failed"] {',
       '  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;',
-      '  padding: 1px 5px; border-radius: 5px; background: rgba(255,255,255,.05);',
+      '  padding: 1px 5px; border-radius: 5px; background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.05));',
       '  color: var(--dsw-alias-label-secondary, #cfd3d6); white-space: pre-wrap; word-break: break-word;',
       '}',
       '.dshm-md-math[data-dshm-math="failed"] { border: 1px dashed var(--dsw-alias-state-warn-primary, #f59e0b); }',
@@ -8720,7 +8837,7 @@
       '}',
       '.dshm-preview-text {',
       '  margin: 0; padding: 10px; border-radius: 10px;',
-      '  background: rgba(255,255,255,.03);',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.03));',
       '  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
       /* 代码长行不折行、要能横向滚 —— 而"真的能横向滚"正是横滑手势不该抢的区域 ✓
          （两条规则是配套的：手势那边判 scrollWidth > clientWidth ✓） */
@@ -8746,7 +8863,7 @@
       '}',
       '.dshm-skel { display: flex; align-items: center; gap: 11px; height: 44px; padding: 0 2px; }',
       '.dshm-skel i {',
-      '  display: block; height: 10px; border-radius: 5px; background: rgba(255,255,255,.07);',
+      '  display: block; height: 10px; border-radius: 5px; background: var(--dsw-alias-bg-skeleton, rgba(255,255,255,.07));',
       '  animation: dshm-skel-pulse 1.2s ease-in-out infinite;',
       '}',
       '.dshm-skel i:nth-child(1) { width: 18px; height: 18px; border-radius: 6px; flex: 0 0 auto; }',
@@ -8781,7 +8898,7 @@
       '  background: transparent; cursor: pointer;',
       '  color: var(--dsw-alias-label-secondary, #a9b0b8); font-size: 17px; line-height: 1;',
       '}',
-      '.dshm-file-more:active { background: rgba(255,255,255,.1); }',
+      '.dshm-file-more:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.1)); }',
       '.dshm-file-actions { display: none; flex-wrap: wrap; gap: 6px; padding: 0 0 10px 33px; }',
       '.dshm-file-actions[data-open="1"] { display: flex; }',
       /* ── 多选态 ─────────────────────────────────────────────────────
@@ -9074,11 +9191,11 @@
       '  border: 0; background: transparent; padding: 0 2px; cursor: pointer;',
       '  color: inherit; font: inherit; border-radius: 8px;',
       '}',
-      '.dshm-stats-seg:active { background: rgba(255,255,255,.10); }',
+      '.dshm-stats-seg:active { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.10)); }',
       '.dshm-stats-seg[aria-expanded="true"] { color: var(--dsw-alias-label-secondary, #a9b0b8); }',
       '.dshm-stats-track {',
       '  flex: 0 0 auto; width: 56px; height: 6px; border-radius: 3px;',
-      '  background: rgba(255,255,255,.16); overflow: hidden;',
+      '  background: var(--dsw-alias-bg-skeleton, rgba(255,255,255,.16)); overflow: hidden;',
       '}',
       '.dshm-stats-fill {',
       // ★ 必须显式 block：`span` 默认是 inline，而**百分比宽度对非替换行内元素无效** ——
@@ -10593,6 +10710,8 @@
        */
       installComposerFocusKeeper()
       installComposerFocusWatch()
+      // ★ round 194：附件键在滚动/回弹期间要按帧跟随（`position: fixed` 不会自己跟着内容走 ✗）
+      installAttachFollowOnScroll()
       setInterval(syncComposerFocusKeeper, 200)
       /**
        * ★ 壳 insets 的**兜底对账**（round 115）✓：壳那条"推"的路可能被漏掉
@@ -12241,7 +12360,8 @@
           tagLineageEntry()
           syncStatsBar(statsBar)
           // ★ round 192：自绘的「添加附件」键也挂在同一条观察者上 ✓
-          //   （输入区每次重绘都会把我们塞进去的那个节点摘掉 ✗ —— 与状态栏同一个坑 ✓）
+          //   （输入区每次重绘都会把我们摘掉 ✗ —— 与状态栏同一个坑 ✓）
+          // ★ round 194：滚动/回弹期间还要**按帧**跟一次（`position: fixed` 不会自己跟着内容走 ✗）
           syncAttachButton()
           /**
            * ★ 设置弹窗开/关也要**当场**报给壳（round 137 ✓）—— 它是第 4 层可返回的东西 ✓。
@@ -13385,6 +13505,8 @@
   var focusKeeperInput = null
   var focusKeeperTrigger = null
   var focusKeeperWasOpen = false
+  /** ★ 开窗口那一刻的快照："这一轮确实见过菜单开着" ✓（`restoreComposerFocus` 的 `onBody` 档用它 ✓）。 */
+  var focusKeeperSawMenu = false
   /**
    * ★★ 最关键的闸：**"用户点了菜单里的东西"**。
    *
@@ -13472,12 +13594,34 @@
         if (event === undefined || event.target === undefined) return
         var target = event.target
         if (target.closest === undefined) return
-        if (target.closest('[data-composer-card="true"]') === null) {
+        var inCard = target.closest('[data-composer-card="true"]') !== null
+        /**
+         * ★★ round 194：菜单**也是我们这一摊** ✓ —— 它是 `position: fixed` 的浮层、
+         *   挂在 `body` 下 ✗（实测 `menu.parentElement === body` ✓），
+         *   所以"在菜单里选一项"那一下**不在卡片里** ✗。第一版只认卡片 ⇒
+         *   要么把它当"用户去点别处了"（撤位 ✗ ⇒ 选完不还焦点 ✗，实测 `选一项` 掉过 ✓），
+         *   要么得给一个 400ms 的宽限（赌时间 ✗，正是本轮要根除的写法 ✗）。
+         *   ⇒ 现在**直接认菜单**：`closest('[role="menu"][aria-label="模型与推理等级"]')` ✓
+         *   （与 `composerMenuNode` 同一个判据 ✓，不认类名 / 哈希 ✓）。
+         */
+        var inMenu = target.closest('[role="menu"]') !== null
+        if (inCard !== true && inMenu !== true) {
           /**
-           * 卡片外：**不立刻**撤位 ✗，推迟 400ms ✓（见 `focusKeeperDisarmAt` 的说明 ✓）。
-           * 每一次卡片外的按压都**重置**这个时限 ✓ —— 用户连着点两下，第二下照样算数 ✓。
+           * ★★ round 194：卡片外**且**菜单外 —— 这里**不再撤位** ✗。
+           *
+           * 先试过"立刻撤位" ✓：读数 `点菜单外` **20/20 都收不到焦点** ✗
+           * （DSH 把菜单关掉之后把焦点放在**触发器**上 ✓，而我们刚把自己关掉了 ✗）。
+           * 而"抢用户焦点"这件事**根本不需要靠撤位来防** ✓ ——
+           * `restoreComposerFocus` 的**焦点判据**已经防住了 ✓：
+           * 用户在别处点到**能聚焦**的东西 ⇒ `active` 是那个东西 ✗ ⇒ 我们一个字都不动 ✓。
+           * ⇒ 撤位这层是**多余且有害**的 ✓（它把"点空白关菜单"这一档也误杀了 ✗）。
+           * 只保留"不把这一下当成 arm"（不在卡片里按就不重新记输入框 ✓）。
            */
-          focusKeeperDisarmAt = Date.now() + 400
+          return
+        }
+        if (inMenu === true) {
+          // 在菜单里按 ⇒ 保持这一轮有效 ✓（不重新记输入框：菜单里那次按压时输入框没变 ✓）
+          focusKeeperArmed = true
           return
         }
         focusKeeperInput = composerInputNode()
@@ -13487,6 +13631,7 @@
         if (menuNow !== null) focusKeeperMenu = menuNow
         focusKeeperArmed = true
         focusKeeperDisarmAt = 0
+        focusKeeperSawMenu = false
         startComposerFocusWatchdog()
       },
       true,
@@ -13566,7 +13711,15 @@
      * 焦点**掉到 body 上** ⇒ 只在"菜单确实开过 + 这一轮确实是用户在输入卡片里按的"才还 ✓。
      * 没有这两道闸，页面上任何"焦点掉到 body"的瞬间都会被我们拨一次 ✓ = 抢焦点 ✗。
      */
-    var onBody = active === document.body && focusKeeperWasOpen === true && focusKeeperArmed === true
+    /**
+     * ★★ round 194：这里踩过一个**逻辑自相矛盾** ✗ —— 原来写的是
+     *   `focusKeeperWasOpen === true` ✓，而 `openComposerFocusWindow()` 开头**刚把它置回 false** ✗✗
+     *   ⇒ "焦点掉到 body 上"这一档**永远不成立** ✓（实测 `lastMiss` 一直是
+     *   "焦点不在触发器/菜单/body 上：BODY" ✓ —— 明明就是 body ✓）。
+     *   ⇒ 改成看**另取的一个快照** `focusKeeperSawMenu` ✓：开窗口那一刻记下
+     *   "这次确实见过菜单" ✓，此后不再被清 ✗。
+     */
+    var onBody = active === document.body && focusKeeperSawMenu === true && focusKeeperArmed === true
     if (onTrigger !== true && onMenu !== true && onBody !== true) {
       focusKeeperStats.lastMiss = '焦点不在触发器/菜单/body 上：' + String(active === null ? '(null)' : active.tagName)
       return false
@@ -13625,7 +13778,21 @@
       dropComposerFocusWindow()
       return
     }
-    if (restoreComposerFocus('focusin') === true) dropComposerFocusWindow()
+    if (restoreComposerFocus('focusin') === true && composerFocusSettled() === true) dropComposerFocusWindow()
+  }
+
+  /**
+   * 焦点**真的已经在输入框上**了吗 ✓（收工判据 ✓，不再看时间 ✗）。
+   *   `document.activeElement` 就是那个可编辑框本身 ✓（不是它的祖先 ✗ ——
+   *   实测点进去之后 `activeElement === div.yhfFVG_input` ✓）。
+   */
+  function composerFocusSettled() {
+    try {
+      var input = composerInputNode()
+      return input !== null && document.activeElement === input
+    } catch (error) {
+      return false
+    }
   }
 
   /**
@@ -13643,34 +13810,31 @@
    */
   function openComposerFocusWindow() {
     focusKeeperStats.windows += 1
-    focusKeeperWasOpen = false
-    focusKeeperUntil = Date.now() + 1600
+    /**
+     * ★★ round 194：窗口**只挂 `focusin`** ✓，**不再开 rAF 轮询** ✗✗。
+     *
+     * ## 为什么把轮询删掉（实测读数，不是洁癖 ✗）
+     * 第一版按帧轮询 ✓，跑一段时间后 `composerFocus()` 的计数是
+     * **`attempts 266978 / restored 37513 / windows 141`** ✗✗ ——
+     * 因为多个窗口**共用** `focusKeeperUntil` ✗：新窗口把截止时间往后推 ✓，
+     * 旧循环就永远不到期 ⇒ **常驻 rAF** ✓（正是本项目明令禁止的那一种 ✗，
+     * 而且它每帧都在 `focus()` ⇒ 37k 次抢焦点 ✗）。
+     * ⇒ 现在：窗口期只做**事件驱动** ✓（`focusin` ✓ + 200ms 心跳兜底 ✓），
+     *   一次开关菜单的开销 = 0 个定时器 + 最多几次 `querySelector` ✓。
+     *
+     * ## 为什么"等它改完再拨"这条思路仍然成立 ✓
+     * DSH 每改一次焦点都**必然**派发 `focusin` ✓（它走的是脚本 `.focus()` ✓），
+     * 所以"抢回来"这件事只需要挂在事件上 ✓ —— 轮询从来不是必要条件 ✗。
+     */
+    focusKeeperWasOpen = true
+    focusKeeperSawMenu = true
+    focusKeeperUntil = Date.now() + 3000
     if (focusKeeperFocusHandler === null) {
       focusKeeperFocusHandler = composerFocusKeeperOnFocus
       document.addEventListener('focusin', focusKeeperFocusHandler, true)
     }
-    /**
-     * 先**同步**试一次 ✓（菜单刚没、焦点还在触发器上的那一瞬可能就在这一刻 ✓）——
-     * `MutationObserver` 的回调是**微任务** ✓，所以这一句就跑在
-     * "DSH 把焦点塞进菜单项"那个任务**之前** ✓ —— 这是整条链上最早的一刻 ✓。
-     */
-    if (restoreComposerFocus('菜单消失那一微任务') === true) {
-      dropComposerFocusWindow()
-      return
-    }
-    if (typeof globalThis.requestAnimationFrame !== 'function') return
-    var step = function () {
-      if (Date.now() > focusKeeperUntil) {
-        dropComposerFocusWindow()
-        return
-      }
-      if (restoreComposerFocus('窗口期逐帧') === true) {
-        dropComposerFocusWindow()
-        return
-      }
-      globalThis.requestAnimationFrame(step)
-    }
-    globalThis.requestAnimationFrame(step)
+    // 先同步试一次（菜单刚没、焦点还在触发器上的那一瞬 ✓）
+    if (restoreComposerFocus('菜单消失那一微任务') === true && composerFocusSettled() === true) dropComposerFocusWindow()
   }
 
   /**
@@ -13721,6 +13885,7 @@
       var open = composerMenuNode()
       if (open !== null) {
         focusKeeperWasOpen = true
+        focusKeeperSawMenu = true
         focusKeeperMenu = open
         focusKeeperStats.seenOpen += 1
         return
@@ -13746,6 +13911,7 @@
     var open = composerMenuNode()
     if (open !== null) {
       focusKeeperWasOpen = true
+      focusKeeperSawMenu = true
       focusKeeperMenu = open
       focusKeeperStats.seenOpen += 1
       return
@@ -13844,21 +14010,29 @@
     var svg = document.createElementNS(ns, 'svg')
     svg.setAttribute('viewBox', '0 0 16 16')
     /**
-     * ★★ round 193：视觉尺寸 `16 → 20` ✓（用户："你这个键**好像画的略小**"✗）。
+     * ★★ round 194（用户两轮反馈合起来定稿 ✓）：**尺寸 17 + 线宽 1.4**（呈现 ≈1.49px ✓）。
      *
-     * 只改**呈现尺寸** ✓，`viewBox` 与 `d` 一个字都不动 ✗ —— 于是回形针的**形状**
-     * 与 0.15 那颗逐点相同 ✓，变大的只是它在 28px 圆钮里的占比 ✓。
-     * 三档都量过（描边内视觉盒 ✓，同一套 `getBBox` 读数 ✓）：
-     *   `16` → **5.2×9.5px**（线宽 1.4px ✓，改前 ✓）；
-     *   `18` → **5.85×10.69px**（线宽 1.58px ✓）；
-     *   `20` → **6.5×11.88px**（线宽 1.75px ✓，改后 ✓）。
-     * `18` 只比原来大 12.5% ✓（真机缩放下几乎看不出来 ✓）；`20` 是 **+25%** ✓
-     * 且仍留 4px 内边距（28 − 20 ✓）⇒ 取 `20` ✓。
+     * ## 三轮的读数（同一套 `getBBox` + `stroke-width×缩放` ✓，别再靠眼睛 ✗）
+     *   · `16`（最初）→ 视觉盒 **5.2×9.5px** ✓、线宽 **1.4px** ✓ —— 用户："好像画的略小"✗；
+     *   · `20`（上一轮）→ **6.5×11.88px**、线宽 **1.75px** —— 用户："**有点粗**"✗；
+     *   · **`17`（本轮）→ 5.53×10.09px、线宽 1.49px** ✓（介于两者之间 ✓，
+     *     线宽落在用户要的 ≈1.5 ✓）。
+     * ★ 只改**呈现尺寸** ✓，`viewBox` 与 `d` 一个字都不动 ✗ —— 形状与 0.15 那颗逐点相同 ✓。
+     *   所以视觉盒**天生是竖长条**（0.15 自己的路径比例就是 5.2:9.5 ≈ 0.55 ✓）——
+     *   要它"见方"只能重画路径 ✗（那就不是 0.15 那个回形针了 ✗）⇒ 不做 ✓。
      * ★ 为什么不动那颗键自己的 28×28 ✓：它与左边那颗「添加文件或调用指令」
      *   **同规格**（实测两颗都是 28×28 ✓），改钮就是改排布 ✗。
+     *
+     * ## ★★ 居中：**光把 svg 盒子居中是不够的** ✗（这就是"回形针不居中"的根因 ✓）
+     * 实测：`svg` 盒子与圆钮**同心**（Δ = `0, 0` ✓，`display:grid` + `place-items:center` ✓），
+     * 但**路径在自己的 viewBox 里就不居中** ✗：`getBBox()` = `{x:5.4, y:4.6, w:5.2, h:9.5}`
+     * ⇒ 视觉中心 `(8.0, 9.35)` vs viewBox 中心 `(8, 8)` ⇒ **纵向偏下 1.35 用户单位**
+     * （`17px` 下 = **1.43px** ✓）⇒ 肉眼就是"回形针吊在圆钮下半边"✗。
+     * ⇒ 用 `<g transform="translate(0,-1.35)">` 把**路径**抬回来 ✓（`viewBox` 与 `d` 仍不动 ✓），
+     *   判据：视觉盒中心与圆钮中心在**横、竖两个方向**的偏差 **各 ≤0.5px** ✓（实测见交单 ✓）。
      */
-    svg.setAttribute('width', '20')
-    svg.setAttribute('height', '20')
+    svg.setAttribute('width', '17')
+    svg.setAttribute('height', '17')
     svg.setAttribute('aria-hidden', 'true')
     svg.setAttribute('fill', 'none')
     svg.setAttribute('stroke', 'currentColor')
@@ -13866,6 +14040,12 @@
     svg.setAttribute('stroke-linecap', 'round')
     var path = document.createElementNS(ns, 'path')
     path.setAttribute('d', 'M10.6 4.6v6.9a2.6 2.6 0 0 1-5.2 0V6.3a1.5 1.5 0 0 1 3 0v5.6')
+    /**
+     * ★★ round 194：把**路径**抬 1.35 用户单位 ✓（见上面那段"光把 svg 盒子居中不够"✓）。
+     *   为什么不改 `d` 里的坐标 ✗：那串 `d` 是 0.15 的原样 ✓，改了就跟它"逐点相同"这条保证脱钩 ✗；
+     *   `transform` 只动**位置**、不动形状 ✓，而且读数一眼可核 ✓。
+     */
+    path.setAttribute('transform', 'translate(0,-1.35)')
     svg.appendChild(path)
     return svg
   }
@@ -14002,6 +14182,34 @@
     if (attachFrame !== null) return
     if (typeof globalThis.requestAnimationFrame !== 'function') return
     attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
+  }
+
+  /**
+   * ★★ round 194（用户："整个空间是**脱离聊天框**的（当滑到页面最下，再往上滑可以看出来）"✗）：
+   *   **滚动期间按帧跟随** ✓。
+   *
+   * ## 为什么会掉队 ✗
+   * 这颗键挂在我们自己的宿主里 ✓、`position: fixed` ✓ ⇒ 它的坐标是**视口坐标** ✓，
+   * 而锚点那颗 `+` 在**页面里**（会随滚动 / 回弹 / 键盘让位上上下下 ✓）⇒
+   * 只要滚动发生，两者就会错开 ✗ —— 用户"滑到最底再往上回弹"时看得最清楚 ✓
+   * （那时内容在动、我们钉在原地 ✓）。
+   *
+   * ## 做法：`scroll`（**捕获相位** ✓ + `passive` ✓）
+   * `scroll` 事件**不冒泡**，但**会捕获** ✓ ⇒ 挂在 `document` 上用 `capture: true`
+   * 才能收到**内层滚动容器**的滚动 ✓（DSH 的会话列表自己就是一个滚动容器 ✗，
+   * 只挂 `window` 会漏掉它 ✓）。`passive: true` ⇒ 绝不阻塞滚动 ✓。
+   * 收到之后走**同一条跟手帧循环** ✓（`scheduleAttachFollow` ✓，位置不再变就自己停 ✓），
+   * 不新开定时器、不常驻 rAF ✓。
+   */
+  function installAttachFollowOnScroll() {
+    try {
+      document.addEventListener('scroll', function () { scheduleAttachFollow() }, { capture: true, passive: true })
+      globalThis.addEventListener('resize', function () { scheduleAttachFollow() }, { passive: true })
+      return true
+    } catch (error) {
+      debugBoxLine('[attach] 滚动跟随装不上（那颗键会在滚动时掉队 ✓）：' + String(error && error.message ? error.message : error))
+      return false
+    }
   }
 
   /** 同步一次（幂等 ✓ —— 位置没变就一个字节都不写 ✓，与 `syncStatsBar` 同一条纪律 ✓）。 */
@@ -19287,6 +19495,14 @@
         return streamLogRead()
       },
       /**
+       * ★★ round 194：**模型钮自证**（用户："浅绿图标飘到那一排上面、那一排里它的位置是空的"✗）。
+       *   报钮 / 那一排 / 孩子的 rect 与我们的两条变量 ✓，外加**跑出那一排的元素** ✓。
+       *   真机上念法：`__DSH_MOBILE_BOOT__.composerModel()` ✓。
+       */
+      composerModel: function () {
+        return composerModelProbe()
+      },
+      /**
        * ★ 断链那一刻的**现场**（只读 ✓，后台回来那一单要的三样 ✓）：
        *   `offline` 的五个字段 + 当下 `socket.readyState` ✓。
        *   ★ 为什么给"形状"而不是给 socket 本身 ✗：把 socket 露出去 = 多一个能改它的入口 ✗
@@ -19890,7 +20106,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930102705'
+    var BOOT_STAMP = 'BUILD-0930104642'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
