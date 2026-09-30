@@ -71,10 +71,53 @@ interface Surface {
         clickTries: number
         clickStepMs: number
       }
+      /**
+       * ★★ R1a/R1b 追加：宿主目录那两个口 ✓（`__DSH_MOBILE_BOOT__` 上**早就有的**生产入口 ✓，
+       *   不是测试专用口 ✗）：`hostRecord` 直通 `hostRecordUpsert` ✓、
+       *   `storeHost` 直通配对落盘那条路 ✓（`__DSH_MOBILE_BOOT__.storeHost` ✓）、
+       *   `hosts` / `hostsActive` 读目录 ✓。
+       */
+      hostRecord: (record: Record<string, unknown>) => boolean
+      storeHost: (config: Record<string, unknown>) => boolean
+      storedHost: () => Record<string, unknown> | null
+      hosts: () => Array<Record<string, unknown>>
+      hostsActive: () => string | null
+      currentFingerprint: () => string | null
+      /** ★ R1b 追加：唯一身份写入口 ✓（验收要能"把身份种进壳"✓，与生产同一条路 ✓）。 */
+      identityWrite: (key: string, value: string | null) => boolean
+      /**
+       * ★★ R4 追加：显式跑一次"宿主明确拒绝这台设备"那条路 ✓
+       *   （生产函数 `handleDeviceRejection` 的直通口 ✓，验收脚本用的就是它 ✓）。
+       */
+      deviceRejection: (code: string, detail: string) => boolean
+      /**
+       * ★★ R5 追加：身份这条线的**读数 + 真实渲染产物** ✓
+       *   （`data` = `identityDiagnostics()` ✓、`group` = 生产行渲染函数造的那一组 ✓）。
+       */
+      identityDiagnostics: () => { data: IdentityDiagnostics; group: FakeElement }
     }
   }
   /** ★ 本轮追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
   storage: Map<string, string>
+}
+
+/** ★★ R5：`identityDiagnostics()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
+interface IdentityDiagnostics {
+  fingerprint: string | null
+  fingerprintShort: string
+  why: string
+  restore: string
+  restoreOk: boolean
+  hosts: Array<{
+    fingerprint: string
+    fingerprintShort: string
+    label: string
+    slots: string[]
+    active: boolean
+  }>
+  cleared: Record<string, unknown> | null
+  clearedText: string
+  vaultKeys: string[]
 }
 
 /**
@@ -135,6 +178,19 @@ function bootOnSurface(options: {
   innerWidth: number
   consent: string[]
   readyState?: string
+  /**
+   * ★ 本轮追加：`location.search` ✓（默认 `?debug=1` ✓ —— 不传时与原来逐字一致 ✓）。
+   *   R1b 那条用例要靠它塞一张**真的配对票据**（`?pair=<base64url(票据 JSON)>` ✓）——
+   *   产品的 `readUrlConfig()` 只从查询串读票据 ✓，没有这个口子就验不到
+   *   "配对落盘时 endpoints 还在不在"✗。
+   */
+  search?: string
+  /**
+   * ★ 本轮追加：`location.host` ✓（默认 `10.34.221.181:3443` ✓ —— 不传时与原来逐字一致 ✓）。
+   *   **换源**在真机上就是"换一个 authority"✓ ⇒ 只有能换 host，才验得到
+   *   "同一台电脑的两个地址互相认不认得出"✓（一个沙箱 = 一个源 ✓、共享同一个壳 ✓）。
+   */
+  host?: string
   /** ★ 追加：预装一个假隧道 ✓（塞进 `__DSH_TRANSPORT__` ✓ ⇒ poll 会真的取待办并逐条执行 ✓）。 */
   transport?: Record<string, unknown>
   /** ★ 追加：冒充原生壳 ✓（`DshmShell` ✓ —— 形状照 scripts/check-device-channel.mjs ✓）。 */
@@ -292,12 +348,12 @@ function bootOnSurface(options: {
     atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
     btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
     location: {
-      origin: 'https://10.34.221.181:3443',
+      origin: 'https://' + (options.host ?? '10.34.221.181:3443'),
       protocol: 'https:',
-      host: '10.34.221.181:3443',
+      host: options.host ?? '10.34.221.181:3443',
       pathname: options.pathname,
-      search: '?debug=1',
-      href: 'https://10.34.221.181:3443' + options.pathname + '?debug=1',
+      search: options.search ?? '?debug=1',
+      href: 'https://' + (options.host ?? '10.34.221.181:3443') + options.pathname + (options.search ?? '?debug=1'),
     },
     document: documentStub,
     localStorage: {
@@ -2121,4 +2177,496 @@ test('★ 结构性：0.1.5 / 0.2.0 的分叉**只许有一处**（版本号字�
   // 怎么把它打红：把 agentsFork 里任何一处版本差异挪到别的函数里（例如在 agentsLoadCatalog 里
   //   直接判 `plan.version === '0.1.5'`）⇒ 立刻红 ✓。
   assert.deepEqual(offenders, [], '版本差异不许散到 agentsFork 之外 ✗')
+})
+
+/* ════════════════════════════════════════════════════════════════════════════════
+ * ★★ 本轮（R1/R4/R5）：**"换网就要重新配对"这条**的回归
+ *
+ * ## 用户原话（本轮修的就是它 ✗）
+ * 「tailscale 和校园网连接会互相冲突，**连好 tail 以后校园网的隧道就需要重新配对**」
+ *
+ * ## 病根（诊断见 30-换网重新配对问题-诊断.md ✓；读数全部是代码级 ✓）
+ *   槽只来自"当前页面的 config"✓，而 `hostRecordUpsert` 把 `slots` **整组替换** ✗ ⇒
+ *   同一台电脑的第二个地址把第一个地址挤掉 ✓ ⇒ 换回来时 `currentHostFingerprint()`
+ *   三条路全断（票据只在配对当次有 ✗ / 目录里没有这个源 ✗ / 旧键早被迁移删掉 ✗）⇒
+ *   `restoreIdentityFromVault()` 一个键都不恢复 ✗ ⇒ 界面"尚未配对" ⇒ 只能重新配对 ⇒
+ *   配完又把另一头挤掉 ✓ —— **两个地址互相挤，配一次坏一次** ✓。
+ *
+ * ## 本组用例怎么钉住它
+ *   · R1a：槽**按宿主合并、只增不减**（去重 / 有上限 / 新的在前 ✓）；
+ *   · R1b：配对当次的候选地址（票据 `endpoints` ✓）**必须落盘** ✓、
+ *     并**跨得过**那次"一次性重载丢 `?pair=`"✓；
+ *   · 端到端：**学校配对 ⇒ 切 Tailscale ⇒ 回学校**，三次都要认得出这台电脑 ✓
+ *     （这就是用户那句原话的可执行版本 ✓）；
+ *   · R4：本机没有这台宿主的身份时被拒 ⇒ **一个键都不许动** ✗（免得连坐清掉另一个源的备份 ✓）；
+ *   · R5：诊断页能念出"为什么认不出这台电脑" ✓（此前这条链在手机上完全不可见 ✗）。
+ *
+ * ★ 一个沙箱 = 一个源 ✓（`host` 选项 ✓），而**壳是跨源的** ✓（同一个 Map 传进三次 ✓）——
+ *   这正是真机上"两个地址 = 两个 localStorage + 同一个 SharedPreferences"的形状 ✓。
+ * ════════════════════════════════════════════════════════════════════════════════ */
+
+/** 这台电脑的宿主指纹（形状与真实一致：32 位小写十六进制 ✓）。 */
+const FP_MINE = 'cccccccccccccccccccccccccccccccc'
+/** 另一个宿主（用来证明"合并绝不跨记录" ✗）。 */
+const FP_OTHER = 'dddddddddddddddddddddddddddddddd'
+const HOST_SCHOOL = 'school.example:3443'
+const ORIGIN_SCHOOL = 'https://' + HOST_SCHOOL
+const HOST_TS = '100.123.136.82:3443'
+const ORIGIN_TS = 'https://' + HOST_TS
+
+/**
+ * 一个**哑存储**假壳 ✓ —— `vaultGet` / `vaultSet` 与 Java 侧**同一份约定** ✓
+ * （载荷里值为 `null` ⇒ 删除该键 ✓）。`vault` 是外面传进来的 Map ✓ ⇒
+ * 断言能直接看"壳里那条还在不在"✓，而且**三个沙箱可以共享同一个壳** ✓（= 跨源 ✓）。
+ */
+function makeVaultShell(
+  vault: Map<string, string>,
+  shellSlots: Array<{ label: string; url: string }> = [],
+): Record<string, unknown> {
+  return {
+    version: () => 'test-shell-1',
+    vaultGet: () => JSON.stringify(Object.fromEntries(vault)),
+    vaultSet: (payload: string) => {
+      const patch = JSON.parse(payload) as Record<string, unknown>
+      for (const key of Object.keys(patch)) {
+        const value = patch[key]
+        if (value === null || value === undefined) vault.delete(key)
+        else vault.set(key, String(value))
+      }
+    },
+    endpoints: () => JSON.stringify({ slots: shellSlots, timeoutMs: 2000 }),
+    insets: () => JSON.stringify({ seen: false }),
+    platform: () => JSON.stringify({ android: 34 }),
+    changeAddress: () => {},
+    // ★ 上报槽那条路会调它 ✓（生产里是真桥 ✓；这里只要不抛就行 ✓）
+    setEndpointSlots: () => {},
+    scanPair: () => 'ok',
+    notify: () => {},
+    setBackAvailable: () => {},
+    backAvailable: () => {},
+    onResume: () => {},
+  }
+}
+
+/** 目录里那条记录记着的**全部**地址 ✓（顺序也算判据 ✓）。 */
+function recordSlots(records: Array<Record<string, unknown>>, fingerprint: string): string[] {
+  const record = records.find((item) => item['fingerprint'] === fingerprint)
+  assert.ok(record !== undefined, '目录里应有这台宿主：' + fingerprint + '（实际 ' + JSON.stringify(records.map((r) => r['fingerprint'])) + '）')
+  const slots = Array.isArray(record['slots']) ? (record['slots'] as Array<Record<string, unknown>>) : []
+  /**
+   * ★ 必须**自己造一个本 realm 的数组** ✗：`records` / `slots` 都是 vm 里的对象 ✓
+   *   （`runInNewContext` 两个 realm ✓）⇒ 直接 map 出来的还是**对方 realm** 的数组 ✗ ⇒
+   *   `assert.deepEqual` 会因为"原型不同"红得毫无信息量 ✓（multi-host.test.ts 里那条注释踩过同一个坑 ✓）。
+   */
+  const out: string[] = []
+  for (const slot of slots) out.push(String(slot['url'] ?? ''))
+  return out
+}
+
+/** 票据那条 base64url ✓（与宿主 `Buffer.toString('base64url')` / 网页 `unb64u` 同一形状 ✓）。 */
+function base64url(text: string): string {
+  return Buffer.from(text, 'utf8').toString('base64url')
+}
+
+/** 等异步的 `boot()` 走完那几段（claim / 落盘 ✓）。 */
+async function bootSettle(ms = 90): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+test('★★ R1a：同一台电脑的第二个地址不许把第一个地址挤掉（slots 按宿主合并、只增不减）', () => {
+  const vault = new Map<string, string>()
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  const api = surface.boot.apk
+  // ① 学校地址上配对成功 ⇒ 目录记下"学校"这一条（外加本页那个源 ✓ —— 产品本来就这么记 ✓）
+  api.storeHost({
+    baseUrl: ORIGIN_SCHOOL,
+    tunnelUrl: 'wss://' + HOST_SCHOOL + '/mobile/ws',
+    pinnedHostFingerprint: FP_MINE,
+  })
+  assert.deepEqual(
+    recordSlots(api.hosts(), FP_MINE),
+    [ORIGIN_SCHOOL, 'https://10.34.221.181:3443'],
+    '第一次配对：记下配对那个源 + 本页源 ✓',
+  )
+  // ② 切到 Tailscale（同一台电脑的**另一个地址** ⇒ 同一个指纹 ✓）之后又连上
+  api.storeHost({
+    baseUrl: ORIGIN_TS,
+    tunnelUrl: 'wss://' + HOST_TS + '/mobile/ws',
+    pinnedHostFingerprint: FP_MINE,
+  })
+  const merged = recordSlots(api.hosts(), FP_MINE)
+  assert.ok(
+    merged.includes(ORIGIN_SCHOOL),
+    '★ 学校那条**必须还在** ✗（以前这里被整组替换掉 ⇒ 回学校就认不出这台电脑 ✓）：' + JSON.stringify(merged),
+  )
+  assert.ok(merged.includes(ORIGIN_TS), 'Tailscale 那条也要在 ✓：' + JSON.stringify(merged))
+  assert.equal(merged[0], ORIGIN_TS, '最近连上的那个源排第一 ✓（面板「电脑」那一行显示的就是 slots[0] ✓）')
+  assert.equal(
+    merged.filter((url) => url === 'https://10.34.221.181:3443').length,
+    1,
+    '同 host 去重 ✓（同一个源不许记两遍 ✗）：' + JSON.stringify(merged),
+  )
+})
+
+test('★★ R1a：合并只在同一条宿主记录内 —— 另一台电脑的地址绝不许被记到本台名下', () => {
+  const vault = new Map<string, string>()
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  const api = surface.boot.apk
+  // 本机（这台电脑）在学校那个地址上有记录 ✓
+  api.hostRecord({ fingerprint: FP_MINE, slots: [{ label: '学校', url: ORIGIN_SCHOOL }], updatedAt: 1 })
+  // 另一台电脑（另一个指纹 ✓ —— 它自己是另一个 authority ✓）
+  api.hostRecord({ fingerprint: FP_OTHER, slots: [{ label: '别的电脑', url: 'https://other.example:3443' }], updatedAt: 1 })
+  const mine = recordSlots(api.hosts(), FP_MINE)
+  const other = recordSlots(api.hosts(), FP_OTHER)
+  assert.deepEqual(other, ['https://other.example:3443'], '另一台只该有它自己那条 ✗：' + JSON.stringify(other))
+  assert.equal(
+    other.includes(ORIGIN_SCHOOL),
+    false,
+    '★ 合并绝不许跨记录 ✗（跨了就会"按槽认源"认错机器 ✓ —— 比少个名字严重得多 ✓）',
+  )
+  assert.deepEqual(mine, [ORIGIN_SCHOOL], '本台那条也要原样在 ✓：' + JSON.stringify(mine))
+})
+
+test('★ R1a：槽有上限（新的在前 ⇒ 超了砍尾巴 = 砍最老那些）', () => {
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(new Map<string, string>()),
+  })
+  const api = surface.boot.apk
+  for (let index = 0; index < 9; index += 1) {
+    api.hostRecord({
+      fingerprint: FP_MINE,
+      slots: [{ label: '', url: 'https://host' + index + '.example:3443' }],
+      updatedAt: index + 1,
+    })
+  }
+  const slots = recordSlots(api.hosts(), FP_MINE)
+  assert.ok(slots.length <= 6, '槽不许无限长 ✗：' + JSON.stringify(slots))
+  assert.equal(slots[0], 'https://host8.example:3443', '最新的排第一 ✓：' + JSON.stringify(slots))
+  assert.equal(slots.includes('https://host0.example:3443'), false, '最老的那条被砍掉 ✓：' + JSON.stringify(slots))
+})
+
+test('★ R1a：旧槽上的名字不许被空名字冲掉（壳里补的「学校」/「Tailscale」保得住 ✓）', () => {
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(new Map<string, string>()),
+  })
+  const api = surface.boot.apk
+  api.hostRecord({ fingerprint: FP_MINE, slots: [{ label: '学校', url: ORIGIN_SCHOOL }], updatedAt: 1 })
+  // 同一条地址、这次**没带名字**（真实情形：下一次上报只认得当前源 ✓）
+  api.hostRecord({ fingerprint: FP_MINE, slots: [{ label: '', url: ORIGIN_SCHOOL }], updatedAt: 2 })
+  const record = api.hosts().find((item) => item['fingerprint'] === FP_MINE)
+  const slots = (record?.['slots'] ?? []) as Array<Record<string, unknown>>
+  assert.equal(slots.length, 1, '同 host 去重后只剩一条 ✓：' + JSON.stringify(slots))
+  assert.equal(slots[0]?.['label'], '学校', '★ 已经补好的名字不许被空串冲掉 ✗：' + JSON.stringify(slots))
+})
+
+test('★★ R1b：配对当次的候选地址（票据 endpoints）要落盘、并进目录 —— 跨得过那次"丢 ?pair="的重载', async () => {
+  const vault = new Map<string, string>()
+  const ticket = base64url(
+    JSON.stringify({
+      ticket: 'TICKET-1',
+      code: '123456',
+      hostFingerprint: FP_MINE,
+      endpoints: [ORIGIN_SCHOOL, ORIGIN_TS],
+    }),
+  )
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    host: HOST_SCHOOL,
+    shell: makeVaultShell(vault),
+    search: '?debug=1&pair=' + ticket,
+  })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  await bootSettle()
+  const stored = surface.boot.apk.storedHost()
+  assert.ok(stored !== null, '配对那一次加载必须把配置落盘 ✓')
+  assert.deepEqual(
+    // ★ 同样要搬进本 realm 再比 ✗（vm 里的数组原型不同 ✓ —— 见 recordSlots 那段说明 ✓）
+    Array.from((stored?.['endpoints'] ?? []) as string[]),
+    [ORIGIN_SCHOOL, ORIGIN_TS],
+    '★ 票据给的**全部**候选地址必须一起落盘 ✗（以前只写三个字段 ⇒ 永久丢掉 ✗）：' + JSON.stringify(stored),
+  )
+  assert.equal(stored?.['pairingTicket'], undefined, '票据照旧**不落盘** ✓（它是一次性的 ✓）')
+  const slots = recordSlots(surface.boot.apk.hosts(), FP_MINE)
+  assert.ok(
+    slots.includes(ORIGIN_TS),
+    '★ 票据广告的另一个地址必须进目录 ✓（它就是"换源之后还认得出"的唯一依据 ✓）：' + JSON.stringify(slots),
+  )
+})
+
+test('★★★ R1a+R1b 端到端：学校配对 ⇒ 切 Tailscale 不用重配 ⇒ 回学校也不用重配（用户那句原话）', async () => {
+  /** ★ **同一个壳**跨三次加载 ✓（= 真机上的 SharedPreferences ✓）；三个沙箱 = 三个源 ✓。 */
+  const vault = new Map<string, string>()
+  const ticket = base64url(
+    JSON.stringify({
+      ticket: 'TICKET-1',
+      code: '123456',
+      hostFingerprint: FP_MINE,
+      endpoints: [ORIGIN_SCHOOL, ORIGIN_TS],
+    }),
+  )
+  // ── ① 学校地址上扫码配对（URL 带票据 ⇒ readUrlConfig 那条路 ✓）
+  const school = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    host: HOST_SCHOOL,
+    shell: makeVaultShell(vault),
+    search: '?debug=1&pair=' + ticket,
+  })
+  await bootSettle()
+  assert.deepEqual(
+    recordSlots(school.boot.apk.hosts(), FP_MINE).sort(),
+    [ORIGIN_SCHOOL, ORIGIN_TS].sort(),
+    '★ 配对当次就把两个地址都记进目录 ✓：' + JSON.stringify(recordSlots(school.boot.apk.hosts(), FP_MINE)),
+  )
+  // 真机上配对之后，设备私钥会被 backfill 进壳（`backfillIdentityVault` ✓）——
+  // 这里显式走**同一个写入口**种一次 ✓（配对落盘与身份入壳是两条路 ✓）。
+  assert.equal(school.boot.apk.identityWrite('dsh-mobile.device-key:' + FP_MINE, 'KEY-1'), true, '身份写入口应接受带指纹的键 ✓')
+  assert.equal(vault.get('dsh-mobile.device-key:' + FP_MINE), 'KEY-1', '壳里必须真的有这把私钥 ✓（跨源那份 ✓）')
+
+  // ── ② 切到 Tailscale（**新源** ✓ localStorage 空的 ✓）——不该再要重新配对 ✗
+  const tail = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    host: HOST_TS,
+    shell: makeVaultShell(vault),
+  })
+  assert.equal(
+    tail.boot.apk.currentFingerprint(),
+    FP_MINE,
+    '★ 换到 Tailscale 也认得出这台电脑 ✓（目录里记着它两个地址 ✓）',
+  )
+  assert.equal(
+    tail.storage.get('dsh-mobile.device-key:' + FP_MINE),
+    'KEY-1',
+    '★ 身份从壳里恢复出来了 ⇒ **不用重新配对** ✓（修复前这里是 undefined ✗）',
+  )
+  assert.equal(tail.thrown.length, 0, `顶层不应抛错：${String(tail.thrown[0])}`)
+  /**
+   * ★★ 真机上"在 Tailscale 上连上了"这一步**必须一起模拟** ✗ —— 它走的是
+   *   `noteHostConnected` ⇒ `hostRecordUpsert({..., slots: hostSlotsForConfig(config)})` ✓。
+   *   而在"配置里没有 endpoints"的形状下（老配置 / 配对页写的那份 ✓ /
+   *   宿主只广告自己一条的部署 ✓），那一次 upsert 算出来的槽**只有当前这个源** ✗ ⇒
+   *   只靠 R1b 是不够的 ✗：**R1a（按宿主合并、只增不减）才是这一步的兜底** ✓。
+   *   （这里直接用 `hostRecord` 表达那一次 upsert 的产物 ✓ —— 与生产同一个写入口 ✓。）
+   */
+  assert.equal(
+    tail.boot.apk.hostRecord({
+      fingerprint: FP_MINE,
+      slots: [{ label: '', url: ORIGIN_TS }],
+      lastState: 'connected',
+      lastSeenAt: 2,
+      updatedAt: 2,
+    }),
+    true,
+    '在 Tailscale 上连上 ⇒ 记一次目录 ✓',
+  )
+  assert.deepEqual(
+    recordSlots(tail.boot.apk.hosts(), FP_MINE),
+    [ORIGIN_TS, ORIGIN_SCHOOL],
+    '★ 连上之后学校那条**仍然要在** ✗（以前这一步把它挤掉 ⇒ 回学校就认不出 ✓）',
+  )
+
+  // ── ③ 回学校（又一个新源 ✓）——用户报的那条：**这里以前是要重新配对的** ✗→✓
+  const back = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    host: HOST_SCHOOL,
+    shell: makeVaultShell(vault),
+  })
+  assert.equal(back.boot.apk.currentFingerprint(), FP_MINE, '★ 回学校仍然认得出这台电脑 ✓')
+  assert.equal(
+    back.storage.get('dsh-mobile.device-key:' + FP_MINE),
+    'KEY-1',
+    '★ 回学校也不用重新配对 ✓（"连好 tail 以后校园网要重新配对"就是这一条 ✗→✓）',
+  )
+})
+
+test('★★ R4：本机没有这台宿主的身份时被拒 ⇒ **一个键都不许动**（免得连坐清掉另一个地址的备份）', () => {
+  const vault = new Map<string, string>([
+    // 这台电脑在**另一个地址**上配过对：配置 + 私钥都在壳里 ✓
+    ['dsh-mobile.host:' + FP_MINE, JSON.stringify({ baseUrl: ORIGIN_SCHOOL, tunnelUrl: 'wss://' + HOST_SCHOOL + '/mobile/ws', pinnedHostFingerprint: FP_MINE })],
+    ['dsh-mobile.device-key:' + FP_MINE, 'KEY-SCHOOL'],
+    ['dsh-mobile.hosts', JSON.stringify([
+      { fingerprint: FP_MINE, label: '电脑', slots: [{ label: '学校', url: ORIGIN_SCHOOL + '/mobile/app' }], updatedAt: 1 },
+    ])],
+  ])
+  /** ★ 当前源是夹具那个默认 host ✓（目录里**只有学校那个地址** ⇒ 认不出来 ✓ = 本轮那个病根状态 ✓）。 */
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  const api = surface.boot.apk
+  assert.equal(api.currentFingerprint(), null, '这个源认不出这台电脑（目录里没有它的槽 ✓）')
+  assert.equal(api.deviceRejection('mobile/device-unknown', '验收触发'), true, '拒绝那条路应真的跑了 ✓')
+  // ★★ 连坐就是这一条：以前会把壳里那四条一起清掉 ✗（另一个地址从此少一条退路 ✓）
+  assert.equal(
+    vault.get('dsh-mobile.host:' + FP_MINE) !== undefined,
+    true,
+    '★ 别的地址在壳里的配置不许被清 ✗：' + JSON.stringify(Array.from(vault.keys())),
+  )
+  assert.equal(vault.get('dsh-mobile.device-key:' + FP_MINE), 'KEY-SCHOOL', '★ 别的地址在壳里的私钥不许被清 ✗')
+  // 留痕：清 0 个键 + 为什么跳过 ✓（诊断页读它 ✓）
+  const marker = JSON.parse(String(surface.storage.get('dsh-mobile.identityCleared'))) as Record<string, unknown>
+  assert.deepEqual(marker['cleared'], [], '这次一个键都没清 ✓')
+  assert.match(String(marker['skipped']), /本机没有/, '要写清**为什么跳过** ✓：' + JSON.stringify(marker))
+  assert.equal(marker['code'], 'mobile/device-unknown', '拒绝码要留痕 ✓')
+})
+
+test('★ R4：真的在这台电脑上配过对（本机持有它的 device-key）⇒ 被拒时照旧清干净', () => {
+  const vault = new Map<string, string>([
+    // 目录里记着**当前源** ✓ ⇒ 指纹解析得出来 ✓ ⇒ 启动时身份会被恢复进本机 ✓
+    ['dsh-mobile.host:' + FP_MINE, JSON.stringify({ baseUrl: 'https://10.34.221.181:3443', tunnelUrl: 'wss://10.34.221.181:3443/mobile/ws', pinnedHostFingerprint: FP_MINE })],
+    ['dsh-mobile.device-key:' + FP_MINE, 'KEY-MINE'],
+    ['dsh-mobile.claimed-ticket:' + FP_MINE, 'TICKET-MINE'],
+    ['dsh-mobile.lastGoodEndpoint:' + FP_MINE, 'wss://10.34.221.181:3443/mobile/ws'],
+    ['dsh-mobile.hosts', JSON.stringify([
+      { fingerprint: FP_MINE, label: '电脑', slots: [{ label: '学校', url: 'https://10.34.221.181:3443/mobile/app' }], updatedAt: 1 },
+    ])],
+  ])
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  const api = surface.boot.apk
+  assert.equal(api.currentFingerprint(), FP_MINE, '当前源就是这台电脑 ✓')
+  assert.equal(surface.storage.get('dsh-mobile.device-key:' + FP_MINE), 'KEY-MINE', '身份先从壳恢复进本机 ✓')
+  assert.equal(api.deviceRejection('mobile/device-revoked', '验收触发'), true, '拒绝那条路应真的跑了 ✓')
+  for (const base of ['dsh-mobile.host', 'dsh-mobile.device-key', 'dsh-mobile.claimed-ticket', 'dsh-mobile.lastGoodEndpoint']) {
+    assert.equal(vault.has(base + ':' + FP_MINE), false, '真的配过对 ⇒ 照旧清干净 ✓：' + base)
+  }
+  const marker = JSON.parse(String(surface.storage.get('dsh-mobile.identityCleared'))) as Record<string, unknown>
+  assert.ok(Array.isArray(marker['cleared']) && (marker['cleared'] as unknown[]).length > 0, '清理过的键要留痕 ✓')
+  assert.equal(marker['skipped'], null, '走的是真清理那条路 ⇒ 没有"跳过"字段 ✓')
+})
+
+test('★★ R5：端侧诊断能念出"为什么认不出这台电脑"（指纹 / 恢复读数 / 目录里的地址 / 清理留痕）', () => {
+  const vault = new Map<string, string>([
+    ['dsh-mobile.host:' + FP_MINE, JSON.stringify({ baseUrl: ORIGIN_SCHOOL, tunnelUrl: 'wss://' + HOST_SCHOOL + '/mobile/ws', pinnedHostFingerprint: FP_MINE })],
+    ['dsh-mobile.device-key:' + FP_MINE, 'KEY-SCHOOL'],
+    ['dsh-mobile.hosts', JSON.stringify([
+      { fingerprint: FP_MINE, label: '学校那台', slots: [{ label: '学校', url: ORIGIN_SCHOOL + '/mobile/app' }], updatedAt: 1 },
+    ])],
+  ])
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  const panel = surface.boot.apk.identityDiagnostics()
+  // ── ① 读数（生产函数 ✓）
+  assert.equal(panel.data.fingerprint, null, '这个源认不出这台电脑 ✓')
+  assert.match(panel.data.restore, /跳过/, '恢复那条读数必须**说清跳过了** ✗（以前一个字都没有 ✗）：' + panel.data.restore)
+  assert.equal(panel.data.restoreOk, false, '跳过 ≠ 正常 ⇒ 要标出来 ✓')
+  assert.match(panel.data.why, /目录记着的地址/, '要逐条说清三条路 ✓：' + panel.data.why)
+  assert.ok(
+    panel.data.why.includes(ORIGIN_SCHOOL),
+    '★ 目录里记着哪些地址要念出来 ✓（这正是判断"换源还认不认得出"的证据 ✓）：' + panel.data.why,
+  )
+  assert.equal(panel.data.hosts.length, 1, '目录里那一台要列出来 ✓')
+  assert.deepEqual(
+    Array.from((panel.data.hosts[0]?.['slots'] ?? []) as string[]),
+    [ORIGIN_SCHOOL + '/mobile/app'],
+    '每台的槽也要念出来 ✓',
+  )
+  assert.ok(
+    panel.data.vaultKeys.includes('dsh-mobile.host:' + FP_MINE),
+    '壳里有哪些键名要念出来 ✓（只念键名 ✓）：' + JSON.stringify(panel.data.vaultKeys),
+  )
+  // ── ② 真渲染产物（生产行渲染函数 ✓ —— 不是"某个字符串存在"✗）
+  const text = textOf(panel.group)
+  assert.ok(text.includes('端侧诊断'), '行要画在「端侧诊断」这一组里 ✓：' + text)
+  assert.ok(text.includes('定不出来'), '第一行要说清"认不出" ✓：' + text)
+  assert.ok(text.includes(ORIGIN_SCHOOL), '要把目录记着的地址摆在屏上 ✓：' + text)
+  assert.ok(text.includes('学校那台'), '要把宿主的显示名念出来 ✓：' + text)
+  assert.ok(text.includes('dsh-mobile.host:' + FP_MINE), '壳里的键名要能念 ✓：' + text)
+  // ★★ 屏幕上**绝不许**出现身份值 ✗（这一屏是给人看/念的 ✓）
+  assert.equal(text.includes('KEY-SCHOOL'), false, '★ 私钥值绝不许上屏 ✗：' + text)
+  // ── ③ 调试框那条"能念的话" ✓（不许静默 ✗）
+  assert.match(
+    surface.boxText(),
+    /认不出这台电脑/,
+    '★ 指纹定不下来时调试框必须留一行 ✗（以前这条路上一个字都没有 ✗）：' + surface.boxText(),
+  )
+})
+
+test('★ R5：清理留痕要有读者 —— 被拒（跳过清理）之后诊断页那行要说得出话', () => {
+  const vault = new Map<string, string>([
+    ['dsh-mobile.host:' + FP_MINE, JSON.stringify({ baseUrl: ORIGIN_SCHOOL, tunnelUrl: 'wss://' + HOST_SCHOOL + '/mobile/ws', pinnedHostFingerprint: FP_MINE })],
+    ['dsh-mobile.hosts', JSON.stringify([
+      { fingerprint: FP_MINE, label: '学校那台', slots: [{ label: '学校', url: ORIGIN_SCHOOL + '/mobile/app' }], updatedAt: 1 },
+    ])],
+  ])
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeVaultShell(vault),
+  })
+  surface.boot.apk.deviceRejection('mobile/device-unknown', '验收触发')
+  const panel = surface.boot.apk.identityDiagnostics()
+  assert.ok(panel.data.cleared !== null, '★ dsh-mobile.identityCleared 必须真的有读者 ✗（本轮之前它是死键 ✓）')
+  assert.match(panel.data.clearedText, /mobile\/device-unknown/, '留痕里要有拒绝码 ✓：' + panel.data.clearedText)
+  assert.match(panel.data.clearedText, /跳过了清理/, '留痕里要说清"这次没清任何键" ✓：' + panel.data.clearedText)
+  const text = textOf(panel.group)
+  assert.ok(text.includes('上次的身份清理'), '诊断页要有一行专门念它 ✓：' + text)
+  assert.ok(text.includes('跳过了清理'), '那一行要把原因念出来 ✓：' + text)
+})
+
+test('★ 结构性：R5 那组身份读数必须挂在「端侧诊断」那一页上（不是只有验收口能拿到 ✗）', () => {
+  /**
+   * 为什么用**结构性**判据 ✗：这一句就是"画到用户真能看到的那一页"本身 ✓ ——
+   * 而 `fillConnSettings` 依赖真实 DOM 的 `getComputedStyle` ✓（读 CSS 变量那几行 ✓），
+   * 在 `node:vm` 的最小假 DOM 里跑不完整 ✓。所以这里断"那一页确实调了它" ✓，
+   * 与上面那条版本分叉的结构性判据同一个口径 ✓。
+   * ★ 渲染代码仍只有一份 ✓：`appendIdentityDiagnosticsRows` ✓（上面那条用例断的就是它画了什么 ✓）。
+   * 怎么把它打红：把 `if (DEBUG_BOX_ON) appendIdentityDiagnosticsRows(diagnostics)` 这一行删掉
+   *   ⇒ 立刻红 ✓（用户那一页再也看不到"为什么认不出这台电脑"✓）。
+   */
+  const lines = bootSource.split('\n')
+  const start = lines.findIndex((line) => line.indexOf('  function fillConnSettings(') === 0)
+  assert.ok(start > 0, 'boot.js 里应当有 fillConnSettings（「连接与设备」那一页**唯一**的渲染器 ✓）')
+  let end = -1
+  for (let index = start + 1; index < lines.length; index++) {
+    if (lines[index] === '  }') {
+      end = index
+      break
+    }
+  }
+  assert.ok(end > start, 'fillConnSettings 的结束大括号应当能在第 2 列找到 ✓')
+  const inside = lines.slice(start, end + 1).join('\n')
+  assert.ok(
+    inside.includes('appendIdentityDiagnosticsRows(diagnostics)'),
+    '「端侧诊断」那一组必须真的调 appendIdentityDiagnosticsRows ✓',
+  )
+  assert.ok(
+    inside.includes("settingsGroup('端侧诊断')"),
+    '而且必须画在「端侧诊断」这一组里 ✓（别的地方用户找不到 ✗）',
+  )
 })

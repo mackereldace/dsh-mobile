@@ -477,6 +477,103 @@
   }
 
   /**
+   * ★★ 一台宿主的槽**最多留几条** ✓（R1a ✓）。
+   *
+   * 为什么必须有上限 ✗：槽集现在是**只增不减**的 ✓（见 `mergeHostSlots` ✓）——
+   * 没有上限的话，一台电脑换过的每个地址都会永久占一行 ✓，面板越列越长 ✗、
+   * 壳那份 JSON 也会一直长 ✗。6 条足够覆盖"学校 / Tailscale / 桌面版端口 /
+   * 机器名 / IPv6 / 临时实例"这类真实组合 ✓；超了砍**尾巴** ✓
+   * （新的排在前 ⇒ 砍掉的正是最老、最少用的那些 ✓）。
+   */
+  var HOST_SLOT_LIMIT = 6
+
+  /**
+   * ★★ R1a：把一台宿主的槽**按 host 合并**（新的在前 ✓、同 host 去重 ✓、有上限 ✓）。
+   *
+   * ## 为什么必须合并（这是"换网就要重新配对"的真正病根 ✗）
+   *
+   * 槽以前是**整组替换**的 ✗ —— 而槽只来自"当前页面的 config"✓（`hostSlotsForConfig` ✓），
+   * 于是**同一台电脑的第二个地址会把第一个地址挤掉** ✗：手机先在学校地址上配对 ✓
+   * （目录里记下学校那条 ✓），再切到 Tailscale ✓ ⇒ 目录被改写成只有 Tailscale ✗ ⇒
+   * 回到学校时 `currentHostFingerprint()` 三条路全断 ✓
+   * （票据只有配对当次有 ✗ / 目录里没有学校那条 ✗ / 旧键早就被迁移删掉 ✗）
+   * ⇒ `restoreIdentityFromVault()` 一个键都不恢复 ✗ ⇒ 界面"尚未配对" ⇒ 用户只能重新配对 ✓
+   * ⇒ 配完又把 Tailscale 挤掉 ✓ —— 两个地址**互相挤**，配一次坏一次 ✓
+   * （这就是用户报的那句"连好 tail 以后校园网的隧道就需要重新配对"✗）。
+   *
+   * ## 语义（三条，缺一不可）
+   *   1. **新的在前** ✓：`slots[0]` 是"最近这次真的连上的那个源" ✓
+   *      （面板「电脑」那一行显示的就是它 ✓，见 `hostPrimaryAddress` ✓）；
+   *   2. **同 host 去重** ✓（按 `new URL(slot.url).host` 比 ✓ —— 与
+   *      `hostFingerprintMatchingOrigin` **同一口径** ✗：两处口径不一致就会"记了却认不出"✗）；
+   *   3. **旧槽一条不丢** ✓（除上限截断外 ✓），并且**旧槽上的名字要保住** ✓ ——
+   *      壳里带名字的槽（「学校」/「Tailscale」✓）只在"本来就属于本记录"时才补名字 ✓，
+   *      新一次上报若没带名字 ✗，不能把已经补好的名字冲成空串 ✗。
+   *
+   * ## 安全边界（一个字都不许松 ✗）
+   * 合并**只在同一条宿主记录内**发生 ✓ —— `previous` 就是**同一个指纹**那条记录 ✓
+   * ⇒ 绝不可能把**另一台电脑**的地址记到本台名下 ✗（那会让指纹归属"按槽认源"认错机器 ✓，
+   * 正是 `hostSlotsForConfig` 里"只补名字、不新增槽"那条纪律要防的事 ✓）。
+   * 槽本身**不是**信任来源 ✗：它只回答"这个 authority 是不是这台电脑的地址"✓，
+   * "这台电脑是谁"仍然只由**带外指纹**锚定 ✓（票据的 `pinnedHostFingerprint` ✓ /
+   * 目录里已经证过的槽 ✓）。
+   *
+   * @param incoming - 这一次真的知道的槽 ✓（`hostSlotsForConfig` 的产物 ✓；空 = 这次没新信息 ✓）。
+   * @param previous - 这条记录里原有的槽 ✓（没有记录时是 `undefined` ✓）。
+   * @returns 合并后的槽数组 ✓（永远是数组 ✓，绝不返回 undefined ✗）。
+   */
+  function mergeHostSlots(incoming, previous) {
+    var incomingList = Array.isArray(incoming) ? incoming : []
+    var previousList = Array.isArray(previous) ? previous : []
+    var out = []
+    var indexByHost = {}
+    /** 一条槽的 host ✓（不是对象 / 没有 url / 解析不出来 ⇒ 空串 ⇒ 跳过 ✗）。 */
+    var hostOf = function (slot) {
+      var url = slot !== null && typeof slot === 'object' ? slot.url : slot
+      if (typeof url !== 'string' || url.length === 0) return ''
+      var host = ''
+      try {
+        host = new URL(url, location.href).host
+      } catch (error) {
+        void error
+      }
+      return host
+    }
+    /** 一条槽上的名字 ✓（不是对象 / 没名字 ⇒ 空串 ✓）。 */
+    var labelOf = function (slot) {
+      return slot !== null && typeof slot === 'object' && typeof slot.label === 'string' ? slot.label : ''
+    }
+    // ① 新的在前 ✓（= "最近成功连上的那个源排前面" ✓）
+    for (var i = 0; i < incomingList.length; i++) {
+      var host = hostOf(incomingList[i])
+      if (host === '' || indexByHost[host] !== undefined) continue
+      indexByHost[host] = out.length
+      out.push(incomingList[i])
+    }
+    // ② 旧的按原顺序补在后面 ✓（同 host 已经有了就跳过 ⇒ 去重 ✓）
+    for (var j = 0; j < previousList.length; j++) {
+      host = hostOf(previousList[j])
+      if (host === '' || indexByHost[host] !== undefined) continue
+      indexByHost[host] = out.length
+      out.push(previousList[j])
+    }
+    // ③ 名字：新槽没名字、旧槽有 ⇒ 用旧名字 ✓（只影响显示 ✓，不改变归属 ✓）
+    for (var k = 0; k < previousList.length; k++) {
+      host = hostOf(previousList[k])
+      var at = host === '' ? undefined : indexByHost[host]
+      if (at === undefined) continue
+      var kept = out[at]
+      if (kept === null || typeof kept !== 'object') continue
+      if (labelOf(kept).length > 0) continue
+      var previousLabel = labelOf(previousList[k])
+      if (previousLabel.length > 0) kept.label = previousLabel
+    }
+    // ④ 上限：新的在前 ⇒ 砍尾巴 = 砍最老的那几条 ✓
+    if (out.length > HOST_SLOT_LIMIT) out = out.slice(0, HOST_SLOT_LIMIT)
+    return out
+  }
+
+  /**
    * 把一条宿主记录**合并**进目录 ✓（主键 = 指纹 ✓ —— 有的字段不覆盖 ✓）。
    *
    * 语义：只更新**这次真的知道**的字段 ✗（`undefined` 的字段保持原值 ✓）——
@@ -495,7 +592,12 @@
     var next = {
       fingerprint: fingerprint,
       label: typeof record.label === 'string' && record.label.length > 0 ? record.label : previous.label,
-      slots: Array.isArray(record.slots) && record.slots.length > 0 ? record.slots : previous.slots,
+      /**
+       * ★★ R1a：槽**按宿主合并、只增不减** ✓（`mergeHostSlots` ✓）——
+       * 原来这里是**整组替换** ✗ ⇒ 同一台电脑的第二个地址会把第一个地址挤掉 ✗
+       * ⇒ 换回来时指纹解析不出来 ⇒ 用户被迫重新配对 ✓。
+       */
+      slots: mergeHostSlots(record.slots, previous.slots),
       lastState: record.lastState !== undefined ? record.lastState : previous.lastState,
       lastSeenAt: record.lastSeenAt !== undefined ? record.lastSeenAt : previous.lastSeenAt,
       updatedAt: Date.now(),
@@ -1971,12 +2073,54 @@
   var IDENTITY_CLEARED_KEY = 'dsh-mobile.identityCleared'
   /** 本页已经因为"被明确拒绝"清过身份（只清一次 ✓；前台自愈也读它 ✓）。 */
   var deviceRejected = false
+  /**
+   * ★★ R5：「上一次从壳恢复身份」到底发生了什么 ✓ —— **说给人听的一句话** ✓
+   * （调试框 `debugBoxLine` ✓ + 诊断页那一行 ✓ 读的都是它 ✓，不各算一份 ✗）。
+   *
+   * 为什么必须有它 ✗：手机上既没有控制台、也拿不到截图 ✓，
+   * 而"换源之后认不出这台电脑"这件事此前**一个字都不留** ✗ ⇒
+   * 用户说"又要重新配对"时，我们连"它到底恢复没恢复"都判不了 ✗。
+   */
+  var lastRestoreReadout = '（这一次加载还没有跑过恢复）'
+  /** 上一次恢复算不算正常 ✓（指纹定不出来 = false ✓ ⇒ 诊断页标黄 ✓）。 */
+  var lastRestoreOk = true
 
   /** 这个错误码是不是"宿主不认这台设备"（判据见上面那段 ✓）。 */
   function deviceRejectionCode(code) {
     if (code === 'mobile/device-unknown') return 'mobile/device-unknown'
     if (code === 'mobile/device-revoked') return 'mobile/device-revoked'
     return undefined
+  }
+
+  /**
+   * ★★ 把"这台手机上的配对怎么就没了"**留痕** ✓ —— 全文件**唯一**的写入口 ✓
+   * （原来那段 JSON 直接写在 `handleDeviceRejection` 里 ✗；R4 多出一条"跳过清理"的路 ✓
+   *  ⇒ 两处各写一份形状必然漂 ✗）。
+   *
+   * 为什么必须有它 ✗：手机上没有控制台 ✓（`boot.js` 里那句话的原话 ✓），
+   * 而"我的配对怎么没了"是用户最会问、也最难自证的一件事 ✓ ⇒ 落盘 + 诊断页读它 ✓
+   * （`appendIdentityDiagnosticsRows` ✓）。
+   *
+   * @param code - 宿主回的拒绝码 ✓（`mobile/device-unknown` / `mobile/device-revoked` ✓）。
+   * @param detail - 宿主给的人话 ✓（截断 300 字 ✓）。
+   * @param cleared - 这一次**真正**被清掉的键名 ✓（空数组 = 一个都没动 ✓）。
+   * @param skipped - 非空字符串 = **跳过了清理** ✓ 以及为什么 ✓（R4 ✓）。
+   */
+  function writeIdentityClearedMarker(code, detail, cleared, skipped) {
+    try {
+      localStorage.setItem(
+        IDENTITY_CLEARED_KEY,
+        JSON.stringify({
+          at: new Date().toISOString(),
+          code: code,
+          detail: String(detail === undefined ? '' : detail).slice(0, 300),
+          cleared: cleared,
+          skipped: typeof skipped === 'string' && skipped.length > 0 ? skipped : null,
+        }),
+      )
+    } catch (error) {
+      void error
+    }
   }
 
   /**
@@ -2003,6 +2147,43 @@
     } catch (error) {
       void error
     }
+    /**
+     * ★★ R4：**只有本机确实持有这台宿主的设备私钥时才清** ✗✗。
+     *
+     * ## 为什么必须有这道闸（用户报的"两个地址互相冲突"的第二条机制 ✓）
+     *
+     * 清理的单位是**宿主指纹** ✓（`identityKeyFor` ✓）—— 而**同一台电脑的两个地址
+     * 是同一个指纹** ✓（`host-identity.json` 全机只有一份 ✓）。
+     * 而壳的身份库是**跨源**的 ✓ ⇒ 在 Tailscale 那个源上被拒 ✗ 会把
+     * `dsh-mobile.host:<指纹>` 等四条**从壳里一起清掉** ✗ ⇒ 校园网那个源
+     * （本机 localStorage 里那份还在 ✓，但**壳里那份备份没了** ✗）从此少一条退路 ✓。
+     *
+     * 判据只在"我们真的在这个源上配过对"时才成立 ✓：
+     * localStorage 里**本机**有这台宿主的 `dsh-mobile.device-key` ✓
+     * （带指纹那份 ✓；指纹定不下来时 `identityKeyFor` 退回旧键 ✓ ⇒ 纯旧模式与改动前一致 ✓）。
+     * ★ 为什么只看**本机**（不看壳）✗：壳里那份是**所有源共用**的备份 ✓ ——
+     *   在"本机从来没有过身份"的新源上拿它当"我们有身份"的证据 ✗ 正是这次要断掉的连坐 ✓。
+     * ⇒ 本机没有 ⇒ **一个键都不动** ✓，只回配对页 ✓（用户该看到的下一步照样给到 ✓）。
+     *
+     * ★ 这条闸**不削弱**任何安全属性 ✓：它只是"少删自己的凭据"✓ ——
+     *   被撤销的设备照样连不上（宿主说了算 ✓），而"真的配过对"的情形照旧清干净 ✓
+     *   （撤销/解除配对之后不该留私钥 ✓）。
+     */
+    var rejectionFingerprint = currentHostFingerprint()
+    var localDeviceKeyKey = identityKeyFor(DEVICE_KEY, rejectionFingerprint)
+    var ownsIdentityLocally = localValue(localDeviceKeyKey) !== null
+    if (!ownsIdentityLocally) {
+      var skippedReason = '本机没有这台宿主的设备私钥（这个地址上从来没有配对成功过）⇒ 不清任何键（免得把另一个地址在壳里的备份一起清掉）'
+      writeIdentityClearedMarker(code, detail, [], skippedReason)
+      debugBoxLine('[identity] 电脑端拒绝（' + code + '）但本机没有这台宿主的身份 ⇒ 保留壳里的备份 ✓：' + skippedReason)
+      console.warn('[dsh-mobile] 电脑端明确拒绝这台设备（' + code + '）⇒ 本机没有这台宿主的身份，**不清任何键** ✓（回配对界面 ✓）：' + String(detail))
+      try {
+        location.replace(PAIRING_PAGE_PATH)
+      } catch (error) {
+        void error
+      }
+      return true
+    }
     var cleared = []
     for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
       try {
@@ -2027,19 +2208,7 @@
       }
     }
     // 手机上没有控制台 ⇒ "我的配对怎么没了"必须留痕 ✓（诊断页读它 ✓）
-    try {
-      localStorage.setItem(
-        IDENTITY_CLEARED_KEY,
-        JSON.stringify({
-          at: new Date().toISOString(),
-          code: code,
-          detail: String(detail === undefined ? '' : detail).slice(0, 300),
-          cleared: cleared,
-        }),
-      )
-    } catch (error) {
-      void error
-    }
+    writeIdentityClearedMarker(code, detail, cleared, undefined)
     console.warn('[dsh-mobile] 电脑端明确拒绝这台设备（' + code + '）⇒ 已清除本机与壳里的配对身份，回到配对界面 ✓：' + String(detail))
     try {
       // ★ 用 replace 而不是 href ✗：否则系统返回键会退回那个已经连不上的 app 页 ⇒ 立刻又被拒一次 ✗
@@ -2070,9 +2239,29 @@
    */
   function restoreIdentityFromVault() {
     var vault = vaultRead()
-    if (vault === null) return 0
+    if (vault === null) {
+      lastRestoreReadout = '没有壳（纯浏览器）⇒ 无库可恢复 ✓'
+      lastRestoreOk = true
+      return 0
+    }
     var fingerprint = currentHostFingerprint()
-    if (!validHostFingerprint(fingerprint)) return 0
+    if (!validHostFingerprint(fingerprint)) {
+      /**
+       * ★★ R5：这条路上**绝不许静默** ✗✗。
+       *
+       * 为什么 ✗：指纹定不下来时这里原来直接 `return 0` ✓ —— 一个键都不恢复 ✓，
+       * 而**屏幕上、调试框里、日志里全都没有一个字** ✗ ⇒ 真机上"换源之后认不出这台电脑"
+       * 与"恢复好了但连不上"**长得一模一样** ✗（本轮用户报的"校园网要重新配对"
+       * 就是前者 ✓，而它此前完全不可见 ✗）。
+       * ⇒ 调试框留一行可念的话 ✓ + 诊断页「身份恢复」那一行读同一个读数 ✓
+       *   （`lastRestoreReadout` ✓，见 `identityDiagnostics` ✓）。
+       */
+      lastRestoreReadout = '跳过：当前源定不出宿主指纹 ⇒ 一个键都不恢复'
+      lastRestoreOk = false
+      debugBoxLine('[identity] ★ 认不出这台电脑：' + identityResolutionWhy())
+      console.warn('[dsh-mobile] 当前源定不出宿主指纹 ⇒ 不从壳的身份库恢复任何键（换地址后需要重新配对）：' + identityResolutionWhy())
+      return 0
+    }
     var restored = 0
     for (var i = 0; i < IDENTITY_VAULT_KEYS.length; i++) {
       var base = IDENTITY_VAULT_KEYS[i]
@@ -2095,6 +2284,10 @@
     if (restored > 0) {
       console.info('[dsh-mobile] 已按宿主指纹 ' + String(fingerprint).slice(0, 8) + '… 从壳的身份库恢复 ' + restored + ' 个跨源身份键（换地址后不用重新配对）')
     }
+    lastRestoreOk = true
+    lastRestoreReadout =
+      '按指纹 ' + formatFingerprint(fingerprint).slice(0, 9) + '… 恢复 ' + restored + ' 个键' +
+      (restored === 0 ? '（壳里没有这台宿主的键 —— 本机已有 / 或它从没进过壳库）' : '')
     return restored
   }
 
@@ -2154,6 +2347,152 @@
     vaultMerge(patch)
     console.info('[dsh-mobile] 已把本机 ' + count + ' 个身份键补进壳的库（换地址后不用重新配对）')
     return count
+  }
+
+  /**
+   * ★★ R5：**为什么"当前源"认不出是哪台电脑** ✓ —— 一句话，给**手机屏幕**看 ✓。
+   *
+   * 三条路逐条点名 ✓（与 `currentHostFingerprint` 的顺序一一对应 ✓）：
+   *   · 本页票据（只有配对当次才有 ✓）；
+   *   · 宿主目录里那条记录记着的**全部**地址 ✓（这一条是本轮修的那个病根 ✓ ——
+   *     以前它会被"整组替换"缩减成只剩当前源 ✗，现在按宿主合并、只增不减 ✓）；
+   *   · 本机旧 `dsh-mobile.host`（P1a 迁移之后就没有了 ✓ —— 它只对没迁移过的老用户有效 ✓）。
+   *
+   * ★ 只写"地址/有没有"这类**不是秘密**的东西 ✗ —— 绝不回传任何身份值 ✓
+   *   （尤其私钥 ✗；这条读数会显示在屏幕上 ✓）。
+   */
+  function identityResolutionWhy() {
+    var records = hostsRead()
+    var slotHosts = []
+    for (var i = 0; i < records.length; i++) {
+      var slots = Array.isArray(records[i].slots) ? records[i].slots : []
+      for (var j = 0; j < slots.length; j++) {
+        var url = slots[j] !== null && typeof slots[j] === 'object' ? slots[j].url : slots[j]
+        if (typeof url !== 'string' || url.length === 0) continue
+        if (slotHosts.indexOf(url) < 0) slotHosts.push(url)
+      }
+    }
+    var legacy = localValue(STORAGE_KEY) === null ? '没有' : '有（但归属对不上）'
+    return (
+      '当前地址 ' + location.host +
+      '｜本页票据：' + (validHostFingerprint(pageTicketFingerprint) ? '有' : '没有') +
+      '｜目录记着的地址：' + (slotHosts.length === 0 ? '（一条都没有）' : slotHosts.join('、')) +
+      '｜本机旧 host 键：' + legacy
+    )
+  }
+
+  /**
+   * ★★ R5：身份这条线的**全部读数** ✓（纯数据 ✓ —— 面板与验收读**同一份** ✓，不各算一份 ✗）。
+   *
+   * 三样是用户/排障真正要问的 ✓：
+   *   · `fingerprint` —— **当前源对应哪台电脑** ✓（`null` = 定不出来 ✗ = 本轮那个病根 ✓）；
+   *   · `restore` —— **上一次恢复做了什么** ✓（`lastRestoreReadout` ✓，含"为什么没恢复"✓）；
+   *   · `hosts` —— 目录里每台 + 它记着的**全部**地址 ✓（换源还认不认得出，就看这里 ✓）；
+   *   · `cleared` —— 上一次"身份被清"的记录 ✓（`dsh-mobile.identityCleared` ✓ ——
+   *     R5 之前它是**死键** ✗：写了没有任何读者 ✓）。
+   *   · `vaultKeys` —— 壳的身份库里**有哪些键名** ✓（**只有名字** ✗，值一律不回传 ✓）。
+   */
+  function identityDiagnostics() {
+    var fingerprint = currentHostFingerprint()
+    var fingerprintShort = validHostFingerprint(fingerprint) ? formatFingerprint(fingerprint).slice(0, 9) + '…' : ''
+    var records = hostsRead()
+    var rows = []
+    for (var i = 0; i < records.length; i++) {
+      var slots = Array.isArray(records[i].slots) ? records[i].slots : []
+      var urls = []
+      for (var j = 0; j < slots.length; j++) {
+        var url = slots[j] !== null && typeof slots[j] === 'object' ? slots[j].url : slots[j]
+        if (typeof url === 'string' && url.length > 0) urls.push(url)
+      }
+      rows.push({
+        fingerprint: String(records[i].fingerprint),
+        fingerprintShort: formatFingerprint(String(records[i].fingerprint)).slice(0, 9) + '…',
+        label: hostRecordLabel(records[i]),
+        slots: urls,
+        active: validHostFingerprint(fingerprint) && records[i].fingerprint === fingerprint,
+      })
+    }
+    var cleared = null
+    try {
+      var raw = localStorage.getItem(IDENTITY_CLEARED_KEY)
+      if (typeof raw === 'string' && raw.length > 0) cleared = parseJsonOrUndefined(raw)
+    } catch (error) {
+      void error
+    }
+    var clearedText = ''
+    if (cleared !== null && cleared !== undefined && typeof cleared === 'object') {
+      var clearedKeys = Array.isArray(cleared.cleared) ? cleared.cleared : []
+      var skipped = typeof cleared.skipped === 'string' ? cleared.skipped : ''
+      clearedText =
+        String(cleared.at === undefined ? '' : cleared.at).slice(0, 19).replace('T', ' ') +
+        '｜' + String(cleared.code === undefined ? '' : cleared.code) +
+        '｜清掉 ' + clearedKeys.length + ' 个键' +
+        (skipped.length > 0 ? '｜★ 跳过了清理：' + skipped : '')
+    }
+    var vault = vaultRead()
+    return {
+      fingerprint: validHostFingerprint(fingerprint) ? fingerprint : null,
+      fingerprintShort: fingerprintShort,
+      why: identityResolutionWhy(),
+      restore: lastRestoreReadout,
+      restoreOk: lastRestoreOk,
+      hosts: rows,
+      cleared: cleared === undefined ? null : cleared,
+      clearedText: clearedText,
+      vaultKeys: vault === null ? [] : Object.keys(vault).sort(),
+    }
+  }
+
+  /**
+   * ★★ R5：把上面那几样**画进「端侧诊断」** ✓ —— 渲染代码只有这一份 ✓
+   * （`fillConnSettings` 调它 ✓，验收/排障那条直通口也调它 ✓，不各写一份 ✗）。
+   *
+   * 为什么画在这里 ✗：手机上唯一能"念出来"的地方就是这一页 ✓（没有控制台 ✓）。
+   * 画法沿用本页既有行 ✓（`settingsRow` ✓ —— 不新造样式 ✗）。
+   */
+  function appendIdentityDiagnosticsRows(group) {
+    var readout = identityDiagnostics()
+    group.appendChild(
+      settingsRow(
+        '当前源是哪台电脑',
+        readout.fingerprintShort === '' ? '定不出来 ✗（这个地址不在宿主目录里）' : readout.fingerprintShort,
+        readout.fingerprintShort === '' ? 'warn' : 'ok',
+      ),
+    )
+    group.appendChild(settingsRow('身份恢复', readout.restore, readout.restoreOk ? 'ok' : 'warn'))
+    if (readout.fingerprintShort === '') {
+      group.appendChild(settingsRow('为什么认不出', readout.why, 'warn'))
+    }
+    group.appendChild(
+      settingsRow(
+        '宿主目录',
+        readout.hosts.length === 0 ? '（一台都没登记 ✗）' : '共 ' + readout.hosts.length + ' 台',
+        readout.hosts.length === 0 ? 'warn' : 'ok',
+      ),
+    )
+    for (var i = 0; i < readout.hosts.length; i++) {
+      var record = readout.hosts[i]
+      group.appendChild(
+        settingsRow(
+          (record.active ? '· 当前 · ' : '· ') + record.label + '｜' + record.fingerprintShort,
+          record.slots.length === 0 ? '（这个宿主一条地址都没记 ✗）' : record.slots.join('、'),
+        ),
+      )
+    }
+    group.appendChild(
+      settingsRow(
+        '壳的身份库',
+        readout.vaultKeys.length === 0 ? '（空 / 没有壳）' : readout.vaultKeys.length + ' 个键：' + readout.vaultKeys.join('、'),
+      ),
+    )
+    group.appendChild(
+      settingsRow(
+        '上次的身份清理',
+        readout.clearedText === '' ? '（没有记录 ✓）' : readout.clearedText,
+        readout.clearedText === '' ? 'ok' : 'warn',
+      ),
+    )
+    return group
   }
 
   /**
@@ -14261,6 +14600,20 @@
       diagnostics.appendChild(settingsRow('键盘让位', readVar('--dshm-keyboard')))
     }
     /**
+     * ★★ R5：**身份这条线的读数** ✓ —— 与上面那几行同一个口径 ✓（纯排障读数 ⇒ `?debug=1` 才画 ✓）。
+     *
+     * 「调试模式」那颗开关就在本组下方、**始终可见** ✓ ⇒ 用户按提示打开它再回来看这一屏即可 ✓
+     * （不需要新入口 ✓）。
+     *
+     * 画的是 `appendIdentityDiagnosticsRows` ✓ —— 渲染只有那一份 ✓，本处只负责"挂到哪一组" ✓。
+     *
+     * 为什么非有它不可 ✗（本轮用户报的"连好 tail 以后校园网要重新配对"✓）：
+     * 这条链此前在手机上**完全不可见** ✗ —— 恢复被跳过没有日志 ✓、
+     * `dsh-mobile.identityCleared` 写了没人读 ✓、目录里到底记着哪些地址更是无处可看 ✓。
+     * 有了这一屏，"这个地址认不认得出这台电脑"变成一句能念的话 ✓。
+     */
+    if (DEBUG_BOX_ON) appendIdentityDiagnosticsRows(diagnostics)
+    /**
      * ★★ round 151：**「调试模式」开关** ✓（用户："另外你再加一个切换 debug 和正常模式的功能吧"✓）。
      *
      * ## 为什么放在**这一组**、而且是**始终可见**的 ✗
@@ -18901,6 +19254,20 @@
           return { rows: hostsPanelRows(), group: buildHostsGroup() }
         },
         /**
+         * ★★ R5：「身份这条线」的**读数 + 真实渲染产物** ✓（与 `hostsPanel` 同一个写法 ✓）。
+         *
+         * `data` 是纯数据 ✓（`identityDiagnostics` ✓）；`group` 是**生产行渲染函数**
+         * （`appendIdentityDiagnosticsRows` ✓）造出来的那一组 ✓ —— 断言因此能打在
+         * "端侧诊断那一页真的画了什么"上 ✓，而不是打在"某个字符串存在"上 ✓。
+         * ★ 与生产页面进的是**同一个**函数 ✓（`fillConnSettings` 里那一行也调它 ✓），
+         *   **没有测试专用的渲染** ✗。
+         */
+        identityDiagnostics: function () {
+          var group = settingsGroup('端侧诊断')
+          appendIdentityDiagnosticsRows(group)
+          return { data: identityDiagnostics(), group: group }
+        },
+        /**
          * ★★ 「会话与智能体」那一组的**行模型 + 真实渲染产物** ✓（与 「hostsPanel」 同一个写法 ✓）。
          *
          * 「getTunnel」 由调用方给 ✓ —— 验收里塞一个假隧道 ✓；生产调用点是 「fillConnSettings」
@@ -19212,11 +19579,30 @@
 
     // 配对成功后票据只在首次连接使用，随后清除，避免长期留在 URL 与配置里
     if (fromUrl !== undefined) {
-      storeHost({
+      var pairedConfig = {
         baseUrl: config.baseUrl,
         tunnelUrl: config.tunnelUrl,
         pinnedHostFingerprint: config.pinnedHostFingerprint,
-      })
+      }
+      /**
+       * ★★ R1b：票据给的候选地址**必须一起落盘** ✗（R1a 的另一半 ✓）。
+       *
+       * 为什么要它 ✗：落盘只写三个字段的话 ✓，`endpoints` 就**永久丢了** ✗ ——
+       * 而 `hostSlotsForConfig` 的四个来源里只有它是"这台电脑的**全部**地址" ✓
+       * （学校 / Tailscale 两条都在里头 ✓，本机实测票据就是
+       * `http://…:3081` + `https://100.123.136.82:3443` + `https://10.34.255.229:3443` ✓）。
+       * 丢了它 ⇒ 目录只剩"当前这一个源" ✗ ⇒ 换源之后 `currentHostFingerprint()` 定不出指纹 ✗
+       * ⇒ 一个身份键都不恢复 ⇒ 用户看到"要重新配对" ✗（见 `mergeHostSlots` 的长注释 ✓）。
+       *
+       * ★ 只多留这一个字段 ✗：`pairingTicket` / `pairingCode` 照旧**不落盘** ✓
+       *   （票据是一次性的 ✓，留着只会让下一次连接走"待确认"分支 ✗）。
+       * ★ 落盘之后它**跨得过**下面那次"一次性重载"（丢掉 `?pair=` ✓）：
+       *   重载读的是这份配置 ✓ ⇒ `endpoints` 还在 ✓（`readStoredHost` 不删它 ✓）。
+       */
+      if (Array.isArray(config.endpoints) && config.endpoints.length > 0) {
+        pairedConfig.endpoints = config.endpoints.slice()
+      }
+      storeHost(pairedConfig)
       try {
         history.replaceState(null, '', location.pathname)
       } catch (error) {
@@ -19540,7 +19926,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930060959'
+    var BOOT_STAMP = 'BUILD-0930064259'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
