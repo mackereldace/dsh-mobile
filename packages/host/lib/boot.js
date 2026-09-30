@@ -9073,22 +9073,35 @@
       '@media (max-width: 1023px) {',
       /**
        * ★★ 底部状态栏三段各自弹的那个 DSH 面板里，**只有「上下文」那个矮一截、低一截** ✗
-       *   （用户原话："那三个控件点开以后的页面只有上下文的沉下去了"✓）。
-       *   真机自然值是"内容少 16px、位置低 21px、宽度窄 36px、横向还偏右 56px"✗
-       *   —— 它的锚点是输入框里那颗**被我们隐身的环** ✓，DSH 给的是**一次性算好的内联坐标** ✓
-       *   （不是 CSS anchor positioning ✗ ⇒ 搬锚点没用 ✓，实测纹丝不动 ✓）。
-       *   ⇒ 只能从面板自己身上纠：补高、同宽、`top: auto` 关掉内联 top、`bottom` 抄
-       *     另外两个面板的**计算值** `53.8333px`（不是"锚点到视口底"✗ —— 那会把它抬到上半屏 ✗）。
-       *   ★ 选择器**只认这一个组件的类** ✗ —— 用 `[class*="_panel"]` 会把 panelList/panelRow/… 全钉死 ✗
-       *     （真机上用户立刻反馈"全都变得特别高"✗）。构建哈希会随 DSH 改版变 ⇒ 退化为原样 ✓
-       *     （宁可失效、不可误伤 ✓）。
-       *   真机实测：三个面板都 `h158 w300`、底边同为 `b816`、上下文 `l32` ✓。
+       *   （用户原话："那三个控件点开以后的页面只有上下文的沉下去了"✓；
+       *     2026-09-30 又报一次："上下文空间点击后又靠下了"✗ —— 就是这条在 0.2.0 上失配了 ✓）。
+       *   它的位置是 DSH **一次性算好的内联坐标**（`style="left:…; top:…"` ✓、`bottom` 是 `auto` ✓）
+       *   ⇒ 只能从面板自己身上纠：补高、同宽、`top: auto` 关掉内联 top、再自己给一个 `bottom` ✓。
+       *
+       * ## ★★ 0.2.0 复测（2026-09-30）：三条路都探过，只能用**我们自己的标记** ✓
+       *   · 老选择器 `.JObwrW_panel` 是**构建哈希** ✗ ⇒ 0.2.0 里叫 `y0jqnG_panel` ⇒ 静默失效 ✓
+       *     （实测：把老规则原样注进真 0.2.0 ⇒ 面板几何**一个字没变** ✓ —— 用户报的就是这一件 ✓）；
+       *   · 现成的语义特征**分不开这三块** ✗：三块都是 `role="dialog"` ✓、都没有 `data-*` ✓、
+       *     都是**直挂 body 的 portal**（祖先链只有 body ✓）⇒ 认 role / 结构会把另外两块一起改 ✗
+       *     （正是当年"全都变得特别高"的事故 ✓）；`[class*="_panel"]` 全页命中 **7** 个 ✗、
+       *     `[class$="_panel"]` 命中 **2** 个 ✗（还捎上另一个 `…_panel`）⇒ 都不够窄 ✗。
+       *   · ⇒ 改成**我们自己打标记** ✓：点开上下文面板之前挂一个 MutationObserver ✓，
+       *     用**前后差集**认出"这一下点出来的那块 dialog" ⇒ 标成 `data-dshm-context-panel` ✓
+       *     （与哈希 / 语言 / 结构都无关 ✓；面板**点开一次建一次** ⇒ 每次都得重新标 ✓）。
+       *
+       * ## `bottom` 也**不再写死**真机常数 ✗（它会随设备几何变 ✓）
+       *   同一个观测回调里量一下**它自己的自然底边**（那一刻我们的规则还没生效 ✓ —— 判据就是这个标记 ✓），
+       *   写进 `--dshm-context-panel-bottom` ✓ ⇒ 另外两块面板在哪，它就在哪 ✓（安全区 / 键盘 / 机型都无关 ✓）。
+       *   ★ 实测：无头 390×844 里另外两块的自然底边距视口底是 **34px** ✓，而真机（带 20px 手势条）是
+       *     **53.8333px** ✓ —— 写死常数在那台机器上对、换个几何就错 19.8px ✗。
+       *   ★ 量不到（JS 没跑到 / 观察者没抓到）⇒ **回落到 `53.8333px`** ✓ = 上一版的行为 ✓（不会更差 ✓）。
+       *   真机实测（写死常数那版）：三个面板都 `h158 w300`、底边同为 `b816`、上下文 `l32` ✓。
        */
-      '  .JObwrW_panel {',
+      '  [data-dshm-context-panel] {',
       '    min-height: 158px !important;',
       '    width: min(300px, 100vw - 24px) !important;',
       '    top: auto !important;',
-      '    bottom: 53.8333px !important;',
+      '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '    left: 32px !important;',
       '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
@@ -13050,6 +13063,48 @@
   }
 
   /**
+   * ★★ 给**上下文面板**打标记 + 量出它自己的**自然底边**（2026-09-30，round 190）。
+   *
+   * 为什么要标记 ✗：那块面板在 0.2.0 里**没有任何现成的特征**能把它与另外两块统计面板分开 ✓
+   * （三块都是 `role="dialog"`、都没有 `data-*`、都是直挂 body 的 portal ✓ —— 实测见 CSS 那段注释 ✓），
+   * 唯一现成的区分是 `aria-label` 的**文案**（中文本地化 ⇒ 切英文就失效 ✗）或**构建哈希**（换版就失效 ✗）。
+   * ⇒ 用"**这一下点出来的是哪块**"来认 ✓：点之前记一份 dialog 快照 ✓，
+   *   点之后拿差集 ⇒ 那块就是上下文面板 ✓（与哈希、语言、结构都无关 ✓）。
+   *
+   * 为什么要量底边 ✗：我们的规则用 `top: auto` 关掉了 DSH 的内联 top ⇒ 必须自己给 `bottom` ✓，
+   * 而"正确的那条底边"**随设备几何变** ✗（无头 390×844 = 34px、带 20px 手势条的真机 = 53.8333px ✓）。
+   * ⇒ 在这一刻（**我们的规则还没生效**，判据正是这个标记 ✓）量它的自然底边 ⇒ 写进 CSS 变量 ✓
+   *   ⇒ 另外两块面板在哪，它就在哪 ✓。
+   * ★ 观察者只活 3 秒就断开 ✓（点击没开出面板时不留长期观察者 ✓，本项目对"常驻观察者"一向谨慎 ✓）。
+   */
+  function anchorContextPanel() {
+    if (typeof MutationObserver !== 'function' || document.body === null) return
+    var before = new Set(document.querySelectorAll('[role="dialog"]'))
+    var timer = setTimeout(function () {
+      observer.disconnect()
+      debugBoxLine('[stats] ✗ 上下文面板没能在 3 秒内认出来（底边回落到 53.8333px）')
+    }, 3000)
+    var observer = new MutationObserver(function () {
+      var fresh = []
+      var now = document.querySelectorAll('[role="dialog"]')
+      for (var i = 0; i < now.length; i++) if (!before.has(now[i])) fresh.push(now[i])
+      if (fresh.length === 0) return
+      var panel = fresh[fresh.length - 1]
+      clearTimeout(timer)
+      observer.disconnect()
+      var box = panel.getBoundingClientRect()
+      var bottom = window.innerHeight - box.bottom
+      if (bottom >= 0 && bottom <= window.innerHeight) {
+        panel.style.setProperty('--dshm-context-panel-bottom', Math.round(bottom * 100) / 100 + 'px')
+      } else {
+        debugBoxLine('[stats] ✗ 上下文面板的底边量不到（' + String(Math.round(bottom)) + 'px）⇒ 回落到 53.8333px')
+      }
+      panel.setAttribute('data-dshm-context-panel', '1')
+    })
+    observer.observe(document.body, { childList: true })
+  }
+
+  /**
    * 把点击转发给 DSH 自己那颗控件。
    *
    * 这样"点开看详情"用的是**宿主原生的面板**（真数据、真交互、位置也由宿主算），
@@ -13062,7 +13117,11 @@
   function forwardStatsToggle(which) {
     if (which === 'context') {
       var meter = contextMeterButton()
-      if (meter !== null) meter.click()
+      if (meter !== null) {
+        // ★ 先挂观察者再点 ✓（顺序反了就抓不到那块面板 ✓）
+        anchorContextPanel()
+        meter.click()
+      }
       return
     }
     var root = document.querySelector('[data-composer-stats]')
@@ -18966,7 +19025,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930090125'
+    var BOOT_STAMP = 'BUILD-0930092505'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
