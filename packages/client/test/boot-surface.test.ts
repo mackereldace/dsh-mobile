@@ -56,10 +56,71 @@ interface Surface {
   boot: {
     apk: {
       deviceCallLog: () => DeviceCallLogEntry[]
+      /**
+       * ★ 本轮追加：「会话与智能体」那一组 ✓（**生产渲染函数** `buildAgentsGroup` ✓ ——
+       *   与 `hostsPanel` 同一个写法 ✓：断言打在"面板真的画了什么"上 ✓，不打在复制品上 ✓）。
+       *   `group` 会**自己**在数据落地后原地重画 ✓ ⇒ 断言可以打在同一棵元素上 ✓。
+       */
+      agentsPanel: (getTunnel?: () => unknown) => { model: Record<string, unknown>; group: FakeElement }
+      /** ★ 本轮追加：这一组的口径读数 ✓（超时 / 重试上限 / 缓存 / 行数上限 ✓）。 */
+      agentsConfig: () => {
+        timeoutMs: number
+        listRetry: number
+        cacheMs: number
+        maxRows: number
+        clickTries: number
+        clickStepMs: number
+      }
     }
   }
-  /** ★ round 185 追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
+  /** ★ 本轮追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
   storage: Map<string, string>
+}
+
+/**
+ * ★★ 本轮追加：一个**最小可用的假 DOM 节点** ✓（只有新的那几条用例会造它 ✓）。
+ *
+ * 为什么要它 ✗：既有夹具的 `setAttribute` / `addEventListener` 都是**空函数** ✓（原来够用 ✓），
+ * 而本轮要断言的恰恰是"**每一条都带得走的判据**"✓（`data-dshm-session` 之类 ✓）与
+ * "**点击之后到底点了哪个 DOM 节点**"✓ ⇒ 这两件事都要求属性与监听器**真的存下来** ✓。
+ * ★ 只加能力、不动既有语义 ✗：不传新参数时，既有用例走的路与原来**逐字一致** ✓。
+ */
+interface FakeElement {
+  tagName: string
+  id: string
+  style: Record<string, unknown>
+  dataset: Record<string, string>
+  className: string
+  attrs: Record<string, string>
+  children: FakeElement[]
+  parentNode: FakeElement | null
+  textContent: string
+  disabled?: boolean
+  clicks: number
+  listeners: Record<string, Array<(event?: unknown) => void>>
+  isConnected?: boolean
+  setAttribute: (name: string, value: unknown) => void
+  getAttribute: (name: string) => string | null
+  removeAttribute: (name: string) => void
+  addEventListener: (type: string, run: (event?: unknown) => void) => void
+  removeEventListener: () => void
+  remove: () => void
+  querySelector: (selector: string) => FakeElement | null
+  querySelectorAll: (selector: string) => FakeElement[]
+  appendChild: (child: FakeElement) => FakeElement
+  insertBefore: (child: FakeElement) => FakeElement
+  replaceChildren: () => void
+  click: () => void
+  getBoundingClientRect: () => { top: number; left: number; right: number; bottom: number; width: number; height: number }
+  /**
+   * ★ 下面三样只有**假 DSH 节点**才需要 ✓（本文件既有的最小夹具不建它们 ✓）——
+   *   所以在这里声明成**可选** ✓，由 DshNode 收成**必填** ✓：
+   *   两个接口因此是**同一套假元素** ✓（DshNode 处处可当 FakeElement 用 ✓），
+   *   而 DshNode 自己的返回值又能收窄 ✓。
+   */
+  parentElement?: FakeElement | null
+  events?: string[]
+  dispatchEvent?: (event: { type?: string }) => boolean
 }
 
 /**
@@ -82,6 +143,14 @@ function bootOnSurface(options: {
   storageThrowsForLog?: boolean
   /** ★ 追加：沙箱里的定时器 unref ✓ —— 免得 drawBar 那个 15 秒清理定时器把测试进程挂住 ✓。 */
   unrefTimers?: boolean
+  /**
+   * ★ 本轮追加：一个**假 DSH DOM** ✓（`createDshDom` 造的 ✓ —— 见它自己的说明 ✓）。
+   *   不传 ⇒ `document.querySelector` 照旧恒 `null`、`querySelectorAll` 照旧恒 `[]` ✓
+   *   （既有用例一个字都不用改 ✓）。
+   */
+  dsh?: DshDom
+  /** ★ 本轮追加：`document.title` ✓（DSH 把当前会话标题写在它里面 ✓ —— 兜底判据要用 ✓，见 agentsIdByTitle ✓）。 */
+  title?: string
 }): Surface {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
@@ -97,13 +166,45 @@ function bootOnSurface(options: {
       className: '',
       children: [],
       textContent: '',
-      setAttribute: () => {},
-      removeAttribute: () => {},
-      addEventListener: () => {},
+      attrs: {},
+      clicks: 0,
+      listeners: {},
+      /**
+       * ★ 本轮追加：属性**真的存下来** ✓（原来这里是空函数 ✗）——
+       *   本轮要断言的"带得走的判据"就是 `data-dshm-*` 属性 ✓。
+       *   `data-x-y` 同时同步进 `dataset` ✓（与真 DOM 一致 ✓）。
+       */
+      setAttribute: (name: string, value: unknown) => {
+        const text = String(value)
+        ;(element['attrs'] as Record<string, string>)[name] = text
+        if (name.indexOf('data-') === 0) {
+          const key = name
+            .slice('data-'.length)
+            .replace(/-([a-z0-9])/g, (_match: string, letter: string) => letter.toUpperCase())
+          ;(element['dataset'] as Record<string, string>)[key] = text
+        }
+      },
+      getAttribute: (name: string) => (element['attrs'] as Record<string, string>)[name] ?? null,
+      removeAttribute: (name: string) => {
+        delete (element['attrs'] as Record<string, string>)[name]
+      },
+      /**
+       * ★ 本轮追加：监听器**真的存下来** ✓（原来也是空函数 ✗）——
+       *   新用例靠 `fireClick` 真的把那条路上点一遍 ✓（不是断言"函数存在"✗）。
+       */
+      addEventListener: (type: string, run: (event?: unknown) => void) => {
+        const table = element['listeners'] as Record<string, Array<(event?: unknown) => void>>
+        if (table[type] === undefined) table[type] = []
+        table[type].push(run)
+      },
       removeEventListener: () => {},
       remove: () => {},
       querySelector: () => null,
       querySelectorAll: () => [],
+      replaceChildren: () => {
+        // ★ 本轮追加：清空子节点 ✓（生产代码用它"原地重画这一组"✓ —— 真 DOM 本来就有它 ✓）
+        ;(element['children'] as unknown[]).length = 0
+      },
       getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
       appendChild(child: Record<string, unknown>) {
         ;(element['children'] as unknown[]).push(child)
@@ -139,12 +240,18 @@ function bootOnSurface(options: {
 
   const documentStub = {
     readyState: options.readyState ?? 'complete',
+    title: options.title ?? '',
     body,
     head: makeElement('head'),
     documentElement: makeElement('html'),
     getElementById: (id: string) => registry.get(id) ?? null,
-    querySelector: () => null,
-    querySelectorAll: () => [],
+    /**
+     * ★ 本轮追加：给了假 DSH DOM 就由它回答 ✓（不传 ⇒ 与原来逐字一致：恒 `null` / 恒 `[]` ✓）。
+     *   本轮要验的是"**到底点了哪个节点**"✓ ⇒ DSH 那一侧必须能被查询到 ✓。
+     */
+    querySelector: (selector: string) => (options.dsh === undefined ? null : options.dsh.querySelector(selector)),
+    querySelectorAll: (selector: string) =>
+      options.dsh === undefined ? [] : options.dsh.querySelectorAll(selector),
     createElement: (tag: string) => makeElement(tag),
     createTextNode: (text: string) => ({ textContent: text }),
     addEventListener: () => {},
@@ -235,6 +342,21 @@ function bootOnSurface(options: {
     addEventListener: () => {},
     removeEventListener: () => {},
     performance: globalThis.performance,
+    /**
+     * ★ 本轮追加：`MouseEvent` ✓ —— 生产代码"打开 DSH 那颗子智能体树"时**必须**合成一次
+     * `mouseover`（0.1.5 计数形态的 `onClick` 是 undefined ✗，只有悬停能开树 ✓ ——
+     * 见 29 号文档 §一 #21 ✓）。原来沙箱里没有它 ⇒ 那一句会抛 ReferenceError
+     * （被 catch 住、只写一行调试框 ✓）⇒ **测不到"到底有没有合成"** ✗。
+     * 这里给一个最小实现 ✓：只记 type 与 init ✓（够断言"发了、发的是 mouseover"✓）。
+     */
+    MouseEvent: class {
+      type: string
+      detail: Record<string, unknown>
+      constructor(type: string, init?: Record<string, unknown>) {
+        this.type = type
+        this.detail = init ?? {}
+      }
+    },
   }
   sandbox['globalThis'] = sandbox
   sandbox['window'] = sandbox
@@ -1225,4 +1347,778 @@ test('★ 结构性：反重放位图只有一个出生地，而且就在"建连
     //     却还留着旧连接 ⇒ 旧连接的帧照样落进新位图"）。
     assert.ok(!body.includes('new ReplayWindow'), name + '里不许建位图（没有连接就没有会话位图）')
   }
+})
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ★★ 本轮：「设备 / 智能体面板」增量 1 —— **当前这台电脑的会话 + 当前会话的子智能体** ✓
+ *
+ * 需求出处：27-项目简介.md §接下来 第 4 条 / 26-交付总览-20260930.md §9 第 4 条 /
+ *   23-项目交付总览.md §196 / 21-后续目标与路线图.md §4C（"把 DSH 的多会话、子代理在手机上可视化"）。
+ * 接口依据：29-多智能体切换页-接口调研.md（`session/list` ✓ / 0.1.5 `subagents/list` ✓ /
+ *   0.2.0 `session/projections` → `values.subagentCatalog` ✓ / 切过去只能点 DOM ✓）。
+ *
+ * ## 下面的夹具为什么必须存在（不是"为了测试方便"✗）
+ * 这一轮要验的两件事**只有真 DOM 才说得清** ✓：
+ *   ① **每一条都带得走的判据** ✓（`data-dshm-session` / `data-dshm-subagent` 属性 ✓）；
+ *   ② **点击之后到底点了哪个节点** ✓（判据是"那一行被点过"✓，不是"某个函数被调用"✗）。
+ * 既有的假 DOM 把 `setAttribute` / `addEventListener` 都写成空函数 ✗ ⇒ 这两件事都测不到 ✓。
+ * 所以下面这一层只补**真 DOM 本来就有的能力** ✓（属性存储 ✓、监听器派发 ✓、`replaceChildren` ✓），
+ * 并且**只在传 `dsh` 时才介入** ✓ —— 既有用例走的路一个字都没变 ✓。
+ */
+
+/** 一个假 DSH 节点 ✓（比夹具多记两样：点过几次 ✓、收过哪些合成事件 ✓）。 */
+interface DshNode extends FakeElement {
+  clicks: number
+  /** ★ 收到过的**合成事件类型** ✓（`mouseover` ✓ —— 断言"悬停有没有真的发出去"就靠它 ✓）。 */
+  events: string[]
+  dispatchEvent: (event: { type?: string }) => boolean
+  children: DshNode[]
+  parentNode: DshNode | null
+  /** ★ 真 DOM 里 `parentElement` 与 `parentNode` 在"父节点是元素"时是同一个 ✓ ——
+   *  生产代码读的正是它（与既有 `lineageForwardPointer` 同一个写法 ✓）⇒ 假节点必须也有 ✓。 */
+  parentElement: DshNode | null
+  /** ★ 返回值收窄回 DshNode ✓（父接口给的是 FakeElement ✓ —— 收窄是允许的 ✓）。 */
+  querySelector: (selector: string) => DshNode | null
+  querySelectorAll: (selector: string) => DshNode[]
+}
+
+/** 假 DSH DOM 的对外形状 ✓（生产代码只用到这几个选择器 ✓）。 */
+interface DshDom {
+  querySelector: (selector: string) => DshNode | null
+  querySelectorAll: (selector: string) => DshNode[]
+  /** 按会话 id 取侧栏那一行 ✓（0.1.5 / 0.2.0 都给 ✓ —— 断言"点的是哪一行"✓）。 */
+  row: (id: string) => DshNode
+  /** 树菜单里那一行 ✓（按 label 认 ✓）。 */
+  treeRow: (label: string) => DshNode
+  /** 那颗「N 个子智能体」入口 ✓（没渲染就是 null ✓）。 */
+  trigger: () => DshNode | null
+  /** 树菜单现在开着没有 ✓（点完那一行它必须关掉 ✓ —— 生产代码就是这么验的 ✓）。 */
+  treeOpen: () => boolean
+}
+
+/** 只支持生产代码真正会用到的那几种选择器 ✓（`tag` / `.class` / `[attr]` / `[attr="value"]` ✓）。 */
+function matchesSelector(node: DshNode, selector: string): boolean {
+  const tokens = selector.match(/[a-zA-Z][\w-]*|\[[^\]]+\]|\.[\w-]+/g) ?? []
+  if (tokens.length === 0) return false
+  for (const token of tokens) {
+    if (token.startsWith('[')) {
+      const body = token.slice(1, -1)
+      const equal = body.indexOf('=')
+      if (equal < 0) {
+        if (node.getAttribute(body) === null) return false
+        continue
+      }
+      const name = body.slice(0, equal)
+      const wanted = body.slice(equal + 1).replace(/^"|"$/g, '')
+      if (String(node.getAttribute(name)) !== wanted) return false
+      continue
+    }
+    if (token.startsWith('.')) {
+      if (String(node.className).split(/\s+/).indexOf(token.slice(1)) < 0) return false
+      continue
+    }
+    if (String(node.tagName).toLowerCase() !== token.toLowerCase()) return false
+  }
+  return true
+}
+
+function dshDescendants(node: DshNode): DshNode[] {
+  const out: DshNode[] = []
+  for (const child of node.children) {
+    out.push(child)
+    for (const deeper of dshDescendants(child)) out.push(deeper)
+  }
+  return out
+}
+
+/**
+ * 造一个**假 DSH 页面** ✓ —— 只造本轮那几条路要用的东西 ✓：
+ *   · 侧栏会话行（`[role="treeitem"]` + `aria-selected` ✓；0.2.0 多 `data-row-key` ✓ / 0.1.5 **没有** ✗）；
+ *   · 那颗「N 个子智能体」入口（`[aria-haspopup="tree"]` ✓）；
+ *   · 树菜单（`[role="tree"]` + `[role="treeitem"]` ✓）—— **只有"开了"才挂在树上** ✓
+ *     （真 DSH 是 `createPortal` + 关闭即卸载 ✓ —— 29 §一 #19 ✓；这样"菜单关没关"才验得出来 ✓）。
+ */
+function createDshDom(spec: {
+  sessions: Array<{ id: string; title: string; selected?: boolean; running?: boolean }>
+  /** true = 0.2.0（行上有 `data-row-key` ✓）；false = 0.1.5（一个 `data-*` 都没有 ✗）。 */
+  rowKey: boolean
+  /**
+   * ★ 侧栏行"点了没反应"✓（真机上是 React 把节点换掉、或点空了 ✓ —— 29 §三 方案 A 的风险点 ✓）。
+   * 用它来钉"**点了之后必须验**"✓：点了但 `aria-selected` 没变 ⇒ 面板**必须**说没切过去 ✗。
+   */
+  inert?: boolean
+  /**
+   * ★ 额外造几颗**带 `data-row-key` 的别的行** ✓（0.2.0 的工作区行就是 `workspace:<key>` ✓ ——
+   *   29 §一 #24 ✓）。用来造"这一版能从 DOM 上认出来、但**侧栏会话行一条都没渲染**"那个现场 ✓。
+   */
+  extraRowKeys?: string[]
+  tree?: {
+    trigger?: boolean
+    rows?: Array<{ label: string; aria?: string }>
+    /** ★ 开树靠哪条路 ✗✗：0.1.5 的计数形态 `onClick` 是 undefined ⇒ **只有悬停能开** ✓（29 §一 #21）。 */
+    opensOn?: 'hover' | 'click' | 'both'
+  }
+}): DshDom {
+  const makeNode = (tag: string): DshNode => {
+    // ★ 必须**显式标成 DshNode** ✗：不标的话 TS 从字面量推出来的 children 是 never[]、
+    //   dataset/attrs/listeners 是 {} ✓ ⇒ 夹具自己的每一处索引都会报 TS7053 ✓（语义一点没变 ✓）。
+    const node: DshNode = {
+      tagName: tag,
+      id: '',
+      style: {},
+      dataset: {},
+      className: '',
+      attrs: {},
+      children: [],
+      parentNode: null,
+      textContent: '',
+      clicks: 0,
+      events: [],
+      listeners: {},
+      isConnected: true,
+      // ★ 与 parentNode 始终同源 ✓（真 DOM 在"父节点是元素"时也是同一个 ✓）
+      get parentElement(): DshNode | null {
+        return node.parentNode
+      },
+      setAttribute(name: string, value: unknown) {
+        const text = String(value)
+        node.attrs[name] = text
+        if (name.indexOf('data-') === 0) {
+          node.dataset[
+            name
+              .slice('data-'.length)
+              .replace(/-([a-z0-9])/g, (_match: string, letter: string) => letter.toUpperCase())
+          ] = text
+        }
+      },
+      getAttribute(name: string) {
+        return node.attrs[name] ?? null
+      },
+      removeAttribute(name: string) {
+        delete node.attrs[name]
+      },
+      addEventListener(type: string, run: (event?: unknown) => void) {
+        if (node.listeners[type] === undefined) node.listeners[type] = []
+        node.listeners[type].push(run)
+      },
+      removeEventListener() {},
+      remove() {
+        node.isConnected = false
+        if (node.parentNode !== null) {
+          node.parentNode.children = node.parentNode.children.filter((child: DshNode) => child !== node)
+          node.parentNode = null
+        }
+      },
+      appendChild(child: FakeElement) {
+        // ★ 参数类型跟随父接口（FakeElement ✓ —— 收窄参数会让 DshNode 不再能当 FakeElement 用 ✗），
+        //   里面按假 DSH 节点用 ✓：本夹具造出来的子节点本来就是它 ✓。
+        const target = child as DshNode
+        target.parentNode = node
+        target.isConnected = true
+        node.children.push(target)
+        return target
+      },
+      insertBefore(child: FakeElement) {
+        return node.appendChild(child)
+      },
+      replaceChildren() {
+        for (const child of node.children) {
+          child.parentNode = null
+          child.isConnected = false
+        }
+        node.children.length = 0
+      },
+      querySelector(selector: string) {
+        return node.querySelectorAll(selector)[0] ?? null
+      },
+      querySelectorAll(selector: string) {
+        return dshDescendants(node).filter((candidate) => matchesSelector(candidate, selector))
+      },
+      click() {
+        node.clicks++
+        for (const run of node.listeners['click'] ?? []) run()
+      },
+      dispatchEvent(event: { type?: string }) {
+        const type = String(event?.type ?? '')
+        node.events.push(type)
+        let cursor: DshNode | null = node
+        while (cursor !== null) {
+          for (const run of cursor.listeners[type] ?? []) run(event)
+          cursor = cursor.parentNode
+        }
+        return true
+      },
+      getBoundingClientRect() {
+        return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }
+      },
+    }
+    return node
+  }
+
+  const root = makeNode('body')
+  const rows = new Map<string, DshNode>()
+  for (const session of spec.sessions) {
+    const row = makeNode('div')
+    row.className = 'treeRow'
+    row.setAttribute('role', 'treeitem')
+    row.setAttribute('aria-selected', session.selected === true ? 'true' : 'false')
+    if (spec.rowKey) row.setAttribute('data-row-key', 'session:' + session.id)
+    row.textContent = session.title
+    row.addEventListener('click', () => {
+      // ★ 点了没反应那一路 ✓（`inert`）：什么都不做 ⇒ 生产代码**必须**验出来并说出来 ✗
+      if (spec.inert === true) return
+      // ★ 真 DSH 的行为：点一行 ⇒ 它变成"当前"✓（这正是生产代码用来**验收**的那条判据 ✓）
+      for (const other of rows.values()) other.setAttribute('aria-selected', 'false')
+      row.setAttribute('aria-selected', 'true')
+    })
+    rows.set(session.id, row)
+    root.appendChild(row)
+  }
+
+  for (const key of spec.extraRowKeys ?? []) {
+    const extra = makeNode('div')
+    extra.setAttribute('data-row-key', key)
+    extra.textContent = key
+    root.appendChild(extra)
+  }
+
+  const trigger = makeNode('button')
+  const treeRows = new Map<string, DshNode>()
+  const tree = makeNode('div')
+  tree.setAttribute('role', 'tree')
+  let open = false
+  const dropTree = () => {
+    open = false
+    tree.isConnected = false
+    for (const row of treeRows.values()) row.isConnected = false
+    root.children = root.children.filter((child) => child !== tree)
+    tree.parentNode = null
+  }
+  const openTree = () => {
+    if (open) return
+    open = true
+    root.appendChild(tree)
+  }
+  if (spec.tree !== undefined && spec.tree.trigger !== false) {
+    trigger.setAttribute('aria-haspopup', 'tree')
+    trigger.setAttribute('aria-expanded', 'false')
+    const opensOn = spec.tree.opensOn ?? 'both'
+    const triggerRoot = makeNode('div')
+    triggerRoot.appendChild(trigger)
+    // ★ 悬停那条路（0.1.5 唯一能开树的路 ✓）：挂点就在触发键的**根节点**上 ✓（29 §一 #21 ✓）
+    triggerRoot.addEventListener('mouseover', () => {
+      if (opensOn === 'hover' || opensOn === 'both') openTree()
+    })
+    trigger.addEventListener('click', () => {
+      if (opensOn === 'click' || opensOn === 'both') openTree()
+    })
+    root.appendChild(triggerRoot)
+    for (const entry of spec.tree.rows ?? []) {
+      const row = makeNode('div')
+      row.setAttribute('role', 'treeitem')
+      row.setAttribute('aria-label', entry.aria ?? entry.label)
+      row.textContent = entry.aria ?? entry.label
+      row.addEventListener('click', () => {
+        // ★ 真 DSH 的行为：点一行 = 切过去 + **关菜单** ✓（29 §二·3(d) ✓）——
+        //   生产代码就是靠"菜单关了没有"验这一下的 ✓。
+        dropTree()
+      })
+      treeRows.set(entry.label, row)
+      tree.appendChild(row)
+    }
+  }
+
+  return {
+    querySelector: (selector: string) => root.querySelector(selector),
+    querySelectorAll: (selector: string) => root.querySelectorAll(selector),
+    row: (id: string) => {
+      const found = rows.get(id)
+      if (found === undefined) throw new Error('假 DSH 里没有这条会话行：' + id)
+      return found
+    },
+    treeRow: (label: string) => {
+      const found = treeRows.get(label)
+      if (found === undefined) throw new Error('假 DSH 的树里没有这一行：' + label)
+      return found
+    },
+    trigger: () =>
+      spec.tree !== undefined && spec.tree.trigger !== false && root.querySelector('[aria-haspopup="tree"]') !== null
+        ? trigger
+        : null,
+    treeOpen: () => open,
+  }
+}
+
+/**
+ * 一个假隧道 ✓ —— 形状与真宿主逐字段一致 ✓（`packages/host/src/tunnel.ts` 那个 `server-response` 信封 ✓）：
+ *   · 成功 ⇒ `{type, rpcId, result:{ok:true, value}}` ✓；
+ *   · 失败 ⇒ `{type, rpcId, result:{ok:false, error:{code, message}}}` ✓；
+ *   · **没写处理器的端点** ⇒ 回"端点不在了"那个码 ✓ —— 与真网关对
+ *     `subagents/list`（0.2.0 已删 ✓）的答复**同一个** ✓ ⇒ 那一处分叉就是在这里被验的 ✓。
+ */
+interface FakeTunnel {
+  rpc: (endpoint: string, payload: unknown, rpcId?: string) => Promise<unknown>
+  calls: Array<{ endpoint: string; args: Record<string, unknown> }>
+  count: (endpoint: string) => number
+}
+
+function fakeTunnel(handlers: Record<string, (args: Record<string, unknown>) => unknown>): FakeTunnel {
+  const calls: FakeTunnel['calls'] = []
+  return {
+    calls,
+    count: (endpoint: string) => calls.filter((call) => call.endpoint === endpoint).length,
+    async rpc(endpoint: string, payload: unknown, rpcId?: string) {
+      const envelope = payload as { args?: Record<string, unknown> } | undefined
+      const args = envelope?.args ?? {}
+      calls.push({ endpoint, args })
+      const handler = handlers[endpoint]
+      if (handler === undefined) {
+        return {
+          type: 'server-response',
+          rpcId,
+          result: {
+            ok: false,
+            error: { code: 'gateway/invocation-unavailable', message: 'no active Remote method exports this endpoint' },
+          },
+        }
+      }
+      try {
+        const value = await handler(args)
+        return { type: 'server-response', rpcId, result: { ok: true, value } }
+      } catch (error) {
+        const failure = error as { code?: string; message?: string }
+        return {
+          type: 'server-response',
+          rpcId,
+          result: { ok: false, error: { code: failure?.code ?? 'stub/failed', message: String(failure?.message ?? error) } },
+        }
+      }
+    },
+  }
+}
+
+/**
+ * 把假隧道记下的调用**搬回本 realm** ✓ —— vm 里造的 `args` 对象原型与这边不同 ✓，
+ * 直接 `deepStrictEqual` 会因原型不同而**假红** ✗（`readLog` 那条注释记过同一个坑 ✓）。
+ */
+function callsOf(tunnel: FakeTunnel): Array<{ endpoint: string; args: Record<string, unknown> }> {
+  return JSON.parse(JSON.stringify(tunnel.calls)) as Array<{ endpoint: string; args: Record<string, unknown> }>
+}
+
+/** 等异步落地 ✓（面板自己的重画是微任务 + 定时器 ✓）。 */
+async function agentsSettle(ms = 60): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 深度收集 ✓（假 DOM 没有 `querySelector` 的通用实现 ⇒ 测试自己走一遍 ✓）。 */
+function collect(node: FakeElement, hit: (node: FakeElement) => boolean): FakeElement[] {
+  const out: FakeElement[] = []
+  const walk = (current: FakeElement): void => {
+    if (hit(current)) out.push(current)
+    for (const child of current.children ?? []) walk(child)
+  }
+  walk(node)
+  return out
+}
+
+/** 按某个 `data-dshm-*` 属性找那一行 ✓（没找到就抛 ✓ —— 免得断言悄悄变成"反正没有"✗）。 */
+function findByAttr(group: FakeElement, name: string, value: string): FakeElement {
+  const found = collect(group, (node) => node.attrs[name] === value)
+  assert.ok(found.length > 0, `面板里应当有一行 ${name}="${value}"`)
+  return found[0] as FakeElement
+}
+
+/** 一棵子树的全部可见文字 ✓（假 DOM 的 textContent 是直接写的 ✓ —— 与真 DOM 的"拼接"等价于我们要看的那几行 ✓）。 */
+function textOf(node: FakeElement): string {
+  return collect(node, () => true)
+    .map((child) => String(child.textContent ?? ''))
+    .join('｜')
+}
+
+/** 真点一下某个节点 ✓（走上生产代码注册的那条路 ✓，不是直接调函数 ✗）。 */
+function fireClick(node: FakeElement): void {
+  for (const run of node.listeners['click'] ?? []) run()
+}
+
+/** 会话列表答复的**最小真实形状** ✓（`projections.values.title` ✓ —— 29 §二·1(b) 坑 1 ✓）。 */
+function sessionItem(spec: {
+  id: string
+  title: string
+  running?: boolean
+  updatedAt?: number
+  parentSessionId?: string
+  subagent?: boolean
+}): Record<string, unknown> {
+  const item: Record<string, unknown> = {
+    sessionId: spec.id,
+    running: spec.running === true,
+    blank: false,
+    updatedAt: spec.updatedAt ?? 0,
+    projections: { asOfSeq: 1, values: { title: spec.title } },
+  }
+  if (spec.parentSessionId !== undefined) item['parentSessionId'] = spec.parentSessionId
+  if (spec.subagent === true) item['origin'] = 'subagent'
+  return item
+}
+
+test('★★ 会话与智能体（0.2.0）：列出这台电脑的会话与当前会话的子智能体，点一条真的点了 DSH 那一行', async () => {
+  const dsh = createDshDom({
+    rowKey: true,
+    sessions: [
+      { id: 's1', title: '修侧栏标题', selected: true, running: true },
+      { id: 's2', title: '另一个会话', running: true },
+      { id: 's3', title: '早就停了的会话' },
+    ],
+    // 0.2.0：点一下就能钉住开树 ✓（合成悬停照样能开 ✓ —— 两条路都验得到 ✓）
+    tree: { rows: [{ label: 'build-lib 子代理', aria: 'build-lib 子代理 可继续 正在运行' }], opensOn: 'both' },
+  })
+  const tunnel = fakeTunnel({
+    'session/list': () => ({
+      items: [
+        sessionItem({ id: 's1', title: '修侧栏标题', running: true, updatedAt: 300 }),
+        sessionItem({ id: 's2', title: '另一个会话', running: true, updatedAt: 200 }),
+        sessionItem({ id: 's3', title: '早就停了的会话', updatedAt: 100 }),
+        // ★ 子智能体会话**自己也在**这份列表里 ✓（29 §二·1(b) 坑 3）—— 它**不该**出现在会话那一组 ✗
+        sessionItem({ id: 'a1', title: 'build-lib 子代理', running: true, parentSessionId: 's1', subagent: true }),
+      ],
+    }),
+    // 0.2.0：目录走 projections ✓（29 §一 #12 ✓ —— 目录在 values.subagentCatalog ✓）
+    'session/projections': () => ({
+      asOfSeq: 7,
+      values: { subagentCatalog: [{ id: 'a1', createdAt: 1, mode: 'continuable', label: 'build-lib 子代理' }] },
+    }),
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  await agentsSettle()
+
+  // ① 会话：在跑的在前 ✓、都带得走的判据 ✓、子智能体会话**不列**在这里 ✓
+  const order = collect(group, (node) => node.attrs['data-dshm-session'] !== undefined).map(
+    (node) => node.attrs['data-dshm-session'],
+  )
+  assert.deepEqual(order, ['s1', 's2', 's3'], `会话应当"在跑的在前、其次最近"：${JSON.stringify(order)}`)
+  assert.equal(findByAttr(group, 'data-dshm-session', 's1').attrs['data-dshm-session-current'], '1', '当前那一条要标出来 ✓')
+  assert.equal(findByAttr(group, 'data-dshm-session', 's2').attrs['data-dshm-session-running'], '1')
+  assert.equal(findByAttr(group, 'data-dshm-session', 's3').attrs['data-dshm-session-running'], '0')
+  assert.ok(textOf(group).includes('另一个会话'), '行上要看得见名字 ✓：' + textOf(group))
+  assert.ok(textOf(group).includes('正在跑 2 个'), '要写清有几个在跑 ✓：' + textOf(group))
+  assert.ok(textOf(group).includes('当前电脑'), '这一组要落在"当前这台电脑"下面 ✓：' + textOf(group))
+
+  // ② 参数：`_request` 必须**显式给空对象** ✓（省略会被网关判 missing ✗ —— 见 boot.js 那段注释 ✓）
+  assert.deepEqual(callsOf(tunnel)[0], { endpoint: 'session/list', args: { _request: {} } })
+  assert.deepEqual(callsOf(tunnel)[1], { endpoint: 'session/projections', args: { request: { sessionId: 's1' } } })
+  // ③ 0.2.0 **一次都不该**去打那个已经被删掉的端点 ✓（DOM 上就认出是哪一版了 ✓）
+  assert.equal(tunnel.count('subagents/list'), 0, '0.2.0 上那个端点已经没了 ⇒ 不该去试 ✗')
+
+  // ④ 子智能体：状态来自会话列表那一行的 running ✓（0.2.0 的目录**没有** activity ✗ —— 29 §一 #9）
+  const subagent = findByAttr(group, 'data-dshm-subagent', 'a1')
+  assert.equal(subagent.attrs['data-dshm-subagent-running'], '1')
+  assert.equal(subagent.attrs['data-dshm-subagent-source'], 'catalog')
+  assert.ok(textOf(subagent).includes('build-lib 子代理'))
+
+  // ⑤ 点会话 ⇒ 判据是"**DSH 那一行被点过**"✓（不是"某个函数被调用"✗）
+  fireClick(findByAttr(group, 'data-dshm-session', 's2'))
+  await agentsSettle()
+  assert.equal(dsh.row('s2').clicks, 1, '必须点了 DSH 自己那条会话行 ✓')
+  assert.equal(dsh.row('s2').getAttribute('aria-selected'), 'true', 'DSH 那边真的换过去了 ✓')
+  assert.equal(dsh.row('s1').clicks, 0, '不许顺手把当前那条也点了 ✗')
+
+  // ⑥ 点子智能体 ⇒ 先开 DSH 那颗树（合成悬停 + 点入口 ✓）⇒ 再点树里那一行 ✓
+  fireClick(findByAttr(group, 'data-dshm-subagent', 'a1'))
+  await agentsSettle()
+  assert.equal(dsh.trigger()?.clicks, 1, '必须点过那颗「子智能体」入口 ✓')
+  assert.ok(
+    (dsh.trigger()?.parentNode?.events ?? []).includes('mouseover'),
+    '还必须合成过 mouseover（0.1.5 只有这条路能开树 ✓ —— 29 §一 #21）',
+  )
+  assert.equal(dsh.treeRow('build-lib 子代理').clicks, 1, '必须点了树里那一行 ✓')
+  assert.equal(dsh.treeOpen(), false, '点完那一行菜单应当关了（DSH 的 closeCatalog ✓）')
+
+  // ⑦ 成功路径**不许**在屏幕上留"没切过去"✗
+  assert.equal(textOf(group).includes('没切过去'), false, '成功了就不许写失败提示 ✗：' + textOf(group))
+})
+
+test('★★ 会话与智能体（0.1.5）：目录走 subagents/list，侧栏行没有 id ⇒ 按文案认', async () => {
+  const dsh = createDshDom({
+    // ★ 0.1.5：侧栏行上**一个 data-* 都没有** ✗（29 §一 #24：那一版 grep data-row-key = 0）
+    rowKey: false,
+    sessions: [
+      { id: 's1', title: '甲会话', selected: true, running: true },
+      { id: 's2', title: '乙会话', running: true },
+    ],
+    // ★ 0.1.5 的计数形态**点不开**树 ✗（onClick 是 undefined ✓）⇒ 只有合成悬停能开 ✓（29 §一 #21）
+    tree: { rows: [{ label: '窗口探针', aria: '窗口探针 一次性 正在运行' }], opensOn: 'hover' },
+  })
+  const tunnel = fakeTunnel({
+    'session/list': () => ({
+      items: [
+        sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 }),
+        sessionItem({ id: 's2', title: '乙会话', running: true, updatedAt: 100 }),
+        sessionItem({ id: 'b1', title: '窗口探针', running: true, parentSessionId: 's1', subagent: true }),
+      ],
+    }),
+    // 0.1.5 的目录端点 ✓（29 §一 #10：条目**自带** activity ✓）
+    'subagents/list': () => ({
+      parentAvailable: true,
+      entries: [{ kind: 'child', id: 'b1', activity: 'running', hasChildren: false, mode: 'one-shot', label: '窗口探针' }],
+    }),
+    // ★ 刻意**不装** session/projections ✓ —— 这一版要是跑去调它，下面那条断言就会红 ✓
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  await agentsSettle()
+
+  // ① 当前会话 id 是**按标题反推**的 ✓（行上没有 id ✗）⇒ 目录请求的 parentSessionId 必须对 ✓
+  assert.equal(tunnel.count('subagents/list'), 1)
+  assert.deepEqual(callsOf(tunnel)[1], { endpoint: 'subagents/list', args: { parentSessionId: 's1' } })
+  assert.equal(tunnel.count('session/projections'), 0, '0.1.5 不该去碰 0.2.0 的那个端点 ✗')
+  // ② 状态**直接来自服务端的 activity** ✓（这一版独有的字段 ✓ —— 29 §一 #10）
+  const subagent = findByAttr(group, 'data-dshm-subagent', 'b1')
+  assert.equal(subagent.attrs['data-dshm-subagent-running'], '1')
+  assert.equal(subagent.attrs['data-dshm-subagent-source'], 'catalog')
+  // ③ 点会话 ⇒ 按**可见文案**认那一行 ✓（这一版没有 data-row-key ✗）
+  fireClick(findByAttr(group, 'data-dshm-session', 's2'))
+  await agentsSettle()
+  assert.equal(dsh.row('s2').clicks, 1, '按文案也要认对那一行 ✓')
+  assert.equal(dsh.row('s1').clicks, 0)
+  // ④ 点子智能体 ⇒ **只有合成悬停能开树** ✓（夹具的 click 在这一版故意打不开 ✗ —— 这条就在钉它 ✓）
+  fireClick(findByAttr(group, 'data-dshm-subagent', 'b1'))
+  await agentsSettle()
+  assert.ok(
+    (dsh.trigger()?.parentNode?.events ?? []).includes('mouseover'),
+    '0.1.5 上必须合成悬停（click() 打不开那棵树 ✗）',
+  )
+  assert.equal(dsh.treeRow('窗口探针').clicks, 1)
+  assert.equal(textOf(group).includes('没切过去'), false, '成功了就不许写失败提示 ✗：' + textOf(group))
+})
+
+test('★ 会话与智能体：读不到数据时面板照常显示（只少那一组）+ 调试框一行 —— 不许静默 ✗', async () => {
+  const dsh = createDshDom({ rowKey: false, sessions: [{ id: 's1', title: '甲会话', selected: true }] })
+  const tunnel = fakeTunnel({
+    'session/list': () => {
+      throw Object.assign(new Error('电脑没回话'), { code: 'stub/down' })
+    },
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  // ★ 同步就该有一棵能看的树 ✓（请求还在飞 ✓ —— 面板**不被网络卡住** ✓）
+  assert.ok(textOf(group).includes('当前电脑'), '还没读到数据时也要有这一组 ✓：' + textOf(group))
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  await agentsSettle(200)
+  assert.ok(textOf(group).includes('读取失败'), '失败要写在屏幕上 ✓：' + textOf(group))
+  assert.match(surface.boxText(), /\[会话\] 读取失败/, '调试框也要有一行 ✓')
+  // ★ 重试上限 = 1（合计 2 次）✓ —— 失败不许变成无限重试 ✗
+  assert.equal(tunnel.count('session/list'), 2, '重试上限就是 1 次（合计 2 次）✗')
+})
+
+test('★ 会话与智能体：请求带超时，且**超时不再重试**（手机上没网时不许把面板挂住 ✗）', async () => {
+  const dsh = createDshDom({ rowKey: true, sessions: [{ id: 's1', title: '甲会话', selected: true }] })
+  const tunnel = fakeTunnel({
+    // 永不回话 = "手机上没网" ✓
+    'session/list': () => new Promise(() => {}),
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const config = surface.boot.apk.agentsConfig()
+  assert.ok(config.timeoutMs > 0 && config.timeoutMs <= 10000, '单次请求必须**有**上限 ✓：' + config.timeoutMs)
+  assert.equal(config.listRetry, 1, '重试上限就写在生产代码里 ✓')
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  assert.ok(textOf(group).includes('正在读'), '面板要**立刻**能看 ✓（不等网络 ✓）：' + textOf(group))
+  await agentsSettle(config.timeoutMs + 400)
+  assert.match(surface.boxText(), /\[会话\] 读取失败：请求超时/, '超时要说出来 ✓（手机上没有控制台 ✓）')
+  assert.equal(tunnel.count('session/list'), 1, '超时**不重试**（再试只是把等待翻倍 ✗）')
+  assert.ok(textOf(group).includes('读取失败'), '屏幕上也要有 ✓：' + textOf(group))
+})
+
+test('★ 会话与智能体：认不出那一行时明确写「没切过去」（屏幕上 + 调试框各一处）', async () => {
+  const dsh = createDshDom({ rowKey: true, sessions: [{ id: 's1', title: '甲会话', selected: true, running: true }] })
+  const tunnel = fakeTunnel({
+    // 列表里有 s2 ✓，而页面上的侧栏里**没有**它 ✗ —— 真机上"换了会话/抽屉没渲染"就是这个样子 ✓
+    'session/list': () => ({
+      items: [
+        sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 }),
+        sessionItem({ id: 's2', title: '乙会话', running: true, updatedAt: 100 }),
+      ],
+    }),
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  await agentsSettle()
+  fireClick(findByAttr(group, 'data-dshm-session', 's2'))
+  await agentsSettle(surface.boot.apk.agentsConfig().clickTries * surface.boot.apk.agentsConfig().clickStepMs + 200)
+  assert.ok(textOf(group).includes('没切过去'), '屏幕上必须明说没切过去 ✓：' + textOf(group))
+  assert.match(surface.boxText(), /\[会话\] 切到「乙会话」：没切过去/, '调试框也要有一行 ✓')
+  assert.equal(dsh.row('s1').clicks, 0, '认不出目标时不许乱点别的行 ✗')
+})
+
+test('★ 会话与智能体：**点了但 DSH 没换过去**时也要明说（判据是那一行真的被选中了）', async () => {
+  const dsh = createDshDom({
+    rowKey: true,
+    // ★ 点了没反应 ✓（真机：React 把节点换掉 / 点空了 ⇒ 29 §三 方案 A 点名的那个风险 ✓）
+    inert: true,
+    sessions: [
+      { id: 's1', title: '甲会话', selected: true, running: true },
+      { id: 's2', title: '乙会话', running: true },
+    ],
+  })
+  const tunnel = fakeTunnel({
+    'session/list': () => ({
+      items: [
+        sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 }),
+        sessionItem({ id: 's2', title: '乙会话', running: true, updatedAt: 100 }),
+      ],
+    }),
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const config = surface.boot.apk.agentsConfig()
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  await agentsSettle()
+  fireClick(findByAttr(group, 'data-dshm-session', 's2'))
+  await agentsSettle(config.clickTries * config.clickStepMs + 200)
+  // ★ 确实点了（不是"没点却说没切过去"✓）—— 判据是**节点被点过** ✓
+  assert.equal(dsh.row('s2').clicks, 1, '该点的还是要点 ✓')
+  assert.equal(dsh.row('s2').getAttribute('aria-selected'), 'false', '假 DSH 故意没换 ✓')
+  // ★ 点了没换成 ⇒ **必须**说出来 ✗（"点了就当成功"是这一轮点名要消灭的那种假成功 ✓）
+  assert.ok(textOf(group).includes('没切过去'), '屏幕上必须明说没切过去 ✓：' + textOf(group))
+  assert.ok(textOf(group).includes('DSH 没有换过去'), '还要说清是"点了没换"这一种 ✓：' + textOf(group))
+  assert.match(surface.boxText(), /\[会话\] 切到「乙会话」：没切过去/, '调试框也要有一行 ✓')
+})
+
+test('★ 会话与智能体：目录端点拿不到时退回会话列表的父子关系（少的是状态，不是一整组）', async () => {
+  const dsh = createDshDom({ rowKey: true, sessions: [{ id: 's1', title: '甲会话', selected: true, running: true }] })
+  const tunnel = fakeTunnel({
+    'session/list': () => ({
+      items: [
+        sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 }),
+        // ★ 子智能体会话**本来就在**这份列表里 ✓（29 §二·1(b) 坑 3）—— 降级路就靠它 ✓
+        sessionItem({ id: 'c1', title: '降级也要看得见', running: true, parentSessionId: 's1', subagent: true }),
+      ],
+    }),
+    // ★ 目录那一个端点**两个版本都不给** ✓（没装的端点 ⇒ 网关回"端点不在了"✓）
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const group = surface.boot.apk.agentsPanel(() => tunnel).group
+  await agentsSettle()
+  const subagent = findByAttr(group, 'data-dshm-subagent', 'c1')
+  assert.equal(subagent.attrs['data-dshm-subagent-source'], 'sessions', '要说清这一条是降级来的 ✓')
+  assert.equal(subagent.attrs['data-dshm-subagent-running'], '1', '状态退回用会话列表那一行 ✓')
+  assert.ok(textOf(group).includes('降级也要看得见'), '降级也要看得见这条子智能体 ✓：' + textOf(group))
+  assert.ok(textOf(group).includes('目录端点拿不到'), '降级这件事要写在屏幕上 ✓：' + textOf(group))
+  assert.match(surface.boxText(), /\[会话\] 子智能体目录拿不到/, '调试框也要有一行 ✓')
+})
+
+test('★ 会话与智能体：命中缓存就不重复请求（刷新要克制），点「刷新」才再取一次', async () => {
+  const dsh = createDshDom({ rowKey: true, sessions: [{ id: 's1', title: '甲会话', selected: true, running: true }] })
+  const tunnel = fakeTunnel({
+    'session/list': () => ({ items: [sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 })] }),
+    'session/projections': () => ({ asOfSeq: 1, values: { subagentCatalog: [] } }),
+  })
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh })
+  const api = surface.boot.apk
+  const first = api.agentsPanel(() => tunnel).group
+  await agentsSettle()
+  assert.equal(tunnel.count('session/list'), 1)
+  // 用户又点进这一页 ⇒ 面板**被重建** ✓ —— 缓存还在 ⇒ 一次请求都不许再发 ✗
+  const second = api.agentsPanel(() => tunnel).group
+  await agentsSettle()
+  assert.equal(tunnel.count('session/list'), 1, '缓存内不许再请求 ✗（刷新时机要克制）')
+  assert.ok(textOf(second).includes('甲会话'), '缓存里的数据要照画 ✓：' + textOf(second))
+  assert.ok(textOf(first).includes('甲会话'))
+  // 「刷新」= 强制再取一次 ✓
+  const refresh = collect(second, (node) => node.dataset['dshmAction'] === 'agents-refresh')
+  assert.equal(refresh.length, 1, '这一组要有**一颗**「刷新」（缓存没过期又想立刻更新时用 ✓）')
+  fireClick(refresh[0] as FakeElement)
+  await agentsSettle()
+  assert.equal(tunnel.count('session/list'), 2, '点了「刷新」才再取一次 ✓')
+  const config = api.agentsConfig()
+  assert.ok(config.cacheMs >= 5000, '缓存时长要**是**个数（生产值 ✓）：' + config.cacheMs)
+  assert.ok(config.maxRows >= 1 && config.maxRows <= 50, '列表上限要**是**个数（不静默截断 ✗）：' + config.maxRows)
+})
+
+test('★ 会话与智能体：侧栏收起（会话行根本没渲染）时用**文档标题**认当前会话 —— 子智能体那一组不许变空', async () => {
+  /**
+   * ★ 为什么这条最像真机 ✗✗：手机上面板常是**收起态** ✓，而 DSH 在收起态**不渲染侧栏列表** ✗
+   *   （见 dshToggleSidebar 自己的说明 ✓）⇒ "那条选中的行"根本不存在 ✓。
+   *   只认行的写法在真机上会**永远**认不出当前会话 ⇒ 子智能体那一组永远是空的 ✓ 而且不报错 ✗。
+   * 两版都验一遍 ✓（0.2.0 靠工作区行也带 data-row-key 认出版本 ✓；0.1.5 一个 data-* 都没有 ✓）。
+   */
+  const cases = [
+    {
+      name: '0.2.0',
+      extraRowKeys: ['workspace:root'],
+      endpoint: 'session/projections',
+      args: { request: { sessionId: 's1' } } as Record<string, unknown>,
+      other: 'subagents/list',
+    },
+    {
+      name: '0.1.5',
+      extraRowKeys: [] as string[],
+      endpoint: 'subagents/list',
+      args: { parentSessionId: 's1' } as Record<string, unknown>,
+      other: 'session/projections',
+    },
+  ]
+  for (const one of cases) {
+    const dsh = createDshDom({
+      rowKey: false,
+      // ★ 侧栏会话行**一条都没有** ✓（面板收起就是这个世界 ✓）
+      sessions: [],
+      extraRowKeys: one.extraRowKeys,
+      tree: { rows: [{ label: '标题认出来的子代理' }], opensOn: 'both' },
+    })
+    const tunnel = fakeTunnel({
+      'session/list': () => ({
+        items: [
+          sessionItem({ id: 's1', title: '甲会话', running: true, updatedAt: 200 }),
+          sessionItem({ id: 'c9', title: '标题认出来的子代理', running: true, parentSessionId: 's1', subagent: true }),
+        ],
+      }),
+      // 两个端点都装 ✓ —— 断言只看**这一版该走哪一个** ✓
+      'session/projections': () => ({
+        asOfSeq: 1,
+        values: { subagentCatalog: [{ id: 'c9', createdAt: 1, mode: 'continuable', label: '标题认出来的子代理' }] },
+      }),
+      'subagents/list': () => ({
+        parentAvailable: true,
+        entries: [{ kind: 'child', id: 'c9', activity: 'running', mode: 'continuable', label: '标题认出来的子代理' }],
+      }),
+    })
+    const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], dsh, title: '甲会话' })
+    const group = surface.boot.apk.agentsPanel(() => tunnel).group
+    await agentsSettle()
+    assert.deepEqual(
+      callsOf(tunnel)[1],
+      { endpoint: one.endpoint, args: one.args },
+      one.name + '：目录请求要按**文档标题**认出来的当前会话发 ✓',
+    )
+    assert.equal(tunnel.count(one.other), 0, one.name + '：不该去碰另一版的那个端点 ✗')
+    const subagent = findByAttr(group, 'data-dshm-subagent', 'c9')
+    assert.ok(textOf(subagent).includes('标题认出来的子代理'), one.name + '：这一组不许是空的 ✗：' + textOf(group))
+  }
+})
+
+test('★ 结构性：0.1.5 / 0.2.0 的分叉**只许有一处**（版本号字面量只能出现在 agentsFork 里）', () => {
+  const lines = bootSource.split('\n')
+  const start = lines.findIndex((line) => line.indexOf('  function agentsFork(') === 0)
+  assert.ok(start > 0, 'boot.js 里应当有 agentsFork（两版**唯一**的分叉点 ✓）')
+  let end = -1
+  for (let index = start + 1; index < lines.length; index++) {
+    // 函数级结束大括号 = 恰好两个空格 + "}" ✓（函数体里的都在 4 列以后 ✓）
+    if (lines[index] === '  }') {
+      end = index
+      break
+    }
+  }
+  assert.ok(end > start, 'agentsFork 的结束大括号应当能在第 2 列找到 ✓')
+  const inside = lines.slice(start, end + 1)
+  assert.ok(inside.some((line) => line.includes("'0.1.5'")), '0.1.5 那一版要在这一处 ✓')
+  assert.ok(inside.some((line) => line.includes("'0.2.0'")), '0.2.0 那一版要在这一处 ✓')
+  const offenders = lines
+    .map((line, index) => ({ line, index }))
+    .filter((item) => /'0\.(1\.5|2\.0)'/.test(item.line))
+    .filter((item) => item.index < start || item.index > end)
+    .map((item) => String(item.index + 1) + ': ' + item.line.trim())
+  // 怎么把它打红：把 agentsFork 里任何一处版本差异挪到别的函数里（例如在 agentsLoadCatalog 里
+  //   直接判 `plan.version === '0.1.5'`）⇒ 立刻红 ✓。
+  assert.deepEqual(offenders, [], '版本差异不许散到 agentsFork 之外 ✗')
 })
