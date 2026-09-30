@@ -2454,6 +2454,95 @@
    * ★ 这个函数**只写记录** ✗：不碰调用方的任何状态、不改时序、不改返回值 ✓ ——
    *   所以调用点可以插在既有语句之间而**行为零变化** ✓。
    */
+  /**
+   * ★★ 后台回来那一单（2026-09-30）：**流级日志** —— 让真机下一次能自己念出来。
+   *
+   * ## 为什么非要它（复现文档的原话）
+   * 真机上现在**分不开"流死了"与"根本没断"** ✗：那位复现者的流级探针
+   * （记录每条流的 open / fail / 重开 ✓）**只存在于无头夹具里** ✗，
+   * 手机上一条都看不到 ✓ ⇒ 用户再报一次，我们还是只能拿到"界面没更新"这一句 ✓。
+   *
+   * ## 照谁写 ✓
+   * 照现成的 `deviceCallLog`（用户手机上能念的落盘环形日志 ✓，就在上面 ✓）——
+   * 同一个落盘契约、同一套"读不出/写不进都不许炸"的纪律 ✓。
+   *
+   * ## 落盘契约（读的人按它写 ✓）
+   * · 键：`dsh-mobile.streamLog` ✓；值：JSON 数组 ✓、**新的在后** ✓；
+   * · 上限：最近 **40** 条 ✓（超了从**头上**砍 ✗ —— 一份日志不许无限长大 ✗）；
+   * · 每条 `{at, stream, event, reason, readyState}` 五个字段 ✓：
+   *     ① at —— `Date.now()` ✓（与宿主审计的时间戳能直接比 ✓）；
+   *     ② stream —— 流名 ✓（`session/follow` / `workspace/follow` / `job/list` /
+   *        `session/control` / `$events` … ✓，直接就是端点的名字 ✓）；
+   *     ③ event —— `open`（开了一条 ✓）/ `fail`（失败被结算 ✗）/ `close`（正常收尾 ✓）
+   *        / `heal`（自愈那一趟的判据与结论 ✓，见 `selfHealDecision` ✓）；
+   *     ④ reason —— 一句话 ✓（失败时含错误 `name` 与**是否带 carrier 标记** ✓）；
+   *     ⑤ readyState —— 那一瞬 `socket.readyState` ✓（`0` 连中 / `1` 开着 / `3` 已关 ✓）。
+   *
+   * ★ 读不出来 / 写不进去**都不许炸** ✗（整段 try/catch ✓）：
+   *   取证绝不许改变被取证对象的行为 ✗ —— 这条链上抛一次错就会把隧道带偏 ✓。
+   */
+  var STREAM_LOG_KEY = 'dsh-mobile.streamLog'
+  /** 环形上限 ✓：40 条 ≈ 覆盖"7 条流全断 + 各自重开 + 两轮自愈" ✓。 */
+  var STREAM_LOG_MAX = 40
+  var STREAM_LOG_TEXT_MAX = 200
+
+  /** 读回那份环形记录 ✓（**只有这一个读取实现** ✓：落盘与对外的读取入口都走它 ✓）。 */
+  function streamLogRead() {
+    try {
+      var raw = localStorage.getItem(STREAM_LOG_KEY)
+      if (raw === null || raw === undefined || raw === '') return []
+      var parsed = JSON.parse(raw)
+      return Object.prototype.toString.call(parsed) === '[object Array]' ? parsed : []
+    } catch (error) {
+      return []
+    }
+  }
+
+  /**
+   * 追加一条 ✓（新的在后 ✓、超上限从头上砍 ✓）。
+   * ★ 只写记录 ✗：不碰调用方任何状态、不改时序、不改返回值 ✓ ⇒ 调用点插在既有语句之间行为零变化 ✓。
+   */
+  function streamLogPush(stream, event, reason, readyState) {
+    try {
+      var entries = streamLogRead()
+      entries.push({
+        at: Date.now(),
+        stream: String(stream === undefined || stream === null || stream === '' ? '-' : stream).slice(0, 60),
+        event: String(event === undefined || event === null ? '' : event).slice(0, 16),
+        reason: String(reason === undefined || reason === null ? '' : reason).slice(0, STREAM_LOG_TEXT_MAX),
+        readyState: typeof readyState === 'number' ? readyState : -1,
+      })
+      if (entries.length > STREAM_LOG_MAX) entries = entries.slice(entries.length - STREAM_LOG_MAX)
+      localStorage.setItem(STREAM_LOG_KEY, JSON.stringify(entries))
+    } catch (error) {
+      void error
+    }
+  }
+
+  /** 那一瞬 socket 的 `readyState` ✓（没有 socket 记 -1 ✓，绝不抛 ✗）。 */
+  function streamLogReadyState(tunnel) {
+    try {
+      if (tunnel === undefined || tunnel === null || tunnel.socket === undefined || tunnel.socket === null) return -1
+      return typeof tunnel.socket.readyState === 'number' ? tunnel.socket.readyState : -1
+    } catch (error) {
+      return -1
+    }
+  }
+
+  /** 失败原因那句话 ✓（含 `name` 与**是否带 carrier 标记** ✓ —— 这正是这一单要看的那一位 ✓）。 */
+  function streamLogFailureText(error) {
+    try {
+      if (error === undefined || error === null) return '(空错误)'
+      var name = String(error.name === undefined ? 'Error' : error.name)
+      var message = String(error.message === undefined ? error : error.message).slice(0, 120)
+      var marker = error.dshRemoteStreamFailure
+      var carrier = marker !== undefined && marker !== null && marker.kind === 'carrier' ? 'carrier=1' : 'carrier=0'
+      return name + ': ' + message + ' · ' + carrier
+    } catch (thrown) {
+      return '(读错误信息时抛了：' + String(thrown && thrown.message ? thrown.message : thrown) + ')'
+    }
+  }
+
   function deviceCallLogPush(kind, id, phase, outcome, detail) {
     try {
       var entries = deviceCallLogRead()
@@ -4369,6 +4458,31 @@
         // 表现为"隧道连上了但侧栏永远是空的"（见 failPending 的说明）。
         var offline = new Error('dsh-mobile: 与电脑的连接已断开，正在自动重连')
         offline.code = 'mobile/link-closed'
+        /**
+         * ★★ 后台回来那一单（2026-09-30）：让"链路断开"这类失败**长成 DSH 认得的形状** ✓。
+         *
+         * ## 为什么（复现文档 `32-后台回来聊天不刷新` 的读数）
+         * 页面里把隧道 socket 关掉 ⇒ **7 条流一起失败** ✗，而**只有 2 条自己回来**
+         * （`$events` + 当前 `session/follow` ✓）；`workspace/follow` / `session/control` /
+         * `job/list` **三轮 0 次重开** ✗ —— 用户看到的"聊天记录不自动加载、切一下会话就好"
+         * 就是它 ✓。DSH 那边的重订阅**只认** `RemoteStreamCarrierError`
+         * （`dsh-api-gateway/lib/client.js`：`if (!(error instanceof RemoteStreamCarrierError))
+         * throw terminalStreamFailure(error)` ✓），而跨 bundle 的实例判断靠**一个标记** ✓：
+         * `normalizeConnectionStream` 读 `error.dshRemoteStreamFailure?.kind === 'carrier'`
+         * 就把它转成那个类 ✓。我们造的是**普通 `Error`** ✗ ⇒ 注定被判成"终态失败"✗ ⇒ 永不重开 ✓。
+         *
+         * ## 为什么加在**这里**、绝不加进 `failStreams()` ✗
+         * `failStreams` 同时被**解析类失败**调用 ✓（帧被拒 / 帧长不匹配 ✗）——
+         * 那类失败**重试也没用** ✗（重开一条流照样撞同一堵墙 ✓），
+         * 给它打上 carrier 标记就是把"该认输的"变成"无限重试"✗。
+         * 只有这里这一句是**链路级断开** ✓（socket 关了 ✓，重连之后流重开就有意义 ✓）。
+         *
+         * ## ★ 如实说明：**理论上对、效果未证实** ✗
+         * 复现那一份做过注入实验：**带标记与不带标记的读数一样**（60 秒内都没重开 ✗）。
+         * 所以这一条**不是**"修好了" ✓ —— 它是"把我们这半边的形状改对" ✓，
+         * 效果要等真机复现 + 下面那份流日志念出来才看得清 ✓。
+         */
+        offline.dshRemoteStreamFailure = { kind: 'carrier' }
         self.failStreams(offline)
         self.failPending(offline)
         if (!settled) {
@@ -4888,6 +5002,11 @@
     var cancelled = false
 
     var state = {
+      /**
+       * ★ 流级日志要能念出**流名** ✓ ⇒ 把它挂在 state 上 ✓
+       *   （`failStreams` 遍历的是 state ✓，那里拿不到 `endpoint` 这个闭包变量 ✗）。
+       */
+      __dshmEndpoint: String(endpoint),
       push: function (value) {
         queue.push(value)
         if (waiter !== undefined) {
@@ -4898,6 +5017,8 @@
       },
       finish: function () {
         done = true
+        // ★ 流级日志：远端正常收尾 ✓（只写记录 ✗）
+        streamLogPush(endpoint, 'close', 'id=' + String(streamId) + ' · finish', streamLogReadyState(self))
         if (waiter !== undefined) {
           var w = waiter
           waiter = undefined
@@ -4915,6 +5036,8 @@
       },
     }
     this.streams.set(streamId, state)
+    // ★ 流级日志：开了一条 ✓（只写记录 ✗，不改任何状态与时序 ✓）
+    streamLogPush(endpoint, 'open', 'id=' + String(streamId), streamLogReadyState(this))
 
     var iterable = {
       [Symbol.asyncIterator]: function () {
@@ -4996,7 +5119,19 @@
   }
 
   Tunnel.prototype.failStreams = function (error) {
-    this.streams.forEach(function (stream) {
+    var self = this
+    this.streams.forEach(function (stream, streamId) {
+      /**
+       * ★ 流级日志：**逐条**记 ✓ —— 复现文档要的正是"哪几条失败、哪几条重开、
+       *   哪几条一直没回来" ✓，所以流名与 id 都要落在这一条上 ✓。
+       *   ★ 只写记录 ✗：`stream.fail(error)` 的入参与顺序一个字节都没动 ✓。
+       */
+      streamLogPush(
+        stream === undefined || stream === null ? '(未知流)' : stream.__dshmEndpoint,
+        'fail',
+        'id=' + String(streamId) + ' · ' + streamLogFailureText(error),
+        streamLogReadyState(self),
+      )
       stream.fail(error)
     })
     this.streams.clear()
@@ -6676,236 +6811,43 @@
    *                    所以这里必须传**取值函数**而不是隧道对象本身）。
    */
   /**
-   * DSH 设计 token 的"桥"。
+   * ★★ round 193：**"DSH 设计 token 的桥"整段已经删掉** ✓（用户 2026-09-30："整个系统只在
+   *   深色下测过，浅色很多显示有问题"✗ 的**最高优先根因** ✓）。
    *
-   * ## 为什么必须有它（这是"两个抽屉颜色不一致"的真正根因）
+   * ## 它当年在干什么，为什么现在必须没有它 ✗
    *
-   * 我们所有面板都挂在 `document.body` 下（不在 DSH 的 React 根里），而
-   * `--dsw-alias-*` 这些 token 是**定义在 DSH 根元素上**的 ✗ ——
-   * 于是我们写的 `var(--dsw-alias-bg-base, #15171a)` 里那个"万不得已的兜底值"
-   * **一直在生效**：实测侧栏 `rgb(27,27,28)` vs 我们的面板 `rgb(21,21,23)` ✗。
-   * 兜底值成了实际值，肉眼只能看出"颜色不太一样"，说不清差在哪
-   * （用户的原话就是"风格不一致，颜色、控件细节"）—— 验收里的等式断言把它变成了数字 ✓。
+   * 它把 DSH 的 9 个 `--dsw-alias-*` token 加上一个"侧栏实测底色"
+   * **用行内样式钉在 `document.body` 上** ✓（`document.body.style.setProperty` ✓），
+   * 而它的取值又是"从 DSH 子树里读**计算值**"✗ —— 读回来的**正是它自己刚写上去的那个值** ✗✗。
+   * 于是切主题之后：`body` 上的行内深色值**盖住**了 DSH 自己的
+   * `body[data-ds-dark-theme]` / `body` 规则 ✓ ⇒ **永远读回旧主题的那一套** ✓。
    *
-   * ## 做法
+   * ## 实测读数（都是真页面量出来的 ✓，不是推断）
    *
-   * 从 DSH 子树里的任意元素读**解析后的值**（自定义属性会继承，所以在作用域内随便取 ✓），
-   * 写到 `document.body` 上 —— 我们的节点都在 body 下，于是全部继承到 ✓。
-   * 写在 body 上**不会影响 DSH 自己**：它在自己更深的根元素上重新定义了这些 token ✓。
+   * · 切到浅色后：`body` 的行内仍是 `--dsw-alias-bg-base: #151517`、
+   *   `--dsw-alias-label-primary: #f9fafb` ✓，`computed body backgroundColor = rgb(21,21,23)` ✓；
+   * · **设置弹窗（DSH 自己的界面）里 27/27 个文本节点对比度 < 3.0** ✗（最低 1.0 ✓）；
+   *   把那些行内值摘掉 ⇒ **0/27** ✓（那一步是我量出来的对照 ✓）；
+   * · "两半主题不一致"：`[class*="sidebarCol"]` 底色 `rgb(249,250,251)`（浅 ✓，
+   *   它来自桥**没抄**的 `--dsw-specific-sidebar-fill` ✓）vs `body` / `centerCol`
+   *   底色 `rgb(21,21,23)`（被钉死的深色 ✗）⇒ 侧栏文字 **1.0** ✗。
    *
-   * ## 三个必须守住的细节
+   * ## 为什么可以**直接删**（而不是"改挂 documentElement"✓）
    *
-   * 1. DSH 可能还没挂载（脚本先跑）→ 取不到来源时**重试**，不是一次就放弃 ✗；
-   * 2. 用户切浅色/深色主题时 DSH 只改自己的根元素，**不会通知我们** ✗ →
-   *    监听 `prefers-color-scheme` 与根元素属性变化，重新桥一次 ✓；
-   * 3. 取不到的 token 要**说出来**（调试框里报），不能让它们继续悄悄吃兜底值 ✗
-   *    —— 这正是这个 bug 藏了这么久的原因 ✓。
+   * 桥的前提是"token 定义在 DSH 很深的根元素上、`body` 下的节点继承不到"✗ ——
+   * 而 0.17 与 0.2.0 **都把 token 定义在 `body` 上** ✓
+   * （`dsh-client-ui-theme/lib/client.js`：浅色 `body{--dsw-alias-…}` ✓、
+   *  深色 `body[data-ds-dark-theme]{…}` ✓，两版逐字相同 ✓）⇒
+   * 我们的面板**本来就继承得到** ✓，桥从第一天起就是多余的 ✗（而且它自己就是 bug 源 ✗）。
+   *
+   * ★ 与它一起删掉的三条刷新路径（挂载竞态重试 / 主题切换观察 / 回到前台 ✓）也**一并删干净** ✗
+   *   —— 不留半截：`THEME_TOKENS` / `themeBridgeState` / `themeBridgeSignature` /
+   *   `themeSourceElement` / `describeElement` / `themeCandidateElements` /
+   *   `readThemeDefinitions` / `themeSurfaceColor` / `bridgeThemeTokens` / `startThemeBridge`
+   *   十个标识符**一个不剩** ✓（判据：全文件 grep 不到它们 ✓）。
+   * ★ 唯一的遗留物是 `--dshm-surface-sidebar` ✓ —— 它当年**只由桥写入** ✓，
+   *   所以同时改成 DSH 自己的 `--dsw-alias-bg-layer-1` ✓（见 `#dsh-mobile-sheet-panel` ✓）。
    */
-  var THEME_TOKENS = [
-    '--dsw-alias-bg-base',
-    '--dsw-alias-label-primary',
-    '--dsw-alias-label-secondary',
-    '--dsw-alias-label-tertiary',
-    '--dsw-alias-border-l1',
-    '--dsw-alias-border-l2',
-    '--dsw-alias-state-business-primary',
-    '--dsw-alias-state-warn-primary',
-  ]
-  /**
-   * 桥接状态。**必须能被读到**（诊断对象 + `?debug=1` 的调试框两条路都有）：
-   * 这个 bug 之所以藏了这么久，就是因为"没取到值"是完全静默的 ✗ ——
-   * 面板照旧吃兜底色，屏幕上只表现为"颜色有点不一样"，谁也说不清差在哪。
-   */
-  var themeBridgeState = { owner: '(未找到)', values: {}, updatedAt: 0, attempts: 0 }
-  var themeBridgeSignature = ''
-
-  /** DSH 界面里第一个可用的主题来源元素（三栏任意一栏都在作用域内 ✓）。 */
-  function themeSourceElement() {
-    var candidates = ['[class*="centerCol"]', '[class*="sidebarCol"]', '[class*="frame"]', '#root']
-    for (var i = 0; i < candidates.length; i++) {
-      var node = document.querySelector(candidates[i])
-      if (node !== null && node !== undefined) return node
-    }
-    return null
-  }
-
-  function describeElement(element) {
-    if (element === null || element === undefined) return '(空)'
-    var name = String(element.tagName || '').toLowerCase()
-    var id = element.id === '' || element.id === undefined ? '' : '#' + element.id
-    var parts = String(element.className || '').split(/\s+/)
-    var cls = ''
-    for (var i = 0; i < parts.length; i++) {
-      if (parts[i] !== '') {
-        cls = '.' + parts[i]
-        break
-      }
-    }
-    return name + id + cls
-  }
-
-  /**
-   * 候选层：**先祖先、后内层**。
-   *
-   * ★ 这里踩过一次：一开始直接从 `[class*="sidebarCol"]` 上读，取到空串，
-   *   于是桥接什么都没做、面板继续吃兜底色 ✗ —— token 定义在**别的层**上，
-   *   而自定义属性只向下继承，"这个元素在不在作用域里"和"它这层有没有值"是两件事 ✗。
-   */
-  function themeCandidateElements() {
-    var source = themeSourceElement()
-    if (source === null || source === undefined) return []
-    var list = []
-    var node = source
-    while (node !== null && node !== undefined) {
-      list.push(node)
-      node = node.parentElement
-    }
-    var inner = source.querySelectorAll('*')
-    var limit = Math.min(inner.length, 800)
-    for (var i = 0; i < limit; i++) list.push(inner[i])
-    return list
-  }
-
-  /**
-   * 找出"定义 token 最多"的那一层，并取回它定义的全部值。
-   *
-   * 为什么不是"每个 token 各找各的层"：那样会从不同层拼出一套**互相不属于对方**的颜色 ✗
-   * （例如底色取自主题 A、文字色取自主题 B，浅色主题下就会出现白字白底）。
-   * 所以以"一层为准" ✓，找不到的少数 token 就如实记为"DSH 未定义"。
-   */
-  function readThemeDefinitions() {
-    var candidates = themeCandidateElements()
-    if (candidates.length === 0) return null
-    var best = { owner: null, values: {}, count: 0 }
-    for (var i = 0; i < candidates.length; i++) {
-      var computed = globalThis.getComputedStyle(candidates[i])
-      var values = {}
-      var count = 0
-      for (var t = 0; t < THEME_TOKENS.length; t++) {
-        var name = THEME_TOKENS[t]
-        var value = String(computed.getPropertyValue(name) || '').trim()
-        if (value !== '') {
-          values[name] = value
-          count += 1
-        }
-      }
-      if (count > best.count) best = { owner: candidates[i], values: values, count: count }
-      if (best.count === THEME_TOKENS.length) break
-    }
-    return best.owner === null ? null : best
-  }
-
-  /**
-   * 量出侧栏**实际刷出来的**底色。
-   *
-   * 为什么不从 token 取：实测侧栏可见面是 `rgb(27,27,28)`，而它那层能读到的
-   * `--dsw-alias-bg-base` 是 `#151517` ✗ —— 那个颜色**不来自任何一个 bg token**
-   * （DSH 自己的样式表在更深处画了它）。用户要的是"看起来一致"，
-   * 那就量看起来的那个值 ✓，而不是继续猜 token 名（已经猜错两轮 ✗）。
-   */
-  function themeSurfaceColor() {
-    var column = document.querySelector('[class*="sidebarCol"]')
-    if (column === null || column === undefined) return ''
-    var node = column
-    for (var depth = 0; depth < 6 && node !== null && node !== undefined; depth++) {
-      var color = String(globalThis.getComputedStyle(node).backgroundColor || '').trim()
-      if (color !== '' && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') return color
-      node = node.firstElementChild
-    }
-    return ''
-  }
-
-  /**
-   * 把 DSH 的 token 值同步到 `document.body` 上（我们的节点都在它下面，于是全部继承到 ✓）。
-   *
-   * 写在 body 上**不会影响 DSH 自己** —— 它在自己更深的根元素上重新定义了这些 token ✓。
-   *
-   * @param reason - 触发原因，写进调试框（判断"是挂载时同步的，还是切主题时"）。
-   */
-  function bridgeThemeTokens(reason) {
-    if (document.body === null || document.body === undefined) return false
-    themeBridgeState.attempts += 1
-    var found = readThemeDefinitions()
-    if (found === null) return false
-    var absent = []
-    var pairs = []
-    for (var i = 0; i < THEME_TOKENS.length; i++) {
-      var name = THEME_TOKENS[i]
-      var value = found.values[name]
-      if (value === undefined) absent.push(name)
-      else pairs.push(name + '=' + value)
-    }
-    // 侧栏的实际底色也一起抄（它不是 token，只是"屏幕上那个颜色" ✓）
-    var surface = themeSurfaceColor()
-    if (surface !== '') pairs.push('--dshm-surface-sidebar=' + surface)
-    var signature = describeElement(found.owner) + '|' + pairs.join(';') + '|' + absent.join(',')
-    if (signature === themeBridgeSignature) return absent.length === 0
-    themeBridgeSignature = signature
-    for (var k = 0; k < pairs.length; k++) {
-      var split = pairs[k].indexOf('=')
-      var property = pairs[k].slice(0, split)
-      var setting = pairs[k].slice(split + 1)
-      if (document.body.style.getPropertyValue(property) !== setting) document.body.style.setProperty(property, setting)
-    }
-    themeBridgeState.owner = describeElement(found.owner)
-    themeBridgeState.values = found.values
-    themeBridgeState.surface = surface
-    themeBridgeState.updatedAt = Date.now()
-    debugBoxLine(
-      '[theme] token 桥（' + reason + '）：' + String(pairs.length) + '/' + String(THEME_TOKENS.length) +
-        ' 个，来源 ' + themeBridgeState.owner +
-        (absent.length === 0 ? ' ✓' : '；DSH 未定义：' + absent.join(' ')),
-    )
-    return absent.length === 0
-  }
-
-  /**
-   * 启动桥接并保持它跟着主题走。
-   *
-   * 三条刷新路径缺一不可（每条都对应一种"屏幕上颜色不对"的真实成因）：
-   *   1. **挂载竞态**：boot.js 可能比 DSH 挂载更早 → 前 20 次每 300ms 重试 ✓；
-   *   2. **主题切换**：DSH 只改自己的根元素，不会通知我们 ✗ → 盯 `prefers-color-scheme`
-   *      与根元素属性变化 ✓，并在前 20 秒每秒再看一眼（有些主题是注入 <style> 生效，
-   *      属性根本不变 ✗ —— 这条兜住它）✓；
-   *   3. **回到前台**：手机切回页面时 DSH 可能已重建过 DOM ✗ → `visibilitychange` 再同步 ✓。
-   */
-  function startThemeBridge() {
-    var attempts = 0
-    var tick = function () {
-      var done = bridgeThemeTokens('挂载' + String(attempts + 1))
-      attempts += 1
-      if (done || attempts >= 20) return
-      setTimeout(tick, 300)
-    }
-    tick()
-    var watch = 0
-    var watcher = setInterval(function () {
-      bridgeThemeTokens('前 20 秒巡检')
-      watch += 1
-      if (watch >= 20) clearInterval(watcher)
-    }, 1000)
-    try {
-      globalThis.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
-        bridgeThemeTokens('系统主题切换')
-      })
-    } catch (error) {
-      void error
-    }
-    try {
-      var observer = new MutationObserver(function () {
-        bridgeThemeTokens('DSH 根元素变化')
-      })
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
-      if (document.body !== null && document.body !== undefined) {
-        observer.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
-      }
-    } catch (error) {
-      void error
-    }
-    document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') bridgeThemeTokens('回到前台')
-    })
-  }
 
   /** 最近一笔滑动导航的判定（验收脚本读它，避免"只看结果、猜原因" ✓）。 */
   var swipeNavigationState = {
@@ -8072,9 +8014,6 @@
       setTimeout(logPwa, 600)
     }
 
-    // 先把 DSH 的 token 桥过来（面板/顶栏/状态栏的配色全靠它，晚了会先闪一帧兜底色 ✗）
-    startThemeBridge()
-
     var style = document.createElement('style')
     style.id = 'dsh-mobile-style'
     style.textContent = [
@@ -8202,7 +8141,13 @@
          这里原本是 `bg-elevated`（#1e2126），比侧栏的 `bg-base`（#15171a）**亮一档** ✗ ——
          两个抽屉一左一右、同一个应用，底色不同看起来就是"两块拼起来的东西"。
          统一之后，两者的区分只剩圆角与阴影（那才是我们希望被看见的层次）✓。 */
-      '  background: var(--dshm-surface-sidebar, var(--dsw-alias-bg-base, #15171a));',
+      /**
+       * ★★ round 193：这里原来是 `var(--dshm-surface-sidebar, var(--dsw-alias-bg-base, …))` ✗ ——
+       *   而 `--dshm-surface-sidebar` **只由那个 token 桥写入** ✓（它抄的是"侧栏**当时刷出来的**
+       *   那个颜色"✗，时序一错就跟着错 ✓）。桥删了 ⇒ 这个兜底链**整条作废** ✓，
+       *   直接用 DSH 自己的层级底色 ✓（浅 `#fff` / 深 `#232324` ✓，两套主题都自带 ✓）。
+       */
+      '  background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #15171a));',
       '  border-radius: 18px 0 0 18px;',
       '  padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px));',
       /**
@@ -19213,9 +19158,48 @@
           pending: TEMML_STATE.queue === undefined ? 0 : TEMML_STATE.queue.length,
         }
       },
-      /** 设计 token 桥的状态（验收脚本读它，而不是去猜我们吃的是哪个值 ✓）。 */
+      /**
+       * ★★ round 193：**token 桥已经删掉** ✓（见文件里那段"为什么删掉它"的记录 ✓）。
+       *
+       * 这个诊断口**故意留着** ✓ —— 但它现在报的东西**换了含义** ✓：
+       *   · `removed: true` + `reason`：如实说"桥没了" ✓（外部脚本一眼可辨 ✓）；
+       *   · `values` / `owner`：改成报**当下 `body` 上真正解析出来的**那几个 token ✓
+       *     —— 这正是我们面板实际吃到的那一套 ✓（桥在时它抄的也是这些值 ✓，
+       *     区别只在**不再写回 `body` 覆盖 DSH 自己** ✗✓）。
+       * ⇒ 验收里"panel 的文字颜色必须都在 DSH 的 token 之内"那几条照旧有数据可用 ✓，
+       *   而且量的是**真值**（不是桥自己写上去的那个回声 ✓）。
+       */
       theme: function () {
-        return themeBridgeState
+        var names = [
+          '--dsw-alias-bg-base', '--dsw-alias-label-primary', '--dsw-alias-label-secondary',
+          '--dsw-alias-label-tertiary', '--dsw-alias-border-l1', '--dsw-alias-border-l2',
+          '--dsw-alias-state-business-primary', '--dsw-alias-state-warn-primary',
+        ]
+        var values = {}
+        var owner = '(body)'
+        try {
+          var cs = globalThis.getComputedStyle(document.body)
+          for (var i = 0; i < names.length; i++) {
+            var value = String(cs.getPropertyValue(names[i]) || '').trim()
+            if (value !== '') values[names[i]] = value
+          }
+        } catch (error) {
+          void error
+        }
+        return {
+          removed: true,
+          reason: 'round 193：token 桥已删除（浅色整屏白字白底的根因）；这里报的是 body 上的真值',
+          owner: owner,
+          values: values,
+        }
+      },
+      /**
+       * ★★ 流级日志（后台回来那一单 ✓）—— 与落盘**同源** ✓：直接回 `streamLogRead()` ✓
+       *   （就是 localStorage 里那一份 ✓）。真机上念法：
+       *   `__DSH_MOBILE_BOOT__.streamLog()` ⇒ 逐条看 open / fail / close / heal ✓。
+       */
+      streamLog: function () {
+        return streamLogRead()
       },
       /** 「模型菜单关掉后把焦点还给输入框」那一条链的计数（四个静默失败点各有一个数 ✓）。 */
       composerFocus: function () {
@@ -19794,7 +19778,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930101245'
+    var BOOT_STAMP = 'BUILD-0930101944'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -21021,8 +21005,14 @@
    */
   function selfHealDecision(reason) {
     try {
-      if (shellBridge() === undefined) return 'skip:no-shell'
-      if (document.visibilityState !== 'visible') return 'skip:not-visible'
+      if (shellBridge() === undefined) {
+        streamLogPush('(heal)', 'heal', 'skip:no-shell · 起因=' + String(reason), -1)
+        return 'skip:no-shell'
+      }
+      if (document.visibilityState !== 'visible') {
+        streamLogPush('(heal)', 'heal', 'skip:not-visible · 起因=' + String(reason), -1)
+        return 'skip:not-visible'
+      }
       var api = globalThis.__DSH_MOBILE_BOOT__
       var state = api !== undefined && typeof api.state === 'function' ? String(api.state()) : 'unknown'
       /**
@@ -21039,23 +21029,39 @@
        * ★ 为什么不会变成"刷新循环" ✗：`frameDesyncAt` 是内存态 ✓ ⇒ 重载即清零 ✓；
        *   且这里只在**回到前台**那两个触发点被问到 ✓，外加 15 秒节流 ✓（下一行 ✓）。
        */
-      if (frameDesyncAt !== 0) return 'reload'
-      if (state === 'connected') return 'skip:connected'
+      if (frameDesyncAt !== 0) {
+        streamLogPush('(heal)', 'heal', 'reload · 帧长解析器错过位（frameDesyncAt 非 0）', -1)
+        return 'reload'
+      }
+      if (state === 'connected') {
+        streamLogPush('(heal)', 'heal', 'skip:connected · state=' + state + ' · 起因=' + String(reason), -1)
+        return 'skip:connected'
+      }
       /**
        * ★★ 身份已作废（宿主明确拒绝 ✓）⇒ **绝不重载** ✗：
        *   重载改不了"这台设备不被认"这个事实 ✓，只会把用户刚打开的设置页 / 正在输入的地址刷掉 ✗
        *   —— 用户报的"进入设置页会自动被重新刷新退回到主页"✗ 就是它 ✓。
        */
-      if (deviceRejected) return 'skip:device-rejected'
+      if (deviceRejected) {
+        streamLogPush('(heal)', 'heal', 'skip:device-rejected · 起因=' + String(reason), -1)
+        return 'skip:device-rejected'
+      }
       /**
        * ★★ 收紧到"**本页曾经连上过**"✓：
        *   只有真正的"连上过又掉了"才值得替用户按刷新 ✓。**从未连上**的情形
        *   （配对中 / 电脑没开 / 地址填错 / 网络不通 ✓）重载一次都修不好任何东西 ✗，
        *   却会把配对界面、刚打开的面板、正在输入的地址一起刷掉 ✗。
        */
-      if (!pageEverConnected) return 'skip:never-connected'
-      if (Date.now() - lastSelfHealAt < 15000) return 'skip:throttled'
+      if (!pageEverConnected) {
+        streamLogPush('(heal)', 'heal', 'skip:never-connected · 起因=' + String(reason), -1)
+        return 'skip:never-connected'
+      }
+      if (Date.now() - lastSelfHealAt < 15000) {
+        streamLogPush('(heal)', 'heal', 'skip:throttled · 起因=' + String(reason), -1)
+        return 'skip:throttled'
+      }
       void reason
+      streamLogPush('(heal)', 'heal', 'reload · 起因=' + String(reason), -1)
       return 'reload'
     } catch (error) {
       return 'skip:error'
