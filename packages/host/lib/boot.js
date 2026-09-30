@@ -8315,7 +8315,7 @@
        *   只有 `--dshm-safe-bottom` 非 0 时才有影响 ✓（没开 edge-to-edge 的机器上是 0 ✓）。
        */
       '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
-      '  box-shadow: -18px 0 44px rgba(0,0,0,.6);',
+      '  box-shadow: var(--dsw-elevation-prominent, -18px 0 44px rgba(0,0,0,.6));',
       '  transform: translateX(102%);',
       '  transition: transform var(--dshm-slide);',
       '  will-change: transform; overflow: hidden;',
@@ -8435,8 +8435,14 @@
       '.dshm-cap-switch {',
       '  flex: 0 0 auto; margin-left: auto; position: relative; cursor: pointer;',
       '  width: 44px; height: 26px; padding: 0; border-radius: 999px;',
-      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.16));',
-      '  background: transparent;',
+      /**
+       * ★★ round 194（审计 D5 ✓）：关态的轨道原来写的是 `background: transparent` ✗ ——
+       *   浅色下**整个轨道等于不存在** ✓，只剩一个浅灰旋钮漂在白底上 ✓
+       *   （实测：轨道 `rgba(0,0,0,0)` ✓）。改成 DSH 自己的**空闲态底色** ✓
+       *   （浅 `#d4d4d4` / 深 `#545557` ✓，两套主题都自带 ✓），边框也交给它 ✓。
+       */
+      '  border: 1px solid var(--dsw-alias-state-idle-primary, rgba(255,255,255,.16));',
+      '  background: var(--dsw-alias-state-idle-primary, transparent);',
       '  transition: background .15s ease, border-color .15s ease;',
       '}',
       '.dshm-cap-switch[data-on="1"] {',
@@ -8448,7 +8454,7 @@
       '  background: var(--dsw-alias-label-secondary, #a9b0b8);',
       '  transition: transform .15s ease, background .15s ease;',
       '}',
-      '.dshm-cap-switch[data-on="1"] .dshm-cap-knob { transform: translateX(18px); background: #fff; }',
+      '.dshm-cap-switch[data-on="1"] .dshm-cap-knob { transform: translateX(18px); background: var(--dsw-alias-switch-thumb, #fff); }',
       /* 工作区行：整行可点，标题 + 路径两行，右侧箭头 */
       '.dshm-ws {',
       '  display: flex; align-items: center; gap: 12px; width: 100%; box-sizing: border-box;',
@@ -9217,7 +9223,7 @@
       '.dshm-prompt-input {',
       '  width: 100%; box-sizing: border-box; min-height: 42px; padding: 0 12px; border-radius: 10px;',
       '  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
-      '  background: rgba(255,255,255,.05);',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.05));',
       '  color: var(--dsw-alias-label-primary, #e8eaed); font-size: 16px;',
       '}',
       '.dshm-prompt-actions { display: flex; gap: 8px; margin-top: 10px; }',
@@ -9317,7 +9323,7 @@
       '  body[data-dsh-mobile-drawer="open"] [class*="sidebarCol"] {',
       '    left: 0 !important;',
       // 阴影投向**右侧**（盖在让位后的主页面上），这是"纵深"的来源
-      '    box-shadow: 14px 0 36px rgba(0,0,0,.55);',
+      '    box-shadow: var(--dsw-elevation-prominent, 14px 0 36px rgba(0,0,0,.55));',
       '  }',
       /**
        * ★★ round 164（用户 B ✓）：**触屏上 `:hover` 是"粘"的** —— 用户原话：
@@ -9958,7 +9964,7 @@
       '    position: fixed; z-index: 260; min-width: 172px; padding: 4px;',
       '    border-radius: 10px; border: .5px solid var(--dsw-alias-border-l3, rgba(255,255,255,.14));',
       '    background: var(--dsw-alias-bg-layer-2, #24272c);',
-      '    box-shadow: 0 12px 30px rgba(0,0,0,.45);',
+      '    box-shadow: var(--dsw-elevation-prominent, 0 12px 30px rgba(0,0,0,.45));',
       '  }',
       '#dshm-presented-menu button {',
       '    display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px;',
@@ -10006,7 +10012,7 @@
       '    background: var(--dsw-alias-bg-layer-3, #232427);',
       '    color: var(--dsw-alias-label-primary, #e8eaed);',
       '    border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14));',
-      '    box-shadow: 0 10px 30px rgba(0,0,0,.5);',
+      '    box-shadow: var(--dsw-elevation-prominent, 0 10px 30px rgba(0,0,0,.5));',
       '    font-size: 12.5px; line-height: 17px;',
       '    opacity: 0; transform: translateY(6px); pointer-events: none;',
       '    transition: opacity .18s ease, transform .18s ease;',
@@ -20106,7 +20112,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930104642'
+    var BOOT_STAMP = 'BUILD-0930112405'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -20764,7 +20770,7 @@
         'position:fixed;left:8px;right:8px;top:calc(var(--dshm-top-h, 52px) + 8px);z-index:200;' +
         'padding:14px 16px;border-radius:14px;font-size:15px;line-height:1.65;color:#fff;word-break:break-word;' +
         'background:' + (tone === 'ask' ? '#2b2b2b' : '#2d6cdf') + ';' +
-        'border:1px solid rgba(255,255,255,.16);box-shadow:0 10px 30px rgba(0,0,0,.45)'
+        'border:1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.16));box-shadow:var(--dsw-elevation-prominent, 0 10px 30px rgba(0,0,0,.45))'
       var line = document.createElement('div')
       line.textContent = text
       bar.appendChild(line)
