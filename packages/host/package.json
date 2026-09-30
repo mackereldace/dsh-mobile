@@ -22,8 +22,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-api-gateway": "^0.1.5-rc.1 || ^0.1.7-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1 || ^0.1.7-rc.1"
+    "@deepseek-ai/dsh-api-gateway": "^0.1.5-rc.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1"
   },
   "dependencies": {},
   "types": "lib/cordis.d.ts",
