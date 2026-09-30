@@ -48,9 +48,13 @@ export const DEFAULT_LISTENER_TLS = '0.0.0.0:3443'
  * profile 名允许的字符。
  *
  * ★ 它同时是**路径穿越的闸门**：`profile` 会拼进文件路径，
- *   `/`、`\`、`..` 一律不接受（否则一个请求就能写到 profile 目录之外 ✗）。
+ *   `/`、`\` 一律不接受（否则一个请求就能写到 profile 目录之外 ✗）。
+ *
+ * ★ `.` 与 `..` **也要单独挡掉**（2026-09-30 补 ✓）：它们**能通过字符白名单** ✗，
+ *   却会让 `join(dshHome, 'profiles', '..', 'cordis.patch.yml')` 指到 `profiles/` **之外** ✗
+ *   （`<DSH_HOME>/cordis.patch.yml`）—— 白名单本身在这两个名字上是漏的 ✓。
  */
-const PROFILE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/
+const PROFILE_NAME_PATTERN = /^(?!\.{1,2}$)[A-Za-z0-9._-]+$/
 
 /** 契约里的路由路径（注册处与处理器共用一处，别各写一遍）。 */
 export const SETUP_PATH = '/mobile/setup'
@@ -889,7 +893,14 @@ export function toWireConfig(config: MobileSetupConfig): WireMobileSetupConfig {
  *   · 只认**恰好挂在 `<dshHome>/profiles/` 下**的候选 ✓（fallback 镜像 `profiles/node_modules`
  *     的上级是 `profiles` 本身 ⇒ 不算 ✓），并对名字做字符白名单 ✓（防路径穿越 ✗）。
  *
- * @returns 推断不出来（在仓库里直接跑、或布局不认识）时返回 undefined，由调用方给默认值。
+ * ★★ **它只是兜底，不是主路**（2026-09-30 修 ✗）：`link:` / 本地路径安装（pnpm 建软链、
+ *   桌面 UI 装本地路径必然如此）下，`fileURLToPath` 给的是**仓库真身**
+ *   （`…/dsh-mobile/packages/host/lib/cordis.js` ✓），路径里**根本没有 `profiles/<名字>`** ✗
+ *   ⇒ 这里只能返回 undefined ✓。所以 profile 名必须由调用方**显式**给出
+ *   （见 `resolveProfilePatchPath` ✓），**不许**再"推不出来就退回 `web`" ✗。
+ *
+ * @returns 推断不出来（在仓库里直接跑、软链安装、或布局不认识）时返回 undefined；
+ *          **调用方不许据此挑一个默认值** ✗ —— 要么另有显式来源，要么明确失败 ✓。
  */
 export function profileNameFromModuleUrl(moduleUrl: string, dshHome: string): string | undefined {
   let dir: string
@@ -914,18 +925,98 @@ export function profileNameFromModuleUrl(moduleUrl: string, dshHome: string): st
 }
 
 /**
+ * ★★ 认不出"这是哪个 profile"时抛出的**唯一**错误（**绝不静默挑一个默认值** ✗）。
+ *
+ * 为什么单独一个类型 ✗：这句话最终要**显示在配置页上给用户看** ✓，
+ * 调用方（路由 / 安装脚本）需要一个稳定的判据把它与"写盘失败"之类的错误分开 ✓ ——
+ * 也便于用例把它钉住 ✓（`assert.throws(..., ProfileResolutionError)` ✓）。
+ */
+export class ProfileResolutionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProfileResolutionError'
+  }
+}
+
+/** 请求解析 profile 时的输入。 */
+export interface ResolveProfilePatchPathOptions {
+  dshHome: string
+  /**
+   * ★★ **显式**的 profile 名 —— 这是**唯一正常来源** ✓：
+   *   · 插件侧：`ctx.get('profileContext')?.name`（DSH 自己知道这次起的是哪个 profile ✓）
+   *     —— DSH 的 `dsh-web-app` bundle patch 就是这么判桌面版的
+   *     （`disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` ✓）；
+   *   · 脚本侧：`--profile`（默认 `web` ✓）。
+   */
+  profile?: string | undefined
+  /**
+   * **兜底**：从插件模块地址反推 profile（老布局 / 没有 `profileContext` 的 DSH ✓）。
+   * ⚠️ 软链安装（`link:` / 本地路径）下它**必然推不出** ✓ —— 那时必须靠 `profile` ✗。
+   */
+  moduleUrl?: string | undefined
+}
+
+/**
  * 求出 profile 的 `cordis.patch.yml` 绝对路径（页面读写的对象 ✓）。
  *
- * 优先级：插件配置里的 `profile` > 从模块地址推断 > `'web'`（DSH 的默认 profile）。
+ * ## ★★ profile 名是**显式输入**，不再靠猜（2026-09-30 修 ✗）
+ *
+ * 旧实现是"从插件自己的模块路径反推 profile，**推不出来就退回 `web`**" ✗ ——
+ * 而 `web` 恰恰是用户**日常在用**的那套配置 ✗。软链安装（pnpm 的 `link:`；
+ * 桌面 UI 装**本地路径**必然建软链 ✓）下，`fileURLToPath` 给的是**仓库真身**
+ * （`…/dsh-mobile/packages/host/lib/cordis.js` ✓），路径里**没有 `profiles/<名字>`** ✗
+ * ⇒ 一路退到 `web` ✗。真机实测（DSH 桌面版 0.2.0-rc.2，profile = `desktop`，`link:` 安装）：
+ * 插件**确实加载了** ✓（`GET /mobile/setup/page` → 200 ✓），可同一个服务返回的却是
+ * `"profilePath": "/Users/…/.dsh/profiles/web/cordis.patch.yml"` ✗ —— 用户在桌面上
+ * 点一下"保存"，改的是**另一套**生产配置，而且**不报错、不提示** ✗（本项目最恨的一类 ✓）。
+ *
+ * ## 新规则（只有三条，没有"默认值"这条 ✗）
+ *
+ * | 有显式名字 | 模块路径能推出 | 结果 |
+ * |---|---|---|
+ * | ✓ | （不看） | `profiles/<显式名>/cordis.patch.yml` ✓ |
+ * | ✗ | ✓ | `profiles/<推出来的>/cordis.patch.yml` ✓（老布局兜底 ✓） |
+ * | ✗ | ✗ | **抛 `ProfileResolutionError`** ✗ —— 明确失败，绝不挑一个 ✗ |
+ *
+ * 名字给得**不合法**（`../../etc`、`a/b`、`.`、`..`、非字符串）也一律抛错 ✓：
+ * 它会被拼进文件路径 ⇒ 宁可不干活，也不能写到 profile 目录之外 ✗。
+ *
+ * @throws ProfileResolutionError 没有可用的 profile 名时（message 就是给用户念的那句话 ✓）
  */
-export function resolveProfilePatchPath(options: {
-  dshHome: string
-  profile?: string | undefined
-  moduleUrl: string
-}): string {
-  const explicit = options.profile !== undefined && PROFILE_NAME_PATTERN.test(options.profile) ? options.profile : undefined
-  const profile = explicit ?? profileNameFromModuleUrl(options.moduleUrl, options.dshHome) ?? 'web'
-  return join(options.dshHome, 'profiles', profile, 'cordis.patch.yml')
+export function resolveProfilePatchPath(options: ResolveProfilePatchPathOptions): string {
+  const requested = options.profile
+  if (requested !== undefined) {
+    if (typeof requested !== 'string') {
+      throw new ProfileResolutionError(
+        `profile 名必须是字符串（拿到的是 ${typeof requested}）—— 认不出 profile 时我们**拒绝猜一个**。`,
+      )
+    }
+    const name = requested.trim()
+    // 空串 = "本次没表态"（不是"名字叫空"）⇒ 落到下面的兜底/失败 ✓，绝不当作一个合法的 profile ✗
+    if (name.length > 0) {
+      if (!PROFILE_NAME_PATTERN.test(name)) {
+        throw new ProfileResolutionError(
+          `profile 名 ${JSON.stringify(name)} 不合法：只允许字母、数字、点、下划线、连字符，` +
+            `且不能是 . 或 ..（它会拼进配置文件路径 ⇒ 能写到 profile 目录之外 ✗）。`,
+        )
+      }
+      return join(options.dshHome, 'profiles', name, 'cordis.patch.yml')
+    }
+  }
+  const inferred = options.moduleUrl === undefined ? undefined : profileNameFromModuleUrl(options.moduleUrl, options.dshHome)
+  if (inferred !== undefined) return join(options.dshHome, 'profiles', inferred, 'cordis.patch.yml')
+  /**
+   * ★★ 到这里就是**明确失败** ✓：既不猜 `web`（会改掉用户另一套配置 ✗），
+   *   也不返回一个"看起来像路径"的东西 ✗ —— 抛出去的 message 会原样出现在
+   *   `GET/POST /mobile/setup` 的 500 响应里，再由配置页显示给用户 ✓。
+   */
+  throw new ProfileResolutionError(
+    '认不出这台机器用的是哪个 DSH profile，因此**拒绝猜一个**：' +
+      '插件模块不在任何 `profiles/<名字>/node_modules` 下（用 `link:` / 本地路径安装时就是这样），' +
+      '猜错会改掉你**另一套**配置而且不会有任何报错。' +
+      '请显式指定：插件侧取 `ctx.get(\'profileContext\').name`，安装脚本用 `--profile <名字>`，' +
+      '或在插件配置里写 `profile: <名字>`。',
+  )
 }
 
 // ─────────────────── 本机配置页（GET /mobile/setup/page） ───────────────────
@@ -1210,8 +1301,16 @@ export function renderSetupPage(): string {
         function load() {
           fetch('/mobile/setup')
             .then(function (response) {
-              if (!response.ok) throw new Error('HTTP ' + response.status)
-              return response.json()
+              return response.text().then(function (text) {
+                var payload = null
+                try { payload = JSON.parse(text) } catch (error) { payload = null }
+                if (!response.ok) {
+                  // ★ 服务端那句 message **原样**显示 ✓ —— 与下面保存那条同一规矩：
+                  //   "认不出这是哪个 profile"这类话是用户唯一的线索，别自己编成 "HTTP 500" ✗
+                  throw new Error(payload && payload.message ? payload.message : 'HTTP ' + response.status + '：' + text)
+                }
+                return payload === null ? {} : payload
+              })
             })
             .then(function (payload) {
               state.current = payload.current === undefined ? null : payload.current
@@ -1273,8 +1372,17 @@ function respondHtml(res: ServerResponse, html: string, headOnly = false): void 
 
 /** 路由处理器的依赖。 */
 export interface SetupHandlerOptions {
-  /** profile 的 `cordis.patch.yml`（由 `resolveProfilePatchPath` 求出 ✓）。 */
-  patchFile: string
+  /**
+   * profile 的 `cordis.patch.yml`（由 `resolveProfilePatchPath` 求出 ✓）。
+   *
+   * ★★ `undefined` = **认不出这是哪个 profile** ✓（`resolveProfilePatchPath` 已经明确拒绝猜 ✗）
+   *   ⇒ 处理器会**明确报错**（500 + `patchFileProblem` 那句人话 ✓），
+   *   绝不退到某个默认 profile 去读写 ✗ —— 那正是"改掉用户另一套配置还不报错"的形状 ✗。
+   *   ⚠️ 页面本身（`GET /mobile/setup/page`）仍然照常返回 ✓：用户得有地方**看见**这句话 ✓。
+   */
+  patchFile: string | undefined
+  /** `patchFile === undefined` 时给用户念的那句话（就是 `ProfileResolutionError.message` ✓）。 */
+  patchFileProblem?: string | undefined
   /**
    * "仅本机"判据。
    *
@@ -1291,8 +1399,19 @@ export interface SetupHandlerOptions {
   machineName?: (() => string) | undefined
 }
 
-/** 组装 `GET /mobile/setup` 的响应体。 */
-export function buildSetupStatus(options: SetupHandlerOptions): MobileSetupStatus {
+/** 认不出 profile 时的兜底文案（正常路径上传进来的就是 `ProfileResolutionError.message` ✓）。 */
+const PROFILE_UNKNOWN_MESSAGE =
+  '认不出这台机器用的是哪个 DSH profile，因此**拒绝猜一个**（猜错会改掉你另一套配置，而且不会有任何报错）。' +
+  '请显式指定 profile 名后重试：插件侧取 `ctx.get(\'profileContext\').name`，安装脚本用 `--profile <名字>`。'
+
+/**
+ * 组装 `GET /mobile/setup` 的响应体。
+ *
+ * ★ 入参刻意收窄成 `patchFile: string` ✓：这条路**只**在 profile 已经解析出来时才走得通 ✓，
+ *   调用方（`handleSetupRequest`）必须先把"认不出 profile"那条岔路处理掉 ✗（否则
+ *   `profilePath` 就会被填成某个猜出来的路径 ✗ —— 本次修的就是这个 ✗）。
+ */
+export function buildSetupStatus(options: SetupHandlerOptions & { patchFile: string }): MobileSetupStatus {
   const io = options.io ?? SILENT_IO
   const current = readCurrentConfig(options.patchFile)
   const suggested = deriveSuggestedConfig({ detectLanIp: options.detectLanIp }, io)
@@ -1449,7 +1568,11 @@ async function readJsonBody(req: IncomingMessage, limit = 64 * 1024): Promise<un
   }
 }
 
-async function handleSetupWrite(req: IncomingMessage, res: ServerResponse, options: SetupHandlerOptions): Promise<void> {
+async function handleSetupWrite(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: SetupHandlerOptions & { patchFile: string },
+): Promise<void> {
   const io = options.io ?? SILENT_IO
   const body = await readJsonBody(req)
   if (body === undefined) {
@@ -1482,6 +1605,12 @@ async function handleSetupWrite(req: IncomingMessage, res: ServerResponse, optio
  * 这条路由**能改宿主配置** ✗ ⇒ 只允许**本机**访问 ✓，判据就是
  * `index.ts` 里 `POST /mobile/device/call` 那道闸用的**同一个** `isLoopbackRequest` ✓
  * （由 `options.isLocalRequest` 注入 ⇒ 不会出现第二套判据 ✗）。
+ *
+ * ## 三条出路（★ 没有"猜一个 profile"这条 ✗）
+ *
+ *   1. 正常：`options.patchFile` 是**那个 profile 的** `cordis.patch.yml` ✓（由调用方显式解析 ✓）；
+ *   2. 认不出 profile ⇒ **500 + 一句人话** ✗（`patchFileProblem` ✓）—— 绝不退到默认 profile ✗；
+ *   3. 页面 `/mobile/setup/page` **永远**返回 HTML ✓（用户得有地方看见第 2 条那句话 ✓）。
  */
 export function handleSetupRequest(req: IncomingMessage, res: ServerResponse, options: SetupHandlerOptions): void {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -1511,11 +1640,31 @@ export function handleSetupRequest(req: IncomingMessage, res: ServerResponse, op
       res.end()
       return
     }
+    /**
+     * ★★ 页面**永远照常返回** ✓ —— 即使 profile 认不出来（下面那条 500 ✓）：
+     *   用户得有地方**看见**那句"认不出这是哪个 profile"✓（页面自己会去读 `/mobile/setup`
+     *   并把服务端那句 message 原样显示出来 ✓）。反过来，若这里也 500，用户就只有一个
+     *   白页 + 一行 HTTP 500 ✗ —— 那正是本项目最恨的"不报错、不提示"的形状 ✓。
+     */
     respondHtml(res, renderSetupPage(), req.method === 'HEAD')
     return
   }
+  /**
+   * ★★ 认不出 profile ⇒ **明确失败** ✓（绝不拿一个猜出来的 profile 去读写 ✗）。
+   *
+   * 为什么放在闸门**之后** ✗：这句话虽然无害，但先把"你不是本机"那条拒掉更稳妥 ✓
+   * （两者都是拒绝，顺序不影响安全性，但 403 的语义更准确 ✓）。
+   */
+  const patchFile = options.patchFile
+  if (patchFile === undefined) {
+    respondJson(res, 500, {
+      code: 'mobile/setup-profile-unknown',
+      message: options.patchFileProblem ?? PROFILE_UNKNOWN_MESSAGE,
+    })
+    return
+  }
   if (req.method === 'GET' || req.method === 'HEAD') {
-    const status = buildSetupStatus(options)
+    const status = buildSetupStatus({ ...options, patchFile })
     if (req.method === 'HEAD') {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       res.end()
@@ -1525,7 +1674,7 @@ export function handleSetupRequest(req: IncomingMessage, res: ServerResponse, op
     return
   }
   if (req.method === 'POST') {
-    void handleSetupWrite(req, res, options).catch((error: unknown) => {
+    void handleSetupWrite(req, res, { ...options, patchFile }).catch((error: unknown) => {
       respondJson(res, 500, {
         code: 'mobile/setup-write-failed',
         message: `写入接入配置失败：${error instanceof Error ? error.message : String(error)}`,

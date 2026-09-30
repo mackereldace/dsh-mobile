@@ -53,6 +53,7 @@ import {
   renderInsertPatch,
   resolveListener,
   resolvePatchConfig,
+  resolveProfilePatchPath,
 } from '../packages/host/src/setup-config.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -185,9 +186,29 @@ if (typeof args.dshHome !== 'string' || args.dshHome.length === 0) {
   process.exit(2)
 }
 
-const profileDir = join(args.dshHome, 'profiles', args.profile)
+/**
+ * ★★ profile 名 ⇒ patch 路径：**只有一处实现** ✓（`setup-config.ts` 的 `resolveProfilePatchPath` ✓）。
+ *
+ * 这里此前自己 `join(dshHome, 'profiles', profile, 'cordis.patch.yml')` 了一遍 ✗ ——
+ * 那正是本项目最恨的"同一件事两条路径各写一份"（漂移了没人知道 ✓）。
+ *
+ * ★ 本脚本**永远**有 profile 名 ✓：`--profile`，默认 `web` ✓ —— 所以它走的是
+ *   "有显式名字 ⇒ 直接用"那条正常路径 ✓（不是猜 ✗）。
+ * ⚠️ 名字不合法（含 `/`、`..` …）⇒ 明确报错退出 ✓：它会拼进文件路径，
+ *   宁可不干活，也不能写到 profile 目录之外 ✗。
+ */
+let patchFile
+try {
+  patchFile = resolveProfilePatchPath({ dshHome: args.dshHome, profile: args.profile })
+} catch (error) {
+  fail(
+    `${error instanceof Error ? error.message : String(error)}\n` +
+      `        本次用的是 --profile ${JSON.stringify(args.profile)}；请传一个合法的 profile 名（默认 web）。`,
+  )
+}
+/** profile 目录 = patch 文件的上级（下面 preflight 要建它 ✓ —— 由 patch 路径反推，不再各算一遍 ✗）。 */
+const profileDir = dirname(patchFile)
 const profileModules = join(profileDir, 'node_modules')
-const patchFile = join(profileDir, 'cordis.patch.yml')
 
 /**
  * 需要安装的包：插件本体、协议依赖，以及**预览桥**。

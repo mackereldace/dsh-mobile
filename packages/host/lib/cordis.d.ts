@@ -126,6 +126,27 @@ export declare function readWebServerPort(webServer: unknown): number | undefine
  *     （"读不到 DSH 的监听端口"），让用户自己在 DSH 页面地址后面接上 ✓。
  */
 export declare function setupStartupHint(port: number | undefined): string;
+/**
+ * ★★ 取本次运行的 profile 名（唯一来源：DSH 自己挂上来的 `profileContext` 服务 ✓）。
+ *
+ * ## 为什么这样取（先读现成的，不自创 API ✗）
+ *
+ * `ctx.get('profileContext')?.name` —— **DSH 自己的 bundle patch 就是这么判的**：
+ * `dsh-web-app/cordis.patch.yml` 里 `disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` ✓。
+ * 该服务在 `dsh-app-boot` 的 `boot()` 里由 `prepare(ctx)` **先** `provide`、
+ * 之后**才**挂载插件树 ⇒ 本插件 `apply()` 跑时它一定已经在 ✓。
+ *
+ * ## 为什么这么防御 ✗
+ *
+ * · 用 `?.` 调 `get`（与下面 `ctx.get('tools')` 同一写法 ✓）：`ctx.get` 在**不认识的服务名**上
+ *   返回 `undefined`（不抛 ✓），但 `profileContext` 是 DSH 的服务、不是本插件 `inject` 的依赖 ✗ ——
+ *   老版本 DSH / 非 profile 启动下它可能不存在 ✓，那时**安静地**返回 undefined 即可 ✓
+ *   （由调用方走 `config.profile` → 模块地址反推 → 明确报错 ✓，绝不猜一个默认值 ✗）。
+ * · 抛错也**吞掉**：插件的加载失败会把整个 DSH 带下去 ✗，而"认不出 profile"只是
+ *   接入配置这一条路由不可用 ✓（那条路由会明确报错 ✓，见 `resolveProfilePatchPath`）。
+ * · 名字必须是**非空字符串**才算数 ✓（拿一个 `{}` 或空串去拼路径＝另一种静默 ✗）。
+ */
+export declare function readProfileContextName(ctx: Context): string | undefined;
 /** 插件主体。 */
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=cordis.d.ts.map

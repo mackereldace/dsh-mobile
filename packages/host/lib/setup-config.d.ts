@@ -384,19 +384,71 @@ export declare function toWireConfig(config: MobileSetupConfig): WireMobileSetup
  *   · 只认**恰好挂在 `<dshHome>/profiles/` 下**的候选 ✓（fallback 镜像 `profiles/node_modules`
  *     的上级是 `profiles` 本身 ⇒ 不算 ✓），并对名字做字符白名单 ✓（防路径穿越 ✗）。
  *
- * @returns 推断不出来（在仓库里直接跑、或布局不认识）时返回 undefined，由调用方给默认值。
+ * ★★ **它只是兜底，不是主路**（2026-09-30 修 ✗）：`link:` / 本地路径安装（pnpm 建软链、
+ *   桌面 UI 装本地路径必然如此）下，`fileURLToPath` 给的是**仓库真身**
+ *   （`…/dsh-mobile/packages/host/lib/cordis.js` ✓），路径里**根本没有 `profiles/<名字>`** ✗
+ *   ⇒ 这里只能返回 undefined ✓。所以 profile 名必须由调用方**显式**给出
+ *   （见 `resolveProfilePatchPath` ✓），**不许**再"推不出来就退回 `web`" ✗。
+ *
+ * @returns 推断不出来（在仓库里直接跑、软链安装、或布局不认识）时返回 undefined；
+ *          **调用方不许据此挑一个默认值** ✗ —— 要么另有显式来源，要么明确失败 ✓。
  */
 export declare function profileNameFromModuleUrl(moduleUrl: string, dshHome: string): string | undefined;
 /**
+ * ★★ 认不出"这是哪个 profile"时抛出的**唯一**错误（**绝不静默挑一个默认值** ✗）。
+ *
+ * 为什么单独一个类型 ✗：这句话最终要**显示在配置页上给用户看** ✓，
+ * 调用方（路由 / 安装脚本）需要一个稳定的判据把它与"写盘失败"之类的错误分开 ✓ ——
+ * 也便于用例把它钉住 ✓（`assert.throws(..., ProfileResolutionError)` ✓）。
+ */
+export declare class ProfileResolutionError extends Error {
+    constructor(message: string);
+}
+/** 请求解析 profile 时的输入。 */
+export interface ResolveProfilePatchPathOptions {
+    dshHome: string;
+    /**
+     * ★★ **显式**的 profile 名 —— 这是**唯一正常来源** ✓：
+     *   · 插件侧：`ctx.get('profileContext')?.name`（DSH 自己知道这次起的是哪个 profile ✓）
+     *     —— DSH 的 `dsh-web-app` bundle patch 就是这么判桌面版的
+     *     （`disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` ✓）；
+     *   · 脚本侧：`--profile`（默认 `web` ✓）。
+     */
+    profile?: string | undefined;
+    /**
+     * **兜底**：从插件模块地址反推 profile（老布局 / 没有 `profileContext` 的 DSH ✓）。
+     * ⚠️ 软链安装（`link:` / 本地路径）下它**必然推不出** ✓ —— 那时必须靠 `profile` ✗。
+     */
+    moduleUrl?: string | undefined;
+}
+/**
  * 求出 profile 的 `cordis.patch.yml` 绝对路径（页面读写的对象 ✓）。
  *
- * 优先级：插件配置里的 `profile` > 从模块地址推断 > `'web'`（DSH 的默认 profile）。
+ * ## ★★ profile 名是**显式输入**，不再靠猜（2026-09-30 修 ✗）
+ *
+ * 旧实现是"从插件自己的模块路径反推 profile，**推不出来就退回 `web`**" ✗ ——
+ * 而 `web` 恰恰是用户**日常在用**的那套配置 ✗。软链安装（pnpm 的 `link:`；
+ * 桌面 UI 装**本地路径**必然建软链 ✓）下，`fileURLToPath` 给的是**仓库真身**
+ * （`…/dsh-mobile/packages/host/lib/cordis.js` ✓），路径里**没有 `profiles/<名字>`** ✗
+ * ⇒ 一路退到 `web` ✗。真机实测（DSH 桌面版 0.2.0-rc.2，profile = `desktop`，`link:` 安装）：
+ * 插件**确实加载了** ✓（`GET /mobile/setup/page` → 200 ✓），可同一个服务返回的却是
+ * `"profilePath": "/Users/…/.dsh/profiles/web/cordis.patch.yml"` ✗ —— 用户在桌面上
+ * 点一下"保存"，改的是**另一套**生产配置，而且**不报错、不提示** ✗（本项目最恨的一类 ✓）。
+ *
+ * ## 新规则（只有三条，没有"默认值"这条 ✗）
+ *
+ * | 有显式名字 | 模块路径能推出 | 结果 |
+ * |---|---|---|
+ * | ✓ | （不看） | `profiles/<显式名>/cordis.patch.yml` ✓ |
+ * | ✗ | ✓ | `profiles/<推出来的>/cordis.patch.yml` ✓（老布局兜底 ✓） |
+ * | ✗ | ✗ | **抛 `ProfileResolutionError`** ✗ —— 明确失败，绝不挑一个 ✗ |
+ *
+ * 名字给得**不合法**（`../../etc`、`a/b`、`.`、`..`、非字符串）也一律抛错 ✓：
+ * 它会被拼进文件路径 ⇒ 宁可不干活，也不能写到 profile 目录之外 ✗。
+ *
+ * @throws ProfileResolutionError 没有可用的 profile 名时（message 就是给用户念的那句话 ✓）
  */
-export declare function resolveProfilePatchPath(options: {
-    dshHome: string;
-    profile?: string | undefined;
-    moduleUrl: string;
-}): string;
+export declare function resolveProfilePatchPath(options: ResolveProfilePatchPathOptions): string;
 /**
  * ★★ 手机接入配置页（**单文件 HTML**：内联 CSS/JS，一个外部资源都不引 ✗）。
  *
@@ -436,8 +488,17 @@ export declare function resolveProfilePatchPath(options: {
 export declare function renderSetupPage(): string;
 /** 路由处理器的依赖。 */
 export interface SetupHandlerOptions {
-    /** profile 的 `cordis.patch.yml`（由 `resolveProfilePatchPath` 求出 ✓）。 */
-    patchFile: string;
+    /**
+     * profile 的 `cordis.patch.yml`（由 `resolveProfilePatchPath` 求出 ✓）。
+     *
+     * ★★ `undefined` = **认不出这是哪个 profile** ✓（`resolveProfilePatchPath` 已经明确拒绝猜 ✗）
+     *   ⇒ 处理器会**明确报错**（500 + `patchFileProblem` 那句人话 ✓），
+     *   绝不退到某个默认 profile 去读写 ✗ —— 那正是"改掉用户另一套配置还不报错"的形状 ✗。
+     *   ⚠️ 页面本身（`GET /mobile/setup/page`）仍然照常返回 ✓：用户得有地方**看见**这句话 ✓。
+     */
+    patchFile: string | undefined;
+    /** `patchFile === undefined` 时给用户念的那句话（就是 `ProfileResolutionError.message` ✓）。 */
+    patchFileProblem?: string | undefined;
     /**
      * "仅本机"判据。
      *
@@ -453,8 +514,16 @@ export interface SetupHandlerOptions {
     /** 机器名的注入点（单测用；不给就是 `./lan-trust.ts` 的 `localMachineName` ✓）。 */
     machineName?: (() => string) | undefined;
 }
-/** 组装 `GET /mobile/setup` 的响应体。 */
-export declare function buildSetupStatus(options: SetupHandlerOptions): MobileSetupStatus;
+/**
+ * 组装 `GET /mobile/setup` 的响应体。
+ *
+ * ★ 入参刻意收窄成 `patchFile: string` ✓：这条路**只**在 profile 已经解析出来时才走得通 ✓，
+ *   调用方（`handleSetupRequest`）必须先把"认不出 profile"那条岔路处理掉 ✗（否则
+ *   `profilePath` 就会被填成某个猜出来的路径 ✗ —— 本次修的就是这个 ✗）。
+ */
+export declare function buildSetupStatus(options: SetupHandlerOptions & {
+    patchFile: string;
+}): MobileSetupStatus;
 /** 校验后的写入请求。 */
 interface ParsedWriteRequest {
     config: MobileSetupConfig;
@@ -487,6 +556,12 @@ export declare function configFromRequestBody(body: unknown): ParsedWriteRequest
  * 这条路由**能改宿主配置** ✗ ⇒ 只允许**本机**访问 ✓，判据就是
  * `index.ts` 里 `POST /mobile/device/call` 那道闸用的**同一个** `isLoopbackRequest` ✓
  * （由 `options.isLocalRequest` 注入 ⇒ 不会出现第二套判据 ✗）。
+ *
+ * ## 三条出路（★ 没有"猜一个 profile"这条 ✗）
+ *
+ *   1. 正常：`options.patchFile` 是**那个 profile 的** `cordis.patch.yml` ✓（由调用方显式解析 ✓）；
+ *   2. 认不出 profile ⇒ **500 + 一句人话** ✗（`patchFileProblem` ✓）—— 绝不退到默认 profile ✗；
+ *   3. 页面 `/mobile/setup/page` **永远**返回 HTML ✓（用户得有地方看见第 2 条那句话 ✓）。
  */
 export declare function handleSetupRequest(req: IncomingMessage, res: ServerResponse, options: SetupHandlerOptions): void;
 export {};

@@ -21,13 +21,13 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 import { load } from 'js-yaml'
 
@@ -40,6 +40,7 @@ import {
   type PreservedConfig,
   type SetupHandlerOptions,
   type SetupIo,
+  ProfileResolutionError,
   configFromRequestBody,
   derivePhoneEntry,
   deriveSuggestedConfig,
@@ -565,7 +566,7 @@ describe('setup-config：GET/POST /mobile/setup 的 HTTP 契约', () => {
     assert.deepEqual(payload.current['listener'], { enabled: true, plain: '0.0.0.0:3081', tls: '0.0.0.0:3443' })
   })
 
-  test('★ profilePath：从插件自身位置推断 profile，推断不出来才退回 web', () => {
+  test('★ profilePath：从插件自身位置推断 profile（正常形态），显式名字优先', () => {
     // 打红：写死 'web'（用 --profile headless 部署的机器就会被写到别的 profile）
     const home = tempDir()
     const moduleUrl = `file://${home}/profiles/headless/node_modules/@dsh-mobile/host/lib/cordis.js`
@@ -578,11 +579,158 @@ describe('setup-config：GET/POST /mobile/setup 的 HTTP 契约', () => {
     )
     // fallback 镜像（profiles/node_modules）不算某个 profile
     assert.equal(profileNameFromModuleUrl(`file://${home}/profiles/node_modules/@dsh-mobile/host/lib/cordis.js`, home), undefined)
-    assert.equal(resolveProfilePatchPath({ dshHome: home, moduleUrl: 'file:///nowhere/x.js' }), join(home, 'profiles', 'web', 'cordis.patch.yml'))
+    /**
+     * ★★ 下面两条断言是 **2026-09-30 改的** ✗（这条用例的标题原来叫"推断不出来才退回 web"）。
+     *
+     * 为什么**必须**改 ✗：本次修复的要害就是**删掉"推不出来就退回 web"** ——
+     * 软链安装（`link:` / 桌面 UI 装本地路径）下这条兜底一踩一个准，而 `web` 正是用户
+     * 日常在用的那套配置 ⇒ 页面上点一下"保存"就改到**另一套** profile 上，且不报错 ✗。
+     * 所以"推不出来"与"名字畸形"现在都必须**明确失败** ✓（判据是 `ProfileResolutionError`）。
+     * ⚠️ 覆盖意图**一个都没丢** ✓：老布局仍能推 ✓、显式名优先 ✓、镜像目录不算 profile ✓、
+     *    路径穿越仍被拒 ✓ —— 只是"拒绝"的形式从"悄悄退回 web"变成"抛错" ✓。
+     */
+    // 推不出来 ⇒ 明确失败（**绝不**退回 web ✗ —— 真机事故的墓志铭见下面 C2 的用例）
+    assert.throws(
+      () => resolveProfilePatchPath({ dshHome: home, moduleUrl: 'file:///nowhere/x.js' }),
+      ProfileResolutionError,
+      '推不出 profile 时必须明确失败：退回 web 就是"改掉用户另一套配置还不报错" ✗',
+    )
     // 路径穿越：profile 名带 '/' 一律不认（否则一个请求就能写到 profile 之外 ✗）
+    assert.throws(
+      () => resolveProfilePatchPath({ dshHome: home, profile: '../../etc', moduleUrl: 'file:///nowhere/x.js' }),
+      ProfileResolutionError,
+      "畸形名 '../../etc' 必须被拒（旧行为是'当没看见、退回 web' —— 同样是静默 ✗）",
+    )
+  })
+})
+
+// ──────── C2. profile 名解析：软链安装下**不许静默退回 web**（2026-09-30 真机事故） ────────
+
+/**
+ * ## 这一组守的是什么（真机现场，别怀疑 ✓）
+ *
+ * 用户在 **DSH 桌面版 0.2.0-rc.2（profile = `desktop`）**上用**本地路径**装了本插件
+ * （`"@dsh-mobile/host": "link:/…/dsh-mobile/packages/host"` ⇒ pnpm 建**软链** ✓）。
+ * 插件**确实加载了** ✓（`GET /mobile/setup/page` → 200 ✓），可同一个服务返回的却是
+ * `"profilePath": "/Users/…/.dsh/profiles/web/cordis.patch.yml"` ✗ —— **生产** profile ✗。
+ * 用户在页面上点一下"保存"，改的就是他**日常在用**的那套配置 ✗，而且**不报错、不提示** ✗。
+ *
+ * 根因：profile 名是**从插件自己的模块路径反推**的（路径里应含 `profiles/<名字>/node_modules/…` ✓），
+ * 而 `link:` 安装时真实路径指向**仓库**（`…/dsh-mobile/packages/host/lib/cordis.js` ✓）——
+ * 路径里**根本没有 `profiles/<名字>`** ✗ ⇒ 旧实现一路退到 `web` ✗。
+ *
+ * ⇒ 现在 profile 名是**显式输入** ✓（插件侧 `ctx.get('profileContext')?.name` ✓、
+ *   脚本侧 `--profile` ✓），**"推不出来就退回 web"这条已经删掉** ✗ ⇒ 明确失败 ✓。
+ */
+describe('setup-config：profile 名解析（软链安装 + 显式 desktop）', () => {
+  /**
+   * ★ 真机现场那个模块 URL：`link:` 安装 ⇒ 插件看到的自己是**仓库**里的文件 ✓
+   *   （`pathToFileURL(repoRoot/packages/host/lib/cordis.js)` 就是软链解开后的真身 ✓）。
+   *   拿来当夹具而不是写死 `/Volumes/…` ⇒ 换机器也照样跑 ✓。
+   */
+  const linkInstalledModuleUrl = pathToFileURL(join(repoRoot, 'packages', 'host', 'lib', 'cordis.js')).href
+
+  test('★★ 软链形态（模块在仓库里、路径没有 profiles/）+ 显式 desktop ⇒ 必须解析成 desktop', () => {
+    /**
+     * **怎么把它打红**：把 `resolveProfilePatchPath` 里那句"有显式名字就直接用"改回
+     * "从模块地址猜、猜不出退回 web"（= 老实现）⇒ 本条立刻红 —— 拿到的会是
+     * `<home>/profiles/web/cordis.patch.yml` ✗。**这条用例就是老实现的墓志铭** ✓：
+     * 真机上正是它让桌面版（`desktop`）的页面去写 `web` 那套配置 ✗。
+     */
+    const home = tempDir('dshm-profile-link-')
+    // ① 先证明"路径反推"在这条路上**必然失败**（软链 ⇒ 真身是仓库 ⇒ 没有 profiles/<名字>）
+    assert.doesNotMatch(linkInstalledModuleUrl, /\/profiles\//, '前提：这条 URL 就是 link: 安装后的真身（仓库路径）')
     assert.equal(
-      resolveProfilePatchPath({ dshHome: home, profile: '../../etc', moduleUrl: 'file:///nowhere/x.js' }),
+      profileNameFromModuleUrl(linkInstalledModuleUrl, home),
+      undefined,
+      '前提：软链安装下路径反推**推不出来**（老实现就是在这一步退回了 web ✗）',
+    )
+    // ② 显式给了 desktop ⇒ 必须**直接用它**（这条路上模块地址一点用都没有 ✓）
+    assert.equal(
+      resolveProfilePatchPath({ dshHome: home, profile: 'desktop', moduleUrl: linkInstalledModuleUrl }),
+      join(home, 'profiles', 'desktop', 'cordis.patch.yml'),
+    )
+    // ③ 显式名**压过**路径推断：模块在别的 profile 布局下、显式给 desktop ⇒ 仍是 desktop
+    const installedElsewhere = `file://${home}/profiles/headless/node_modules/@dsh-mobile/host/lib/cordis.js`
+    assert.equal(
+      resolveProfilePatchPath({ dshHome: home, profile: 'desktop', moduleUrl: installedElsewhere }),
+      join(home, 'profiles', 'desktop', 'cordis.patch.yml'),
+      '显式名必须压过模块地址 —— 否则"我在哪个 profile"仍然是猜的 ✗',
+    )
+  })
+
+  test('★★ 没给 profile 名、路径也推不出 ⇒ **必须失败**（绝不返回 web 这条生产 profile ✗）', () => {
+    /**
+     * **怎么把它打红**：在 `resolveProfilePatchPath` 的末尾加回 `?? 'web'` ⇒ 本条立刻红。
+     * 这就是本次修复的要害（"不许静默"）：拿不准就报错，**别再猜一个默认值** ✗。
+     */
+    const home = tempDir('dshm-profile-none-')
+    for (const moduleUrl of [linkInstalledModuleUrl, 'file:///nowhere/x.js']) {
+      assert.throws(
+        () => resolveProfilePatchPath({ dshHome: home, moduleUrl }),
+        (error: unknown) => {
+          assert.ok(
+            error instanceof ProfileResolutionError,
+            '必须抛 ProfileResolutionError（调用方靠这个类型把"认不出 profile"与"写盘失败"分开 ✓）',
+          )
+          // ★ 症状要落到"**人能念的一句话**"上 ✓ —— 它最终原样显示在配置页上给用户看 ✓
+          assert.match(error.message, /profile/, '这句人话里必须点明是 profile 认不出来')
+          assert.match(error.message, /拒绝猜/, '必须说清"我们拒绝猜"（而不是含糊地报个 500）')
+          assert.match(error.message, /--profile|profileContext/, '必须给出下一步：显式指定 profile 名')
+          return true
+        },
+      )
+    }
+    // 失败路径**不许**顺手造出任何东西（旧实现那条 `?? 'web'` 就是在这里溜过去的 ✗）
+    assert.equal(existsSync(join(home, 'profiles')), false, '认不出 profile 时不许碰任何 profile 目录')
+  })
+
+  test('★ 正常形态（profiles/web/node_modules/…）⇒ 仍解析成 web（防回归：老布局不许被这次修复改坏）', () => {
+    /**
+     * **怎么把它打红**：把 `profileNameFromModuleUrl` 那段兜底整个删掉 ⇒ 插件被**复制**进
+     * profile 的老布局（自研安装器那条路 ✓）也解析不出 profile 了 ✗ ——
+     * 那不是修复，是把另一条路弄坏 ✓。
+     */
+    const home = tempDir('dshm-profile-normal-')
+    for (const name of ['web', 'headless']) {
+      const moduleUrl = `file://${home}/profiles/${name}/node_modules/@dsh-mobile/host/lib/cordis.js`
+      assert.equal(profileNameFromModuleUrl(moduleUrl, home), name)
+      assert.equal(
+        resolveProfilePatchPath({ dshHome: home, moduleUrl }),
+        join(home, 'profiles', name, 'cordis.patch.yml'),
+        `老布局（插件被复制进 profiles/${name}/node_modules）必须仍然推得出来`,
+      )
+    }
+    // pnpm 的 `.pnpm/…` 真身也要能一路走到 `profiles/<名字>`（realpath 之后仍命中 ✓）
+    const pnpmStyle = `file://${home}/profiles/web/node_modules/.pnpm/@dsh-mobile+host@0.1.0/node_modules/@dsh-mobile/host/lib/cordis.js`
+    assert.equal(
+      resolveProfilePatchPath({ dshHome: home, moduleUrl: pnpmStyle }),
       join(home, 'profiles', 'web', 'cordis.patch.yml'),
+    )
+  })
+
+  test('★ 恶意/畸形 profile 名仍被拒（`../../etc`、`a/b`、`.`、`..`、非字符串 ⇒ 明确失败）', () => {
+    /**
+     * **怎么把它打红**：① 去掉 `PROFILE_NAME_PATTERN` 校验 ⇒ 带 `/` 的名字直接拼进路径，
+     * 一个请求就能写到 profile 目录之外 ✗；② 只把非法名"当没看见、继续猜" ⇒
+     * `..` 这种**能通过字符白名单**的名字会把路径指到 `profiles/` 之外 ✗（本次一并补上）。
+     */
+    const home = tempDir('dshm-profile-bad-')
+    for (const bad of ['../../etc', 'a/b', 'a\\b', 'web/../..', '.', '..']) {
+      assert.throws(
+        () => resolveProfilePatchPath({ dshHome: home, profile: bad }),
+        ProfileResolutionError,
+        `${JSON.stringify(bad)} 必须被拒（它会拼进配置文件路径 ✗）`,
+      )
+    }
+    // 空串/空白 = "本次没表态" ⇒ 落到兜底；兜底也推不出 ⇒ 一样**明确失败**（不是"名字叫空" ✓）
+    for (const blank of ['', '   ']) {
+      assert.throws(() => resolveProfilePatchPath({ dshHome: home, profile: blank }), ProfileResolutionError)
+    }
+    // 非字符串（配置里写成数字）⇒ 也明确失败，**不做隐式转换** ✗
+    assert.throws(
+      () => resolveProfilePatchPath({ dshHome: home, profile: 42 as unknown as string }),
+      ProfileResolutionError,
     )
   })
 })
@@ -624,6 +772,51 @@ describe('setup-config：脚本与页面写出的 config 必须逐字节相同',
       readFileSync(scripted, 'utf8'),
       '脚本与共用模块写出的文件必须逐字节相同（含注释、缩进、marker）',
     )
+  })
+})
+
+// ──────── D2. 脚本侧的 profile 名：`--profile` 就是显式输入（写不到别的 profile 去） ────────
+
+describe('setup-config：install-host-plugin.mjs 的 --profile 落到文件路径上', () => {
+  test('★★ `--profile desktop --config-only` ⇒ 写的是 profiles/desktop/…（不是 web ✗）', () => {
+    /**
+     * **怎么把它打红**：把脚本里那句 `resolveProfilePatchPath({ dshHome, profile: args.profile })`
+     * 改成不传 `profile`（= 让它去猜）⇒ 脚本在**仓库**里跑、模块路径里没有 `profiles/` ✗ ⇒
+     * 明确报错退出（老实现更糟：**静默**写到 `web` ✗）。这条不是旧 bug 的墓志铭
+     * （脚本本来就有 `--profile` ✓），它守的是"脚本侧也走**同一个**解析函数"这条接线 ✓。
+     */
+    const root = tempDir('dshm-setup-script-profile-')
+    // 真机上 `profiles/desktop` 一定存在（用户正在跑的 profile ✓）；`--config-only` 不建目录 ✓
+    mkdirSync(join(root, 'profiles', 'desktop'), { recursive: true })
+    execFileSync(
+      process.execPath,
+      [installer, '--dsh-home', root, '--profile', 'desktop', '--config-only', '--listener', '--lan-ip', '10.9.8.7'],
+      { stdio: 'ignore' },
+    )
+    const desktopPatch = join(root, 'profiles', 'desktop', 'cordis.patch.yml')
+    assert.equal(existsSync(desktopPatch), true, '--profile desktop 必须写到 desktop 那一份')
+    assert.equal(readCurrentConfig(desktopPatch)?.listener?.enabled, true, '写进去的配置要能被读回来（同一个解析函数 ✓）')
+    assert.equal(
+      existsSync(join(root, 'profiles', 'web', 'cordis.patch.yml')),
+      false,
+      '★ web 那份**一个字节都不许有** —— 它就是真机上被静默改掉的那套生产配置 ✗',
+    )
+  })
+
+  test('★ profile 名不合法 ⇒ 明确报错退出（绝不"当没看见"接着写 web ✗）', () => {
+    /**
+     * **怎么把它打红**：去掉脚本里那个 try/catch（或让非法名退回默认 `web`）⇒
+     * 本用例要么红在"退出码是 0"、要么红在"写出了东西"✗。
+     */
+    const root = tempDir('dshm-setup-script-badprofile-')
+    const result = spawnSync(
+      process.execPath,
+      [installer, '--dsh-home', root, '--profile', '../../etc', '--config-only'],
+      { encoding: 'utf8' },
+    )
+    assert.notEqual(result.status, 0, '畸形 profile 名必须让它**失败退出**（这也是它能被安全测试的前提 ✓）')
+    assert.match(`${result.stdout}${result.stderr}`, /profile/, '错误信息里要点明是 profile 的问题')
+    assert.equal(existsSync(join(root, 'profiles')), false, '被拒的调用不许写出任何 profile 目录')
   })
 })
 
@@ -1135,6 +1328,28 @@ describe('setup-config：本机配置页 GET /mobile/setup/page', () => {
     assert.match(failing.el('subtitle').textContent, /读取配置失败/)
   })
 
+  test('★★ 读状态被**明确拒绝**（500 + 服务端那句 message，例如"认不出这是哪个 profile"）⇒ 原样显示', async () => {
+    /**
+     * 打红：把 `load()` 里那句 `throw new Error(payload.message)` 去掉（退回只显示 `'HTTP ' + status`）
+     *   ⇒ 用户只看到 "HTTP 500"，而"认不出 profile、该怎么显式指定"这句话恰恰是**唯一**的线索 ✗
+     *   —— 本次修复的可见性（"不许静默"）就靠它 ✓。
+     */
+    const message =
+      '认不出这台机器用的是哪个 DSH profile，因此**拒绝猜一个**：…请显式指定：安装脚本用 `--profile <名字>`。'
+    const page = runSetupPage({
+      status: { code: 'mobile/setup-profile-unknown', message },
+      statusOk: false,
+      statusCode: 500,
+    })
+    await page.settle()
+    assert.equal(
+      page.el('error').textContent,
+      '打不开配置接口：' + message,
+      '服务端那句 message 必须原样传到页面上（它就是给用户念的那句话 ✓）',
+    )
+    assert.match(page.el('subtitle').textContent, /读取配置失败/)
+  })
+
   test('★ 页面里的「端点 ⇒ 受信列表」与宿主 withEndpointAuthorities **结论相同**（防两份实现漂移）', () => {
     // 打红：把页面里那份改成"不去重"/"只认 https"/"插到最前面" ⇒ 本用例立刻红
     //       （漂移的后果：页面写出去的端点没进 trustedHosts ⇒ 手机连上被 403 挡回去 ✗）
@@ -1362,5 +1577,213 @@ describe('setup-config：启动时那行"还没配置"提示', () => {
     assert.equal(readWebServerPort({ port: 0 }), undefined, 'port=0 是"还没 listen 上"的写法，不能当端口用')
     assert.equal(readWebServerPort({}), undefined)
     assert.equal(readWebServerPort({ port: 3711 }), 3711)
+  })
+})
+
+// ── H. 接线：GET /mobile/setup 的 profilePath 必须是**运行中那个** profile（真 apply() + 假 ctx） ──
+
+/**
+ * ## 这一组是 2026-09-30 那次真机事故的**端到端**守门人
+ *
+ * 真机现场（DSH 桌面版 0.2.0-rc.2，profile = `desktop`，`link:` 安装）：
+ * 插件加载成功 ✓、页面 200 ✓，可 `GET /mobile/setup` 返回的是
+ * `…/profiles/web/cordis.patch.yml` ✗（用户**日常在用**的那套配置 ✗），且不报错 ✗。
+ *
+ * 这里跑的是**真的** `apply()` ✓，而 `import.meta.url` 就是**仓库**里的 `src/cordis.ts`
+ * ⇒ 路径里没有 `profiles/` ✓ = 软链安装时插件看到的自己 ✓ —— 于是老实现必然退回 `web` ✗，
+ * 这条用例当时就会红 ✓。
+ */
+describe('setup-config：profile 名从 ctx.get(\'profileContext\') 来（真机事故的端到端守门人）', () => {
+  interface Route {
+    kind: string
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void
+  }
+
+  /**
+   * 起一次**真的** `apply()`（只把 `ctx.webServer` 换成记录用的假对象 ✓），
+   * 并把 `console.warn` 收下来（"不一致"那类警告必须能被断言到 ✓ —— 不许静默 ✗）。
+   *
+   * ★★ 真机现场的三个要素都在这里：
+   *   · 模块 URL = 仓库里的 `src/cordis.ts`（`import.meta.url`）⇒ 没有 `profiles/` ✓；
+   *   · 运行中的 profile 名只从 `ctx.get('profileContext').name` 来 ✓；
+   *   · `config.profile` 默认**不传** ⇒ 没有任何可猜的名字 ✓。
+   */
+  async function applyWithProfileContext(options: {
+    home: string
+    profileContext: unknown
+    configProfile?: string | undefined
+  }): Promise<{
+    call: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: string }>
+    warnings: string[]
+  }> {
+    const routes: Route[] = []
+    const ctx = {
+      webServer: {
+        register: (route: Route) => {
+          routes.push(route)
+          return () => {}
+        },
+        registerUpgrade: () => () => {},
+        tapIndex: () => () => {},
+        port: 3711,
+      },
+      effect: (fn: () => () => void) => {
+        fn()
+      },
+      logger: { info: () => {} },
+      get: (name: string) => (name === 'profileContext' ? options.profileContext : undefined),
+      on: () => {},
+    } as unknown as Parameters<typeof apply>[0]
+
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((value) => String(value)).join(' '))
+    }
+    try {
+      const config = { dshHome: options.home, injectShim: false }
+      apply(ctx, options.configProfile === undefined ? config : { ...config, profile: options.configProfile })
+    } finally {
+      console.warn = originalWarn
+    }
+
+    const route = routes.find((item) => item.path === SETUP_PATH)
+    assert.notEqual(route, undefined, '插件没有注册 /mobile/setup（配置页就没有入口了）')
+
+    const call = async (method: string, pathname: string, body?: unknown): Promise<{ status: number; body: string }> => {
+      const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
+      const req = {
+        method,
+        url: pathname,
+        headers: { host: '127.0.0.1:3711' },
+        socket: { remoteAddress: '127.0.0.1' },
+        async *[Symbol.asyncIterator]() {
+          for (const chunk of chunks) yield chunk
+        },
+      } as unknown as IncomingMessage
+      let status = 0
+      let text = ''
+      let headersSent = false
+      let finish: (() => void) | undefined
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      const res = {
+        get headersSent() {
+          return headersSent
+        },
+        writeHead(code: number) {
+          status = code
+          headersSent = true
+        },
+        end(data?: Buffer | string) {
+          text = typeof data === 'string' ? data : (data?.toString('utf8') ?? '')
+          finish?.()
+        },
+      } as unknown as ServerResponse
+      route?.handler(req, res)
+      await Promise.race([finished, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())])
+      assert.notEqual(status, 0, `${method} ${pathname} 未产生响应（处理器卡住了）`)
+      return { status, body: text }
+    }
+
+    return { call, warnings }
+  }
+
+  test('★★ 软链安装 + profileContext.name=desktop ⇒ profilePath **就是 desktop 那份**（老实现给的是 web ✗）', async () => {
+    /**
+     * **怎么把它打红**：把 `cordis.ts` 里 `profile: contextProfile ?? config.profile` 那句改回
+     * `profile: config.profile`（= 不看 `profileContext`）⇒ 本用例立刻红（500 或 web 路径 ✗）。
+     * 这正是真机上用户会看到的那一页：他点"保存"改的是**另一套**配置 ✗。
+     */
+    const home = tempDir('dshm-profile-wire-')
+    const env = await applyWithProfileContext({ home, profileContext: { name: 'desktop', dir: join(home, 'profiles', 'desktop') } })
+
+    const response = await env.call('GET', SETUP_PATH)
+    assert.equal(response.status, 200, response.body)
+    const payload = JSON.parse(response.body) as { profilePath: string; configured: boolean }
+    assert.equal(
+      payload.profilePath,
+      join(home, 'profiles', 'desktop', 'cordis.patch.yml'),
+      '★ GET /mobile/setup 的 profilePath 必须是**运行中那个** profile 的（真机返回过 profiles/web ✗）',
+    )
+    assert.doesNotMatch(payload.profilePath, /profiles\/web\//, '退到 web 就是"改掉用户日常那套配置还不报错" ✗')
+
+    // 写也必须落到**同一个**文件上（页面点保存走的就是这条路 ✓）
+    const posted = await env.call('POST', SETUP_PATH, { phoneBaseUrl: 'https://10.0.0.5:3443' })
+    assert.equal(posted.status, 200, posted.body)
+    assert.equal(
+      readCurrentConfig(join(home, 'profiles', 'desktop', 'cordis.patch.yml'))?.phoneBaseUrl,
+      'https://10.0.0.5:3443',
+    )
+    assert.equal(existsSync(join(home, 'profiles', 'web', 'cordis.patch.yml')), false, 'web 那份一个字节都不许被碰 ✗')
+  })
+
+  test('★★ 认不出 profile ⇒ 500 + 一句人话；**绝不**拿 web 顶上，也不写盘；页面照样打得开', async () => {
+    /**
+     * **怎么把它打红**：① 在 `resolveProfilePatchPath` 末尾加回 `?? 'web'` ⇒ 这里变成 200 + web 路径 ✗；
+     * ② 让 `handleSetupRequest` 在没有 patchFile 时"跳过检查" ⇒ 会去写一个猜出来的路径 ✗；
+     * ③ 让 page 分支也 500 ⇒ 用户只剩一张白页，**看不见**那句话 ✗。
+     */
+    const home = tempDir('dshm-profile-wire-none-')
+    const env = await applyWithProfileContext({ home, profileContext: undefined })
+
+    const response = await env.call('GET', SETUP_PATH)
+    assert.equal(response.status, 500, '认不出 profile 必须**明确失败**（不许 200 + 一个猜出来的 profilePath ✗）')
+    const payload = JSON.parse(response.body) as { code: string; message: string }
+    assert.equal(payload.code, 'mobile/setup-profile-unknown')
+    assert.match(payload.message, /profile/, '要给一句**人能念**的话（它会显示在配置页上 ✓）')
+    assert.match(payload.message, /拒绝猜/, '必须说清"我们拒绝猜一个"')
+    assert.ok(!response.body.includes('profiles/web'), '不许把 web 当默认值端出来 ✗')
+    // 启动时也要有声音（console.warn）—— 不静默 ✗
+    assert.ok(
+      env.warnings.some((line) => line.includes('profile')),
+      `认不出 profile 时启动必须打一行警告（实际：${env.warnings.join(' ｜ ') || '（无）'}）`,
+    )
+
+    // 页面**照样**返回 HTML：用户得有地方看见上面那句话 ✓
+    const page = await env.call('GET', SETUP_PAGE_PATH)
+    assert.equal(page.status, 200, '认不出 profile 时页面也必须打得开（否则用户只有一张白页 ✗）')
+    assert.match(page.body, /<form id="setup-form"/)
+
+    // 写请求同样拒绝，而且**一个文件都没写** ✗
+    assert.equal((await env.call('POST', SETUP_PATH, { phoneBaseUrl: 'https://10.0.0.5:3443' })).status, 500)
+    assert.equal(existsSync(join(home, 'profiles')), false, '认不出 profile 时不许往任何 profile 目录写东西 ✗')
+  })
+
+  test('★ 配置里的 profile 与运行中的**不一致** ⇒ 以运行中的为准，并打一行警告（不静默 ✗）', async () => {
+    /**
+     * **怎么把它打红**：把优先级倒过来（`config.profile` 压过 `profileContext.name`）⇒
+     * 本用例会拿到 `profiles/web/…` ✗；把警告去掉 ⇒ 第二条断言红 ✓。
+     */
+    const home = tempDir('dshm-profile-wire-mismatch-')
+    const env = await applyWithProfileContext({ home, profileContext: { name: 'desktop' }, configProfile: 'web' })
+    const response = await env.call('GET', SETUP_PATH)
+    assert.equal(response.status, 200, response.body)
+    assert.equal(
+      (JSON.parse(response.body) as { profilePath: string }).profilePath,
+      join(home, 'profiles', 'desktop', 'cordis.patch.yml'),
+      '运行中的 profile 才是真相（配置里那个多半是上一次留下的 ✗）',
+    )
+    assert.ok(
+      env.warnings.some((line) => line.includes('不一致')),
+      `不一致必须打一行警告（实际：${env.warnings.join(' ｜ ') || '（无）'}）`,
+    )
+  })
+
+  test('★ 老 DSH 没有 profileContext ⇒ 仍认 `config.profile`（老布局那条路不许被弄坏 ✓）', async () => {
+    /**
+     * **怎么把它打红**：把 `config.profile` 从 `profile: contextProfile ?? config.profile` 里删掉 ⇒
+     * 本用例变成 500（没有 profileContext 的 DSH 上，用户配置的显式 profile 被无视 ✗）。
+     */
+    const home = tempDir('dshm-profile-wire-config-')
+    const env = await applyWithProfileContext({ home, profileContext: undefined, configProfile: 'headless' })
+    const response = await env.call('GET', SETUP_PATH)
+    assert.equal(response.status, 200, response.body)
+    assert.equal(
+      (JSON.parse(response.body) as { profilePath: string }).profilePath,
+      join(home, 'profiles', 'headless', 'cordis.patch.yml'),
+    )
   })
 })

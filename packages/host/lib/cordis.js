@@ -200,6 +200,41 @@ export function setupStartupHint(port) {
     }
     return `${head}在本机浏览器打开 http://127.0.0.1:${port}${SETUP_PAGE_PATH}${tail}`;
 }
+/**
+ * ★★ 取本次运行的 profile 名（唯一来源：DSH 自己挂上来的 `profileContext` 服务 ✓）。
+ *
+ * ## 为什么这样取（先读现成的，不自创 API ✗）
+ *
+ * `ctx.get('profileContext')?.name` —— **DSH 自己的 bundle patch 就是这么判的**：
+ * `dsh-web-app/cordis.patch.yml` 里 `disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` ✓。
+ * 该服务在 `dsh-app-boot` 的 `boot()` 里由 `prepare(ctx)` **先** `provide`、
+ * 之后**才**挂载插件树 ⇒ 本插件 `apply()` 跑时它一定已经在 ✓。
+ *
+ * ## 为什么这么防御 ✗
+ *
+ * · 用 `?.` 调 `get`（与下面 `ctx.get('tools')` 同一写法 ✓）：`ctx.get` 在**不认识的服务名**上
+ *   返回 `undefined`（不抛 ✓），但 `profileContext` 是 DSH 的服务、不是本插件 `inject` 的依赖 ✗ ——
+ *   老版本 DSH / 非 profile 启动下它可能不存在 ✓，那时**安静地**返回 undefined 即可 ✓
+ *   （由调用方走 `config.profile` → 模块地址反推 → 明确报错 ✓，绝不猜一个默认值 ✗）。
+ * · 抛错也**吞掉**：插件的加载失败会把整个 DSH 带下去 ✗，而"认不出 profile"只是
+ *   接入配置这一条路由不可用 ✓（那条路由会明确报错 ✓，见 `resolveProfilePatchPath`）。
+ * · 名字必须是**非空字符串**才算数 ✓（拿一个 `{}` 或空串去拼路径＝另一种静默 ✗）。
+ */
+export function readProfileContextName(ctx) {
+    try {
+        const profileContext = ctx.get?.('profileContext');
+        if (typeof profileContext !== 'object' || profileContext === null)
+            return undefined;
+        const name = profileContext.name;
+        if (typeof name !== 'string')
+            return undefined;
+        const trimmed = name.trim();
+        return trimmed.length === 0 ? undefined : trimmed;
+    }
+    catch {
+        return undefined;
+    }
+}
 /** 插件主体。 */
 export function apply(ctx, config = {}) {
     const dshHome = resolveDshHome(config.dshHome);
@@ -641,7 +676,52 @@ export function apply(ctx, config = {}) {
      * 所以这条 `/mobile/setup` 比本插件那条 `/mobile` 前缀更长 ⇒ 只有这一条路径会被它接走 ✓，
      * 其余 `/mobile/*` 一字不动 ✓。
      */
-    const setupPatchFile = resolveProfilePatchPath({ dshHome, profile: config.profile, moduleUrl: import.meta.url });
+    /**
+     * ★★ 本次运行的是**哪个 profile** —— 必须**显式**取到，绝不猜（2026-09-30 修 ✗）。
+     *
+     * ## 为什么不能靠"从插件自己的模块路径反推"
+     *
+     * 软链安装（pnpm 的 `link:`；桌面 UI 装**本地路径**必然建软链 ✓）下，插件的真实路径是
+     * **仓库**（`…/dsh-mobile/packages/host/lib/cordis.js` ✓）—— 路径里没有 `profiles/<名字>` ✗
+     * ⇒ 反推必然失败。旧实现此时**静默退回 `web`** ✗，而 `web` 通常正是用户**日常在用**的那套
+     * 配置 ✗ ⇒ 桌面版（profile = `desktop`）页面上点一下"保存"，改的是另一套配置，**不报错** ✗。
+     * 真机实测就是这个症状：`/mobile/setup/page` → 200 ✓，而 `profilePath` 指向 `profiles/web/…` ✗。
+     *
+     * ## 名字从哪儿来（先读现成的，不自创 API ✗）
+     *
+     * DSH 把当前 profile 作为服务 `profileContext` 挂上来（`dsh-app-boot` 的
+     * `boot()` 里 `prepare(ctx)` 先 `provide('profileContext', …)`、**再**挂载插件树 ✓ ⇒
+     * 本插件 `apply()` 跑的时候它一定已经在 ✓），形状是
+     * `{ name, dir, patchPath, installAnchor, … }` ✓ —— **DSH 自己的 bundle patch 就是这么用的**：
+     * `dsh-web-app/cordis.patch.yml` 里 `disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` ✓。
+     * 所以这里用**同一个**取值方式 ✓，不新增任何 DSH 侧 API ✗。
+     *
+     * ## 优先级
+     *
+     * `profileContext.name`（**运行时真相** ✓）> `config.profile`（插件配置里的显式覆盖 ✓，
+     * 老 DSH 没有 `profileContext` 时仍可用 ✓）> 从模块地址反推（老布局兜底 ✓）。
+     * 三者都没有 ⇒ `resolveProfilePatchPath` 抛错 ✓（下面接住，明确报错、绝不猜 ✗）。
+     */
+    const contextProfile = readProfileContextName(ctx);
+    if (config.profile !== undefined && contextProfile !== undefined && config.profile !== contextProfile) {
+        // ★ 不一致也**不静默** ✓：以运行中的为准（配置里那个多半是上一次留下的 ✗）。
+        console.warn(`[mobile-host] 配置里的 profile='${config.profile}' 与本次运行的 profile='${contextProfile}' 不一致 ⇒ ` +
+            `以**运行中的**为准（${config.profile} 大概率是上次留下的，用它就会改掉另一套配置）`);
+    }
+    /** profile 的 `cordis.patch.yml`；`undefined` = 认不出来（**明确报错**，见下面的注册处 ✓）。 */
+    let setupPatchFile;
+    let setupPatchProblem;
+    try {
+        setupPatchFile = resolveProfilePatchPath({
+            dshHome,
+            profile: contextProfile ?? config.profile,
+            moduleUrl: import.meta.url,
+        });
+    }
+    catch (error) {
+        setupPatchProblem = error instanceof Error ? error.message : String(error);
+        console.warn(`[mobile-host] ★ 认不出这是哪个 profile：${setupPatchProblem}`);
+    }
     const disposeSetup = ctx.webServer.register({
         kind: 'prefix',
         path: SETUP_PATH,
@@ -662,7 +742,13 @@ export function apply(ctx, config = {}) {
             if (mobileHost.handleHttp(req, res))
                 return;
             handleSetupRequest(req, res, {
+                /**
+                 * ★★ 这两项一起给 ✓：路径**就是那个 profile 的** ✓；认不出来时
+                 *   `patchFile === undefined` ⇔ 处理器返回 500 + `patchFileProblem` 那句人话 ✗
+                 *   —— 它**不会**退到某个默认 profile 去读写 ✓（本次修的就是那个 ✗）。
+                 */
                 patchFile: setupPatchFile,
+                patchFileProblem: setupPatchProblem,
                 // ★ 仅本机：全项目只有这一个判据（index.ts 的 isLoopbackRequest）
                 isLocalRequest: isLoopbackRequest,
                 io: {
@@ -686,7 +772,8 @@ export function apply(ctx, config = {}) {
         listener?.dispose();
     });
     ctx.logger?.info?.(`[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
-        `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ${setupPatchFile}），` +
+        `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ` +
+        `${setupPatchFile ?? '（★ 认不出这是哪个 profile ⇒ 这条路由会明确报错，不会猜一个默认 profile）'}），` +
         `配置页 GET ${SETUP_PAGE_PATH}，` +
         `隧道 ${'/mobile/ws'}，身份指纹见 /mobile/manifest（协议版本 1）`);
     /**
@@ -703,8 +790,12 @@ export function apply(ctx, config = {}) {
      *
      * 本文件里其它"给人看的下一步提示"（TLS 就绪 / agent 工具已注册 ✓）都走 console.log，
      * 而终端会把 URL 变成**可点链接** ✓ —— 这正是这一行的用途 ✓。
+     *
+     * ⚠️ 认不出 profile 时（`setupPatchFile === undefined`）**不打**这一行 ✗：
+     *   没有 profile 就没有可写的文件，让用户去点一张必然 500 的页面是误导 ✓
+     *   （上面已经打过一行 console.warn 把原因说清了 ✓ —— 不静默 ✓）。
      */
-    if (readCurrentConfig(setupPatchFile) === null) {
+    if (setupPatchFile !== undefined && readCurrentConfig(setupPatchFile) === null) {
         console.log(setupStartupHint(readWebServerPort(ctx.webServer)));
     }
 }
