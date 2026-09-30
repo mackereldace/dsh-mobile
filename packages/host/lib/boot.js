@@ -2055,6 +2055,85 @@
   }
 
   /**
+   * ★★ round 185：端侧**投递链的取证记录** ✓ —— 只记事实，**一行逻辑都不改** ✗。
+   *
+   * 为什么要有它 ✗：2026-09-30 用户真机报「有提权请求，但手机一点反应都没有」✓，
+   * 而宿主侧审计（三条实例 ✓）**全是对的** ✓ —— approval/asked → approval-push →
+   * mobile/device/call notify ✓，2 秒后手机确实来取了 mobile/device/pending ✓，
+   * 然后**没有 mobile/device/result** ✗。
+   * ⇒ 故障落在「手机取到之后、回报之前」这一段 ✓，而这一段原先**一个字都不记** ✗；
+   *   手机上没有控制台 ✓ ⇒ 现场必须**落盘** ✓，而且要能从外面读（主线用 adb + CDP ✓，
+   *   读 __DSH_MOBILE_BOOT__.apk.deviceCallLog() ✓，见那一段自己的注释 ✓）。
+   *
+   * ## 落盘契约（读的人按它写 ✓）
+   *
+   * · 键：dsh-mobile.deviceCallLog ✓；值：JSON 数组 ✓；**新的在后** ✓；
+   * · 上限：最近 12 条 ✓（超了从**头上**砍 ✗ —— 上限自己截断，绝不让它无限长大 ✗）；
+   * · 每条 {at, id, kind, phase, outcome, detail} 六个字段 ✓：
+   *     ① at —— Date.now() 毫秒 ✓（与宿主审计的时间戳能直接比 ✓）；
+   *     ② id —— 这条投递的 id ✓（「取待办」那一级的记录用 '-' ✓）；
+   *     ③ kind —— 能力名（show / notify / clipboard / vibrate / open ✓）；
+   *        「取待办」那一级记 pending ✓；
+   *     ④ phase —— taken（取到 ✓）/ exec-start（开始执行 ✓）/ bridge（桥返回的原文 ✓）/
+   *        exec-end（执行结束 ✓）/ report-ok（回报成功 ✓）/ report-fail（★ 回报失败 ✗）；
+   *     ⑤ outcome —— 机器可读的短结论 ✓（count=N / ok / error / acked / no-ack / threw ✓）；
+   *     ⑥ detail —— 给人念的一句话 ✓（每条最多 300 字 ✓）。
+   *
+   * ★ 读不出来 / 写不进去**都不许炸** ✗ —— 下面两个函数整段包在 try/catch 里 ✓：
+   *   取证绝不许改变被取证对象的行为 ✗（这条链上抛一次错就会把投递带偏 ✓）。
+   */
+  var DEVICE_CALL_LOG_KEY = 'dsh-mobile.deviceCallLog'
+  /** 环形上限 ✓：12 条 = 够覆盖「取到 → 执行 → 回报」三轮，再留几轮上下文 ✓。 */
+  var DEVICE_CALL_LOG_MAX = 12
+  /** 一条 detail 最多留多少字 ✓ —— 怕异常文本很长，一条就把 12 条的预算吃光 ✗。 */
+  var DEVICE_CALL_LOG_DETAIL_MAX = 300
+
+  /**
+   * 读回那份环形记录 ✓ —— **只有这一个读取实现** ✓：落盘（下面那个 push ✓）
+   * 与对外的读取入口（__DSH_MOBILE_BOOT__.apk.deviceCallLog ✓）都走它 ✓，
+   * 绝不另写第二份 ✗（同一个概念只能有一个事实来源 ✓，见交接文档 §五 第 17 条 ✓）。
+   *
+   * 读不出来（没写过 ✓ / JSON 坏了 ✓ / localStorage 直接抛错 ✓）一律回空数组 ✓
+   * —— **绝不抛** ✗。
+   */
+  function deviceCallLogRead() {
+    try {
+      var raw = localStorage.getItem(DEVICE_CALL_LOG_KEY)
+      if (raw === null || raw === undefined || raw === '') return []
+      var parsed = JSON.parse(raw)
+      return Object.prototype.toString.call(parsed) === '[object Array]' ? parsed : []
+    } catch (error) {
+      return []
+    }
+  }
+
+  /**
+   * 追加一条记录 ✓（新的在后 ✓；超上限从头上砍 ✓）。
+   *
+   * 参数按「读的人怎么念」排 ✓：kind（哪种能力）→ id（哪一条）→ phase（走到哪一步）
+   * → outcome（结论）→ detail（一句话）。
+   * ★ 这个函数**只写记录** ✗：不碰调用方的任何状态、不改时序、不改返回值 ✓ ——
+   *   所以调用点可以插在既有语句之间而**行为零变化** ✓。
+   */
+  function deviceCallLogPush(kind, id, phase, outcome, detail) {
+    try {
+      var entries = deviceCallLogRead()
+      entries.push({
+        at: Date.now(),
+        id: String(id === undefined || id === null || id === '' ? '-' : id).slice(0, 60),
+        kind: String(kind === undefined || kind === null ? '' : kind).slice(0, 40),
+        phase: String(phase === undefined || phase === null ? '' : phase).slice(0, 24),
+        outcome: String(outcome === undefined || outcome === null ? '' : outcome).slice(0, 80),
+        detail: String(detail === undefined || detail === null ? '' : detail).slice(0, DEVICE_CALL_LOG_DETAIL_MAX),
+      })
+      if (entries.length > DEVICE_CALL_LOG_MAX) entries = entries.slice(entries.length - DEVICE_CALL_LOG_MAX)
+      localStorage.setItem(DEVICE_CALL_LOG_KEY, JSON.stringify(entries))
+    } catch (error) {
+      void error
+    }
+  }
+
+  /**
    * ★★ round 144：**隧道状态那句话只许有一份实现** ✓（这正是本项目反复守的那条 ✗）。
    *
    * 它原来长在 `fillConnSettings` 里 ✓（设置页那一行「隧道」✓），而 round 144 的调试面板
@@ -3008,7 +3087,18 @@
     this.keys = undefined
     this.nonceBase = { client: undefined, server: undefined }
     this.outCounter = 1n
-    this.inReplay = new ReplayWindow(1024)
+    /**
+     * ★★ round 186：**这里不再建反重放位图** ✗（原来这里有一句 new ReplayWindow(1024) ✓）。
+     *
+     * 判据：位图记的是"**这一条连接**上哪些 counter 见过了" ⇒ 它是**会话级**的东西 ✓；
+     *   而构造函数建出来的是"一个还没有任何连接的位图" ✗ —— 它不属于任何会话 ✓，
+     *   又会被 openEndpoint 立刻换掉 ✓ ⇒ 它只是一个**多出来的出生地** ✗。
+     *   出生地多一个，就多一条"建了连接却没换新位图"的路 ✓ —— 这个坑反复复发就是这个成因 ✓。
+     * ⇒ 现在**位图与连接同生** ✓：唯一出生地在 openEndpoint 里、紧挨着 new WebSocket ✓
+     *   （见那里的说明 ✓）；会话复位只把它**摘下来** ✓（见 resetSessionState ✓）。
+     *   在此之前它是 undefined ✓ —— 没有连接就没有位图，谁也别想拿它判帧 ✓。
+     */
+    this.inReplay = undefined
     this.streams = new Map()
     this.nextStreamId = 1
     this.pending = new Map()
@@ -3647,13 +3737,18 @@
    *     用的就是 `this.keys === undefined && this.nonceBase.server === undefined` ✓，
    *     留下旧的 `server` 值会让宿主回的**明文 ServerHello 被当成会话帧解析** ✗
    *     （round 156 抓到的真根之一 ✓：现象是"重连永远连不上"✗）；
-   *   · `inReplay` —— 本次会话的**入站**反重放窗口 ✓（本条故障的元凶 ✓）；
+   *   · inReplay —— ★★ round 186 起**这里不再造位图** ✗：位图属于"连接" ✓，
+   *     它的唯一出生地在 openEndpoint（紧挨着 new WebSocket ✓，见那里的说明 ✓）；
+   *     这里只把它**摘下来** ✓ = "这条会话的位图到此为止" ✓（此后任何 socket 都不再是
+   *     "当前连接" ✓，旧连接那些迟到的帧/事件一个字都进不来 ✓）。
    *   · `outCounter` —— 本次会话的**出站**计数 ✓（归 1 ✓：`ServerAuthOk` 之后会被写成 2 ✓，
    *     与宿主"数据帧从 2 开始"的约定一致 ✓）。
    * ★ 只清**会话级** ✗ —— 重试额度（`failStreak` / `autoReconnectDeadline` / `autoPaused` ✓）、
    *   传输对象（`socket` / `ready` / `pingTimer` ✓）与"本次端点尝试"的两个码
    *   （`attemptRejectionCode` / `attemptPendingCode` ✓，它们由 `openEndpoint` 每次尝试自己清 ✓）
    *   都**不在这里**动 ✓（动了会吃掉用户点的那一下的额度和提示 ✓）。
+   *   self.socket 仍是**传输级** ✓（它由退避定时器体与 openEndpoint 自己管 ✓）；
+   *   而位图是**会话级** ✓ —— 两者的归属不同，所以一个留、一个必须在这里摘掉 ✓。
    */
   Tunnel.prototype.resetSessionState = function () {
     this.keys = undefined
@@ -3662,7 +3757,21 @@
     this.hello = undefined
     this.ephemeral = undefined
     this.nonceBase = { client: undefined, server: undefined }
-    this.inReplay = new ReplayWindow(1024)
+    /**
+     * ★★ round 186：**只摘下来，绝不再造一张** ✗（原来这里是 new ReplayWindow(1024) ✓
+     *   —— 第二个出生地 ✓，本轮删掉 ✓）。
+     *
+     * 为什么"顺手造一张"是错的 ✗✗：这个函数**不是**"建连接"那一处 ✓ ——
+     *   退避定时器的回调体也调它 ✓，而那条路上**并不保证**紧接着真建起一条连接
+     *   （额度已尽 / 已有一次拨号在飞 / 手动那一下先把它清掉 ✓）。于是"复位造新位图"
+     *   会造出**一张没有连接的位图** ✓，两面都坏 ✗：
+     *     · 它把当前那条连接记过的 counter 全忘了 ✓ ⇒ **同一会话内已经见过的帧可以再被
+     *       接受一次** ⇒ 反重放被削弱 ✗（那是安全属性 ✓ —— 绝不许为了修症状动它 ✗✗）；
+     *     · 而旧连接照样能把帧喂进来 ✓ ⇒ 那一帧拿到的是一张**跟它没关系**的位图 ✗
+     *       （真机那句 帧被拒绝（seen）就是这么来的 ✓）。
+     * ⇒ 复位 = 摘下来 ✓；新位图由下一条连接**自己带** ✓（openEndpoint ✓）。
+     */
+    this.inReplay = undefined
     this.outCounter = 1n
   }
 
@@ -3692,6 +3801,16 @@
        *   ⇒ 只要拨号不是那条退避定时器带起来的（按需重拨 / 手动 ✓），
        *   新会话的帧就会被旧会话的反重放位图拒掉（真机：`帧被拒绝（seen）`✗）。
        *   现在**所有拨号路径**都在这里经过同一份复位 ✓ —— 谁也漏不掉 ✓。
+       *
+       * ★★ round 186（本轮 ✓）：复位**只摘位图、不造位图** ✗ —— 位图改由下面那句
+       *   与 socket 同生 ✓。为什么非这样不可 ✗：真机上这条报错**换了个面孔又回来了** ✓ ——
+       *   client api: session/prompt failed: dsh-mobile: 帧被拒绝（seen）(gateway/internal)
+       *   ★ 症状不对称：用户的 prompt **早就送到电脑了** ✓（电脑处理了 ✓），只有**电脑回的
+       *   那一帧被我们自己的窗口丢掉** ✗ ⇒ 手机上"消息没上屏" ✓。
+       *   病根不是"某条路漏了复位" ✗，而是**位图与连接不是一套东西** ✓：位图是 Tunnel 上
+       *   一个会被反复替换的字段 ✓，而每条 socket 的回调闭包都指向同一个 Tunnel ✓
+       *   ⇒ 被取代的那条连接照样能把帧喂进来 ✓，那一帧于是拿到一张**别人的位图** ✗。
+       *   判据与不变量写在下面 onmessage 那一段 ✓（那里是防线所在 ✓）。
        */
       self.resetSessionState()
       self.emitState('connecting')
@@ -3703,6 +3822,29 @@
         return
       }
       socket.binaryType = 'arraybuffer'
+      /**
+       * ★★ round 186：**位图与连接同生** ✓ —— 全文件**唯一**一个"会话尺寸位图"的出生地 ✓
+       *   （另一处 new ReplayWindow(16) 是 ServerHello 的一次性探针 ✓，与连接无关 ✓）。
+       *
+       * 为什么放在这里 ✗：只有这一处会 new WebSocket ✓ ⇒ 把位图的出生钉在这一处，
+       *   就得到一条**结构性**的不变量 ✓：每一条连接必然带着一张全新的位图 ✓，
+       *   而"建了连接却没有新位图"这件事在代码里**无法表达** ✗（不再是靠某条路径记得复位 ✓）。
+       *   构造函数与会话复位里都**不许**再建 ✓（各见那两处的说明 ✓）。
+       *
+       * 为什么"新连接必须换新位图" ✓（协议判据，别猜 ✓）：本协议**没有会话恢复** ✗ ——
+       *   · 宿主是**每连接**建一个 TunnelSession ✓（packages/host/src/index.ts 的
+       *     createTunnelSession ← attachSession ✓ 与中继外拨那条 ✓），
+       *     它的 outCounter / inReplay 都是**实例字段** ✓；
+       *   · 临时密钥**每次连接重新生成** ✓（docs/protocol.md 前向保密那节 ✓）；
+       *   · ServerAuthOk 恒为 counter=1、之后数据帧恒从 2 开始 ✓
+       *     （docs/protocol.md 的计数器占位约定 ✓）。
+       *   ⇒ 每一条新连接上，counter 都从 1 **重新数** ✓ ⇒ 位图必须从零开始记 ✓；
+       *     反过来，**连接还活着的时候绝不许换位图** ✗✗ —— 换了就等于忘掉"哪些 counter
+       *     见过" ✓，同一会话内已经见过的帧可以再被接受一次 ⇒ **反重放被削弱** ✗
+       *     （那是安全属性 ✓，不许为了修症状动它 ✗）。这两条就是全部判据 ✓。
+       */
+      var inboundReplay = new ReplayWindow(1024)
+      self.inReplay = inboundReplay
       self.socket = socket
 
       var timeout = setTimeout(function () {
@@ -3717,6 +3859,24 @@
       }, ENDPOINT_TIMEOUT_MS)
 
       socket.onopen = function () {
+        /**
+         * ★★ round 186：**已被取代的连接，连 onopen 都不许再往下走** ✗。
+         *   否则 performHandshake 会把 ClientHello 发到**别人的** socket 上 ✓
+         *   （this.send 用的是 this.socket ✓）—— 那是"两条连接共用一个会话状态"的另一个面孔 ✓。
+         * 判据与 onmessage 那段同一条 ✓：位图还是当前那一张吗 ✗ 不是 ⇒ 这条连接已经出局 ✓。
+         */
+        if (self.inReplay !== inboundReplay) {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          try {
+            socket.close()
+          } catch (error) {
+            void error
+          }
+          reject(new Error('dsh-mobile: 这次拨号已被后来的拨号取代'))
+          return
+        }
         void self.performHandshake().then(
           function () {
             if (settled) return
@@ -3739,7 +3899,44 @@
       }
 
       socket.onmessage = function (event) {
-        void self.onMessage(event.data).catch(function (error) {
+        /**
+         * ★★ round 186：**帧、位图、"当前连接"必须是一套** ✗✗（本轮的真修法就在这里 ✓）
+         *
+         * ## 真机现场（用户截图，逐字 ✓）
+         *   client api: session/prompt failed: dsh-mobile: 帧被拒绝（seen）(gateway/internal)
+         * ★ 不对称症状正是这个病的样子：prompt **早就送到电脑了** ✓（电脑处理了 ✓），
+         *   只有**电脑回的那一帧被我们自己的窗口丢掉** ✗ ⇒ 手机上"消息没上屏" ✓。
+         * 传导链（一条都不需要电脑出错 ✓）：
+         *   ① 这一帧被判重放 ⇒ onMessage 抛错 ⇒ 本回调的 catch 调 self.fail(error) ✓；
+         *   ② fail() → failPending(error) ⇒ **把那一刻所有在飞的一元请求一起拒掉** ✓
+         *      ⇒ 界面看到的就是那条 session/prompt failed ✓（gateway/internal 是 DSH
+         *      对未归类异常的兜底码 ✓，与我们无关 ✓）。
+         *
+         * ## 为什么会判成 seen ✗
+         *   openEndpoint **从不关闭上一条 socket** ✓（只有端点超时那一支关自己的 ✓），
+         *   而每条 socket 的回调闭包都指向**同一个** Tunnel ✓ ⇒ 被取代的那条连接照样
+         *   能把帧喂进当前会话 ✓。两边的 counter 都从 1 数起 ✓（ServerAuthOk 恒为 1 ✓、
+         *   数据帧恒从 2 开始 ✓）⇒ 旧连接的第 3 帧与新会话的第 3 帧**是同一个数字** ✓
+         *   ⇒ 新会话位图里那一位早就置位 ✓ ⇒ seen ✗。
+         *   真机上"另一条连接"从哪来 ✓：端点超时/握手超时（8 秒 / 15 秒 ✓）、
+         *   端点回退、退避定时器与一次在飞的拨号撞在一起 ✓、以及旧 socket 迟到的
+         *   onclose 又排了一次重连 ✓ —— 半死的 socket 上宿主的字节仍在往里灌 ✓
+         *   （宿主根本不知道手机已经走了 ✓）。
+         *
+         * ## 判据（本轮钉成不变量 ✓）
+         *   · **位图与连接同生** ✓：唯一出生地是上面那句 new ReplayWindow(1024) ✓；
+         *     构造函数与会话复位里都不许再建 ✗（多一个出生地就多一条漏网的路 ✓）。
+         *   · **当前连接 = self.inReplay 指向的那张位图** ✓ —— 这个对象**就是**身份判据 ✓
+         *     （不比 URL ✗、不比 socket 序号 ✗、不比 readyState ✗：那些都不是"会话"的判据 ✓）。
+         *   · **不是当前连接的帧 ⇒ 一个字都不许进来** ✓（下面那句 return ✓）：
+         *     它的会话密钥早就作废 ✓，它只配被丢掉 ✓ —— 既不许拿去判重放 ✗，
+         *     更不许碰到新会话的位图 ✗（碰了就是"旧连接的第 3 帧顶掉新会话的第 3 帧" ✓）。
+         *   · **同一张位图之内**，重复的 counter 仍然一律判 seen ✓ —— 反重放是安全属性 ✓，
+         *     本轮一个字节都没放宽 ✗（守卫见 boot-surface.test.ts 那条"真重放必须仍然被拒" ✓）。
+         */
+        if (self.inReplay !== inboundReplay) return
+        // ★ 位图**由这条连接自己带进去** ✓（不再读 this.inReplay ✗ —— 那个字段随时会换人 ✓）
+        void self.onMessage(event.data, inboundReplay).catch(function (error) {
           // 配对等待**不是错误**，是流程的正常一环（电脑还没点"允许此设备"）。
           // 早期把它按"隧道建立失败"打出来，日志里满屏红色 error，
           // 排查时很容易把它当成故障——而它只是"还没被批准"。这里降为 info 并
@@ -3756,6 +3953,11 @@
       }
 
       socket.onerror = function () {
+        /**
+         * ★★ round 186：旧连接的错误事件同样不许动新会话 ✓（判据与 onmessage / onclose 一致 ✓）。
+         *   真机上它的后果是"新会话被顺手打成 disconnected" ✓（屏幕上是莫名其妙的断开提示 ✓）。
+         */
+        if (self.inReplay !== inboundReplay) return
         if (settled) {
           self.emitState('disconnected')
           return
@@ -3766,6 +3968,17 @@
       }
 
       socket.onclose = function () {
+        /**
+         * ★★ round 186：**旧连接的关闭事件不许拆掉新会话** ✗（判据同上 ✓）。
+         *
+         * 真机上这条是会咬人的 ✓：旧 socket 的 onclose **迟到**（它早就半死了 ✓，
+         * 关闭事件过一会儿才派发 ✓），而那时手机已经在新连接上跑得好好的 ✓ ⇒
+         * 这一下会 stopKeepalive（停掉新连接的保活 ✗）、emitState('disconnected')
+         * （屏幕上莫名断开 ✗）、failStreams / failPending（把新会话**在飞的请求全拒掉** ✗，
+         * 用户看到的就是"刚发出去的消息又失败了" ✓）、还顺手排一次重连（凭空多拨一次 ✗）。
+         * ⇒ 一个字节都不许进来 ✓。
+         */
+        if (self.inReplay !== inboundReplay) return
         self.stopKeepalive()
         // ★ 回退期间**不要**调度重连：这个端点只是"没选上"，不是链路断了。
         //   让它调度会和 open() 的"试下一个候选"打架——两边同时改 ready/attempt，
@@ -3941,6 +4154,11 @@
        *   （真机：手动重连一连上就被自己的反重放窗口拒掉，`帧被拒绝（seen）` ✗）。
        *   现在**只有一份实现** ✓（`resetSessionState` ✓），这里只调它 ✓。
        *   `socket` / `ready` / 保活是**传输级**的 ✓、不属于会话级 ✗ ⇒ 仍旧留在这里 ✓。
+       * ★★ round 186：这里调它**只摘掉位图、不造位图** ✓（见那个函数的说明 ✓）——
+       *   这一路**不保证**紧接着真建起一条连接（下面那句 connect 可能因为已有一次
+       *   拨号在飞而直接返回 ✓）⇒ 若在这里造位图，就会造出"没有连接的位图" ✓，
+       *   那正是真机那句 帧被拒绝（seen）的一半成因 ✗。位图一律由 openEndpoint
+       *   与 socket 同生 ✓。
        */
       self.resetSessionState()
       void self.connect().catch(function (error) {
@@ -3974,7 +4192,27 @@
     })
   }
 
-  Tunnel.prototype.onMessage = async function (data) {
+  /**
+   * 处理一帧。
+   *
+   * ★★ round 186：**位图必须由调用方带进来** ✗（原来是读 this.inReplay ✗）。
+   *   为什么 ✗：这个函数是被**某一条 socket** 的回调调起来的 ✓ ——
+   *   "这一帧属于哪条连接"这件事**只有那个闭包知道** ✓；而 this.inReplay 是
+   *   "此刻谁在位"✓（一次拨号就换人 ✓）⇒ 读 this 就会把旧连接的帧拿去比新会话的位图 ✗
+   *   ⇒ 真机那句 帧被拒绝（seen）✗（现场与判据见 openEndpoint 里 onmessage 那一段 ✓）。
+   *
+   * @param data - 这一帧的字节 ✓
+   * @param inboundReplay - **这一帧所属连接**的入站位图 ✓（唯一的调用点就在 openEndpoint ✓）
+   */
+  Tunnel.prototype.onMessage = async function (data, inboundReplay) {
+    /**
+     * 拿不到"这一帧属于哪条连接"时 ⇒ **宁可不处理，也绝不许猜一张位图** ✗。
+     * （正常路径上不可能发生 ✓ —— 调用点只有一个 ✓、而且必然带位图 ✓；
+     *   这一句是给"以后有人新加调用点"准备的 ✓：宁可抛一句能读懂的错 ✓。）
+     */
+    if (inboundReplay === undefined) {
+      throw new Error('dsh-mobile: 收到帧，但不知道它属于哪条连接（拒绝拿别人的反重放位图去判它）')
+    }
     var bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer ?? data)
 
     // 阶段 1：明文——ServerHello 的 {e, sh} 或握手期 LinkError
@@ -4021,7 +4259,9 @@
         header: header,
         key: pending.s2c,
         nonceBase: this.nonceBase.server,
-        replay: this.inReplay,
+        // ★ round 186：用**这条连接自己**的位图 ✓（ServerAuthOk 恒为 counter=1 ✓
+        //   —— 正是"谁的 1 才算数"最容易被张冠李戴的那一帧 ✗）
+        replay: inboundReplay,
       })
       var authOk = JSON.parse(fromUtf8(plaintext))
       var expected = await hmac(pending.confirmServer, this.transcript)
@@ -4054,7 +4294,8 @@
       header: header,
       key: session.s2c,
       nonceBase: this.nonceBase.server,
-      replay: this.inReplay,
+      // ★ round 186：同上 —— 这一帧的 counter 只许拿去比它**自己那条连接**的位图 ✓
+      replay: inboundReplay,
     })
 
     switch (header.type) {
@@ -17425,6 +17666,21 @@
           return selfHealDecision(reason === undefined ? '(验收)' : String(reason))
         },
         /**
+         * ★★ round 185：端侧投递链的**取证读数** ✓ —— 主线的读取入口 ✓。
+         *
+         * 怎么用 ✗：真机漏投递时（宿主审计说有、手机一点反应都没有 ✓），
+         *   adb + CDP 念一句 __DSH_MOBILE_BOOT__.apk.deviceCallLog() ✓，
+         *   就能看见最近 12 条投递事件：取到几条（0 条也记 ✓）/ 每条执行到哪一步 /
+         *   回报成功没有 ✓ —— 于是「取到之后、回报之前」那一段第一次有了现场 ✓。
+         *
+         * ★ 与落盘**同源** ✓：直接回 deviceCallLogRead() ✓（就是 localStorage 里那一份 ✓），
+         *   **不另算一份** ✗ —— 两套事实来源必然漂 ✓。
+         * 返回：数组 ✓（没记录 / 读不出来 ⇒ 空数组 ✓ —— **绝不抛** ✗）。
+         */
+        deviceCallLog: function () {
+          return deviceCallLogRead()
+        },
+        /**
          * ★ 系统返回这条线的自证入口（round 121）✓。
          *
          * 验收脚本按老办法**冒充壳**（塞一个假的 `window.DshmShell` ✓）——
@@ -18167,7 +18423,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930022225'
+    var BOOT_STAMP = 'BUILD-0930043352'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -18960,7 +19216,24 @@
         log('轮询#' + index + ' 通 ' + summary)
       }
       var calls = result.value ? result.value.calls || [] : []
+      // ★★ round 185 取证①：**这一轮到底取到几条** ✓ —— 0 条也记一条 ✓。
+      //   为什么连 0 条都要记 ✗：只有每一轮都落一条，「那 4 秒到底取没取到」
+      //   才能与「取到了但没弹出来」分开 ✓（前者是 count=0 ✓、后者是有条目却没有 report ✗）。
+      //   summary 就是上面那句给人念的：「待办N条 电脑侧已启用=[...]」✓（不另算一份 ✗）。
+      deviceCallLogPush('pending', '-', 'taken', 'count=' + calls.length, summary)
+      if (calls.length > 0) {
+        // 取到东西才上调试框 ✓：0 条那一轮 4 秒一次，全打会把框刷没 ✗
+        //（0 条那一轮照旧有上面那句按内容去重的「轮询#N 通 待办0条」✓。）
+        var callLabels = []
+        for (var logIndex = 0; logIndex < calls.length; logIndex++) {
+          callLabels.push(String(calls[logIndex].capability) + '#' + String(calls[logIndex].id))
+        }
+        log('[call-log] 取到 ' + calls.length + ' 条：' + callLabels.join(', '))
+      }
       for (var i = 0; i < calls.length; i++) {
+        // ★★ round 185 取证②：**每条开始执行之前** ✓（与下面的 exec-end 配对 ✓：
+        //   只有 start 没有 end ⇒ 卡在执行里 ✗；两个都有却没有 report ⇒ 卡在回报 ✗）。
+        deviceCallLogPush(calls[i].capability, calls[i].id, 'exec-start', 'start', '开始执行')
         await runCall(transport, calls[i])
       }
 
@@ -19067,6 +19340,16 @@
            * 权限也走安卓原生的运行时权限 ✓ —— 那才是 WebView 里唯一存在的路 ✓。
            */
           var nativeResult = shellNotify(title, body)
+          // ★★ round 185 取证⑤：**桥返回的原文** ✓ —— 真机上这一格是唯一能把
+          //   「桥说没权限（denied）」/「桥抛了（error）」/「压根没有桥（null）」分开的证据 ✓
+          //   （这三件事在页面上原先长得一模一样 ✗）。只记，不参与下面任何判断 ✓。
+          deviceCallLogPush(
+            callInfo.capability,
+            callInfo.id,
+            'bridge',
+            nativeResult === null ? 'no-bridge' : String(nativeResult),
+            'shellNotify → ' + String(nativeResult),
+          )
           if (nativeResult === 'ok') {
             notified = true
             log('[notify] 走原生通知 ✓（壳）')
@@ -19147,7 +19430,50 @@
         detail = String(error && error.message ? error.message : error)
       }
       log('[call] ' + String(callInfo.capability) + ' → ' + String(detail))
-      await call(transport, 'mobile/device/result', { args: { id: callInfo.id, ok: ok, detail: detail } })
+      /**
+       * ★★ round 185 取证③：**这一条的结果到底是什么** ✓（成功 / 桥返回的字符串 / 抛了什么错 ✓）。
+       * ★ 注意 ok=false **不是**异常路径 ✓ —— 上面的 catch 只写 detail、不置 ok ✗，
+       *   所以「执行失败」的证据在 detail 里 ✓（exec-end 与下面那条 report 一起看才完整 ✓）。
+       */
+      deviceCallLogPush(callInfo.capability, callInfo.id, 'exec-end', ok === true ? 'ok' : 'error', 'detail=' + String(detail))
+      log('[call-log] 执行完 ' + String(callInfo.capability) + '#' + String(callInfo.id) + ' → ' + String(detail))
+      /**
+       * ★★ round 185 取证④：**回报 mobile/device/result** ✓ —— 这次故障最可疑的一环 ✓。
+       *
+       * ★ 行为**一个字都不改** ✗：原来就是这一句 await ✓，失败（抛错）也照旧往外抛 ✓
+       *   （上层 devicePollTick 的 onRejected 会把「轮询失败」记进调试框 ✓）——
+       *   本轮只在它前后**加记录** ✓：不加重试 ✗、不改顺序 ✗、不改时机 ✗。
+       *
+       * 判据（宿主侧 recordResult 会**回显**我们发过去的 id ✓，见宿主 device-calls.ts ✓）：
+       *   · 回了同一个 id ⇒ report-ok ✓（顺带把执行结论 ok= 一起记下 ✓）；
+       *   · 回不来 / 回的没有 id / 直接抛错 ⇒ **report-fail** ✗ —— 这一条要**响** ✓。
+       */
+      var reportAck = null
+      try {
+        reportAck = await call(transport, 'mobile/device/result', { args: { id: callInfo.id, ok: ok, detail: detail } })
+      } catch (reportError) {
+        var reportErrorMessage = String(reportError && reportError.message ? reportError.message : reportError)
+        deviceCallLogPush(callInfo.capability, callInfo.id, 'report-fail', 'threw', '回报抛错：' + reportErrorMessage)
+        log('!! 回报失败（抛错）' + String(callInfo.capability) + '#' + String(callInfo.id) + '：' + reportErrorMessage)
+        throw reportError
+      }
+      if (reportAck !== undefined && reportAck !== null && String(reportAck.id) === String(callInfo.id)) {
+        deviceCallLogPush(callInfo.capability, callInfo.id, 'report-ok', 'acked', 'ok=' + String(ok) + ' detail=' + String(detail))
+      } else {
+        /**
+         * ★ 回执原文要**尽力**记下来 ✓，但**绝不许因此抛** ✗ —— 这里是取证代码插进
+         *   生产路径的地方 ✓：取证抛一次，投递就多一次本来不会有的异常 ✗。
+         *   （回执本来就是 JSON 解出来的 ✓，理论上一定可序列化 ✓；这一层只是保险 ✓。）
+         */
+        var reportEcho = '(无法序列化)'
+        try {
+          reportEcho = JSON.stringify(reportAck === undefined ? null : reportAck).slice(0, 200)
+        } catch (echoError) {
+          void echoError
+        }
+        deviceCallLogPush(callInfo.capability, callInfo.id, 'report-fail', 'no-ack', '回报没有回执：' + reportEcho)
+        log('!! 回报失败（没有回执）' + String(callInfo.capability) + '#' + String(callInfo.id) + '：' + reportEcho)
+      }
     }
 
     /** 就某个能力征询一次；用户答了才记账。 */
