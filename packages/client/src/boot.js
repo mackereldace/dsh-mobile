@@ -14304,7 +14304,19 @@
            *   说明 DSH 那个合并菜单打开时聚焦的**不一定是输入框**（也可能是它自己的
            *   过滤/搜索框 ✗）。只要是可编辑的元素、且这一笔是**点在控件上**，就不给焦点 ✓。
            */
-          if (composerInputHasFocus() !== true && focusGuardLastTapWasControl() === true && composerEditableNode(node) === true) {
+          /**
+           * ★ round 207（用户："现在只有那个很多内容的面板了，那个点不动" ✗）：
+           *   触发器菜单的条目要**把焦点给输入框**才能把指令插进去 ✓ ——
+           *   而这条"没焦点时不让焦点跳进输入框"把它吞了 ✗ ⇒ 条目点不动 ✓。
+           *   ⇒ 与抢救同款**范围闸** ✓：只在**我们那几块**里吞（卡片/状态行/我们的菜单/两颗键 ✓），
+           *     别人浮层上的点击**放行** ✓（那正是"点一下要插入"的合法流程 ✓）。
+           */
+          if (
+            composerInputHasFocus() !== true &&
+            focusGuardLastTapWasControl() === true &&
+            focusGuardTapInOurScope() === true &&
+            composerEditableNode(node) === true
+          ) {
             focusGuardStats.swallowedFocus += 1
             return
           }
