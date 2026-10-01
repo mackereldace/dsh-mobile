@@ -13633,7 +13633,36 @@
     return trigger !== null && node === trigger
   }
 
-  var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, refocusedAfterSwap: 0 }
+  var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, refocusedAfterSwap: 0, menuToggleFallback: 0 }
+
+  /**
+   * ★ round 196c（用户 2026-10-01："电脑端 dsh 再次按加号也不会关，那就是 dsh 的毛病了，
+   *   但我们需要修手机上的"✓）：**替 DSH 收一次菜单** ✓ —— 它那颗合并 ＋ 的 toggle 是坏的 ✗
+   *   （桌面端同样复现 ✓ ⇒ 上游 bug ✓，但手机上由我们兜底 ✓）。
+   *   先派 Escape ✓（菜单类组件的标准关闭键 ✓）；120ms 后还没关 ⇒ 再派一次"点外面" ✓
+   *   （只派事件、不碰 DSH 的节点 ✓）。
+   */
+  function closeDshMenuNear(button) {
+    try {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true }),
+      )
+    } catch (error) {
+      void error
+    }
+    setTimeout(function () {
+      try {
+        if (button.getAttribute('aria-expanded') !== 'true' && document.querySelector('[role="menu"]') === null) return
+        var x = 4
+        var y = Math.round(window.innerHeight / 2)
+        document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: y }))
+        document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: x, clientY: y }))
+        document.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }))
+      } catch (error) {
+        void error
+      }
+    }, 120)
+  }
 
   /** 这个节点是不是可编辑的（输入框 / 文本域 / contenteditable ✓）。 */
   function composerEditableNode(node) {
@@ -13678,6 +13707,24 @@
             var inCard = control.closest('[data-composer-card="true"]') !== null
             var inStatsRow = control.closest('[data-composer-stats]') !== null
             if (inCard !== true && inStatsRow !== true && control.id !== 'dshm-attach') return
+            /**
+             * ★ round 196c：那颗合并 ＋（= 锚点那颗 ✓）的 toggle 是坏的 ✗（DSH 自己的 bug ✓，
+             *   桌面端同样复现 ✓）⇒ 手机上兜底：它已经开着菜单、又被点一次 ⇒
+             *   拦掉这一笔 + 替它把菜单收掉 ✓。
+             */
+            var plusEntry = attachAnchor()
+            var plus = plusEntry === null ? null : plusEntry.anchor
+            if (
+              plus !== null &&
+              control === plus &&
+              (plus.getAttribute('aria-expanded') === 'true' || document.querySelector('[role="menu"]') !== null)
+            ) {
+              if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+              if (typeof event.stopPropagation === 'function') event.stopPropagation()
+              focusGuardStats.menuToggleFallback += 1
+              closeDshMenuNear(plus)
+              return
+            }
             if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
             focusGuardStats.preventedPointerFocus += 1
           } catch (error) {
@@ -19965,7 +20012,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001071048'
+    var BOOT_STAMP = 'BUILD-1001071328'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
