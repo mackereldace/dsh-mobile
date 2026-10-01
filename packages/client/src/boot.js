@@ -14698,7 +14698,9 @@
       if (host !== null) host.appendChild(commandButton)
     }
     if (commandButton !== null) {
-      commandButton.style.left = Math.round(rect.left * 100) / 100 + 'px'
+      // ★ round 201c（用户："命令键还是乱动" ✗）：**同样要减掉实际位移** ✗ —— 上一版只给
+      //   附件键减了 ✓、这颗按含变换的 rect 摆 ⇒ 宿主自己又带一遍变换 ⇒ 两遍 ⇒ 乱跑 ✓。
+      commandButton.style.left = Math.round((rect.left - pushNow) * 100) / 100 + 'px'
       commandButton.style.top = Math.round(rect.top * 100) / 100 + 'px'
     }
     if (found.anchor.getAttribute('data-dshm-hide') !== '1') found.anchor.setAttribute('data-dshm-hide', '1')

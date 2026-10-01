@@ -14698,7 +14698,9 @@
       if (host !== null) host.appendChild(commandButton)
     }
     if (commandButton !== null) {
-      commandButton.style.left = Math.round(rect.left * 100) / 100 + 'px'
+      // ★ round 201c（用户："命令键还是乱动" ✗）：**同样要减掉实际位移** ✗ —— 上一版只给
+      //   附件键减了 ✓、这颗按含变换的 rect 摆 ⇒ 宿主自己又带一遍变换 ⇒ 两遍 ⇒ 乱跑 ✓。
+      commandButton.style.left = Math.round((rect.left - pushNow) * 100) / 100 + 'px'
       commandButton.style.top = Math.round(rect.top * 100) / 100 + 'px'
     }
     if (found.anchor.getAttribute('data-dshm-hide') !== '1') found.anchor.setAttribute('data-dshm-hide', '1')
@@ -20765,7 +20767,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001115540'
+    var BOOT_STAMP = 'BUILD-1001121546'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
