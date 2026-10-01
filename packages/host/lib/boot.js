@@ -14907,10 +14907,40 @@
    * 当前地址那一条加**后缀「当前」** ✓（用户最想看的"我现在走的是哪条" ✓）并染成
    * `ok` 色 ✓；读不到槽时给一句**说人话**的提示 ✓（不是空白 / 不是 `undefined` ✗）。
    */
-  function buildDefaultLinksGroup() {
+  /**
+   * ★ round 199（用户 2026-10-01："设置，连接与设备那里，**默认链接先改为可编辑的**，
+   *   后续还要对这方面更新" ✓）：这一节从"只读 + 复制"升级成**可编辑** ✓。
+   *
+   * 写回走壳**现成**的 `setEndpointSlots(json)` ✓（`native/…/MainActivity.java:1468` ✓）：
+   *   形状 `{slots:[{label,url}…], timeoutMs, pinned}` ✓（与 `endpoints()` 同形 ✓）；
+   *   url 必须以 `http` 开头 ✓（壳自己校验 ✓，坏条目会跳过并留日志 ✓）；
+   *   `timeoutMs` 会被壳夹到 200..10000 ✓。
+   * ★ **原样保留 `pinned`** ✓（壳还记着"钉住的那条" ✗，写回时漏掉会把它清没 ✓）。
+   */
+  function saveDefaultLinks(slots, timeoutMs, pinned) {
+    var shell = shellBridge()
+    if (shell === undefined || shell === null || shell.setEndpointSlots === undefined) {
+      setNote('壳没有写端点槽的能力（APK 较旧？）')
+      return false
+    }
+    try {
+      shell.setEndpointSlots(
+        JSON.stringify({ slots: slots, timeoutMs: timeoutMs, pinned: pinned === undefined ? null : pinned }),
+      )
+      setNote('默认链接已保存')
+      return true
+    } catch (error) {
+      setNote('保存失败：' + String(error && error.message ? error.message : error))
+      return false
+    }
+  }
+
+  /** 重画「默认链接」这一节 ✓（保存/取消之后照它来 ✓）。 */
+  function fillDefaultLinksGroup(group) {
     var links = readDefaultLinks()
-    var group = settingsGroup('默认链接')
-    group.setAttribute('data-dshm-default-links-group', '1')
+    var raw = shellJson('endpoints')
+    var pinned = raw !== null && raw !== undefined ? (raw.pinned === undefined ? null : raw.pinned) : null
+    group.replaceChildren()
     var threshold = links.timeoutMs + 'ms'
     if (links.slots.length >= 2) {
       threshold += '（先试' + links.slots[0].label + '，超时切 ' + links.slots[1].label + '）'
@@ -14925,13 +14955,53 @@
       empty.className = 'dshm-set-hint'
       empty.setAttribute('data-dshm-default-links-empty', '1')
       empty.textContent = '还没有默认链接：等这个页面成功加载一次后会自动记下'
-      group.appendChild(empty)
-      return group
+      return
     }
-    var makeRow = function (slot) {
+    var timeoutMs = links.timeoutMs
+    var makeRow = function (slot, index) {
       var current = defaultLinkIsCurrent(slot.url)
       var row = settingsRow(slot.label, current ? slot.url + '（当前）' : slot.url, current ? 'ok' : undefined)
       row.setAttribute('data-dshm-default-link-row', current ? 'current' : 'other')
+      var edit = toolButton('改', function () {
+        group.replaceChildren()
+        var form = document.createElement('div')
+        form.className = 'settingsRow'
+        form.setAttribute('data-dshm-default-link-edit', '1')
+        var labelInput = document.createElement('input')
+        labelInput.type = 'text'
+        labelInput.value = slot.label
+        labelInput.setAttribute('aria-label', '链接名称')
+        labelInput.style.cssText = 'width:84px'
+        var urlInput = document.createElement('input')
+        urlInput.type = 'text'
+        urlInput.value = slot.url
+        urlInput.setAttribute('aria-label', '链接地址')
+        urlInput.style.cssText = 'flex:1;min-width:0'
+        var save = toolButton('存', function () {
+          var url = urlInput.value.trim()
+          if (url.indexOf('http') !== 0) {
+            setNote('地址要以 http 开头 ✓：' + url)
+            return
+          }
+          var slots = []
+          for (var j = 0; j < links.slots.length; j++) {
+            slots.push(j === index ? { label: labelInput.value.trim() || defaultLinkLabel(url), url: url } : links.slots[j])
+          }
+          if (saveDefaultLinks(slots, timeoutMs, pinned) === true) fillDefaultLinksGroup(group)
+        })
+        var cancel = toolButton('取消', function () { fillDefaultLinksGroup(group) })
+        form.appendChild(labelInput)
+        form.appendChild(urlInput)
+        form.appendChild(save)
+        form.appendChild(cancel)
+        group.appendChild(form)
+        var back = toolButton('返回列表', function () { fillDefaultLinksGroup(group) })
+        group.appendChild(back)
+        urlInput.focus()
+      })
+      edit.setAttribute('data-dshm-action', 'edit-default-link')
+      edit.title = '改这条链接的名称/地址'
+      row.appendChild(edit)
       var copy = toolButton('复制', function () {
         void copyText(slot.url).then(function (how) {
           if (how === undefined) {
@@ -14946,7 +15016,13 @@
       row.appendChild(copy)
       return row
     }
-    for (var i = 0; i < links.slots.length; i++) group.appendChild(makeRow(links.slots[i]))
+    for (var i = 0; i < links.slots.length; i++) group.appendChild(makeRow(links.slots[i], i))
+  }
+
+  function buildDefaultLinksGroup() {
+    var group = settingsGroup('默认链接')
+    group.setAttribute('data-dshm-default-links-group', '1')
+    fillDefaultLinksGroup(group)
     return group
   }
 
@@ -20599,7 +20675,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001083137'
+    var BOOT_STAMP = 'BUILD-1001101916'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
