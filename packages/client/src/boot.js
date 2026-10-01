@@ -13764,7 +13764,6 @@
      *   ★ 配套（下面 `pointerdown` 里那条）：记下"按下那一刻输入框有没有焦点" ✓，
      *     事后归还**只在有焦点的情形**才做 ✓ —— 关着的时候一个字都不许动 ✗。
      */
-    installComposerFocusGuard()
     document.addEventListener(
       'pointerdown',
       function (event) {
@@ -14336,11 +14335,6 @@
       attachSteady += 1
     }
     if (host.getAttribute('data-dshm-on') !== '1') host.setAttribute('data-dshm-on', '1')
-    // ★ round 195：键在屏幕上 ⇒ 常驻跟随开着 ✓（真机原生滚动没有 DOM 事件 ✗，见 attachFollowFrame ✓）
-    if (attachFollowAlways !== true) {
-      attachFollowAlways = true
-      scheduleAttachFollow()
-    }
     /**
      * 让位：后续那一颗按钮（= 权限键 ✓）右移"一个钮宽 + 那个 gap" ✓
      * —— 与我们占掉的横向空间**逐像素相等** ✓（值没变就一个字节都不写 ✓）。
@@ -14379,8 +14373,7 @@
   function attachFollowFrame() {
     attachFrame = null
     placeAttachButton()
-    var keep = attachFollowAlways === true && document.visibilityState === 'visible'
-    if (keep !== true && attachSteady >= 3) return
+    if (attachSteady >= 3) return
     if (typeof globalThis.requestAnimationFrame === 'function') attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
   }
   function scheduleAttachFollow() {
