@@ -10738,11 +10738,9 @@
        * ★★ round 193：模型菜单关掉之后把焦点还给输入框 ✓（用户："点控件会把输入法关闭"✗）。
        *   装一次监听 ✓ + 200ms 对一次账 ✓ —— 与同处那三条轮询同一条命 ✓（都是"很便宜"的查一次 ✓）。
        */
-      installComposerFocusKeeper()
-      installComposerFocusWatch()
+      installComposerFocusProtection()
       // ★ round 194：附件键在滚动/回弹期间要按帧跟随（`position: fixed` 不会自己跟着内容走 ✗）
       installAttachFollowOnScroll()
-      setInterval(syncComposerFocusKeeper, 200)
       /**
        * ★ 壳 insets 的**兜底对账**（round 115）✓：壳那条"推"的路可能被漏掉
        *   （页面刚被换掉、事件正好落在导航中间 ✓）—— 每秒问一次就能收敛 ✓。
@@ -13581,88 +13579,6 @@
   /** 自绘的「添加附件」键（全文档只有一个 ✓；建一次、之后只挪 ✓）。 */
   var attachButton = null
 
-  /**
-   * ★★ round 193（用户批准 ✓）：**模型菜单关掉之后，把焦点还给输入框**。
-   *
-   * ## 为什么（用户原话）
-   * "点击控件会把**输入法关闭**"✗。实测读数（不是推断 ✓）：
-   *   · 点之前 `document.activeElement = div.yhfFVG_input`（可编辑 ✓）；
-   *   · 点之后 = `button.cl2Rlq_trigger`（模型钮 ✓）⇒ 真机上输入框失焦 ⇒ **键盘收起** ✗；
-   *   · 关掉菜单后**仍然**停在钮上 ✓（不会自己回来 ✗）。
-   * 机制有调用栈 ✓：DSH 菜单组件的 `show()` 里第一句就是 `triggerRef.current?.focus()`
-   *   —— **三版都一样**（0.15 `_7KE1Ra` / 0.17 / 0.2.0 逐字同款 ✓）⇒ 不是我们引入的 ✗，
-   *   而 `pointerdown` / `mousedown` 上 `preventDefault()` **也拦不住**它 ✓
-   *   （它走的是脚本 `.focus()`、不是浏览器默认行为 ✗）。
-   *
-   * ## 所以只做"归还"，不动 DSH 的一行代码 ✓
-   * 不去抢它的**打开**动作 ✗（抢了会在菜单展开时把键盘又顶起来 ✓ —— 那反而更糟 ✗），
-   * 只在**它自己把菜单关掉**之后对一次账：焦点若**还停在模型钮上** ⇒ 拨回输入框 ✓。
-   *
-   * ## 三条纪律（少一条都会变成"抢用户焦点"✗）
-   *   1. 只在**焦点确实在模型钮上**时才拨 ✓ —— 用户在别处点了（另一颗按钮 / 输入框 ✓）就不碰 ✗；
-   *   2. 只在**菜单真的关掉了**才拨 ✓ —— 菜单还开着时拨回去会把键盘顶起来挡住菜单 ✗
-   *      （这正是不在"打开"那一刻拨的原因 ✓）；
-   *   3. 拨回去**只调 `focus()`** ✓、不派发任何指针事件 ✓ ⇒ **不会把菜单再弹开** ✗
-   *      （菜单的打开走 `click` ✓ —— 见 `lineageForwardPointer` 里那条"合成事件"的教训 ✓）。
-   */
-  var focusKeeperInput = null
-  var focusKeeperTrigger = null
-  var focusKeeperWasOpen = false
-  /** ★ 开窗口那一刻的快照："这一轮确实见过菜单开着" ✓（`restoreComposerFocus` 的 `onBody` 档用它 ✓）。 */
-  var focusKeeperSawMenu = false
-  /**
-   * ★★ 最关键的闸：**"用户点了菜单里的东西"**。
-   *
-   * 为什么非要它 ✗（第一版只看"焦点在不在触发器上"，实测红灯 ✓）：
-   * 实测时间线（60ms 采一次 ✓）是——`t=62 触发器 / 菜单还在` → `t=122 选项 / 菜单没了` ✓。
-   * 也就是说 DSH 撤菜单与"把焦点塞进菜单项"**只隔一帧** ✓，而我们的
-   * `MutationObserver` 是**微任务** ✓、按帧的窗口也是**下一帧** ✓ ⇒
-   * 等我们看的时候焦点**早就不在触发器上了** ✗（它在那个已经脱离文档的选项上 ✓）。
-   * ⇒ 判据不能问"焦点现在在哪"✗，要问"**这一轮里焦点有没有被 DSH 拿走过**"✓：
-   *   只要用户在输入卡片里按过（`pointerdown` ✓）⇒ 我们记下这一刻的输入框 ✓、
-   *   并置位这一条 ✓；菜单关掉时若**没有任何"用户点了菜单以外的地方"**的痕迹 ✓
-   *   ⇒ 这一次关门就是"选完了 / 按 ESC 了"✓ ⇒ 把焦点拨回去 ✓。
-   * 反过来的那一半同样硬性 ✓（见 `installComposerFocusKeeper` ✓）：
-   *   用户在菜单外任何地方按一下 ⇒ **立刻撤掉这条位** ✓ ⇒ 我们一个字都不动 ✗。
-   */
-  var focusKeeperArmed = false
-  /**
-   * ★★ round 195：**按下那一刻输入框有没有焦点** ✓ —— 事后归还**只在这一种情形**才做 ✓。
-   * 用户原话："在**关闭输入法的时候点击会打开**" ✗ ⇒ 键盘本来是关的，我们**一个字都不许动** ✗
-   * （上一版无条件拨回 ⇒ 把键盘弹开了 ✗，这条是我的锅 ✓）。
-   */
-  var focusKeeperHadInputFocus = false
-  /**
-   * ★★ 上面那一位是**带时限**的 ✓（这里踩过一次，记清楚 ✗）：
-   *   菜单是 `position: fixed` 的浮层、**挂在 `body` 下** ✓（实测 `menu.parentElement` = body ✓），
-   *   所以"在菜单里选一项"这**另一次** `pointerdown` 也落在"卡片外" ✓ ⇒
-   *   第一版无条件撤位 ✗ ⇒ **选完永远不还焦点** ✗（实测：`选一项后` 焦点仍在菜单项上 ✓）。
-   *   改成：卡片外的按压把这位**推迟到 400ms 之后**再撤 ✓ ——
-   *     · 真是"用户去点别处了" ✓ ⇒ 400ms 后撤掉 ✓，而且那一瞬焦点**已经不在我们这两处**
-   *       （在用户点的那颗新控件上 ✓）⇒ 就算位还在，`restoreComposerFocus` 的焦点判据也会拦下 ✓；
-   *     · 真是"在菜单里选一项" ✓ ⇒ 关门发生在 400ms **之内** ✓ ⇒ 那一位还在 ✓ ⇒ 焦点照还 ✓。
-   */
-  var focusKeeperDisarmAt = 0
-  /**
-   * ★★ 看门狗序号（`pointerdown` 里每次加一 ✓）。
-   *
-   * ## 为什么还需要它（实测读数，别再省这一步 ✗）
-   * 只靠"心跳看见开着 ⇒ 记住 ⇒ 关门时开窗口"漏掉**同一次心跳之内就关掉**的情形 ✗：
-   *   实测 `seenOpen` 在"打开 → ESC 关掉"整段里**一个数都没涨** ✓ ——
-   *   因为点模型钮那一下（打开 ✓）与按 ESC（关掉 ✓）之间**只有几十毫秒** ✓，
-   *   而心跳是 `200ms` 一次 ✓、`MutationObserver` 的回调只在**菜单进/出 DOM** 时跑 ✓
-   *   （`focusin` 与它无关 ✗）⇒ 我们**从头到尾没看见"它开着"** ✗ ⇒ 永不还焦点 ✓。
-   * 看门狗：**在卡片里按下那一刻**就把序号 +1 ✓，然后自己每 50ms 问一次
-   *   "菜单还开着吗" ✓ —— 开过就置位（记下那棵树 ✓）、关门就开窗口 ✓。
-   *   时限 1.6 秒 ✓、到点自停 ✓（一次点按最多花这么点开销 ✓）。
-   */
-  var focusKeeperWatchdog = 0
-  /**
-   * 关门那一刻**那棵菜单树**（用来判"焦点跑到菜单里去了"✓）。
-   * 只在心跳看见"菜单还开着"时更新 ✓ —— 它必须是**我们亲眼见过的**那一棵 ✓，
-   * 不能是关门之后才去查（那时候它已经不在 DOM 里了 ✗）。
-   */
-  var focusKeeperMenu = null
 
   /** 模型菜单那棵树（`aria-label` 三版逐字相同 ✓ —— 比哈希稳 ✓）。 */
   function composerMenuNode() {
@@ -13686,26 +13602,22 @@
   }
 
   /**
-   * 装一次：只挂**一个**捕获相位的 `pointerdown` ✓（很便宜 ✓，不随观察者重装 ✗）。
+   * ★★ round 196（2026-10-01 用户："这个焦点归还确实没啥用直接拆"✓）：**焦点保护** ——
+   *   只做**预防**、**绝不事后补救** ✓。拆掉的那版"焦点归还"是事后把焦点拨回输入框 ✓，
+   *   于是造出两种新毛病：点输入区外关不掉输入法（快速关一下又弹回 ✓）、
+   *   以及键盘"先收起再弹出"的那一闪 ✗。
    *
-   * 捕获相位 ⇒ 跑在 React 的处理函数**之前** ✓（DSH 的菜单在 `click` 里开 ✓），
-   * 所以这一刻读到的 `activeElement` 还是**用户按下去之前**的那个 ✓。
-   *
-   * 两件事，缺一不可 ✗：
-   *   1. **一律先撤位** ✓ —— 只要这一下不在输入卡片里，就是"用户去忙别的了"✓，
-   *      我们此后**一个字都不许动** ✗（这条就是"别抢用户焦点"的硬保证 ✓）；
-   *   2. 在卡片里按 ⇒ 记下输入框与触发器 ✓、置位 ✓（等菜单关掉再还 ✓）。
+   * 现在只拦两件事，都在**焦点转移发生之前**：
+   *   ① 输入框**有**焦点时，点输入区里的控件（＋ / 权限 / 回形针 / 模型钮 …）
+   *      ⇒ **不让默认的焦点转移发生** ✓（按钮默认可聚焦 ⇒ 一点焦点就跑到按钮上 ⇒ 安卓收键盘 ✗）；
+   *   ② 程序化的 `.focus()` **不许改输入法状态** ✓：
+   *      · 输入框**没有**焦点时，不许把焦点塞进输入框 ——"关着键盘点＋弹键盘"那一档 ✓
+   *        （例外：点的是输入区**空白处** ✓ —— 那就是"我要打字" ✓，照常给焦点 ✓）；
+   *      · 输入框**有**焦点时，不许把焦点挪进模型菜单那棵树（DSH 的 `show()` 会这么干 ✗）；
+   *      · 菜单树里的元素（含「搜索模型」那个输入框 ✓）一律不给焦点 ——
+   *        子菜单一打开就聚焦搜索框 ⇒ 弹键盘，正是用户报的那一档 ✗；想搜的人会自己点 ✓。
+   *   ★ 唯一的例外：用户**亲手点到**的目标可以拿焦点 ✓。
    */
-  /**
-   * ★★ round 195：**不让焦点离开输入框** ✓（而不是事后拨回来 ✗）。
-   *
-   * 背景见 `installComposerFocusKeeper` 的注释 ✓：安卓只在**用户手势那一拍**里显示软键盘 ✓，
-   * 事后的脚本 `.focus()` 只能改焦点、**弹不出输入法** ✗ ⇒ 只要输入框失焦过，键盘就没了 ✓。
-   * ⇒ 从源头拦：把 `HTMLElement.prototype.focus` 包一层 ✓，**只**吞掉
-   *   "目标是模型钮 / 它那棵菜单树，且输入框此刻正有焦点"的那一下 ✓，其余原样转发 ✓。
-   */
-  var composerFocusGuardInstalled = false
-
   /** 输入框（或它所在的那张卡片）此刻有没有焦点 ✓。 */
   function composerInputHasFocus() {
     var active = document.activeElement
@@ -13721,389 +13633,127 @@
     return trigger !== null && node === trigger
   }
 
-  function installComposerFocusGuard() {
-    if (composerFocusGuardInstalled === true) return
+  var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, refocusedAfterSwap: 0 }
+
+  /** 这个节点是不是可编辑的（输入框 / 文本域 / contenteditable ✓）。 */
+  function composerEditableNode(node) {
+    if (node === null || node === undefined || node.matches === undefined) return false
+    try {
+      return node.matches('input, textarea, [contenteditable="true"]')
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+  var focusGuardLastTapTarget = null
+  var focusGuardLastTapAt = 0
+  /** 这一轮是不是"正在打字"（输入框有焦点 ✓）——节点被换时只有这一种情形才还焦点 ✓。 */
+  var focusGuardTyping = false
+
+  /** 最近 700ms 内那一笔是不是**点在控件上**（点空白不算 ✓）。 */
+  function focusGuardLastTapWasControl() {
+    if (focusGuardLastTapTarget === null) return false
+    if (Date.now() - focusGuardLastTapAt > 700) return false
+    var target = focusGuardLastTapTarget
+    if (target.closest === undefined) return false
+    var control = target.closest('button, [role="button"]')
+    return control !== null
+  }
+
+  function installComposerFocusProtection() {
+    if (focusGuardStats.installed === true) return
+    try {
+      document.addEventListener(
+        'pointerdown',
+        function (event) {
+          focusGuardLastTapTarget = event === undefined || event.target === undefined ? null : event.target
+          focusGuardLastTapAt = Date.now()
+          focusGuardTyping = composerInputHasFocus()
+          try {
+            if (composerInputHasFocus() !== true) return
+            var target = event.target
+            if (target === null || target === undefined || target.closest === undefined) return
+            var control = target.closest('button, [role="button"]')
+            if (control === null) return
+            var inCard = control.closest('[data-composer-card="true"]') !== null
+            var inStatsRow = control.closest('[data-composer-stats]') !== null
+            if (inCard !== true && inStatsRow !== true && control.id !== 'dshm-attach') return
+            if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+            focusGuardStats.preventedPointerFocus += 1
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+    } catch (error) {
+      debugBoxLine('[focus] 保护装不上（点控件仍会收键盘）：' + String(error && error.message ? error.message : error))
+      return
+    }
     if (typeof HTMLElement !== 'function' || HTMLElement.prototype === undefined) return
     var original = HTMLElement.prototype.focus
     if (typeof original !== 'function') return
     HTMLElement.prototype.focus = function () {
       try {
-        if (composerInputHasFocus() === true && composerFocusStealer(this) === true) {
-          focusKeeperStats.swallowedFocus += 1
-          return
+        var node = this
+        var tappedNow =
+          focusGuardLastTapTarget !== null && node === focusGuardLastTapTarget &&
+          Date.now() - focusGuardLastTapAt <= 700
+        if (tappedNow !== true) {
+          if (node.closest !== undefined && node.closest('[role="menu"]') !== null) {
+            focusGuardStats.swallowedFocus += 1
+            return
+          }
+          /**
+           * ★ round 196b：判据放宽到"**任何可编辑元素**" ✓ —— 用户实测"关着键盘点＋仍会弹键盘"✗，
+           *   说明 DSH 那个合并菜单打开时聚焦的**不一定是输入框**（也可能是它自己的
+           *   过滤/搜索框 ✗）。只要是可编辑的元素、且这一笔是**点在控件上**，就不给焦点 ✓。
+           */
+          if (composerInputHasFocus() !== true && focusGuardLastTapWasControl() === true && composerEditableNode(node) === true) {
+            focusGuardStats.swallowedFocus += 1
+            return
+          }
+          if (composerInputHasFocus() === true && composerFocusStealer(node) === true) {
+            focusGuardStats.swallowedFocus += 1
+            return
+          }
         }
       } catch (error) {
         // 判据出错就照原样转发 ✓（绝不吞掉别人的聚焦 ✗）
       }
       return original.apply(this, arguments)
     }
-    composerFocusGuardInstalled = true
-  }
-
-  function installComposerFocusKeeper() {
+    focusGuardStats.installed = true
     /**
-     * ★★★ round 195（用户 2026-10-01 反馈 ✓）：
-     *   > 「无论是上下文那一栏，还是输入栏那些小控件，**在打开输入法的时候点击都会关掉**，
-     *   >   或者在**关闭输入法的时候点击会打开**」✓
-     *
-     *   两半的原因不同 ✗：
-     *   · **打开了却关掉** ✗：DSH 自己那颗模型钮被点时会 `triggerRef.current?.focus()` ✓
-     *     （`dsh-client-ui-model-selection` 的 `show()` ✓，0.15/0.17/0.2.0 三版同款 ✓）——
-     *     焦点一离开输入框，**安卓就把输入法收起来** ✗。我们在事后把焦点拨回去 ✗
-     *     **救不回键盘** ✗：安卓只在**用户手势那一拍**里显示软键盘 ✓，
-     *     事后的脚本 `.focus()` 只能改焦点、弹不出输入法 ✓（这正是"无头里 0/80 全绿、真机照旧"的原因 ✗）。
-     *   · **关着却打开** ✗：我们上一版那条"焦点归还"是**无条件**拨回输入框 ✓
-     *     ⇒ 键盘本来是关的也会被它弹开 ✗（这条是我的锅 ✓）。
-     *
-     *   ⇒ 正确的修法是**不让焦点离开输入框** ✓（从源头拦 ✗），而不是事后补救 ✗：
-     *     把 `HTMLElement.prototype.focus` 包一层 ✓ ——
-     *     **只**吞掉"目标是模型钮 / 它那棵菜单树，且输入框此刻正有焦点"的那一下 ✓，
-     *     其余一律原样转发 ✓（键盘导航、其它控件、DSH 别处的聚焦全不受影响 ✓）。
-     *     ★ 这样输入框**从头到尾没失焦** ⇒ 输入法**既不会被关、也不会被弹** ✓✓。
-     *   ★ 只在手机外壳里装 ✓；装过一次就不再装 ✓；任何异常都**转发原函数** ✓（绝不吞掉别人的聚焦 ✗）。
-     *   ★ 配套（下面 `pointerdown` 里那条）：记下"按下那一刻输入框有没有焦点" ✓，
-     *     事后归还**只在有焦点的情形**才做 ✓ —— 关着的时候一个字都不许动 ✗。
+     * ★ round 196b（用户实测："开键盘点模型键有概率收回输入法"✗）——
+     *   这一档**不是焦点被抢** ✗：DSH 开/关菜单时 React 会把输入框节点整个换掉 ✓
+     *   （重渲染 ✓）⇒ 焦点随旧节点消失 ⇒ 安卓收键盘 ✓，而且**事后再 focus 弹不出输入法** ✗
+     *   ⇒ 只有一条路：**在节点被换的那一帧把焦点交给新节点** ✓。
+     *   ★ 范围收得极窄 ✓：只在"这一轮本来就在打字"（输入框有焦点时才置位 ✓）
+     *     且"换完之后焦点确实丢了"的情形才拨 ✓；用户点别处一律不碰 ✗
+     *     （拆掉的那版"焦点归还"就是乱拨才惹的祸 ✓）。
      */
-    document.addEventListener(
-      'pointerdown',
-      function (event) {
-        if (event === undefined || event.target === undefined) return
-        var target = event.target
-        if (target.closest === undefined) return
-        var inCard = target.closest('[data-composer-card="true"]') !== null
-        // ★ round 195：按下**这一拍**就记下焦点在不在输入框上 ✓（DSH 还没机会抢走 ✓）
-        if (inCard === true) focusKeeperHadInputFocus = composerInputHasFocus()
-        /**
-         * ★★ round 194：菜单**也是我们这一摊** ✓ —— 它是 `position: fixed` 的浮层、
-         *   挂在 `body` 下 ✗（实测 `menu.parentElement === body` ✓），
-         *   所以"在菜单里选一项"那一下**不在卡片里** ✗。第一版只认卡片 ⇒
-         *   要么把它当"用户去点别处了"（撤位 ✗ ⇒ 选完不还焦点 ✗，实测 `选一项` 掉过 ✓），
-         *   要么得给一个 400ms 的宽限（赌时间 ✗，正是本轮要根除的写法 ✗）。
-         *   ⇒ 现在**直接认菜单**：`closest('[role="menu"][aria-label="模型与推理等级"]')` ✓
-         *   （与 `composerMenuNode` 同一个判据 ✓，不认类名 / 哈希 ✓）。
-         */
-        var inMenu = target.closest('[role="menu"]') !== null
-        if (inCard !== true && inMenu !== true) {
-          /**
-           * ★★ round 194：卡片外**且**菜单外 —— 这里**不再撤位** ✗。
-           *
-           * 先试过"立刻撤位" ✓：读数 `点菜单外` **20/20 都收不到焦点** ✗
-           * （DSH 把菜单关掉之后把焦点放在**触发器**上 ✓，而我们刚把自己关掉了 ✗）。
-           * 而"抢用户焦点"这件事**根本不需要靠撤位来防** ✓ ——
-           * `restoreComposerFocus` 的**焦点判据**已经防住了 ✓：
-           * 用户在别处点到**能聚焦**的东西 ⇒ `active` 是那个东西 ✗ ⇒ 我们一个字都不动 ✓。
-           * ⇒ 撤位这层是**多余且有害**的 ✓（它把"点空白关菜单"这一档也误杀了 ✗）。
-           * 只保留"不把这一下当成 arm"（不在卡片里按就不重新记输入框 ✓）。
-           */
-          return
-        }
-        if (inMenu === true) {
-          // 在菜单里按 ⇒ 保持这一轮有效 ✓（不重新记输入框：菜单里那次按压时输入框没变 ✓）
-          focusKeeperArmed = true
-          return
-        }
-        focusKeeperInput = composerInputNode()
-        focusKeeperTrigger = composerModelTrigger()
-        var menuNow = composerMenuNode()
-        focusKeeperWasOpen = menuNow !== null
-        if (menuNow !== null) focusKeeperMenu = menuNow
-        focusKeeperArmed = true
-        focusKeeperDisarmAt = 0
-        focusKeeperSawMenu = false
-        startComposerFocusWatchdog()
-      },
-      true,
-    )
-  }
-
-  /**
-   * 对账一次（挂在现成的 200ms 心跳上 ✓，与 `tuneComposerScroll` 同一条命 ✓）。
-   *
-   * 判据用**菜单从"开着"变成"关着"这一跳** ✓（不用时间窗 ✗ —— 选一项之后
-   * DSH 会重渲染，那一刻 DOM 里就是没有菜单了 ✓）。
-   *
-   * ★★ 但**只在"关门那一跳"查一次是不够的** ✗（第一版就这么写，实测红灯 ✓）：
-   *   选一项之后，DSH 先把菜单从 DOM 里撤掉 ✓，**然后**才（在微任务/下一帧里）
-   *   把焦点放到触发器上 ✓ —— 关门那一刻 `document.activeElement` 还在菜单项上 ✓，
-   *   200ms 心跳赶到时它**已经是触发器**了 ✓，可是"这一跳"已经用掉 ✗。
-   *   实测读数（修复前）：`选一项后 → button#:ra:-model-0.cl2Rlq_option`（选项）✓，
-   *   ESC 关 → `button.cl2Rlq_trigger`（触发器）✗ —— 两种关法都没回到输入框 ✓。
-   *   ⇒ 改成**事件驱动**：菜单消失后 1.5 秒内，**每次 `focusin` 都对一次账** ✓
-   *   （DSH 自己把焦点放上触发器的那一刻就会被我们接住 ✓），
-   *   200ms 心跳仍兜底 ✓（`focusin` 万一没派发 ✓）。
-   *   这段窗口只挂**一个**监听器 ✓、到点即摘 ✓、开一次菜单最多花 1.5 秒 ✓。
-   */
-  var focusKeeperUntil = 0
-  /** 已经挂上的 `focusin` 监听器（只挂一个 ✓，摘的时候要拿同一个引用 ✗）。 */
-  var focusKeeperFocusHandler = null
-
-  /** 真的拨一次（三条纪律都在这里 ✓）。 */
-  function restoreComposerFocus(reason) {
-    /**
-     * ★★ 节点必须**在这一刻重新查一次** ✗（第一版用的是 pointerdown 时存下的引用 ✓，
-     *   实测红灯 ✓）：DSH 关菜单那一下会把输入卡片**重渲染** ✓ —— 存下来的触发器
-     *   与输入框**都已经脱离文档** ✗ ⇒ `document.activeElement !== 存下的触发器`
-     *   恒为真 ⇒ 每次都判"用户在别处点了"⇒ **一次都不拨** ✗。
-     *   现在：先用**活引用** ✓，活引用不在文档里再按选择器**重新认一次** ✓；
-     *   两边都认不出就老实不拨 ✓（宁可不动 ✗，也不抢用户焦点 ✗）。
-     */
-    /**
-     * ★★ round 195：**按下时输入框本来就没焦点 ⇒ 绝不拨** ✗ ——
-     *   否则就是"关着键盘点一下 ⇒ 键盘自己弹出来" ✗（用户原话 ✓）。
-     */
-    if (focusKeeperHadInputFocus !== true) {
-      focusKeeperStats.lastMiss = '按下时输入框本来就没焦点 ⇒ 不拨（免得凭空弹键盘）'
-      return false
-    }
-    focusKeeperStats.attempts += 1
-    var trigger = focusKeeperTrigger
-    if (trigger === null || trigger.isConnected !== true) trigger = composerModelTrigger()
-    var input = focusKeeperInput
-    if (input === null || input.isConnected !== true) input = composerInputNode()
-    if (trigger === null || input === null) {
-      focusKeeperStats.lastMiss = '认不出触发器或输入框'
-      return false
-    }
-    /**
-     * 纪律①：焦点**还停在模型钮上**（或"菜单一被撤掉就掉到 body 上"✓）才拨 ✓。
-     *
-     * ★ 为什么把 `body` 也算进来 ✓：实测时间线（60ms 采一次 ✓）——
-     *   `t=0 输入框` → `t=62 触发器 / 菜单还在` → `t=122 选项 / 菜单没了` ✓。
-     *   也就是说 DSH 撤菜单与"把焦点塞进菜单项"之间**只隔一帧** ✓，
-     *   而"菜单项被撤走"那一瞬焦点会**短暂落到 body** ✓ ——
-     *   这正是我们要接住的那一帧 ✓（接住了就不会再落到那个已脱离文档的选项上 ✓）。
-     * `body` 之外的任何东西（用户在别处点了 ✓）一律不碰 ✗。
-     */
-    var active = document.activeElement
-    /**
-     * 焦点**就是模型钮** ⇒ 一定要还 ✓（这是最干净的一档 ✓）。
-     */
-    var onTrigger = active === trigger
-    /**
-     * 焦点**已经跑到菜单里去了**（实测：那个 `cl2Rlq_option` ✓）⇒ 也要还 ✓。
-     * 判据是"它在**我们刚刚看见过的那棵菜单树**里" ✓ —— 不认任何类名 / 哈希 ✗
-     * （那棵树在 `openComposerFocusWindow` 里被存进 `focusKeeperMenu` ✓）。
-     */
-    var onMenu = active !== null && focusKeeperMenu !== null && focusKeeperMenu.contains(active)
-    /**
-     * ★ 焦点跑到**菜单所在的那层浮层**上也认 ✓ —— 实测 `activeElement` 的类名是
-     *   `cl2Rlq_option`、它就在那棵菜单树里 ✓；若哪天 DSH 把焦点放在**外壳**而不是项上，
-     *   这一条也罩得住 ✓（仍然只认**我们亲眼见过的那棵树** ✓，绝不看 `body` 的所有后代 ✗）。
-     */
-    if (onMenu !== true && active !== null && focusKeeperMenu !== null && focusKeeperMenu.parentElement !== null) {
-      onMenu = focusKeeperMenu.parentElement !== document.body && focusKeeperMenu.parentElement.contains(active)
-    }
-    /**
-     * 焦点**掉到 body 上** ⇒ 只在"菜单确实开过 + 这一轮确实是用户在输入卡片里按的"才还 ✓。
-     * 没有这两道闸，页面上任何"焦点掉到 body"的瞬间都会被我们拨一次 ✓ = 抢焦点 ✗。
-     */
-    /**
-     * ★★ round 194：这里踩过一个**逻辑自相矛盾** ✗ —— 原来写的是
-     *   `focusKeeperWasOpen === true` ✓，而 `openComposerFocusWindow()` 开头**刚把它置回 false** ✗✗
-     *   ⇒ "焦点掉到 body 上"这一档**永远不成立** ✓（实测 `lastMiss` 一直是
-     *   "焦点不在触发器/菜单/body 上：BODY" ✓ —— 明明就是 body ✓）。
-     *   ⇒ 改成看**另取的一个快照** `focusKeeperSawMenu` ✓：开窗口那一刻记下
-     *   "这次确实见过菜单" ✓，此后不再被清 ✗。
-     */
-    var onBody = active === document.body && focusKeeperSawMenu === true && focusKeeperArmed === true
-    if (onTrigger !== true && onMenu !== true && onBody !== true) {
-      focusKeeperStats.lastMiss = '焦点不在触发器/菜单/body 上：' + String(active === null ? '(null)' : active.tagName)
-      return false
-    }
-    /**
-     * ★★ 最后一道闸（**只在"焦点在触发器上"这一档才需要**✗）：
-     *   如果用户是"按 ESC / 点空白"关掉菜单的 ✓，那还算顺手；但若这一轮已经被
-     *   "卡片外的某一次按压"撤过位 ✓（`focusKeeperArmed === false` ✓），就一个字都不动 ✗。
-     */
-    if (focusKeeperArmed !== true) {
-      focusKeeperStats.lastMiss = '这一轮没有在输入卡片里按过（位没置）'
-      return false
-    }
-    if (focusKeeperDisarmAt !== 0 && Date.now() > focusKeeperDisarmAt) {
-      focusKeeperArmed = false
-      focusKeeperDisarmAt = 0
-      return false
-    }
-    // 纪律②：目标必须还在文档里 ✓（会话一切换就整棵换掉 ✓）
-    if (input.isConnected !== true) return false
-    // 纪律③：只 focus ✓（不派发事件 ⇒ 不会把菜单再弹开 ✗）
     try {
-      input.focus({ preventScroll: true })
-      focusKeeperStats.restored += 1
-      debugBoxLine('[composer] 模型菜单关掉后把焦点还给输入框 ✓（' + reason + '；用户："点控件会把输入法关闭"✗）')
-    } catch (error) {
-      debugBoxLine('[composer] 焦点归还失败 ✗：' + String(error && error.message ? error.message : error))
-    }
-    focusKeeperTrigger = null
-    focusKeeperInput = null
-    return true
-  }
-
-  /** 摘掉窗口期监听器（幂等 ✓）。 */
-  function dropComposerFocusWindow() {
-    if (focusKeeperFocusHandler !== null) {
-      document.removeEventListener('focusin', focusKeeperFocusHandler, true)
-      focusKeeperFocusHandler = null
-    }
-    focusKeeperUntil = 0
-  }
-
-  /**
-   * 窗口期内的 `focusin` 对账 ✓ —— **这条才是真正接住它的那一下** ✓。
-   *
-   * ## 为什么必须靠它（实测时间线，别再猜 ✗）
-   * `t=0 焦点在输入框` → `t=62 焦点在模型钮、菜单还在` → `t=122 焦点在那个
-   * `cl2Rlq_option` 菜单项上、菜单已经没了` ✓。两次把焦点拿走都是**DSH 自己**干的 ✓
-   * （`triggerRef.current?.focus()` ✓），我们在同一帧里拨回去也**会被它再拿走** ✓ ——
-   * 所以正确的插手点是：**等它改完** ✓，那一改必然派发 `focusin` ✓，
-   * 我们在这一句里**立刻**把焦点拿回输入框 ✓（此刻菜单已经撤了，它不会再改 ✓）。
-   * `requestAnimationFrame` 那条兜底只负责"它一次都没改"的情形 ✓。
-   */
-  function composerFocusKeeperOnFocus() {
-    if (Date.now() > focusKeeperUntil) {
-      dropComposerFocusWindow()
-      return
-    }
-    if (restoreComposerFocus('focusin') === true && composerFocusSettled() === true) dropComposerFocusWindow()
-  }
-
-  /**
-   * 焦点**真的已经在输入框上**了吗 ✓（收工判据 ✓，不再看时间 ✗）。
-   *   `document.activeElement` 就是那个可编辑框本身 ✓（不是它的祖先 ✗ ——
-   *   实测点进去之后 `activeElement === div.yhfFVG_input` ✓）。
-   */
-  function composerFocusSettled() {
-    try {
-      var input = composerInputNode()
-      return input !== null && document.activeElement === input
-    } catch (error) {
-      return false
-    }
-  }
-
-  /**
-   * 开一个 1.6 秒的窗口期 ✓：菜单消失之后，**每一帧**试着拨一次 ✓。
-   *
-   * ## 为什么不是"200ms 心跳查一次"✗（第一版就是，实测红灯 ✓）
-   * 时间线（60ms 采一次 ✓）：`t=62 触发器 / 菜单还在` → `t=122 选项 / 菜单没了` ✓
-   * ⇒ 关门这件事发生在两次心跳**之间** ✓：心跳赶到时焦点**早已**被塞进（已经脱离
-   *   文档的）菜单项里 ✓ ⇒ "焦点在触发器上"这个条件一次都不成立 ✗。
-   *
-   * ## 为什么用 `requestAnimationFrame` 而不是 `setInterval(…, 200)` ✓
-   * 上面那条时间线说明窗口只有**一两帧**宽 ✓；按帧走正好罩住它 ✓，
-   * 而且窗口期一到就自己停 ✓（不会留下常驻 rAF ✗）。
-   * 另外同时挂 `focusin` ✓ —— DSH 改焦点必然派发它 ✓，那是最快的一条路 ✓。
-   */
-  function openComposerFocusWindow() {
-    focusKeeperStats.windows += 1
-    /**
-     * ★★ round 194：窗口**只挂 `focusin`** ✓，**不再开 rAF 轮询** ✗✗。
-     *
-     * ## 为什么把轮询删掉（实测读数，不是洁癖 ✗）
-     * 第一版按帧轮询 ✓，跑一段时间后 `composerFocus()` 的计数是
-     * **`attempts 266978 / restored 37513 / windows 141`** ✗✗ ——
-     * 因为多个窗口**共用** `focusKeeperUntil` ✗：新窗口把截止时间往后推 ✓，
-     * 旧循环就永远不到期 ⇒ **常驻 rAF** ✓（正是本项目明令禁止的那一种 ✗，
-     * 而且它每帧都在 `focus()` ⇒ 37k 次抢焦点 ✗）。
-     * ⇒ 现在：窗口期只做**事件驱动** ✓（`focusin` ✓ + 200ms 心跳兜底 ✓），
-     *   一次开关菜单的开销 = 0 个定时器 + 最多几次 `querySelector` ✓。
-     *
-     * ## 为什么"等它改完再拨"这条思路仍然成立 ✓
-     * DSH 每改一次焦点都**必然**派发 `focusin` ✓（它走的是脚本 `.focus()` ✓），
-     * 所以"抢回来"这件事只需要挂在事件上 ✓ —— 轮询从来不是必要条件 ✗。
-     */
-    focusKeeperWasOpen = true
-    focusKeeperSawMenu = true
-    focusKeeperUntil = Date.now() + 3000
-    if (focusKeeperFocusHandler === null) {
-      focusKeeperFocusHandler = composerFocusKeeperOnFocus
-      document.addEventListener('focusin', focusKeeperFocusHandler, true)
-    }
-    // 先同步试一次（菜单刚没、焦点还在触发器上的那一瞬 ✓）
-    if (restoreComposerFocus('菜单消失那一微任务') === true && composerFocusSettled() === true) dropComposerFocusWindow()
-  }
-
-  /**
-   * `MutationObserver` 口径：**菜单子树被撤掉的那一刻**就开窗口 ✓。
-   *
-   * 为什么必须由它来开 ✗：`syncComposerFocusKeeper` 是 200ms 心跳 ✓，
-   * 而实测关门窗口只有一两帧宽 ✓（见 `openComposerFocusWindow` 的读数 ✓）。
-   * 这个观察者只看 `body` 的 `childList` ✓（不动子树 ✗），回调里先花 O(1) 判一句
-   * "菜单还在不在" ✓ —— 平时每批变动只做一次 `querySelector` ✓，与项目里
-   * `settingsOverlayTouched` 同一套"自己先筛一遍"的纪律 ✓。
-   */
-  function installComposerFocusWatch() {
-    if (typeof globalThis.MutationObserver !== 'function') return false
-    try {
-      var observer = new MutationObserver(function () {
-        var open = composerMenuNode()
-        if (open !== null) {
-          focusKeeperWasOpen = true
-          focusKeeperMenu = open
-          return
-        }
-        if (focusKeeperWasOpen !== true) return
-        openComposerFocusWindow()
-      })
-      observer.observe(document.body, { childList: true })
-      return true
-    } catch (error) {
-      debugBoxLine('[composer] 焦点归还的观察者装不上（退到 200ms 对账 ✓）：' + String(error && error.message ? error.message : error))
-      return false
-    }
-  }
-
-  /**
-   * 看门狗：**在卡片里按下之后**自己盯 1.6 秒 ✓（见 `focusKeeperWatchdog` 的读数 ✓）。
-   *
-   * 三件事 ✓：① 看见菜单 ⇒ 置位并记下**那棵树** ✓；② 看见它没了 ⇒ 开归还窗口 ✓；
-   * ③ 到点自停 ✓（不会留下常驻定时器 ✗）。序号对不上（用户又按了一次 ✓）就换新一代 ✓。
-   */
-  function startComposerFocusWatchdog() {
-    focusKeeperWatchdog += 1
-    var token = focusKeeperWatchdog
-    var deadline = Date.now() + 1600
-    var timer = setInterval(function () {
-      if (token !== focusKeeperWatchdog || Date.now() > deadline) {
-        clearInterval(timer)
-        return
+      var cardForSwap = document.querySelector('[data-composer-card="true"]')
+      if (cardForSwap !== null && typeof MutationObserver === 'function') {
+        var swapObserver = new MutationObserver(function () {
+          try {
+            if (focusGuardTyping !== true) return
+            if (composerInputHasFocus() === true) return
+            var fresh = composerInputNode()
+            if (fresh === null || fresh === undefined) return
+            fresh.focus()
+            focusGuardStats.refocusedAfterSwap += 1
+          } catch (error) {
+            void error
+          }
+        })
+        swapObserver.observe(cardForSwap, { childList: true, subtree: true })
       }
-      var open = composerMenuNode()
-      if (open !== null) {
-        focusKeeperWasOpen = true
-        focusKeeperSawMenu = true
-        focusKeeperMenu = open
-        focusKeeperStats.seenOpen += 1
-        return
-      }
-      if (focusKeeperWasOpen !== true) return
-      clearInterval(timer)
-      openComposerFocusWindow()
-    }, 50)
-  }
-
-  /**
-   * ★ 诊断计数（`?debug=1` 的调试框里能读 ✓，无损于产品路径 ✓）。
-   *
-   * 为什么留着：这条链上有**四个**各自都能静默失败的点 ✓ ——
-   *   观察者没装上 / 看见了但没开窗口 / 开了窗口但判据不认 / 认了但目标不在文档里 ✗。
-   *   它们**外观完全一样**（"焦点没回来"✓）⇒ 不留计数就只能靠猜 ✗
-   *   （本轮已经因此多跑了三轮 ✓）。计数只在内存里 ✓，一条日志都不写 ✗（免得刷屏 ✗）。
-   */
-  var focusKeeperStats = { seenOpen: 0, windows: 0, attempts: 0, restored: 0, swallowedFocus: 0, lastMiss: '' }
-
-  /** 200ms 心跳口径：兜底 ✓（观察者万一没装上 / 没派发 ✗）。 */
-  function syncComposerFocusKeeper() {
-    var open = composerMenuNode()
-    if (open !== null) {
-      focusKeeperWasOpen = true
-      focusKeeperSawMenu = true
-      focusKeeperMenu = open
-      focusKeeperStats.seenOpen += 1
-      return
+    } catch (error) {
+      void error
     }
-    if (focusKeeperWasOpen !== true) return
-    openComposerFocusWindow()
+    debugBoxLine('[focus] 焦点保护已装（只预防；节点被换才还焦点 ✓）')
   }
 
   /**
@@ -14278,6 +13928,12 @@
   var attachLastBox = ''
   /** 跟手帧句柄（同一时刻只排一次 ✓；位置不再变就自己停 ✓）。 */
   var attachFrame = null
+  /**
+   * ★ round 196：跟随循环的**可念计数** ✓ —— 用户报"回形针不跟着面板动"✗，
+   *   而真机上没有任何读数能区分"循环没跑"与"跑了但没跟住"✗ ⇒ 挂个计数：
+   *   `frames` = 循环真正跑了几次、`misses` = 锚点被判 miss 几次 ✓（诊断口 `attachFollow()` ✓）。
+   */
+  var attachFollowStats = { frames: 0, misses: 0 }
   /** 已经连续多少帧"没有新变化"（连续 3 帧即停 ✓ —— 过渡动画跑完就是这个形状 ✓）。 */
   var attachSteady = 0
 
@@ -14372,7 +14028,8 @@
   var attachFollowAlways = false
   function attachFollowFrame() {
     attachFrame = null
-    placeAttachButton()
+    attachFollowStats.frames += 1
+    if (placeAttachButton() === 'miss') attachFollowStats.misses += 1
     if (attachSteady >= 3) return
     if (typeof globalThis.requestAnimationFrame === 'function') attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
   }
@@ -19727,9 +19384,13 @@
           socketReadyStateNow: streamLogReadyState(tunnel),
         }
       },
-      /** 「模型菜单关掉后把焦点还给输入框」那一条链的计数（四个静默失败点各有一个数 ✓）。 */
+      /** 焦点保护（round 196 ✓）：拦了几次默认焦点转移 / 吞了几次程序化聚焦 ✓。 */
       composerFocus: function () {
-        return focusKeeperStats
+        return focusGuardStats
+      },
+      /** 回形针跟随循环的计数（round 196 ✓）：跑了幾帧 / 锚点判 miss 几次 ✓。 */
+      attachFollow: function () {
+        return attachFollowStats
       },
       state: function () {
         return tunnel === undefined ? 'idle' : tunnel.lastState
@@ -20304,7 +19965,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001062736'
+    var BOOT_STAMP = 'BUILD-1001071048'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
