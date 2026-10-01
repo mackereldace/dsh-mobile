@@ -9278,6 +9278,15 @@
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
+      /**
+       * ★ round 195：**只有「会话统计」那一块居中** ✓（用户点名 ✓）——
+       *   左缘由 JS 按它自己的宽度算出来写进 `--dshm-stats-panel-left` ✓
+       *   （用 `left` 而不是 `transform` ✓ —— `transform` 归 DSH 的进出场动画 ✗）。
+       *   标记**每开一次重打一次** ✓（旧标记先全摘掉 ✓），不会串到另外两块上 ✓。
+       */
+      '  [data-dshm-stats-center] {',
+      '    left: var(--dshm-stats-panel-left, 8px) !important;',
+      '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
              必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
              浏览器会把中栏自动放进第 1 条轨道（0px）→ 主体宽度变 0（真实回归）。 */
@@ -13338,7 +13347,7 @@
    * @param anchor - 这一下点的**是哪颗控件**（上下文 = 那颗环；轮次/用量 = 对应的胶囊 ✓）。
    * @param marker - 打在这块面板上的属性名（上下文用 `data-dshm-context-panel` ✓、另两块用 `data-dshm-stats-panel` ✓）。
    */
-  function anchorStatsPanel(anchor, marker) {
+  function anchorStatsPanel(anchor, marker, center) {
     if (typeof MutationObserver !== 'function' || document.body === null) return
     /**
      * ★★ round 194：判据用"**点前/点后的 dialog 差集**" ✓ = 这一下**新出现**的那块 ✓。
@@ -13389,7 +13398,28 @@
       } else {
         debugBoxLine('[stats] ✗ 统计面板的底边量不到（' + String(Math.round(bottom)) + 'px）⇒ 回落到 53.8333px')
       }
+      /**
+       * ★★ round 195（用户 2026-10-01 ✓）：
+       *   ① 用户要**只把「会话统计」那一块居中** ✓（另外两块位置很合适 ✓）——
+       *      而它当时是被**上一条规则顺带推歪**的 ✗：三块面板其实是**同一个被复用的元素** ✗，
+       *      上下文那次打上的 `data-dshm-context-panel` 一直留着 ✓，那条规则里的 `left: 32px`
+       *      就跟着套到了「会话统计」上 ✓ ⇒ 看着不居中 ✗。
+       *   ② ⇒ 两件事：**先把旧标记全摘掉** ✓（不许跨面板串味 ✗）；
+       *      需要居中的那一块（`which === 'time'` ✓）再按自己的宽度算出居中左缘 ✓
+       *      （用 `left` 而不是 `transform` ✓ —— `transform` 归 DSH 的进出场动画用 ✗）。
+       */
+      var stale = document.querySelectorAll('[role="dialog"]')
+      for (var q = 0; q < stale.length; q++) {
+        stale[q].removeAttribute('data-dshm-context-panel')
+        stale[q].removeAttribute('data-dshm-stats-panel')
+        stale[q].removeAttribute('data-dshm-stats-center')
+      }
       panel.setAttribute(marker, '1')
+      if (center === true) {
+        var centered = Math.round((window.innerWidth - box.width) / 2)
+        if (centered >= 0) panel.style.setProperty('--dshm-stats-panel-left', centered + 'px')
+        panel.setAttribute('data-dshm-stats-center', '1')
+      }
     })
     observer.observe(document.body, { childList: true })
   }
@@ -13426,7 +13456,8 @@
      *   而用户要的是"三块一样" ✓（0.15 真机读数就是"三个面板底边同为 b816" ✓）
      *   ⇒ 三块都用**同一套算法**算出同一个底边 ✓（见 `anchorStatsPanel` ✓）。
      */
-    anchorStatsPanel(target, 'data-dshm-stats-panel')
+    // ★ 「轮次」= 用户说的「会话统计」✓ ⇒ 只有它要居中 ✓（另外两块不动 ✓）
+    anchorStatsPanel(target, 'data-dshm-stats-panel', which === 'time')
     target.click()
   }
 
@@ -13596,6 +13627,12 @@
    */
   var focusKeeperArmed = false
   /**
+   * ★★ round 195：**按下那一刻输入框有没有焦点** ✓ —— 事后归还**只在这一种情形**才做 ✓。
+   * 用户原话："在**关闭输入法的时候点击会打开**" ✗ ⇒ 键盘本来是关的，我们**一个字都不许动** ✗
+   * （上一版无条件拨回 ⇒ 把键盘弹开了 ✗，这条是我的锅 ✓）。
+   */
+  var focusKeeperHadInputFocus = false
+  /**
    * ★★ 上面那一位是**带时限**的 ✓（这里踩过一次，记清楚 ✗）：
    *   菜单是 `position: fixed` 的浮层、**挂在 `body` 下** ✓（实测 `menu.parentElement` = body ✓），
    *   所以"在菜单里选一项"这**另一次** `pointerdown` 也落在"卡片外" ✓ ⇒
@@ -13659,7 +13696,75 @@
    *      我们此后**一个字都不许动** ✗（这条就是"别抢用户焦点"的硬保证 ✓）；
    *   2. 在卡片里按 ⇒ 记下输入框与触发器 ✓、置位 ✓（等菜单关掉再还 ✓）。
    */
+  /**
+   * ★★ round 195：**不让焦点离开输入框** ✓（而不是事后拨回来 ✗）。
+   *
+   * 背景见 `installComposerFocusKeeper` 的注释 ✓：安卓只在**用户手势那一拍**里显示软键盘 ✓，
+   * 事后的脚本 `.focus()` 只能改焦点、**弹不出输入法** ✗ ⇒ 只要输入框失焦过，键盘就没了 ✓。
+   * ⇒ 从源头拦：把 `HTMLElement.prototype.focus` 包一层 ✓，**只**吞掉
+   *   "目标是模型钮 / 它那棵菜单树，且输入框此刻正有焦点"的那一下 ✓，其余原样转发 ✓。
+   */
+  var composerFocusGuardInstalled = false
+
+  /** 输入框（或它所在的那张卡片）此刻有没有焦点 ✓。 */
+  function composerInputHasFocus() {
+    var active = document.activeElement
+    if (active === null || active === undefined || active.closest === undefined) return false
+    return active.closest('[data-composer-card="true"]') !== null
+  }
+
+  /** 这一下聚焦是不是"DSH 那颗模型钮 / 它那棵菜单"发起的 ✓（会让输入法被收 ✗）。 */
+  function composerFocusStealer(node) {
+    if (node === null || node === undefined || node.closest === undefined) return false
+    if (node.closest('[role="menu"]') !== null) return true
+    var trigger = composerModelTrigger()
+    return trigger !== null && node === trigger
+  }
+
+  function installComposerFocusGuard() {
+    if (composerFocusGuardInstalled === true) return
+    if (typeof HTMLElement !== 'function' || HTMLElement.prototype === undefined) return
+    var original = HTMLElement.prototype.focus
+    if (typeof original !== 'function') return
+    HTMLElement.prototype.focus = function () {
+      try {
+        if (composerInputHasFocus() === true && composerFocusStealer(this) === true) {
+          focusKeeperStats.swallowedFocus += 1
+          return
+        }
+      } catch (error) {
+        // 判据出错就照原样转发 ✓（绝不吞掉别人的聚焦 ✗）
+      }
+      return original.apply(this, arguments)
+    }
+    composerFocusGuardInstalled = true
+  }
+
   function installComposerFocusKeeper() {
+    /**
+     * ★★★ round 195（用户 2026-10-01 反馈 ✓）：
+     *   > 「无论是上下文那一栏，还是输入栏那些小控件，**在打开输入法的时候点击都会关掉**，
+     *   >   或者在**关闭输入法的时候点击会打开**」✓
+     *
+     *   两半的原因不同 ✗：
+     *   · **打开了却关掉** ✗：DSH 自己那颗模型钮被点时会 `triggerRef.current?.focus()` ✓
+     *     （`dsh-client-ui-model-selection` 的 `show()` ✓，0.15/0.17/0.2.0 三版同款 ✓）——
+     *     焦点一离开输入框，**安卓就把输入法收起来** ✗。我们在事后把焦点拨回去 ✗
+     *     **救不回键盘** ✗：安卓只在**用户手势那一拍**里显示软键盘 ✓，
+     *     事后的脚本 `.focus()` 只能改焦点、弹不出输入法 ✓（这正是"无头里 0/80 全绿、真机照旧"的原因 ✗）。
+     *   · **关着却打开** ✗：我们上一版那条"焦点归还"是**无条件**拨回输入框 ✓
+     *     ⇒ 键盘本来是关的也会被它弹开 ✗（这条是我的锅 ✓）。
+     *
+     *   ⇒ 正确的修法是**不让焦点离开输入框** ✓（从源头拦 ✗），而不是事后补救 ✗：
+     *     把 `HTMLElement.prototype.focus` 包一层 ✓ ——
+     *     **只**吞掉"目标是模型钮 / 它那棵菜单树，且输入框此刻正有焦点"的那一下 ✓，
+     *     其余一律原样转发 ✓（键盘导航、其它控件、DSH 别处的聚焦全不受影响 ✓）。
+     *     ★ 这样输入框**从头到尾没失焦** ⇒ 输入法**既不会被关、也不会被弹** ✓✓。
+     *   ★ 只在手机外壳里装 ✓；装过一次就不再装 ✓；任何异常都**转发原函数** ✓（绝不吞掉别人的聚焦 ✗）。
+     *   ★ 配套（下面 `pointerdown` 里那条）：记下"按下那一刻输入框有没有焦点" ✓，
+     *     事后归还**只在有焦点的情形**才做 ✓ —— 关着的时候一个字都不许动 ✗。
+     */
+    installComposerFocusGuard()
     document.addEventListener(
       'pointerdown',
       function (event) {
@@ -13667,6 +13772,8 @@
         var target = event.target
         if (target.closest === undefined) return
         var inCard = target.closest('[data-composer-card="true"]') !== null
+        // ★ round 195：按下**这一拍**就记下焦点在不在输入框上 ✓（DSH 还没机会抢走 ✓）
+        if (inCard === true) focusKeeperHadInputFocus = composerInputHasFocus()
         /**
          * ★★ round 194：菜单**也是我们这一摊** ✓ —— 它是 `position: fixed` 的浮层、
          *   挂在 `body` 下 ✗（实测 `menu.parentElement === body` ✓），
@@ -13741,6 +13848,14 @@
      *   现在：先用**活引用** ✓，活引用不在文档里再按选择器**重新认一次** ✓；
      *   两边都认不出就老实不拨 ✓（宁可不动 ✗，也不抢用户焦点 ✗）。
      */
+    /**
+     * ★★ round 195：**按下时输入框本来就没焦点 ⇒ 绝不拨** ✗ ——
+     *   否则就是"关着键盘点一下 ⇒ 键盘自己弹出来" ✗（用户原话 ✓）。
+     */
+    if (focusKeeperHadInputFocus !== true) {
+      focusKeeperStats.lastMiss = '按下时输入框本来就没焦点 ⇒ 不拨（免得凭空弹键盘）'
+      return false
+    }
     focusKeeperStats.attempts += 1
     var trigger = focusKeeperTrigger
     if (trigger === null || trigger.isConnected !== true) trigger = composerModelTrigger()
@@ -13976,7 +14091,7 @@
    *   它们**外观完全一样**（"焦点没回来"✓）⇒ 不留计数就只能靠猜 ✗
    *   （本轮已经因此多跑了三轮 ✓）。计数只在内存里 ✓，一条日志都不写 ✗（免得刷屏 ✗）。
    */
-  var focusKeeperStats = { seenOpen: 0, windows: 0, attempts: 0, restored: 0, lastMiss: '' }
+  var focusKeeperStats = { seenOpen: 0, windows: 0, attempts: 0, restored: 0, swallowedFocus: 0, lastMiss: '' }
 
   /** 200ms 心跳口径：兜底 ✓（观察者万一没装上 / 没派发 ✗）。 */
   function syncComposerFocusKeeper() {
@@ -14180,6 +14295,7 @@
     if (found === null || found.anchor === null) {
       clearAttachShift()
       if (host.getAttribute('data-dshm-on') !== '0') host.setAttribute('data-dshm-on', '0')
+      attachFollowAlways = false
       return 'miss'
     }
     var rect = found.anchor.getBoundingClientRect()
@@ -14191,6 +14307,7 @@
     if (!(rect.width > 0) || !(rect.height > 0) || rect.bottom < -8 || rect.top > window.innerHeight + 8) {
       clearAttachShift()
       if (host.getAttribute('data-dshm-on') !== '0') host.setAttribute('data-dshm-on', '0')
+      attachFollowAlways = false
       return 'miss'
     }
     /**
@@ -14219,6 +14336,11 @@
       attachSteady += 1
     }
     if (host.getAttribute('data-dshm-on') !== '1') host.setAttribute('data-dshm-on', '1')
+    // ★ round 195：键在屏幕上 ⇒ 常驻跟随开着 ✓（真机原生滚动没有 DOM 事件 ✗，见 attachFollowFrame ✓）
+    if (attachFollowAlways !== true) {
+      attachFollowAlways = true
+      scheduleAttachFollow()
+    }
     /**
      * 让位：后续那一颗按钮（= 权限键 ✓）右移"一个钮宽 + 那个 gap" ✓
      * —— 与我们占掉的横向空间**逐像素相等** ✓（值没变就一个字节都不写 ✓）。
@@ -14244,10 +14366,21 @@
    * 所以拖动/过渡期间按帧量、按帧写 ✓，位置连着 3 帧没变就**自己停** ✓
    * （不可能出现"常驻 rAF"那种耗电 ✗）。
    */
+  /**
+   * ★★ round 195（用户 2026-10-01："回形针键**仍然没有固定到聊天面板上**，我之前和你反馈过吧"✗）：
+   *   上一版只靠 `scroll`（捕获 ✓）触发跟随 ✗ ⇒ **真机上滚的是 WebView 原生层**（惯性滑动 / 回弹 ✓），
+   *   **根本不派发 DOM `scroll` 事件** ✗ ⇒ 那个循环**从未被触发** ✓（夹具里人为位移 120px 才全绿 ✗，
+   *   这就是"夹具说已修、真机说没修"的那一条 ✓）。
+   *   ⇒ 改成：**只要那颗键在屏幕上，就一直按帧跟随** ✓（`attachFollowAlways` ✓）；
+   *     键被收起来 / 页面不可见 ⇒ 立刻停 ✓（不会常驻耗电 ✗）。
+   *   成本：每帧一次 `getBoundingClientRect` ✓ + 位置没变时**不写 DOM** ✓（`placeAttachButton` 里已比对 ✓）。
+   */
+  var attachFollowAlways = false
   function attachFollowFrame() {
     attachFrame = null
     placeAttachButton()
-    if (attachSteady >= 3) return
+    var keep = attachFollowAlways === true && document.visibilityState === 'visible'
+    if (keep !== true && attachSteady >= 3) return
     if (typeof globalThis.requestAnimationFrame === 'function') attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
   }
   function scheduleAttachFollow() {
@@ -20178,7 +20311,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-0930124115'
+    var BOOT_STAMP = 'BUILD-1001055922'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
