@@ -9106,6 +9106,18 @@
       '  place-items: center; display: grid; padding: 0;',
       '}',
       '#dshm-attach:hover { background: var(--dsw-alias-interactive-bg-hover-solid); }',
+      /* ── round 198：0.15 式两颗独立键 ✓（用户："0.15 有独立的附件上传键"✓ + 「指令」✓）——
+         合并 ＋ 由我们**隐身但保留盒子** ✓（`visibility: hidden` ✓ 行的几何一个像素不动 ✓），
+         「指令」键落在它原来的位置上 ✓、「附件」键照旧在右 ✓ ⇒ 排布回到 0.15 ✓。 */
+      '[data-dshm-hide="1"] { visibility: hidden !important; }',
+      '#dshm-command-btn {',
+      '  position: absolute; left: 0; top: 0; pointer-events: auto;',
+      '  corner-shape: round; background: var(--dsw-specific-selector);',
+      '  width: 28px; height: 28px; box-sizing: border-box; color: var(--dsw-alias-label-primary);',
+      '  cursor: pointer; border: none; border-radius: 999px; flex: none;',
+      '  place-items: center; display: grid; padding: 0;',
+      '}',
+      '#dshm-command-btn:hover { background: var(--dsw-alias-interactive-bg-hover-solid); }',
       /* ── 自绘模型菜单（round 197 ✓）：屏幕**垂直居中** ✓，底部让开键盘 ✓（用户原话：
          「是正常垂直居中就行」+「打开输入法的情况下模型键的菜单完全不可用」✓）。
          宿主铺满可视区、flex 居中 ⇒ 键盘一开它自动浮在键盘上方 ✓；子菜单共用这一块 ✓。 */
@@ -13613,6 +13625,8 @@
 
   /** 自绘的「添加附件」键（全文档只有一个 ✓；建一次、之后只挪 ✓）。 */
   var attachButton = null
+  /** 「指令」键（round 198 ✓，与附件键同一个宿主 ✓）。 */
+  var commandButton = null
 
 
   /** 模型菜单那棵树（`aria-label` 三版逐字相同 ✓ —— 比哈希稳 ✓）。 */
@@ -14039,6 +14053,8 @@
   var focusGuardLastTapAt = 0
   /** 这一轮是不是"正在打字"（输入框有焦点 ✓）——节点被换时只有这一种情形才还焦点 ✓。 */
   var focusGuardTyping = false
+  /** 光标在输入框文本里的偏移 ✓（节点被换时按它还原 ✓，否则光标会被拍回开头 ✗）。 */
+  var focusGuardCaretAt = -1
 
   /** 最近 700ms 内那一笔是不是**点在控件上**（点空白不算 ✓）。 */
   function focusGuardLastTapWasControl() {
@@ -14071,7 +14087,7 @@
             // ★ round 197c：我们自己那块菜单里的行也是控件 ✓ —— 点它们同样不许抢走输入框的焦点 ✗
             //   （用户："打开子菜单仍然会意外关闭输入法" ✓ ⇒ 就是这一档 ✗）。
             var inOurMenu = control.closest('#dshm-model-menu') !== null
-            if (inCard !== true && inStatsRow !== true && inOurMenu !== true && control.id !== 'dshm-attach') return
+            if (inCard !== true && inStatsRow !== true && inOurMenu !== true && control.id !== 'dshm-attach' && control.id !== 'dshm-command-btn') return
             /**
              * ★ round 196c：那颗合并 ＋（= 锚点那颗 ✓）的 toggle 是坏的 ✗（DSH 自己的 bug ✓，
              *   桌面端同样复现 ✓）⇒ 手机上兜底：它已经开着菜单、又被点一次 ⇒
@@ -14153,6 +14169,17 @@
         'focusin',
         function (event) {
           try {
+            /**
+             * ★ round 197h（用户："光标切换……输入栏总会意外关闭输入法" ✗）：
+             *   **打字状态改成实时记** ✓ —— 输入框拿到焦点就在打字 ✓，
+             *   不再依赖"这一笔点过控件"✗（光标移动/输入法光标模式根本没有点控件 ✗
+             *   ⇒ 旧判定永远不成立 ⇒ 节点被换也不救 ✓ ⇒ 键盘照收 ✗）。
+             */
+            var focused = event.target
+            if (composerEditableNode(focused) === true && focused === composerInputNode()) {
+              focusGuardTyping = true
+              return
+            }
             if (focusGuardLastTapWasControl() !== true) return
             var node = event.target
             if (composerEditableNode(node) !== true) return
@@ -14165,6 +14192,26 @@
         },
         true,
       )
+      /**
+       * ★ round 197h：**光标位置也得一起救** ✗ —— 节点被换后焦点回去了、光标却回到开头 ✓
+       *   ⇒ 那"输入法光标切换"照样废 ✗。用"元素内纯文本偏移"记位置 ✓，换完照着放回去 ✓。
+       */
+      document.addEventListener('selectionchange', function () {
+        try {
+          var input = composerInputNode()
+          if (input === null || input === undefined) return
+          if (document.activeElement !== input) return
+          var sel = document.getSelection()
+          if (sel === null || sel.rangeCount === 0) return
+          var range = sel.getRangeAt(0)
+          var pre = document.createRange()
+          pre.selectNodeContents(input)
+          pre.setEnd(range.startContainer, range.startOffset)
+          focusGuardCaretAt = pre.toString().length
+        } catch (error) {
+          void error
+        }
+      })
     } catch (error) {
       void error
     }
@@ -14236,6 +14283,34 @@
             if (fresh === null || fresh === undefined) return
             fresh.focus()
             focusGuardStats.refocusedAfterSwap += 1
+            /** 光标还原 ✓（记的是"元素内纯文本偏移" ✓，换完按位置放回去 ✓）。 */
+            if (focusGuardCaretAt >= 0) {
+              try {
+                var wanted = focusGuardCaretAt
+                var walker = document.createTreeWalker(fresh, NodeFilter.SHOW_TEXT, null)
+                var counted = 0
+                var textNode = null
+                var offsetInNode = 0
+                while ((textNode = walker.nextNode()) !== null) {
+                  var length = textNode.nodeValue === null ? 0 : textNode.nodeValue.length
+                  if (counted + length >= wanted) {
+                    offsetInNode = wanted - counted
+                    break
+                  }
+                  counted += length
+                  offsetInNode = length
+                }
+                var selection = document.getSelection()
+                var caret = document.createRange()
+                if (textNode !== null) caret.setStart(textNode, offsetInNode)
+                else caret.selectNodeContents(fresh)
+                caret.collapse(true)
+                selection.removeAllRanges()
+                selection.addRange(caret)
+              } catch (error) {
+                void error
+              }
+            }
           } catch (error) {
             void error
           }
@@ -14404,6 +14479,60 @@
     return button
   }
 
+  /** 「指令」键的图标 ✓（0.15 那颗的样子 `>_` ✓，16px 与附件键同规格 ✓）。 */
+  function buildCommandIcon() {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('width', '17')
+    svg.setAttribute('height', '17')
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('fill', 'none')
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', 'M4 5l3 3-3 3')
+    path.setAttribute('stroke', 'currentColor')
+    path.setAttribute('stroke-width', '1.5')
+    path.setAttribute('stroke-linecap', 'round')
+    path.setAttribute('stroke-linejoin', 'round')
+    var line = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    line.setAttribute('d', 'M8.5 11h3.5')
+    line.setAttribute('stroke', 'currentColor')
+    line.setAttribute('stroke-width', '1.5')
+    line.setAttribute('stroke-linecap', 'round')
+    svg.appendChild(path)
+    svg.appendChild(line)
+    return svg
+  }
+
+  /**
+   * 「指令」键 ✓（round 198 ✓）：0.15 是「指令」+「附件」两颗独立键 ✓，0.2.0 把它们并成一颗 ＋ ✗，
+   * 而那颗 ＋ 的 toggle 是坏的 ✓（桌面端同样 ✓）⇒ 我们把 ＋ **隐身但保留盒子** ✓，
+   * 「指令」键落在它原位上 ✓，点击**替它开关那张命令菜单** ✓（开着就收 ✓，关着就替它点开 ✓）。
+   */
+  function buildCommandButton() {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.id = 'dshm-command-btn'
+    button.setAttribute('aria-label', '调用指令')
+    button.appendChild(buildCommandIcon())
+    var forward = function (event) {
+      if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
+      var found = attachAnchor()
+      if (found === null || found.anchor === null) {
+        debugBoxLine('[command] ✗ 认不出那颗合并 ＋ ⇒ 这一次点不了')
+        return
+      }
+      var open = found.anchor.getAttribute('aria-expanded') === 'true' || document.querySelector('[role="menu"]') !== null
+      if (open === true) {
+        focusGuardStats.menuToggleFallback += 1
+        closeDshMenuNear(found.anchor)
+        return
+      }
+      found.anchor.click()
+    }
+    button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
+    button.addEventListener('click', forward)
+    return button
+  }
+
   /** 我们自己的宿主（`document.body` 直挂 ✓，**绝不进 DSH 的 React 树** ✗）。 */
   function attachHost() {
     var host = document.querySelector('#dshm-attach-host')
@@ -14483,6 +14612,19 @@
       attachSteady += 1
     }
     if (host.getAttribute('data-dshm-on') !== '1') host.setAttribute('data-dshm-on', '1')
+    /**
+     * ★ round 198：「指令」键落在**锚点原位** ✓（合并 ＋ 隐身但盒子还在 ✓ ⇒ 行的几何一个像素不动 ✓）；
+     *   顺手把锚点标成隐身 ✓（CSS `[data-dshm-hide="1"]` ✓，与 `data-dshm-meter="hidden"` 同一套做法 ✓）。
+     */
+    if (commandButton === null) {
+      commandButton = buildCommandButton()
+      if (host !== null) host.appendChild(commandButton)
+    }
+    if (commandButton !== null) {
+      commandButton.style.left = Math.round(rect.left * 100) / 100 + 'px'
+      commandButton.style.top = Math.round(rect.top * 100) / 100 + 'px'
+    }
+    if (found.anchor.getAttribute('data-dshm-hide') !== '1') found.anchor.setAttribute('data-dshm-hide', '1')
     /**
      * 让位：后续那一颗按钮（= 权限键 ✓）右移"一个钮宽 + 那个 gap" ✓
      * —— 与我们占掉的横向空间**逐像素相等** ✓（值没变就一个字节都不写 ✓）。
@@ -20457,7 +20599,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001081330'
+    var BOOT_STAMP = 'BUILD-1001083137'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
