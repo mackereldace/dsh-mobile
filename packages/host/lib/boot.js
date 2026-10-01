@@ -9126,6 +9126,13 @@
          它弹的是 **listbox** ✗ 不是 menu ✗ ⇒ 前两版找 `[role="menu"]` / `…_menu` 后缀全找不到 ✗
          （"关不掉"三连败的真因 ✓）。⇒ 藏 `[role="listbox"]` ✓。 */
       'html[data-dsh-command-menu="hidden"] [role="listbox"] { visibility: hidden !important; }',
+      /* ★ round 209（用户："只要在输入法展开的情况这个菜单就点不了" ✗）：
+         那张触发器菜单是**贴着光标**弹的 ✓，而光标在输入框里、贴着屏幕底部 ⇒
+         菜单大半**被键盘盖住** ⇒ 露出的那截下面没有可点的条目 ✗（不是事件被吞，是**点不到** ✓）。
+         与早先"模型菜单在键盘展开时完全不可用"同一类 ✓（我们自己的菜单是把宿主底边让开键盘 ✓）。
+         ⇒ 键盘展开时把 DSH 的浮层整体**抬到键盘上方** ✓（用 margin-top ✓，不动 transform ✗ ——
+         那是 DSH 自己的进出场/居中在用 ✓）。 */
+      '[data-dshm-lift="1"] { margin-top: calc(0px - var(--dshm-keyboard, 0px)) !important; }',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -10795,6 +10802,8 @@
       setInterval(tuneComposerScroll, 200)
       // 预览头部的安全区让位也要跟着重跑 ✓（预览可能刚被打开 ✓、也可能被重渲染 ✓）
       setInterval(tuneDshPreviewSafeArea, 200)
+      // ★ round 209：键盘开合时把 DSH 的浮层抬到键盘上方 ✓（250ms 一趟 ✓，很便宜 ✓）
+      setInterval(liftPopupsOverKeyboard, 250)
       /**
        * ★★ round 193：模型菜单关掉之后把焦点还给输入框 ✓（用户："点控件会把输入法关闭"✗）。
        *   装一次监听 ✓ + 200ms 对一次账 ✓ —— 与同处那三条轮询同一条命 ✓（都是"很便宜"的查一次 ✓）。
@@ -14123,6 +14132,28 @@
     if (target.closest === undefined) return false
     var control = target.closest('button, [role="button"]')
     return control !== null
+  }
+
+  /**
+   * ★ round 209：键盘展开时把 DSH 的浮层抬到键盘上方 ✓（只打标记 + 一行 CSS ✓，不改它的内容 ✗）。
+   *   判据：`--dshm-keyboard`（壳量到的 IME 高度 ✓）> 0 ⇒ 抬 ✓；否则撤标记 ✓。
+   *   我们自己的模型菜单不碰 ✓（它的宿主已经让开键盘 ✓）。
+   */
+  function liftPopupsOverKeyboard() {
+    try {
+      var raw = globalThis.getComputedStyle(document.documentElement).getPropertyValue('--dshm-keyboard')
+      var keyboard = parseFloat(raw)
+      var lift = isNaN(keyboard) === false && keyboard > 0
+      var popups = document.querySelectorAll('[role="listbox"], [role="menu"]')
+      for (var i = 0; i < popups.length; i++) {
+        var el = popups[i]
+        if (el.closest('#dshm-model-menu') !== null) continue
+        var want = lift === true ? '1' : '0'
+        if (el.getAttribute('data-dshm-lift') !== want) el.setAttribute('data-dshm-lift', want)
+      }
+    } catch (error) {
+      void error
+    }
   }
 
   function installComposerFocusProtection() {
@@ -20792,7 +20823,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001161400'
+    var BOOT_STAMP = 'BUILD-1001163059'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
