@@ -9197,6 +9197,57 @@
       '  font-size: 13px; line-height: 18px; text-align: left; cursor: pointer; box-sizing: border-box;',
       '}',
       '#dshm-command-menu .dshm-mmenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
+      /* ═══════════ 本地 app 面板：「电脑与智能体」（round 211 ✓）═══════════
+         用户："把我们目前 dsh 的页面弄成自己本地的页面（最好是原生的 app 界面）……
+         尽可能复刻我们目前手机端的设计" ✓ ⇒ 观感一律沿用手机端现有语言 ✓
+         （暗色底 / --dsw-* token / 28px 圆钮 / 18px 圆角卡 / 上下文字居中 ✓）。
+         ★ 走 hash 路由 `#dshm-home` ✓ ⇒ **刷新即生效**、不用重启 ✗（今晚不碰宿主路由 ✓）。 */
+      '#dshm-home {',
+      '  position: fixed; inset: 0; z-index: 400; display: flex; flex-direction: column;',
+      '  background: var(--dsw-alias-bg-base, #151517); color: var(--dsw-alias-label-primary);',
+      '  padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px));',
+      '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
+      '  overflow: hidden;',
+      '}',
+      '#dshm-home[data-open="0"] { display: none; }',
+      '#dshm-home-head {',
+      '  display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 0 12px;',
+      '  border-bottom: .5px solid var(--dsw-alias-border-l3, rgba(255,255,255,.08));',
+      '}',
+      '#dshm-home-head .dshm-home-title { font-size: 16px; font-weight: 600; text-align: center; flex: 1; }',
+      '#dshm-home-body { flex: 1; overflow: auto; padding: 12px; }',
+      '#dshm-home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }',
+      '.dshm-home-card {',
+      '  border-radius: 18px; padding: 12px; box-sizing: border-box; min-height: 108px;',
+      '  background: var(--dsw-alias-bg-layer-1, #232324);',
+      '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
+      '  display: flex; flex-direction: column; gap: 6px; text-align: center; align-items: center;',
+      '  justify-content: center; cursor: pointer; width: 100%; color: inherit; font: inherit;',
+      '}',
+      '.dshm-home-card[data-active="1"] { border-color: var(--dsw-alias-state-business-primary, #7aaaff); }',
+      '.dshm-home-name { font-size: 14px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }',
+      '.dshm-home-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }',
+      '.dshm-home-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--dsw-alias-state-idle-primary, #8a8f98); }',
+      '.dshm-home-dot[data-tone="online"] { background: var(--dsw-alias-state-success-primary, #34c759); }',
+      '.dshm-home-dot[data-tone="busy"] { background: var(--dsw-alias-state-warn-primary, #f59e0b); }',
+      '.dshm-home-dot[data-tone="await"] { background: var(--dsw-alias-state-error-primary, #ff6b6b); }',
+      '.dshm-home-meta { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.dshm-home-actions { display: flex; gap: 8px; margin-top: 4px; }',
+      '.dshm-home-btn {',
+      '  border: none; border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer;',
+      '  background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08)); color: inherit;',
+      '}',
+      '.dshm-home-btn[data-tone="primary"] { background: var(--dsw-alias-state-business-primary, #7aaaff); color: #0b1220; }',
+      '#dshm-home-sessions { margin-top: 16px; }',
+      '#dshm-home-sessions .dshm-home-sec { font-size: 12px; color: var(--dsw-alias-label-tertiary); padding: 4px 2px 8px; }',
+      '.dshm-home-row {',
+      '  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;',
+      '  min-height: 44px; padding: 8px 12px; border: none; border-radius: 12px;',
+      '  background: transparent; color: inherit; font-size: 13px; cursor: pointer; box-sizing: border-box;',
+      '}',
+      '.dshm-home-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
+      '.dshm-home-row .dshm-home-row-note { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-tertiary); }',
+      '.dshm-home-empty { padding: 16px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-attach:disabled { opacity: .5; cursor: default; }',
       '[data-composer-card="true"] > [class*="_row"] {',
       '  --dsh-composer-model-text-display: none !important;',
@@ -10834,6 +10885,7 @@
       modelMenuGetTunnel = getTunnel
       installComposerFocusProtection()
       installModelMenuDismiss()
+      installHomeRoute()
       // ★ round 194：附件键在滚动/回弹期间要按帧跟随（`position: fixed` 不会自己跟着内容走 ✗）
       installAttachFollowOnScroll()
       /**
@@ -14358,6 +14410,338 @@
     }
   }
 
+  /* ═══════════ 本地 app 面板：「电脑与智能体」（round 211 ✓ 用户交办 ✓）═══════════
+   * 两件一起做 ✓：
+   *   A｜多电脑多智能体页面（UU 远程式 ✓）—— 每台电脑一张卡：名称 / 在线离线 / 忙或等审批 /
+   *     当前会话 / 一键切过去 ✓；数据全部取**客户端现成**的 ✓（壳 endpoints ✓、目录 dsh-mobile.hosts ✓、
+   *     session/list ✓、switchHost ✓）⇒ 今晚**不碰宿主路由** ✗（刷新即生效 ✓，明早验收不用重启 ✓）。
+   *   B｜本地 app 页面（增量 1 ✓）—— 界面收进**我们自己的壳层** ✓（hash 路由 #dshm-home ✓），
+   *     观感复刻手机端既有设计 ✓（13 号方案的四态状态机 ✓：idle / busy / awaiting-approval / done ✓）。
+   * ★ `lastSeenAt` 缺失就不显示状态 ✓（13 §三 ✓ —— 防"3 分钟前的 busy 冒充当前"✗）。
+   * ★ 拿不到的数据**如实显示"未知"** ✗，不猜、不编 ✓。
+   */
+  var homePanel = null
+
+  function homeEnsure() {
+    if (homePanel !== null) return true
+    if (document.body === null) return false
+    homePanel = document.createElement('div')
+    homePanel.id = 'dshm-home'
+    homePanel.setAttribute('data-open', '0')
+    document.body.appendChild(homePanel)
+    return true
+  }
+
+  function homeClose() {
+    if (homePanel === null) return
+    homePanel.setAttribute('data-open', '0')
+    if (globalThis.location !== undefined && globalThis.location.hash === '#dshm-home') {
+      try {
+        globalThis.history.replaceState(null, '', globalThis.location.pathname + globalThis.location.search)
+      } catch (error) {
+        void error
+      }
+    }
+  }
+
+  function homeOpen() {
+    if (homeEnsure() !== true) return
+    homePanel.setAttribute('data-open', '1')
+    homeRender()
+    homeRefresh()
+  }
+
+  function homeIsOpen() {
+    return homePanel !== null && homePanel.getAttribute('data-open') === '1'
+  }
+
+  /** 一台机器的行数据 ✓（目录记录 + 壳槽 + 当前这台 ✓ 合并去重 ✓）。 */
+  function homeMachines() {
+    var byAuthority = {}
+    var order = []
+    var put = function (authority, patch) {
+      if (typeof authority !== 'string' || authority.length === 0) return
+      if (byAuthority[authority] === undefined) {
+        byAuthority[authority] = { authority: authority, label: '', appUrl: '', fingerprint: null, updatedAt: 0, active: false }
+        order.push(authority)
+      }
+      var row = byAuthority[authority]
+      if (patch.label !== undefined && patch.label !== '' && row.label === '') row.label = patch.label
+      if (patch.appUrl !== undefined && patch.appUrl !== '' && row.appUrl === '') row.appUrl = patch.appUrl
+      if (patch.fingerprint !== undefined && patch.fingerprint !== null) row.fingerprint = patch.fingerprint
+      if (typeof patch.updatedAt === 'number' && patch.updatedAt > row.updatedAt) row.updatedAt = patch.updatedAt
+      if (patch.active === true) row.active = true
+    }
+    var authorityOf = function (url) {
+      try {
+        return new URL(url, location.href).host
+      } catch (error) {
+        return ''
+      }
+    }
+    var current = location.host
+    put(current, { active: true, label: (globalThis.__DSH_MOBILE_BOOT__ && globalThis.__DSH_MOBILE_BOOT__.deviceName) || '这台电脑', appUrl: location.href, updatedAt: Date.now() })
+    try {
+      var records = hostsRead()
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i]
+        var slots = Array.isArray(record.slots) ? record.slots : []
+        for (var j = 0; j < slots.length; j++) {
+          var slotUrl = typeof slots[j] === 'string' ? slots[j] : slots[j] && slots[j].url
+          if (typeof slotUrl !== 'string' || slotUrl.length === 0) continue
+          var auth = authorityOf(slotUrl)
+          if (auth === '') continue
+          put(auth, {
+            label: hostRecordLabel(record),
+            appUrl: slotUrl,
+            fingerprint: record.fingerprint,
+            updatedAt: Number(record.updatedAt) || 0,
+            active: auth === current,
+          })
+        }
+      }
+    } catch (error) {
+      void error
+    }
+    try {
+      var links = readDefaultLinks()
+      for (var k = 0; k < links.slots.length; k++) {
+        var linkAuth = authorityOf(links.slots[k].url)
+        if (linkAuth === '') continue
+        put(linkAuth, {
+          label: links.slots[k].label,
+          appUrl: links.slots[k].url,
+          updatedAt: Date.now(),
+          active: linkAuth === current,
+        })
+      }
+    } catch (error) {
+      void error
+    }
+    var rows = []
+    for (var o = 0; o < order.length; o++) rows.push(byAuthority[order[o]])
+    return rows
+  }
+
+  var homeState = { sessions: [], sessionsError: '', busy: false }
+
+  /** 当前这台的会话/智能体清单 ✓（取不到就如实说 ✓）。 */
+  async function homeLoadSessions() {
+    if (homeState.busy === true) return
+    homeState.busy = true
+    try {
+      var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      if (link === null || link === undefined || typeof link.rpc !== 'function') {
+        homeState.sessionsError = '隧道未连接 ⇒ 拿不到会话清单'
+        return
+      }
+      var response = await link.rpc('session/list', { args: { request: { limit: 30 } } }, undefined)
+      var result = response === undefined || response === null ? undefined : response.result
+      if (result === undefined || result === null || result.ok !== true) {
+        var err = result === undefined || result === null ? {} : result.error || {}
+        homeState.sessionsError = '拿不到会话清单：' + String(err.message || err.code || '电脑没有返回结果')
+        return
+      }
+      var value = result.value === undefined || result.value === null ? {} : result.value
+      var items = Array.isArray(value.sessions) ? value.sessions : Array.isArray(value.items) ? value.items : []
+      homeState.sessions = items
+      homeState.sessionsError = ''
+    } catch (error) {
+      homeState.sessionsError = '拿不到会话清单：' + String(error && error.message ? error.message : error)
+    } finally {
+      homeState.busy = false
+    }
+  }
+
+  function homeSwitchTo(row) {
+    try {
+      var bridge = shellBridge()
+      if (bridge === undefined || bridge === null || typeof bridge.switchHost !== 'function') {
+        globalThis.location.href = row.appUrl
+        return
+      }
+      var raw = bridge.switchHost(row.appUrl)
+      var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+      if (parsed !== null && parsed !== undefined && parsed.ok === true) return
+      var why = parsed !== null && parsed !== undefined && parsed.error ? String(parsed.error) : '壳没有受理这次切换'
+      homeToast('切不过去：' + why)
+    } catch (error) {
+      homeToast('切不过去：' + String(error && error.message ? error.message : error))
+    }
+  }
+
+  function homeToast(text) {
+    if (homePanel === null) return
+    var note = homePanel.querySelector('[data-dshm-home-note]')
+    if (note === null || note === undefined) return
+    note.textContent = text
+  }
+
+  function homeRender() {
+    if (homePanel === null) return
+    while (homePanel.firstChild !== null) homePanel.removeChild(homePanel.firstChild)
+    var head = document.createElement('div')
+    head.id = 'dshm-home-head'
+    var back = document.createElement('button')
+    back.type = 'button'
+    back.className = 'dshm-home-btn'
+    back.textContent = '返回'
+    back.addEventListener('click', function () { homeClose() })
+    var title = document.createElement('div')
+    title.className = 'dshm-home-title'
+    title.textContent = '电脑与智能体'
+    var refresh = document.createElement('button')
+    refresh.type = 'button'
+    refresh.className = 'dshm-home-btn'
+    refresh.textContent = '刷新'
+    refresh.addEventListener('click', function () {
+      homeRender()
+      homeRefresh()
+    })
+    head.appendChild(back)
+    head.appendChild(title)
+    head.appendChild(refresh)
+    homePanel.appendChild(head)
+
+    var body = document.createElement('div')
+    body.id = 'dshm-home-body'
+    var grid = document.createElement('div')
+    grid.id = 'dshm-home-grid'
+    var machines = homeMachines()
+    if (machines.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'dshm-home-empty'
+      empty.textContent = '还没有电脑：在设置 → 连接与设备里配对一台'
+      body.appendChild(empty)
+    }
+    for (var i = 0; i < machines.length; i++) {
+      grid.appendChild(homeCard(machines[i]))
+    }
+    body.appendChild(grid)
+
+    var sessionsWrap = document.createElement('div')
+    sessionsWrap.id = 'dshm-home-sessions'
+    var sec = document.createElement('div')
+    sec.className = 'dshm-home-sec'
+    sec.textContent = '这台电脑的会话与智能体'
+    sessionsWrap.appendChild(sec)
+    if (homeState.sessionsError !== '') {
+      var hint = document.createElement('div')
+      hint.className = 'dshm-home-empty'
+      hint.textContent = homeState.sessionsError
+      sessionsWrap.appendChild(hint)
+    } else if (homeState.sessions.length === 0) {
+      var loading = document.createElement('div')
+      loading.className = 'dshm-home-empty'
+      loading.textContent = '正在读取…'
+      sessionsWrap.appendChild(loading)
+    } else {
+      for (var s = 0; s < homeState.sessions.length; s++) {
+        sessionsWrap.appendChild(homeSessionRow(homeState.sessions[s]))
+      }
+    }
+    body.appendChild(sessionsWrap)
+
+    var note = document.createElement('div')
+    note.className = 'dshm-home-empty'
+    note.setAttribute('data-dshm-home-note', '1')
+    body.appendChild(note)
+    homePanel.appendChild(body)
+  }
+
+  function homeCard(row) {
+    var card = document.createElement('button')
+    card.type = 'button'
+    card.className = 'dshm-home-card'
+    card.setAttribute('data-active', row.active === true ? '1' : '0')
+    var name = document.createElement('div')
+    name.className = 'dshm-home-name'
+    name.textContent = row.label === '' ? row.authority : row.label
+    var state = document.createElement('div')
+    state.className = 'dshm-home-state'
+    var dot = document.createElement('span')
+    dot.className = 'dshm-home-dot'
+    var tone = row.active === true ? 'online' : 'idle'
+    dot.setAttribute('data-tone', tone)
+    var label = document.createElement('span')
+    label.textContent = row.active === true ? '当前 · 在线' : '未连接'
+    state.appendChild(dot)
+    state.appendChild(label)
+    var meta = document.createElement('div')
+    meta.className = 'dshm-home-meta'
+    meta.textContent = row.authority
+    card.appendChild(name)
+    card.appendChild(state)
+    card.appendChild(meta)
+    if (row.active !== true) {
+      var actions = document.createElement('div')
+      actions.className = 'dshm-home-actions'
+      var go = document.createElement('button')
+      go.type = 'button'
+      go.className = 'dshm-home-btn'
+      go.setAttribute('data-tone', 'primary')
+      go.textContent = '切到这台'
+      go.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        homeSwitchTo(row)
+      })
+      actions.appendChild(go)
+      card.appendChild(actions)
+    }
+    card.addEventListener('click', function () {
+      if (row.active === true) {
+        homeClose()
+        return
+      }
+      homeSwitchTo(row)
+    })
+    return card
+  }
+
+  function homeSessionRow(item) {
+    var row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'dshm-home-row'
+    var label = document.createElement('span')
+    var title = item !== null && typeof item === 'object' ? (item.title || item.label || item.id || '') : String(item)
+    label.textContent = String(title).slice(0, 42)
+    var note = document.createElement('span')
+    note.className = 'dshm-home-row-note'
+    var running = item !== null && typeof item === 'object' && (item.running === true || item.busy === true)
+    note.textContent = running ? '正在运行' : ''
+    row.appendChild(label)
+    row.appendChild(note)
+    row.addEventListener('click', function () {
+      var id = item !== null && typeof item === 'object' ? item.id : item
+      if (typeof id !== 'string' || id.length === 0) return
+      homeClose()
+      try {
+        globalThis.location.href = '/mobile/app?session=' + encodeURIComponent(id)
+      } catch (error) {
+        void error
+      }
+    })
+    return row
+  }
+
+  async function homeRefresh() {
+    await homeLoadSessions()
+    if (homeIsOpen() === true) homeRender()
+  }
+
+  /** hash 路由 ✓（刷新即生效 ✓ 不用重启 ✓）：`#dshm-home` ⇒ 打开面板 ✓。 */
+  function installHomeRoute() {
+    try {
+      if (globalThis.location !== undefined && globalThis.location.hash === '#dshm-home') homeOpen()
+      globalThis.addEventListener('hashchange', function () {
+        if (globalThis.location.hash === '#dshm-home') homeOpen()
+      })
+    } catch (error) {
+      void error
+    }
+  }
+
   function installComposerFocusProtection() {
     if (focusGuardStats.installed === true) return
     try {
@@ -15465,6 +15849,20 @@
    *     所以只有**一份**渲染代码 ✓，"只画哪一组"只是它的一个开关 ✓。
    */
   function fillConnSettings(body, getTunnel, only) {
+    /**
+     * ★ round 211：「电脑与智能体」入口 ✓（UU 远程式多机面板 ✓ 用户交办 ✓）——
+     *   点开我们的全屏面板 ✓（hash `#dshm-home` ✓ 刷新即生效 ✓）。
+     */
+    var homeEntry = document.createElement('button')
+    homeEntry.type = 'button'
+    homeEntry.className = 'dshm-home-btn'
+    homeEntry.setAttribute('data-tone', 'primary')
+    homeEntry.setAttribute('data-dshm-action', 'open-home')
+    homeEntry.textContent = '电脑与智能体'
+    homeEntry.addEventListener('click', function () {
+      homeOpen()
+    })
+    body.appendChild(homeEntry)
     var capabilitiesOnly = only === 'capabilities'
     /**
      * 第一行把"这一页管什么"说清楚，并指出**同一个页面在左边哪里** ✓
@@ -21023,7 +21421,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001171241'
+    var BOOT_STAMP = 'BUILD-1001172336'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
