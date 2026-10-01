@@ -9106,6 +9106,39 @@
       '  place-items: center; display: grid; padding: 0;',
       '}',
       '#dshm-attach:hover { background: var(--dsw-alias-interactive-bg-hover-solid); }',
+      /* ── 自绘模型菜单（round 197 ✓）：屏幕**垂直居中** ✓，底部让开键盘 ✓（用户原话：
+         「是正常垂直居中就行」+「打开输入法的情况下模型键的菜单完全不可用」✓）。
+         宿主铺满可视区、flex 居中 ⇒ 键盘一开它自动浮在键盘上方 ✓；子菜单共用这一块 ✓。 */
+      '#dshm-model-menu-host {',
+      '  position: fixed; left: 0; right: 0; top: 0; bottom: 0;',
+      '  z-index: 300; pointer-events: none;',
+      '}',
+      '#dshm-model-menu-host[data-open="0"] { display: none; }',
+      /* ★ round 197b：**行内文字居中** ✓（用户："不是菜单的位置不居中，而是菜单内的文字不居中" ✓）；
+         面板本体**不居中** ✗ —— 它钉在**模型钮上方的固定位置** ✓（键盘一开，钮上移 ⇒
+         菜单自然落在另一个位置 ✓，正是用户要的"两个位置" ✓）。 */
+      '#dshm-model-menu {',
+      '  position: fixed; pointer-events: auto; box-sizing: border-box;',
+      '  width: min(250px, calc(100vw - 24px)); max-height: 100%; overflow: auto;',
+      '  border-radius: 18px; padding: 6px;',
+      '  background: var(--dsw-specific-selector, #232324);',
+      '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
+      '  box-shadow: var(--dsw-elevation-prominent, 0 12px 40px rgba(0,0,0,.5));',
+      '}',
+      /* ★ round 197c：**上下文字居中** ✓（用户："是上下文字居中，我什么时候跟你说是水平文字居中了" ✗）——
+         `align-items: center` 管上下 ✓；**水平不居中** ✗（回到左对齐 + 尾巴靠右 ✓）。
+         顺手把菜单**收小** ✓（用户："菜单太大了" ✓）：250px 宽、行高 40 ✓。 */
+      '#dshm-model-menu .dshm-mmenu-row {',
+      '  display: flex; align-items: center; gap: 8px; width: 100%;',
+      '  min-height: 40px; padding: 6px 12px; border: none; border-radius: 12px;',
+      '  background: transparent; color: var(--dsw-alias-label-primary);',
+      '  font-size: 14px; line-height: 20px; text-align: left; cursor: pointer; box-sizing: border-box;',
+      '}',
+      '#dshm-model-menu .dshm-mmenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
+      '#dshm-model-menu .dshm-mmenu-sub { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 12px; }',
+      '#dshm-model-menu .dshm-mmenu-check { margin-left: auto; color: var(--dsw-alias-state-business-primary); }',
+      '#dshm-model-menu .dshm-mmenu-title { padding: 6px 12px 4px; font-size: 12px; text-align: left; color: var(--dsw-alias-label-tertiary); }',
+      '#dshm-model-menu .dshm-mmenu-note { padding: 8px 12px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-attach:disabled { opacity: .5; cursor: default; }',
       '[data-composer-card="true"] > [class*="_row"] {',
       '  --dsh-composer-model-text-display: none !important;',
@@ -10738,7 +10771,9 @@
        * ★★ round 193：模型菜单关掉之后把焦点还给输入框 ✓（用户："点控件会把输入法关闭"✗）。
        *   装一次监听 ✓ + 200ms 对一次账 ✓ —— 与同处那三条轮询同一条命 ✓（都是"很便宜"的查一次 ✓）。
        */
+      modelMenuGetTunnel = getTunnel
       installComposerFocusProtection()
+      installModelMenuDismiss()
       // ★ round 194：附件键在滚动/回弹期间要按帧跟随（`position: fixed` 不会自己跟着内容走 ✗）
       installAttachFollowOnScroll()
       /**
@@ -13635,6 +13670,289 @@
 
   var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, swallowedBlur: 0, swallowedClick: 0, refocusedAfterSwap: 0, menuToggleFallback: 0 }
 
+  /* ═══════════ 自绘模型菜单（round 197 ✓）═══════════
+   * 用户："模型菜单直接重弄吧……基本上完全没法用，按钮是合适的但菜单有问题" ✓；
+   * 以及「菜单是上下不居中的」「打开输入法的情况下模型键的菜单完全不可用」
+   * 「子菜单……会拉起输入法（因为自动聚焦搜索模型的输入栏）」✓。
+   *
+   * 要求归拢：
+   *   · 屏幕**垂直居中** ✓（不是居中于按钮 ✓ —— 用户点名 ✓），键盘开着时浮在键盘上方 ✓；
+   *   · 两级：模型 / 推理等级 ✓；子菜单一并居中 ✓；
+   *   · **不自动聚焦搜索框** ✓（想搜自己点 ✓）；
+   *   · 数据/选择走 DSH 现成的动作 ✓：`session/modelCatalog`（取清单 ✓）与
+   *     `session/selectModel`（写选择 ✓，返回 `{selected:{provider,model,reasoningEffort?}}` ✓）。
+   *   · DSH 那个菜单**不再触发** ✓（点模型钮的 click 被我们吞掉、换成开自己的 ✓）
+   *     ⇒ 开关菜单不再有它的 blur/重渲染 ⇒ "有概率收键盘"那条从根上消失 ✓。
+   */
+  /**
+   * ★ round 197c：`getTunnel` 是 `installShell` 的**形参** ✗ —— 模块层的菜单函数看不见它 ✓
+   *   （第一版直接调 `getTunnel()` ⇒ 真机报 "getTunnel is not defined" ✗）。
+   *   ⇒ 装配时把它存下来 ✓（装配点在 installShell 里 ✓，那里名字可见 ✓）。
+   */
+  var modelMenuGetTunnel = null
+  var modelMenuHost = null
+  var modelMenuPanel = null
+  var modelMenuCatalog = null
+  var modelMenuView = 'root'
+  var modelMenuBusy = false
+
+  function modelMenuEnsure() {
+    if (modelMenuHost !== null) return true
+    if (document.body === null) return false
+    modelMenuHost = document.createElement('div')
+    modelMenuHost.id = 'dshm-model-menu-host'
+    modelMenuHost.setAttribute('data-open', '0')
+    modelMenuPanel = document.createElement('div')
+    modelMenuPanel.id = 'dshm-model-menu'
+    modelMenuHost.appendChild(modelMenuPanel)
+    document.body.appendChild(modelMenuHost)
+    return true
+  }
+
+  function modelMenuClose() {
+    if (modelMenuHost === null) return
+    modelMenuHost.setAttribute('data-open', '0')
+    modelMenuView = 'root'
+  }
+
+  function modelMenuCurrent() {
+    var def = modelMenuCatalog === null || modelMenuCatalog === undefined ? null : modelMenuCatalog.default
+    return def === null || def === undefined ? { provider: '', model: '', reasoningEffort: '' } : def
+  }
+
+  function modelMenuRow(label, sub, checked, onActivate, isBack) {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'dshm-mmenu-row'
+    var text = document.createElement('span')
+    text.textContent = label
+    button.appendChild(text)
+    if (sub !== null && sub !== undefined && sub !== '') {
+      var tail = document.createElement('span')
+      tail.className = 'dshm-mmenu-sub'
+      tail.textContent = sub
+      button.appendChild(tail)
+    } else if (checked === true) {
+      var tick = document.createElement('span')
+      tick.className = 'dshm-mmenu-check'
+      tick.textContent = '✓'
+      button.appendChild(tick)
+    }
+    if (isBack === true) text.textContent = '‹ ' + label
+    button.addEventListener('click', function (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      onActivate()
+    })
+    return button
+  }
+
+  function modelMenuTitle(text) {
+    var div = document.createElement('div')
+    div.className = 'dshm-mmenu-title'
+    div.textContent = text
+    return div
+  }
+
+  function modelMenuRender() {
+    if (modelMenuPanel === null) return
+    while (modelMenuPanel.firstChild !== null) modelMenuPanel.removeChild(modelMenuPanel.firstChild)
+    var current = modelMenuCurrent()
+    if (modelMenuView === 'root') {
+      var modelLabel = current.model === '' ? '模型' : current.model
+      var effortLabel = current.reasoningEffort === undefined || current.reasoningEffort === '' ? '推理等级' : current.reasoningEffort
+      modelMenuPanel.appendChild(modelMenuRow('模型', modelLabel, false, function () {
+        modelMenuView = 'models'
+        modelMenuRender()
+      }, false))
+      modelMenuPanel.appendChild(modelMenuRow('推理等级', effortLabel, false, function () {
+        modelMenuView = 'efforts'
+        modelMenuRender()
+      }, false))
+      return
+    }
+    modelMenuPanel.appendChild(modelMenuRow('返回', '', false, function () {
+      modelMenuView = 'root'
+      modelMenuRender()
+      modelMenuPlace()
+    }, true))
+    var groups = modelMenuCatalog === null || modelMenuCatalog === undefined ? [] : modelMenuCatalog.groups
+    if (modelMenuView === 'models') {
+      for (var g = 0; g < groups.length; g++) {
+        modelMenuPanel.appendChild(modelMenuTitle(groups[g].name))
+        var models = groups[g].models
+        for (var m = 0; m < models.length; m++) {
+          var entry = models[m]
+          var chosen = entry.id === current.model
+          modelMenuPanel.appendChild(modelMenuRow(entry.name, '', chosen, (function (pick) {
+            return function () {
+              modelMenuSelectModel(pick)
+            }
+          })({ provider: groups[g].id, model: entry.id, name: entry.name }), false))
+        }
+      }
+      return
+    }
+    /* 推理等级：**只列当前模型自己的档位** ✓（catalog 里挂在 models[].reasoning.efforts ✓）。 */
+    var efforts = []
+    for (var gi = 0; gi < groups.length; gi++) {
+      for (var mi = 0; mi < groups[gi].models.length; mi++) {
+        if (groups[gi].models[mi].id === current.model && groups[gi].models[mi].reasoning !== undefined) {
+          efforts = groups[gi].models[mi].reasoning.efforts
+        }
+      }
+    }
+    if (efforts.length === 0) {
+      modelMenuPanel.appendChild(
+        modelMenuRow(current.model === '' ? '当前模型没有推理等级可选' : '「' + current.model + '」没有推理等级可选', '', false, function () {}, false),
+      )
+      return
+    }
+    for (var e = 0; e < efforts.length; e++) {
+      var effort = efforts[e]
+      modelMenuPanel.appendChild(
+        modelMenuRow(effort.name, effort.description === undefined ? '' : '', effort.id === current.reasoningEffort, (function (pick) {
+          return function () {
+            modelMenuSelectEffort(pick)
+          }
+        })(effort.id), false),
+      )
+    }
+  }
+
+  /**
+   * ★ round 197b：**钉在模型钮上方的固定位置** ✓（用户："位置保证在模型钮位置的上方的固定位置就行，
+   *   打开键盘在一个位置，不打开键盘在另一个位置" ✓）—— 键盘一开、输入区上移 ⇒ 钮上移 ⇒
+   *   菜单自然落在另一个位置 ✓，两个位置都不用写死 ✓。
+   *   水平：以钮为中心 ✓（贴边回夹 ✓）；上方放不下 ⇒ 落到钮下方 ✓。
+   */
+  function modelMenuPlace() {
+    if (modelMenuPanel === null) return
+    var trigger = composerModelTrigger()
+    var rect = trigger === null ? null : trigger.getBoundingClientRect()
+    if (rect === null || !(rect.width > 0)) return
+    var width = modelMenuPanel.offsetWidth || 300
+    var height = modelMenuPanel.offsetHeight || 120
+    var left = Math.round(rect.left + rect.width / 2 - width / 2)
+    if (left < 8) left = 8
+    if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8
+    var gap = 8
+    var top = Math.round(rect.top - gap - height)
+    if (top < 8) top = Math.round(rect.bottom + gap)
+    modelMenuPanel.style.left = left + 'px'
+    modelMenuPanel.style.top = top + 'px'
+  }
+
+  async function modelMenuLoad() {
+    if (modelMenuBusy === true) return
+    modelMenuBusy = true
+    try {
+      var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      if (link === undefined || link === null || typeof link.rpc !== 'function') {
+        debugBoxLine('[model] ✗ 隧道没有 rpc 入口 ⇒ 菜单拿不到清单')
+        return
+      }
+      /**
+       * ★ round 197b：返回要**解包** ✗（第一版把整个 response 当清单 ⇒ 模型/推理等级两栏全空 ✗）——
+       *   `tunnel.rpc` 给的是 `{ result: { ok, value } }` ✓（照 `session/openWorkspacePath` 那处 ✓）。
+       */
+      /**
+       * ★ round 197d：**无参数方法不许带 `request`** ✗ —— 真机报的是
+       *   `typert gateway:session/modelCatalog: args fields do not match the descriptor: @unexpected "request"` ✓
+       *   （它的 descriptor 是 `parameters: []` ✓ ⇒ 形状只能是 `{ args: {} }` ✓；
+       *   `selectModel` 才有 `request` 参数 ✓，那边形状本来就对 ✓）。
+       */
+      var response = await link.rpc('session/modelCatalog', { args: {} }, undefined)
+      var result = response === undefined || response === null ? undefined : response.result
+      if (result === undefined || result === null || result.ok !== true) {
+        var err = result === undefined || result === null ? {} : result.error || {}
+        debugBoxLine('[model] ✗ 取模型清单失败：' + String(err.message || err.code || '电脑没有返回结果'))
+        return
+      }
+      if (result.value !== undefined && result.value !== null) modelMenuCatalog = result.value
+      modelMenuRender()
+    } catch (error) {
+      debugBoxLine('[model] ✗ 取模型清单失败：' + String(error && error.message ? error.message : error))
+    } finally {
+      modelMenuBusy = false
+    }
+  }
+
+  async function modelMenuSelectModel(pick) {
+    try {
+      var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      var request = {
+        sessionId: link.sessionId,
+        provider: pick.provider,
+        model: pick.model,
+      }
+      var response = await link.rpc('session/selectModel', { args: { request: request } }, undefined)
+      var result = response === undefined || response === null ? undefined : response.result
+      if (result !== undefined && result !== null && result.ok === true && result.value !== undefined && result.value.selected !== undefined) {
+        modelMenuCatalog.default = result.value.selected
+      }
+      modelMenuRender()
+      modelMenuClose()
+    } catch (error) {
+      debugBoxLine('[model] ✗ 换模型失败：' + String(error && error.message ? error.message : error))
+    }
+  }
+
+  async function modelMenuSelectEffort(effortId) {
+    try {
+      var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      var current = modelMenuCurrent()
+      var request = {
+        sessionId: link.sessionId,
+        provider: current.provider,
+        model: current.model,
+        reasoningEffort: effortId,
+      }
+      var response = await link.rpc('session/selectModel', { args: { request: request } }, undefined)
+      var result = response === undefined || response === null ? undefined : response.result
+      if (result !== undefined && result !== null && result.ok === true && result.value !== undefined && result.value.selected !== undefined) {
+        modelMenuCatalog.default = result.value.selected
+      }
+      modelMenuRender()
+      modelMenuClose()
+    } catch (error) {
+      debugBoxLine('[model] ✗ 换推理等级失败：' + String(error && error.message ? error.message : error))
+    }
+  }
+
+  function modelMenuOpen() {
+    if (modelMenuEnsure() !== true) return
+    modelMenuView = 'root'
+    modelMenuHost.setAttribute('data-open', '1')
+    modelMenuRender()
+    modelMenuPlace()
+    modelMenuLoad()
+  }
+
+  function modelMenuIsOpen() {
+    return modelMenuHost !== null && modelMenuHost.getAttribute('data-open') === '1'
+  }
+
+  /** 点外面 / Escape ⇒ 收菜单 ✓（只派事件不碰 DSH 节点 ✓；这次收的是**我们自己的** ✓）。 */
+  function installModelMenuDismiss() {
+    document.addEventListener(
+      'pointerdown',
+      function (event) {
+        if (modelMenuIsOpen() !== true) return
+        var target = event.target
+        var inside = target !== null && target !== undefined && target.closest !== undefined && target.closest('#dshm-model-menu') !== null
+        var onTrigger = composerModelTrigger() !== null && target !== null && target.closest !== undefined && target.closest('button') === composerModelTrigger()
+        if (inside === true || onTrigger === true) return
+        modelMenuClose()
+      },
+      true,
+    )
+    document.addEventListener('keydown', function (event) {
+      if (modelMenuIsOpen() !== true) return
+      if (event.key === 'Escape' || event.key === 'Esc') modelMenuClose()
+    })
+  }
+
   /**
    * ★ round 196c（用户 2026-10-01："电脑端 dsh 再次按加号也不会关，那就是 dsh 的毛病了，
    *   但我们需要修手机上的"✓）：**替 DSH 收一次菜单** ✓ —— 它那颗合并 ＋ 的 toggle 是坏的 ✗
@@ -13709,7 +14027,10 @@
             if (control === null) return
             var inCard = control.closest('[data-composer-card="true"]') !== null
             var inStatsRow = control.closest('[data-composer-stats]') !== null
-            if (inCard !== true && inStatsRow !== true && control.id !== 'dshm-attach') return
+            // ★ round 197c：我们自己那块菜单里的行也是控件 ✓ —— 点它们同样不许抢走输入框的焦点 ✗
+            //   （用户："打开子菜单仍然会意外关闭输入法" ✓ ⇒ 就是这一档 ✗）。
+            var inOurMenu = control.closest('#dshm-model-menu') !== null
+            if (inCard !== true && inStatsRow !== true && inOurMenu !== true && control.id !== 'dshm-attach') return
             /**
              * ★ round 196c：那颗合并 ＋（= 锚点那颗 ✓）的 toggle 是坏的 ✗（DSH 自己的 bug ✓，
              *   桌面端同样复现 ✓）⇒ 手机上兜底：它已经开着菜单、又被点一次 ⇒
@@ -13758,6 +14079,20 @@
         'click',
         function (event) {
           try {
+            /**
+             * ★ round 197：模型钮的 click **换成开我们自己的菜单** ✓（DSH 那个直接不用 ✗）——
+             *   它的开关动作挂在 click 上 ✓ ⇒ 拦在这里就不会再有它的 blur/重渲染 ✓
+             *   ⇒ "开/关菜单有概率收键盘"那条从根上消失 ✓。
+             */
+            var clickTarget = event.target
+            var modelTrigger = composerModelTrigger()
+            if (modelTrigger !== null && clickTarget !== null && clickTarget.closest !== undefined && clickTarget.closest('button') === modelTrigger) {
+              if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+              if (typeof event.stopPropagation === 'function') event.stopPropagation()
+              if (modelMenuIsOpen() === true) modelMenuClose()
+              else modelMenuOpen()
+              return
+            }
             if (focusGuardSwallowClickTarget === null) return
             var target = event.target
             var control = target === null || target === undefined || target.closest === undefined ? null : target.closest('button, [role="button"]')
@@ -20081,7 +20416,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001071620'
+    var BOOT_STAMP = 'BUILD-1001075317'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
