@@ -13633,7 +13633,7 @@
     return trigger !== null && node === trigger
   }
 
-  var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, refocusedAfterSwap: 0, menuToggleFallback: 0 }
+  var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, swallowedBlur: 0, swallowedClick: 0, refocusedAfterSwap: 0, menuToggleFallback: 0 }
 
   /**
    * ★ round 196c（用户 2026-10-01："电脑端 dsh 再次按加号也不会关，那就是 dsh 的毛病了，
@@ -13675,6 +13675,8 @@
     }
   }
   var focusGuardLastTapTarget = null
+  /** round 196d：要连 click 一起吞的那颗按钮（DSH 的开关挂在 click 上 ✗，只拦 pointerdown 没用 ✓）。 */
+  var focusGuardSwallowClickTarget = null
   var focusGuardLastTapAt = 0
   /** 这一轮是不是"正在打字"（输入框有焦点 ✓）——节点被换时只有这一种情形才还焦点 ✓。 */
   var focusGuardTyping = false
@@ -13697,6 +13699,7 @@
         function (event) {
           focusGuardLastTapTarget = event === undefined || event.target === undefined ? null : event.target
           focusGuardLastTapAt = Date.now()
+          focusGuardSwallowClickTarget = null
           focusGuardTyping = composerInputHasFocus()
           try {
             if (composerInputHasFocus() !== true) return
@@ -13722,6 +13725,9 @@
               if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
               if (typeof event.stopPropagation === 'function') event.stopPropagation()
               focusGuardStats.menuToggleFallback += 1
+              // ★ round 196d：**连 click 一起吞** ✓ —— DSH 的开关挂在 click 上 ✓，
+              //   只拦 pointerdown 的话那一记 click 照样到得了 ⇒ 菜单关了又开 ✗（用户实测 ✓）。
+              focusGuardSwallowClickTarget = control
               closeDshMenuNear(plus)
               return
             }
@@ -13736,6 +13742,55 @@
     } catch (error) {
       debugBoxLine('[focus] 保护装不上（点控件仍会收键盘）：' + String(error && error.message ? error.message : error))
       return
+    }
+    /**
+     * ★ round 196d：三件补漏（用户实测 1/2/3 全没收住 ✗，逐条对着机制核出来的 ✓）：
+     *   · **click 吞**：DSH 的菜单开关挂在 click 上 ✓ —— 只拦 pointerdown 没用 ✗；
+     *   · **blur 吞**：开/关菜单时 DSH 会 `blur()` 输入框 ✓（不是"被抢焦点"而是"被踢出去"✗）
+     *     ⇒ 输入框有焦点且这一笔点在控件上 ⇒ 不许 blur ✓（"点外面关掉"那条不受影响 ✗ ——
+     *     那种情形点的是空白、不是控件 ✓）；
+     *   · **focusin 抢救**：菜单里那个过滤框是 `autofocus` 进来的 ✗ —— 浏览器自己聚焦、
+     *     **根本不走 `.focus()`** ✗ ⇒ 包 focus 拦不到 ✓ ⇒ 换 `focusin` 一刀切：
+     *     这一笔点在控件上、新焦点又是个可编辑元素、且不是用户亲手点的 ⇒ 立刻 blur 掉 ✓。
+     */
+    try {
+      document.addEventListener(
+        'click',
+        function (event) {
+          try {
+            if (focusGuardSwallowClickTarget === null) return
+            var target = event.target
+            var control = target === null || target === undefined || target.closest === undefined ? null : target.closest('button, [role="button"]')
+            var swallow = control !== null && control === focusGuardSwallowClickTarget
+            focusGuardSwallowClickTarget = null
+            if (swallow !== true) return
+            if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+            if (typeof event.stopPropagation === 'function') event.stopPropagation()
+            focusGuardStats.swallowedClick += 1
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+      document.addEventListener(
+        'focusin',
+        function (event) {
+          try {
+            if (focusGuardLastTapWasControl() !== true) return
+            var node = event.target
+            if (composerEditableNode(node) !== true) return
+            if (node === focusGuardLastTapTarget) return
+            if (node.blur !== undefined) node.blur()
+            focusGuardStats.swallowedFocus += 1
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+    } catch (error) {
+      void error
     }
     if (typeof HTMLElement !== 'function' || HTMLElement.prototype === undefined) return
     var original = HTMLElement.prototype.focus
@@ -13769,6 +13824,20 @@
         // 判据出错就照原样转发 ✓（绝不吞掉别人的聚焦 ✗）
       }
       return original.apply(this, arguments)
+    }
+    var originalBlur = HTMLElement.prototype.blur
+    if (typeof originalBlur === 'function') {
+      HTMLElement.prototype.blur = function () {
+        try {
+          if (this === composerInputNode() && focusGuardTyping === true && focusGuardLastTapWasControl() === true) {
+            focusGuardStats.swallowedBlur += 1
+            return
+          }
+        } catch (error) {
+          void error
+        }
+        return originalBlur.apply(this, arguments)
+      }
     }
     focusGuardStats.installed = true
     /**
@@ -20012,7 +20081,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001071328'
+    var BOOT_STAMP = 'BUILD-1001071620'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
