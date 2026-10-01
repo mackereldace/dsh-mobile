@@ -14534,7 +14534,7 @@
     return rows
   }
 
-  var homeState = { sessions: [], sessionsError: '', busy: false, tab: 'machines' }
+  var homeState = { sessions: [], sessionsError: '', busy: false, tab: 'machines', agents: { running: 0, awaiting: 0 } }
   /** 底部标签 ✓（"原生的 app 界面" ✓ —— 用户原话 ✓）。 */
   var HOME_TABS = [
     { key: 'machines', label: '电脑' },
@@ -14562,6 +14562,20 @@
       var value = result.value === undefined || result.value === null ? {} : result.value
       var items = Array.isArray(value.sessions) ? value.sessions : Array.isArray(value.items) ? value.items : []
       homeState.sessions = items
+      /**
+       * ★ round 211b：**增量 1 客户端可得**的「忙 / 等审批」✓（目标 ① 点名的那两项 ✓）——
+       *   从 `session/list` 的条目推导 ✓：`running/awaiting/awaitingApproval` 有哪个算哪个 ✓；
+       *   推不出来就保持 0 ✓（**不猜** ✗ —— 别的机器仍只显示可达性 ✓，那要增量 2 的宿主上报 ✓）。
+       */
+      var running = 0
+      var awaiting = 0
+      for (var n = 0; n < items.length; n++) {
+        var entry = items[n]
+        if (entry === null || typeof entry !== 'object') continue
+        if (entry.running === true || entry.busy === true) running += 1
+        if (entry.awaitingApproval === true || entry.awaiting === true) awaiting += 1
+      }
+      homeState.agents = { running: running, awaiting: awaiting }
       homeState.sessionsError = ''
     } catch (error) {
       homeState.sessionsError = '拿不到会话清单：' + String(error && error.message ? error.message : error)
@@ -14606,7 +14620,15 @@
     back.addEventListener('click', function () { homeClose() })
     var title = document.createElement('div')
     title.className = 'dshm-home-title'
-    title.textContent = '电脑与智能体'
+    var machinesNow = homeMachines()
+    var online = 0
+    for (var m = 0; m < machinesNow.length; m++) {
+      var rowM = machinesNow[m]
+      if (rowM.active === true || homePing[rowM.authority] === 'online') online += 1
+    }
+    var summary = machinesNow.length + ' 台 · ' + online + ' 在线'
+    if (homeState.agents.awaiting > 0) summary += ' · ' + homeState.agents.awaiting + ' 等审批'
+    title.textContent = summary
     var refresh = document.createElement('button')
     refresh.type = 'button'
     refresh.className = 'dshm-home-btn'
@@ -14760,9 +14782,18 @@
     var tone = row.active === true ? 'online' : probe === 'online' ? 'online' : probe === 'unknown' ? 'idle' : 'idle'
     dot.setAttribute('data-tone', tone)
     var label = document.createElement('span')
+    var activeNote = '当前 · 在线'
+    if (homeState.agents.running > 0 || homeState.agents.awaiting > 0) {
+      activeNote += ' · '
+      if (homeState.agents.running > 0) activeNote += '在跑 ' + homeState.agents.running
+      if (homeState.agents.awaiting > 0) {
+        if (homeState.agents.running > 0) activeNote += ' · '
+        activeNote += '等审批 ' + homeState.agents.awaiting
+      }
+    }
     label.textContent =
       row.active === true
-        ? '当前 · 在线'
+        ? activeNote
         : probe === 'online'
           ? '在线 · 未连接'
           : probe === 'unknown'
@@ -21576,7 +21607,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001173611'
+    var BOOT_STAMP = 'BUILD-1001175048'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
