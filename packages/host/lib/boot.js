@@ -14657,11 +14657,23 @@
      *   （否则会算两遍 ⇒ 越滑越歪 ✓ —— 也正是"逐帧追有偏移"的另一种形态 ✓）。
      *   好处：滑动期间这个 `left` 是**常数** ✓ ⇒ 跟手循环判"没变"⇒ 停 ✓ ⇒ 不再逐帧写 DOM ✓。
      */
+    /**
+     * ★ round 201b（用户："右滑两个控件会右滑的更快" ✗）：上一版减的是根变量 `--dshm-push` ✗
+     *   —— 而**拖动期间 DSH 实际用的是内联 transform** ✓（清掉内联才轮到那个变量接手 ✓），
+     *   那时变量还是 0 ⇒ 等于**加了两遍** ✗ = 越滑越快 ✓。
+     *   ⇒ 改成减**实际位移** ✓：`offsetLeft` 链是**未变换**的布局位置 ✓，
+     *     它与 `getBoundingClientRect().left`（含变换 ✓）的差 = 真实推移量 ✓。
+     */
     var pushNow = 0
     try {
-      var pushRaw = globalThis.getComputedStyle(found.anchor).getPropertyValue('--dshm-push')
-      var pushValue = parseFloat(pushRaw)
-      if (isNaN(pushValue) === false) pushNow = pushValue
+      var untransformed = 0
+      var walk = found.anchor
+      while (walk !== null && walk !== undefined && walk !== document.documentElement) {
+        untransformed += walk.offsetLeft || 0
+        walk = walk.offsetParent
+      }
+      pushNow = rect.left - untransformed
+      if (isNaN(pushNow) === true) pushNow = 0
     } catch (error) {
       void error
     }
@@ -20753,7 +20765,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001114721'
+    var BOOT_STAMP = 'BUILD-1001115540'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
