@@ -9096,6 +9096,13 @@
       '#dshm-attach-host {',
       '  position: fixed; left: 0; top: 0; width: 0; height: 0; margin: 0; padding: 0; z-index: 260;',
       '  overflow: visible; pointer-events: none; display: block;',
+      /* ★ round 201（用户："强行逐帧会有偏移，没有其他解决方案吗" ✓）：**不追矩形、跟变量** ✓ ——
+         左右滑是 DSH 把内容列 `transform` 走的 ✓（根变量 `--dshm-push` ✓，与顶栏
+         `#dsh-mobile-top` 同一条路 ✓）⇒ 我们也 `translateX(var(--dshm-push))` ✓
+         ⇒ 与面板**同一帧**移动 ✓（合成器层面同步 ✓，零延迟 ✓）；
+         另外挂进 `data-dshm-push-follower` 名单 ✓（拖动期间 JS 会把名单里的一起移 ✓）。
+         逐帧追矩形天生慢一帧 ⇒ 快速滑动时就是肉眼可见的"偏移" ✗（上一版的毛病 ✓）。 */
+      '  transform: translateX(var(--dshm-push, 0px));',
       '}',
       '#dshm-attach-host[data-dshm-on="0"] { display: none; }',
       '#dshm-attach {',
@@ -13627,6 +13634,16 @@
   var attachButton = null
   /** 「指令」键（round 198 ✓，与附件键同一个宿主 ✓）。 */
   var commandButton = null
+  /**
+   * ★ round 200（用户："没有改掉再次点击不能关闭的毛病" ✗）：命令菜单的开关**自己记** ✓。
+   *   DSH 那张菜单的 toggle 是坏的 ✓，而且 Escape / 合成的"点外面"都收不动它 ✗
+   *   （合成事件它不认 ✗）⇒ 只有一条稳的路：**把它藏起来** ✓（CSS 标记 ✓ 只显隐、不改内容 ✗），
+   *   我们自己记"开/关" ✓；DSH 认为它开着也没关系 ✓（节点还在 ✓，下次撤掉标记就回来 ✓）。
+   */
+  var commandMenuHidden = false
+  /** 开菜单那一刻新出现的那块浮层 ✓（不认 role/类名 ✓ —— 命令菜单可能不是 role="menu" ✗）。 */
+  var commandMenuNode = null
+  var commandMenuSnapshot = null
 
 
   /** 模型菜单那棵树（`aria-label` 三版逐字相同 ✓ —— 比哈希稳 ✓）。 */
@@ -14520,13 +14537,46 @@
         debugBoxLine('[command] ✗ 认不出那颗合并 ＋ ⇒ 这一次点不了')
         return
       }
-      var open = found.anchor.getAttribute('aria-expanded') === 'true' || document.querySelector('[role="menu"]') !== null
-      if (open === true) {
+      /**
+       * ★ round 200/201：开关由**我们**记 ✓。★ 菜单**不认 `[role="menu"]`** ✗ ——
+       *   命令菜单未必带这个角色 ✗（实测"关不掉"就是这么来的 ✓）⇒ 改成**开的时候记快照** ✓：
+       *   点开之后 80ms 内 body 下**新出现的那个子节点**就是它 ✓（差集 ✓，不认 role/类名/哈希 ✓）；
+       *   找不到再退回 `[role="menu"]` ✓。
+       */
+      var menu =
+        commandMenuNode !== null && commandMenuNode.isConnected === true
+          ? commandMenuNode
+          : document.querySelector('[role="menu"]')
+      if (menu === null || menu === undefined) commandMenuHidden = false
+      if (commandMenuHidden === true) {
+        commandMenuHidden = false
+        if (menu !== null && menu !== undefined) menu.removeAttribute('data-dshm-hide')
         focusGuardStats.menuToggleFallback += 1
-        closeDshMenuNear(found.anchor)
         return
       }
+      if (menu !== null && menu !== undefined) {
+        commandMenuHidden = true
+        menu.setAttribute('data-dshm-hide', '1')
+        focusGuardStats.menuToggleFallback += 1
+        return
+      }
+      commandMenuSnapshot = Array.prototype.slice.call(document.body.children)
       found.anchor.click()
+      setTimeout(function () {
+        try {
+          if (commandMenuSnapshot === null) return
+          var kids = document.body.children
+          for (var k = 0; k < kids.length; k++) {
+            if (commandMenuSnapshot.indexOf(kids[k]) < 0) {
+              commandMenuNode = kids[k]
+              break
+            }
+          }
+          commandMenuSnapshot = null
+        } catch (error) {
+          void error
+        }
+      }, 80)
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -14541,6 +14591,8 @@
     host = document.createElement('div')
     host.id = 'dshm-attach-host'
     host.setAttribute('data-dshm-on', '0')
+    // ★ round 201：挂进 push 跟随名单 ✓（拖动期间 JS 会把名单里的元素**同一帧**一起移 ✓）
+    host.setAttribute('data-dshm-push-follower', '1')
     document.body.appendChild(host)
     return host
   }
@@ -14600,7 +14652,20 @@
     } catch (error) {
       void error
     }
-    var left = Math.round((rect.right + gap) * 100) / 100
+    /**
+     * ★ round 201：宿主自己带着 `translateX(var(--dshm-push))` ✓ ⇒ 这里要把**当前的 push 减掉** ✗
+     *   （否则会算两遍 ⇒ 越滑越歪 ✓ —— 也正是"逐帧追有偏移"的另一种形态 ✓）。
+     *   好处：滑动期间这个 `left` 是**常数** ✓ ⇒ 跟手循环判"没变"⇒ 停 ✓ ⇒ 不再逐帧写 DOM ✓。
+     */
+    var pushNow = 0
+    try {
+      var pushRaw = globalThis.getComputedStyle(found.anchor).getPropertyValue('--dshm-push')
+      var pushValue = parseFloat(pushRaw)
+      if (isNaN(pushValue) === false) pushNow = pushValue
+    } catch (error) {
+      void error
+    }
+    var left = Math.round((rect.right + gap - pushNow) * 100) / 100
     var top = Math.round(rect.top * 100) / 100
     var box = left + '|' + top
     if (box !== attachLastBox) {
@@ -14625,6 +14690,10 @@
       commandButton.style.top = Math.round(rect.top * 100) / 100 + 'px'
     }
     if (found.anchor.getAttribute('data-dshm-hide') !== '1') found.anchor.setAttribute('data-dshm-hide', '1')
+    if (attachFollowAlways !== true) {
+      attachFollowAlways = true
+      scheduleAttachFollow()
+    }
     /**
      * 让位：后续那一颗按钮（= 权限键 ✓）右移"一个钮宽 + 那个 gap" ✓
      * —— 与我们占掉的横向空间**逐像素相等** ✓（值没变就一个字节都不写 ✓）。
@@ -14660,11 +14729,20 @@
    *   成本：每帧一次 `getBoundingClientRect` ✓ + 位置没变时**不写 DOM** ✓（`placeAttachButton` 里已比对 ✓）。
    */
   var attachFollowAlways = false
+  /**
+   * ★ round 200（用户："命令键和附件键左滑右滑都会出现错位" ✗ + "上滑拉到底有惯性" ✓）：
+   *   左右滑是 DSH 用 **transform** 推内容列 ✓（`--dshm-push` 那一套 ✓）—— **不派发 scroll 事件** ✗，
+   *   上滑到底的惯性位移同理 ✓ ⇒ 只靠 scroll/resize 触发就会**慢半拍 = 错位** ✗。
+   *   ⇒ 只要键在屏幕上就**逐帧跟随** ✓（位置没变就不写 DOM ✓、键收起/页面不可见立刻停 ✓）；
+   *   ★ 顺手修掉"帧号卡死就再也不排帧"的隐患 ✓（排帧前先清句柄 ✗ 上一版的写法会永久停摆 ✓）。
+   */
+  var attachFollowAlways = false
   function attachFollowFrame() {
     attachFrame = null
     attachFollowStats.frames += 1
     if (placeAttachButton() === 'miss') attachFollowStats.misses += 1
-    if (attachSteady >= 3) return
+    var keep = attachFollowAlways === true && document.visibilityState === 'visible'
+    if (keep !== true && attachSteady >= 3) return
     if (typeof globalThis.requestAnimationFrame === 'function') attachFrame = globalThis.requestAnimationFrame(attachFollowFrame)
   }
   function scheduleAttachFollow() {
@@ -20675,7 +20753,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001102828'
+    var BOOT_STAMP = 'BUILD-1001114721'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
