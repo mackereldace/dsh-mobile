@@ -14089,6 +14089,32 @@
   /** 光标在输入框文本里的偏移 ✓（节点被换时按它还原 ✓，否则光标会被拍回开头 ✗）。 */
   var focusGuardCaretAt = -1
 
+  /**
+   * ★ round 206（用户："有概率是另一个面板……菜单内容更多，但其中内容完全点不动" ✗）：
+   *   那是 DSH 的**触发器菜单**（`toggleSource("command")` ✓ 与 `/` 指令同源 ✓）——
+   *   它条目的流程是"点一下 ⇒ 把指令插进输入框（要给输入框焦点）"✓，
+   *   而我们的**焦点抢救**把这一步的焦点当场 blur 掉 ✗ ⇒ 条目"点不动" ✓。
+   *   ⇒ 抢救/吞 blur 只在**我们自己那几块**里生效 ✓（卡片 / 状态行 / 我们的菜单 / 那两颗键 ✓），
+   *     别人的浮层一律不碰 ✗。
+   */
+  function focusGuardTapInOurScope() {
+    try {
+      if (focusGuardLastTapTarget === null) return false
+      if (focusGuardLastTapTarget.closest === undefined) return false
+      var t = focusGuardLastTapTarget
+      return (
+        t.closest('[data-composer-card="true"]') !== null ||
+        t.closest('[data-composer-stats]') !== null ||
+        t.closest('#dshm-model-menu') !== null ||
+        t.closest('#dshm-attach') !== null ||
+        t.closest('#dshm-command-btn') !== null
+      )
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
   /** 最近 700ms 内那一笔是不是**点在控件上**（点空白不算 ✓）。 */
   function focusGuardLastTapWasControl() {
     if (focusGuardLastTapTarget === null) return false
@@ -14223,6 +14249,8 @@
               return
             }
             if (focusGuardLastTapWasControl() !== true) return
+            // ★ round 206：只在**我们那几块**里抢 ✓（DSH 的触发器菜单要给输入框焦点才能插指令 ✗）
+            if (focusGuardTapInOurScope() !== true) return
             var node = event.target
             if (composerEditableNode(node) !== true) return
             if (node === focusGuardLastTapTarget) return
@@ -14294,7 +14322,7 @@
     if (typeof originalBlur === 'function') {
       HTMLElement.prototype.blur = function () {
         try {
-          if (this === composerInputNode() && focusGuardTyping === true && focusGuardLastTapWasControl() === true) {
+          if (this === composerInputNode() && focusGuardTyping === true && focusGuardLastTapWasControl() === true && focusGuardTapInOurScope() === true) {
             focusGuardStats.swallowedBlur += 1
             return
           }
@@ -20745,7 +20773,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001143627'
+    var BOOT_STAMP = 'BUILD-1001144006'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
