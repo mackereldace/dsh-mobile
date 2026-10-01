@@ -9122,7 +9122,10 @@
          DSH 那张菜单的容器是 CSS Modules 的 `…_menu` ✓（模型菜单里实测过 ✓）⇒
          按**后缀**匹配 ✓（不认哈希/角色/文案 ✓）；根节点一个标记控制显隐 ✓：
          标记在 ⇒ 藏 ✓；不在 ⇒ 照常 ✓。我们的模型菜单是 `#dshm-model-menu` ✓ **不重叠** ✓。 */
-      'html[data-dsh-command-menu="hidden"] [class$="_menu"] { visibility: hidden !important; }',
+      /* ★ round 204：那颗钮是 `aria-haspopup="listbox"` ✓（0.2.0 源码 `InputBar` 的 `…_add` ✓）——
+         它弹的是 **listbox** ✗ 不是 menu ✗ ⇒ 前两版找 `[role="menu"]` / `…_menu` 后缀全找不到 ✗
+         （"关不掉"三连败的真因 ✓）。⇒ 藏 `[role="listbox"]` ✓。 */
+      'html[data-dsh-command-menu="hidden"] [role="listbox"] { visibility: hidden !important; }',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -14553,25 +14556,20 @@
         return
       }
       /**
-       * ★ round 203：开关**不靠识别浮层** ✓（前两版都栽在"找不到它"上 ✗）——
-       *   只认 DSH 那张菜单的**类名后缀** `…_menu` ✓（CSS Modules 局部名 ✓ 模型菜单里实测过 ✓），
-       *   显隐交给根节点上的标记 ✓（CSS 见上 ✓）：
-       *   · 菜单不在 DOM 里 ⇒ DSH 认为关着 ⇒ 撤标记 + 替它点开 ✓；
-       *   · 菜单在（不管显不显）⇒ 切换**标记** ✓ —— 标记在 = 藏 ✓，撤掉 = 显示 ✓。
-       *   ⇒ 纯状态翻转 ✓，与 DSH 的坏 toggle、与浮层长什么样都无关 ✓。
+       * ★ round 204：**按 `aria-expanded` 判开关** ✓（那是 DSH 自己维护的状态 ✓，现成的 ✓）；
+       *   浮层是 **listbox** ✗（`aria-haspopup="listbox"` ✓）—— 前两版找 menu 找不到就是这么栽的 ✗。
+       *   · `aria-expanded=true` ⇒ 它认为开着 ⇒ 我们把 listbox **藏起来** ✓（根标记 ✓）；
+       *   · 否则 ⇒ 撤标记 + 替它点开 ✓。
+       *   ⇒ 与它那个坏掉的 toggle 无关 ✓（我们只翻自己的标记 ✓）。
        */
-      var menu = document.querySelector('[class$="_menu"]')
-      if (menu === null || menu === undefined) {
-        document.documentElement.removeAttribute('data-dsh-command-menu')
-        found.anchor.click()
+      var expanded = found.anchor.getAttribute('aria-expanded') === 'true'
+      if (expanded === true) {
+        document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
+        focusGuardStats.menuToggleFallback += 1
         return
       }
-      if (document.documentElement.getAttribute('data-dsh-command-menu') === 'hidden') {
-        document.documentElement.removeAttribute('data-dsh-command-menu')
-      } else {
-        document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
-      }
-      focusGuardStats.menuToggleFallback += 1
+      document.documentElement.removeAttribute('data-dsh-command-menu')
+      found.anchor.click()
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -20740,7 +20738,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001131611'
+    var BOOT_STAMP = 'BUILD-1001143342'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
