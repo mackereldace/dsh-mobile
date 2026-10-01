@@ -1248,7 +1248,17 @@ export function renderSetupPage(): string {
           var body = {}
           var hosts = linesOf($('trusted-hosts').value)
           if (hosts.length > 0) body.trustedHosts = hosts
-          var publicBaseUrl = $('public-base-url').value.replace(/^\\s+|\\s+$/g, '')
+          // ★ round 199（归档 §4.1au ② ✓，「一行的事、未做」✓）：提交前**重算** ✓。
+          //   隐藏字段里的值是**上次写进配置的旧值** ✗ ⇒ 页面整份回写 ⇒ 桌面版那份会一直
+          //   停在生产的 3081 ✗。取**服务端 GET /mobile/setup 的 suggested** ✓（纯推导 ✓
+          //   = 明文端口 + 局域网地址 ✓，由服务端算好送过来 ✓）—— 页面侧一个绝对 URL
+          //   字面量都不写 ✓（本页有「整页不含绝对 URL」的断言 ✗，写字面量会当场红 ✓）。
+          //   拿不到才退回隐藏字段 ✓。
+          var publicBaseUrl = ''
+          if (state.suggested !== null && state.suggested !== undefined && typeof state.suggested.publicBaseUrl === 'string') {
+            publicBaseUrl = state.suggested.publicBaseUrl
+          }
+          if (publicBaseUrl.length === 0) publicBaseUrl = $('public-base-url').value.replace(/^\\s+|\\s+$/g, '')
           if (publicBaseUrl.length > 0) body.publicBaseUrl = publicBaseUrl
           var phoneBaseUrl = $('phone-base-url').value.replace(/^\\s+|\\s+$/g, '')
           if (phoneBaseUrl.length > 0) body.phoneBaseUrl = phoneBaseUrl
