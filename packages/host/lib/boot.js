@@ -13754,6 +13754,12 @@
     return div
   }
 
+  /**
+   * ★ round 197f（用户："子菜单下边对齐菜单的下边，然后往上走，返回正好放在最下面" ✓）：
+   *   子菜单**列表在上、「返回」固定在最下面** ✓；面板底边由 `modelMenuPlace` 钉住 ✓
+   *   ⇒ 内容整体从底边往上长 ✓。另外量高度前先清掉上一屏的 maxHeight ✓
+   *   （否则子菜单会被根菜单的高度卡住 ✗ —— 用户："你这样是把子菜单限制到菜单里了" ✓）。
+   */
   function modelMenuRender() {
     if (modelMenuPanel === null) return
     while (modelMenuPanel.firstChild !== null) modelMenuPanel.removeChild(modelMenuPanel.firstChild)
@@ -13764,18 +13770,20 @@
       modelMenuPanel.appendChild(modelMenuRow('模型', modelLabel, false, function () {
         modelMenuView = 'models'
         modelMenuRender()
+        modelMenuPlace()
       }, false))
       modelMenuPanel.appendChild(modelMenuRow('推理等级', effortLabel, false, function () {
         modelMenuView = 'efforts'
         modelMenuRender()
+        modelMenuPlace()
       }, false))
       return
     }
-    modelMenuPanel.appendChild(modelMenuRow('返回', '', false, function () {
+    var backRow = modelMenuRow('返回', '', false, function () {
       modelMenuView = 'root'
       modelMenuRender()
       modelMenuPlace()
-    }, true))
+    }, true)
     var groups = modelMenuCatalog === null || modelMenuCatalog === undefined ? [] : modelMenuCatalog.groups
     if (modelMenuView === 'models') {
       for (var g = 0; g < groups.length; g++) {
@@ -13791,9 +13799,10 @@
           })({ provider: groups[g].id, model: entry.id, name: entry.name }), false))
         }
       }
+      modelMenuPanel.appendChild(backRow)
       return
     }
-    /* 推理等级：**只列当前模型自己的档位** ✓（catalog 里挂在 models[].reasoning.efforts ✓）。 */
+    /* 推理等级：只列当前模型自己的档位 ✓（catalog 里挂在 models[].reasoning.efforts ✓）。 */
     var efforts = []
     for (var gi = 0; gi < groups.length; gi++) {
       for (var mi = 0; mi < groups[gi].models.length; mi++) {
@@ -13806,18 +13815,20 @@
       modelMenuPanel.appendChild(
         modelMenuRow(current.model === '' ? '当前模型没有推理等级可选' : '「' + current.model + '」没有推理等级可选', '', false, function () {}, false),
       )
+      modelMenuPanel.appendChild(backRow)
       return
     }
     for (var e = 0; e < efforts.length; e++) {
       var effort = efforts[e]
       modelMenuPanel.appendChild(
-        modelMenuRow(effort.name, effort.description === undefined ? '' : '', effort.id === current.reasoningEffort, (function (pick) {
+        modelMenuRow(effort.name, '', effort.id === current.reasoningEffort, (function (pick) {
           return function () {
             modelMenuSelectEffort(pick)
           }
         })(effort.id), false),
       )
     }
+    modelMenuPanel.appendChild(backRow)
   }
 
   /**
@@ -13828,6 +13839,8 @@
    */
   function modelMenuPlace() {
     if (modelMenuPanel === null) return
+    // ★ round 197f：先清掉上一屏留下的 maxHeight 再量 ✓（否则子菜单被根菜单的高度卡住 ✗）
+    modelMenuPanel.style.maxHeight = ''
     var trigger = composerModelTrigger()
     var rect = trigger === null ? null : trigger.getBoundingClientRect()
     if (rect === null || !(rect.width > 0)) return
@@ -20431,7 +20444,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001075616'
+    var BOOT_STAMP = 'BUILD-1001075946'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
