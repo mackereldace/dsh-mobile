@@ -14766,6 +14766,29 @@
     return row
   }
 
+  /**
+   * ★ round 211b：目标 ① 点名的「当前会话」✓ —— 从 `session/list` 里认**当前那条** ✓
+   * （拿 `tunnel.sessionId` 对 `id` ✓；对不上就退回第一条 ✓；都没有就留空 ✓ —— **不猜** ✗）。
+   */
+  function homeCurrentSessionTitle() {
+    try {
+      var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      var currentId = link === null || link === undefined ? '' : String(link.sessionId || '')
+      for (var i = 0; i < homeState.sessions.length; i++) {
+        var item = homeState.sessions[i]
+        if (item === null || typeof item !== 'object') continue
+        if (currentId !== '' && String(item.id) === currentId) return String(item.title || item.label || item.id)
+      }
+      if (homeState.sessions.length > 0 && homeState.sessions[0] !== null && typeof homeState.sessions[0] === 'object') {
+        var first = homeState.sessions[0]
+        return String(first.title || first.label || first.id || '')
+      }
+    } catch (error) {
+      void error
+    }
+    return ''
+  }
+
   function homeCard(row) {
     var card = document.createElement('button')
     card.type = 'button'
@@ -14803,7 +14826,8 @@
     state.appendChild(label)
     var meta = document.createElement('div')
     meta.className = 'dshm-home-meta'
-    meta.textContent = row.authority
+    var currentTitle = row.active === true ? homeCurrentSessionTitle() : ''
+    meta.textContent = currentTitle === '' ? row.authority : currentTitle + '｜' + row.authority
     card.appendChild(name)
     card.appendChild(state)
     card.appendChild(meta)
