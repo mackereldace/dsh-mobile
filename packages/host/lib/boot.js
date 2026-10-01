@@ -9119,7 +9119,7 @@
          菜单自然落在另一个位置 ✓，正是用户要的"两个位置" ✓）。 */
       '#dshm-model-menu {',
       '  position: fixed; pointer-events: auto; box-sizing: border-box;',
-      '  width: min(250px, calc(100vw - 24px)); overflow: auto;',
+      '  width: min(220px, calc(100vw - 24px)); overflow: auto;',
       '  border-radius: 18px; padding: 4px;',
       '  background: var(--dsw-specific-selector, #232324);',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
@@ -20457,7 +20457,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001080338'
+    var BOOT_STAMP = 'BUILD-1001081330'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

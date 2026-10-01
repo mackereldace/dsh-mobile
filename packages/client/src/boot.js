@@ -9119,7 +9119,7 @@
          菜单自然落在另一个位置 ✓，正是用户要的"两个位置" ✓）。 */
       '#dshm-model-menu {',
       '  position: fixed; pointer-events: auto; box-sizing: border-box;',
-      '  width: min(250px, calc(100vw - 24px)); overflow: auto;',
+      '  width: min(220px, calc(100vw - 24px)); overflow: auto;',
       '  border-radius: 18px; padding: 4px;',
       '  background: var(--dsw-specific-selector, #232324);',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
