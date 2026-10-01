@@ -9117,6 +9117,12 @@
          合并 ＋ 由我们**隐身但保留盒子** ✓（`visibility: hidden` ✓ 行的几何一个像素不动 ✓），
          「指令」键落在它原来的位置上 ✓、「附件」键照旧在右 ✓ ⇒ 排布回到 0.15 ✓。 */
       '[data-dshm-hide="1"] { visibility: hidden !important; }',
+      /* ★ round 203（用户："点命令，再点还是无法关闭" ✗）：**不靠识别、只认后缀** ✓ ——
+         前两版（认 [role="menu"] ✗ / body 子节点差集 ✗）都栽在"找不到那块浮层"上 ✓。
+         DSH 那张菜单的容器是 CSS Modules 的 `…_menu` ✓（模型菜单里实测过 ✓）⇒
+         按**后缀**匹配 ✓（不认哈希/角色/文案 ✓）；根节点一个标记控制显隐 ✓：
+         标记在 ⇒ 藏 ✓；不在 ⇒ 照常 ✓。我们的模型菜单是 `#dshm-model-menu` ✓ **不重叠** ✓。 */
+      'html[data-dsh-command-menu="hidden"] [class$="_menu"] { visibility: hidden !important; }',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -14092,6 +14098,15 @@
           focusGuardLastTapTarget = event === undefined || event.target === undefined ? null : event.target
           focusGuardLastTapAt = Date.now()
           focusGuardSwallowClickTarget = null
+          // ★ round 203：点在别处 ⇒ 撤掉"藏命令菜单"的标记 ✓（别把别的菜单也一起藏了 ✗）
+          try {
+            var tapTarget = event === undefined ? undefined : event.target
+            if (tapTarget === undefined || tapTarget === null || tapTarget.closest === undefined || tapTarget.closest('#dshm-command-btn') === null) {
+              document.documentElement.removeAttribute('data-dsh-command-menu')
+            }
+          } catch (error) {
+            void error
+          }
           focusGuardTyping = composerInputHasFocus()
           try {
             if (composerInputHasFocus() !== true) return
@@ -14538,45 +14553,25 @@
         return
       }
       /**
-       * ★ round 200/201：开关由**我们**记 ✓。★ 菜单**不认 `[role="menu"]`** ✗ ——
-       *   命令菜单未必带这个角色 ✗（实测"关不掉"就是这么来的 ✓）⇒ 改成**开的时候记快照** ✓：
-       *   点开之后 80ms 内 body 下**新出现的那个子节点**就是它 ✓（差集 ✓，不认 role/类名/哈希 ✓）；
-       *   找不到再退回 `[role="menu"]` ✓。
+       * ★ round 203：开关**不靠识别浮层** ✓（前两版都栽在"找不到它"上 ✗）——
+       *   只认 DSH 那张菜单的**类名后缀** `…_menu` ✓（CSS Modules 局部名 ✓ 模型菜单里实测过 ✓），
+       *   显隐交给根节点上的标记 ✓（CSS 见上 ✓）：
+       *   · 菜单不在 DOM 里 ⇒ DSH 认为关着 ⇒ 撤标记 + 替它点开 ✓；
+       *   · 菜单在（不管显不显）⇒ 切换**标记** ✓ —— 标记在 = 藏 ✓，撤掉 = 显示 ✓。
+       *   ⇒ 纯状态翻转 ✓，与 DSH 的坏 toggle、与浮层长什么样都无关 ✓。
        */
-      var menu =
-        commandMenuNode !== null && commandMenuNode.isConnected === true
-          ? commandMenuNode
-          : document.querySelector('[role="menu"]')
-      if (menu === null || menu === undefined) commandMenuHidden = false
-      if (commandMenuHidden === true) {
-        commandMenuHidden = false
-        if (menu !== null && menu !== undefined) menu.removeAttribute('data-dshm-hide')
-        focusGuardStats.menuToggleFallback += 1
+      var menu = document.querySelector('[class$="_menu"]')
+      if (menu === null || menu === undefined) {
+        document.documentElement.removeAttribute('data-dsh-command-menu')
+        found.anchor.click()
         return
       }
-      if (menu !== null && menu !== undefined) {
-        commandMenuHidden = true
-        menu.setAttribute('data-dshm-hide', '1')
-        focusGuardStats.menuToggleFallback += 1
-        return
+      if (document.documentElement.getAttribute('data-dsh-command-menu') === 'hidden') {
+        document.documentElement.removeAttribute('data-dsh-command-menu')
+      } else {
+        document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
       }
-      commandMenuSnapshot = Array.prototype.slice.call(document.body.children)
-      found.anchor.click()
-      setTimeout(function () {
-        try {
-          if (commandMenuSnapshot === null) return
-          var kids = document.body.children
-          for (var k = 0; k < kids.length; k++) {
-            if (commandMenuSnapshot.indexOf(kids[k]) < 0) {
-              commandMenuNode = kids[k]
-              break
-            }
-          }
-          commandMenuSnapshot = null
-        } catch (error) {
-          void error
-        }
-      }, 80)
+      focusGuardStats.menuToggleFallback += 1
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -20745,7 +20740,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001124000'
+    var BOOT_STAMP = 'BUILD-1001131611'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
