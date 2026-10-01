@@ -14756,10 +14756,18 @@
     state.className = 'dshm-home-state'
     var dot = document.createElement('span')
     dot.className = 'dshm-home-dot'
-    var tone = row.active === true ? 'online' : 'idle'
+    var probe = homePing[row.authority]
+    var tone = row.active === true ? 'online' : probe === 'online' ? 'online' : probe === 'unknown' ? 'idle' : 'idle'
     dot.setAttribute('data-tone', tone)
     var label = document.createElement('span')
-    label.textContent = row.active === true ? '当前 · 在线' : '未连接'
+    label.textContent =
+      row.active === true
+        ? '当前 · 在线'
+        : probe === 'online'
+          ? '在线 · 未连接'
+          : probe === 'unknown'
+            ? '状态未知'
+            : '离线或不可达'
     state.appendChild(dot)
     state.appendChild(label)
     var meta = document.createElement('div')
@@ -14820,9 +14828,61 @@
     return row
   }
 
+  /**
+   * ★ round 211：**在线探测** ✓（UU 远程那颗绿点的来源 ✓）——
+   *   对每台机器的 `/mobile/manifest` 做一次**可达性**探测 ✓（3 秒超时 ✓）：
+   *   通 ⇒ 在线 ✓；不通 ⇒ 离线/未知 ✓（★ 证书或 CORS 挡住 ⇒ 如实标「未知」✗ 不猜 ✓）。
+   *   ★ 这是**增量 1** 的口径 ✓；"不切过去也知道谁在忙"（busy / 等审批）是**增量 2** ✓
+   *     —— 那要宿主侧上报（13 号方案 §四 ✓）。
+   */
+  var homePing = {}
+
+  function homeProbeAll(machines) {
+    for (var i = 0; i < machines.length; i++) {
+      (function (row) {
+        var origin = ''
+        try {
+          origin = new URL(row.appUrl, location.href).origin
+        } catch (error) {
+          return
+        }
+        if (origin === '' || origin === location.origin) {
+          homePing[row.authority] = 'online'
+          return
+        }
+        if (homePing[row.authority] === 'online' && Date.now() - (homePing['at:' + row.authority] || 0) < 30000) return
+        homePing['at:' + row.authority] = Date.now()
+        try {
+          var controller = typeof AbortController === 'function' ? new AbortController() : null
+          var timer = setTimeout(function () {
+            try {
+              if (controller !== null) controller.abort()
+            } catch (error) {
+              void error
+            }
+          }, 3000)
+          fetch(origin + '/mobile/manifest', { signal: controller === null ? undefined : controller.signal })
+            .then(function () {
+              clearTimeout(timer)
+              homePing[row.authority] = 'online'
+              if (homeIsOpen() === true) homeRender()
+            })
+            .catch(function () {
+              clearTimeout(timer)
+              homePing[row.authority] = 'unknown'
+              if (homeIsOpen() === true) homeRender()
+            })
+        } catch (error) {
+          homePing[row.authority] = 'unknown'
+        }
+      })(machines[i])
+    }
+  }
+
   async function homeRefresh() {
     await homeLoadSessions()
     if (homeIsOpen() === true) homeRender()
+    homeProbeAll(homeMachines())
   }
 
   /** hash 路由 ✓（刷新即生效 ✓ 不用重启 ✓）：`#dshm-home` ⇒ 打开面板 ✓。 */
@@ -21516,7 +21576,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001173010'
+    var BOOT_STAMP = 'BUILD-1001173611'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
