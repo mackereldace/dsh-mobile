@@ -9120,7 +9120,7 @@
       '#dshm-model-menu {',
       '  position: fixed; pointer-events: auto; box-sizing: border-box;',
       '  width: min(250px, calc(100vw - 24px)); overflow: auto;',
-      '  border-radius: 18px; padding: 6px;',
+      '  border-radius: 18px; padding: 4px;',
       '  background: var(--dsw-specific-selector, #232324);',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
       '  box-shadow: var(--dsw-elevation-prominent, 0 12px 40px rgba(0,0,0,.5));',
@@ -9130,14 +9130,14 @@
          顺手把菜单**收小** ✓（用户："菜单太大了" ✓）：250px 宽、行高 40 ✓。 */
       '#dshm-model-menu .dshm-mmenu-row {',
       '  display: flex; align-items: center; gap: 8px; width: 100%;',
-      '  min-height: 40px; padding: 6px 12px; border: none; border-radius: 12px;',
+      '  min-height: 34px; padding: 4px 10px; border: none; border-radius: 12px;',
       '  background: transparent; color: var(--dsw-alias-label-primary);',
-      '  font-size: 14px; line-height: 20px; text-align: left; cursor: pointer; box-sizing: border-box;',
+      '  font-size: 13px; line-height: 18px; text-align: left; cursor: pointer; box-sizing: border-box;',
       '}',
       '#dshm-model-menu .dshm-mmenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
-      '#dshm-model-menu .dshm-mmenu-sub { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 12px; }',
+      '#dshm-model-menu .dshm-mmenu-sub { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 11px; }',
       '#dshm-model-menu .dshm-mmenu-check { margin-left: auto; color: var(--dsw-alias-state-business-primary); }',
-      '#dshm-model-menu .dshm-mmenu-title { padding: 6px 12px 4px; font-size: 12px; text-align: left; color: var(--dsw-alias-label-tertiary); }',
+      '#dshm-model-menu .dshm-mmenu-title { padding: 4px 10px 2px; font-size: 11px; text-align: left; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-model-menu .dshm-mmenu-note { padding: 8px 12px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-attach:disabled { opacity: .5; cursor: default; }',
       '[data-composer-card="true"] > [class*="_row"] {',
@@ -13855,7 +13855,20 @@
      *   上方实在放不下（< 120px，比如键盘开着且钮已经贴顶）⇒ 才落到钮下方 ✓。
      */
     var gap = 8
+    /**
+     * ★ round 197g（用户："应该限制在手机状态栏的下面，也就是顶栏顶" ✓）：
+     *   上限取**我们顶栏的顶边** ✓（那上面是状态栏 ✓）；顶栏不在就退回 8px ✓。
+     */
     var safeTop = 8
+    try {
+      var topBar = document.getElementById('dsh-mobile-top')
+      if (topBar !== null) {
+        var barTop = topBar.getBoundingClientRect().top
+        if (barTop > 0) safeTop = Math.round(barTop)
+      }
+    } catch (error) {
+      void error
+    }
     var availableAbove = Math.round(rect.top - gap - safeTop)
     if (availableAbove >= 120) {
       var wanted = modelMenuPanel.scrollHeight || 120
@@ -20444,7 +20457,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001075946'
+    var BOOT_STAMP = 'BUILD-1001080338'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
