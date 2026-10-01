@@ -13705,7 +13705,11 @@
     if (node === null || node === undefined || node.closest === undefined) return false
     if (node.closest('[role="menu"]') !== null) return true
     var trigger = composerModelTrigger()
-    return trigger !== null && node === trigger
+    if (trigger !== null && node === trigger) return true
+    // ★ round 205：合并 ＋（＝命令菜单的触发器 ✓）也算 ✓ —— DSH 的 keepFocus/onToggleCommandMenu
+    //   会把焦点按回输入框 ⇒ 键盘被弹（用户："命令键还是会自动打开输入法"✗，猜测是 DSH 原生行为 ✓ 成立 ✓）。
+    var plusEntry = attachAnchor()
+    return plusEntry !== null && plusEntry.anchor !== null && node === plusEntry.anchor
   }
 
   var focusGuardStats = { installed: false, preventedPointerFocus: 0, swallowedFocus: 0, swallowedBlur: 0, swallowedClick: 0, refocusedAfterSwap: 0, menuToggleFallback: 0 }
@@ -14065,9 +14069,12 @@
 
   /** 这个节点是不是可编辑的（输入框 / 文本域 / contenteditable ✓）。 */
   function composerEditableNode(node) {
-    if (node === null || node === undefined || node.matches === undefined) return false
+    if (node === null || node === undefined) return false
     try {
-      return node.matches('input, textarea, [contenteditable="true"]')
+      // ★ round 205：`contenteditable="true"` 只是写法之一 ✗ —— 还有 `contenteditable=""` /
+      //   裸属性 / 继承得来的 ✓（用户实测"命令键还是自动打开输入法"✗ ⇒ 守卫漏放的就是这些 ✓）。
+      if (node.matches !== undefined && node.matches('input, textarea, [contenteditable]')) return true
+      return node.isContentEditable === true
     } catch (error) {
       void error
       return false
