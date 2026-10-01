@@ -9119,7 +9119,7 @@
          菜单自然落在另一个位置 ✓，正是用户要的"两个位置" ✓）。 */
       '#dshm-model-menu {',
       '  position: fixed; pointer-events: auto; box-sizing: border-box;',
-      '  width: min(250px, calc(100vw - 24px)); max-height: 100%; overflow: auto;',
+      '  width: min(250px, calc(100vw - 24px)); overflow: auto;',
       '  border-radius: 18px; padding: 6px;',
       '  background: var(--dsw-specific-selector, #232324);',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
@@ -13832,15 +13832,30 @@
     var rect = trigger === null ? null : trigger.getBoundingClientRect()
     if (rect === null || !(rect.width > 0)) return
     var width = modelMenuPanel.offsetWidth || 300
-    var height = modelMenuPanel.offsetHeight || 120
     var left = Math.round(rect.left + rect.width / 2 - width / 2)
     if (left < 8) left = 8
     if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8
+    /**
+     * ★ round 197e（用户："子菜单……打开以后默认……这样会显示不全，让它下对齐" ✓）：
+     *   面板**底边恒定**在"模型钮上方 gap"那条线上 ✓（= 下对齐 ✓），内容再长就**往上出** ✓、
+     *   内部滚动 ✓ —— 不再往屏幕底下溢 ⇒ 不会被截 ✗。
+     *   上方实在放不下（< 120px，比如键盘开着且钮已经贴顶）⇒ 才落到钮下方 ✓。
+     */
     var gap = 8
-    var top = Math.round(rect.top - gap - height)
-    if (top < 8) top = Math.round(rect.bottom + gap)
+    var safeTop = 8
+    var availableAbove = Math.round(rect.top - gap - safeTop)
+    if (availableAbove >= 120) {
+      var wanted = modelMenuPanel.scrollHeight || 120
+      var height = Math.min(wanted, availableAbove)
+      modelMenuPanel.style.maxHeight = height + 'px'
+      modelMenuPanel.style.top = Math.round(rect.top - gap - height) + 'px'
+    } else {
+      var wantedBelow = modelMenuPanel.scrollHeight || 120
+      var availableBelow = Math.round(window.innerHeight - rect.bottom - gap - safeTop)
+      modelMenuPanel.style.maxHeight = Math.min(wantedBelow, availableBelow) + 'px'
+      modelMenuPanel.style.top = Math.round(rect.bottom + gap) + 'px'
+    }
     modelMenuPanel.style.left = left + 'px'
-    modelMenuPanel.style.top = top + 'px'
   }
 
   async function modelMenuLoad() {
@@ -20416,7 +20431,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001075317'
+    var BOOT_STAMP = 'BUILD-1001075616'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
