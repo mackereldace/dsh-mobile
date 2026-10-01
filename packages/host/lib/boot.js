@@ -9096,13 +9096,13 @@
       '#dshm-attach-host {',
       '  position: fixed; left: 0; top: 0; width: 0; height: 0; margin: 0; padding: 0; z-index: 260;',
       '  overflow: visible; pointer-events: none; display: block;',
-      /* ★ round 201（用户："强行逐帧会有偏移，没有其他解决方案吗" ✓）：**不追矩形、跟变量** ✓ ——
-         左右滑是 DSH 把内容列 `transform` 走的 ✓（根变量 `--dshm-push` ✓，与顶栏
-         `#dsh-mobile-top` 同一条路 ✓）⇒ 我们也 `translateX(var(--dshm-push))` ✓
-         ⇒ 与面板**同一帧**移动 ✓（合成器层面同步 ✓，零延迟 ✓）；
-         另外挂进 `data-dshm-push-follower` 名单 ✓（拖动期间 JS 会把名单里的一起移 ✓）。
-         逐帧追矩形天生慢一帧 ⇒ 快速滑动时就是肉眼可见的"偏移" ✗（上一版的毛病 ✓）。 */
-      '  transform: translateX(var(--dshm-push, 0px));',
+      /* ★ round 202（用户："这个方案能解决的效果很有限……你接手之前，当时改附件键的方案还不错"
+         ✓）：**回到纯 rect 逐帧跟随** ✓（= `fd8a408` 那版 ✓，用户点名要的 ✓）。
+         我后来加的"变换镜像 + 减位移"两样**各自都引入了新的错位来源** ✗：
+         · 变换镜像 + 减根变量 ⇒ 拖动期间 DSH 用内联 transform、变量还是 0 ⇒ 加两遍（"越滑越快"✗）；
+         · 改成减"实际位移"（offsetLeft 链）⇒ 嵌套变换/局部容器下算不准 ⇒ "稍微复杂点就错位" ✗。
+         ⇒ 朴素的"每帧量锚点 rect、摆到右缘 + gap"反而**最稳** ✓（代价只有一帧延迟 ✓）。
+         ★ 不挂 `data-dshm-push-follower` ✗ —— 那会让 JS 与我们**各自**搬一次 = 又是两遍 ✗。 */
       '}',
       '#dshm-attach-host[data-dshm-on="0"] { display: none; }',
       '#dshm-attach {',
@@ -14591,8 +14591,6 @@
     host = document.createElement('div')
     host.id = 'dshm-attach-host'
     host.setAttribute('data-dshm-on', '0')
-    // ★ round 201：挂进 push 跟随名单 ✓（拖动期间 JS 会把名单里的元素**同一帧**一起移 ✓）
-    host.setAttribute('data-dshm-push-follower', '1')
     document.body.appendChild(host)
     return host
   }
@@ -14657,27 +14655,9 @@
      *   （否则会算两遍 ⇒ 越滑越歪 ✓ —— 也正是"逐帧追有偏移"的另一种形态 ✓）。
      *   好处：滑动期间这个 `left` 是**常数** ✓ ⇒ 跟手循环判"没变"⇒ 停 ✓ ⇒ 不再逐帧写 DOM ✓。
      */
-    /**
-     * ★ round 201b（用户："右滑两个控件会右滑的更快" ✗）：上一版减的是根变量 `--dshm-push` ✗
-     *   —— 而**拖动期间 DSH 实际用的是内联 transform** ✓（清掉内联才轮到那个变量接手 ✓），
-     *   那时变量还是 0 ⇒ 等于**加了两遍** ✗ = 越滑越快 ✓。
-     *   ⇒ 改成减**实际位移** ✓：`offsetLeft` 链是**未变换**的布局位置 ✓，
-     *     它与 `getBoundingClientRect().left`（含变换 ✓）的差 = 真实推移量 ✓。
-     */
-    var pushNow = 0
-    try {
-      var untransformed = 0
-      var walk = found.anchor
-      while (walk !== null && walk !== undefined && walk !== document.documentElement) {
-        untransformed += walk.offsetLeft || 0
-        walk = walk.offsetParent
-      }
-      pushNow = rect.left - untransformed
-      if (isNaN(pushNow) === true) pushNow = 0
-    } catch (error) {
-      void error
-    }
-    var left = Math.round((rect.right + gap - pushNow) * 100) / 100
+    // ★ round 202：**不减任何位移** ✓（回到 fd8a408 ✓）—— rect 本身就含变换 ✓，
+    //   每帧量它、摆到"右缘 + gap" ✓，朴素但稳 ✓（我后来那两版补偿各自引入了新错位 ✗）。
+    var left = Math.round((rect.right + gap) * 100) / 100
     var top = Math.round(rect.top * 100) / 100
     var box = left + '|' + top
     if (box !== attachLastBox) {
@@ -14698,9 +14678,7 @@
       if (host !== null) host.appendChild(commandButton)
     }
     if (commandButton !== null) {
-      // ★ round 201c（用户："命令键还是乱动" ✗）：**同样要减掉实际位移** ✗ —— 上一版只给
-      //   附件键减了 ✓、这颗按含变换的 rect 摆 ⇒ 宿主自己又带一遍变换 ⇒ 两遍 ⇒ 乱跑 ✓。
-      commandButton.style.left = Math.round((rect.left - pushNow) * 100) / 100 + 'px'
+      commandButton.style.left = Math.round(rect.left * 100) / 100 + 'px'
       commandButton.style.top = Math.round(rect.top * 100) / 100 + 'px'
     }
     if (found.anchor.getAttribute('data-dshm-hide') !== '1') found.anchor.setAttribute('data-dshm-hide', '1')
@@ -20767,7 +20745,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001121546'
+    var BOOT_STAMP = 'BUILD-1001124000'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
