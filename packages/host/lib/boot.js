@@ -14320,7 +14320,14 @@
             focusGuardStats.swallowedFocus += 1
             return
           }
-          if (composerInputHasFocus() === true && composerFocusStealer(node) === true) {
+          /**
+           * ★ round 208（用户："只要在输入法展开的情况这个菜单就点不了" ✗）——
+           *   这条"输入框有焦点时不许把焦点挪进菜单树"本是治**模型菜单**抢焦点的 ✓，
+           *   可**触发器菜单**的条目也在菜单树里 ⇒ 插入流程被吞 ✓；
+           *   键盘关着时输入框没焦点、这条不生效 ⇒ 所以"关着能点、开着点不了" ✓（与用户描述逐字吻合 ✓）。
+           *   ⇒ 同款**范围闸** ✓：只在我们那几块里的点击才吞 ✓，别人浮层放行 ✓。
+           */
+          if (composerInputHasFocus() === true && focusGuardTapInOurScope() === true && composerFocusStealer(node) === true) {
             focusGuardStats.swallowedFocus += 1
             return
           }
@@ -20785,7 +20792,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001153358'
+    var BOOT_STAMP = 'BUILD-1001161400'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

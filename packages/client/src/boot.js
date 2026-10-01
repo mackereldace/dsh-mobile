@@ -14320,7 +14320,14 @@
             focusGuardStats.swallowedFocus += 1
             return
           }
-          if (composerInputHasFocus() === true && composerFocusStealer(node) === true) {
+          /**
+           * ★ round 208（用户："只要在输入法展开的情况这个菜单就点不了" ✗）——
+           *   这条"输入框有焦点时不许把焦点挪进菜单树"本是治**模型菜单**抢焦点的 ✓，
+           *   可**触发器菜单**的条目也在菜单树里 ⇒ 插入流程被吞 ✓；
+           *   键盘关着时输入框没焦点、这条不生效 ⇒ 所以"关着能点、开着点不了" ✓（与用户描述逐字吻合 ✓）。
+           *   ⇒ 同款**范围闸** ✓：只在我们那几块里的点击才吞 ✓，别人浮层放行 ✓。
+           */
+          if (composerInputHasFocus() === true && focusGuardTapInOurScope() === true && composerFocusStealer(node) === true) {
             focusGuardStats.swallowedFocus += 1
             return
           }
