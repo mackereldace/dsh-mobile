@@ -9174,6 +9174,29 @@
       '#dshm-model-menu .dshm-mmenu-check { margin-left: auto; color: var(--dsw-alias-state-business-primary); }',
       '#dshm-model-menu .dshm-mmenu-title { padding: 4px 10px 2px; font-size: 11px; text-align: left; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-model-menu .dshm-mmenu-note { padding: 8px 12px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }',
+      /* ── round 210：自绘「命令」菜单 ✓（用户："这个菜单也和模型菜单一样重做吧，没办法了" ✓）——
+         DSH 那张触发器菜单贴着光标弹、被键盘盖住 ⇒ 只能重做 ✓。
+         做法：开它但**藏着** ✓，读出条目用我们这块显示 ✓；点我们的条目 = **替你点它那一条** ✓
+         （程序化 click ✓ 不吃命中测试 ⇒ 不受键盘遮挡影响 ✓）。 */
+      '#dshm-command-menu-host {',
+      '  position: fixed; left: 0; right: 0; top: 0; bottom: 0;',
+      '  z-index: 300; pointer-events: none;',
+      '}',
+      '#dshm-command-menu-host[data-open="0"] { display: none; }',
+      '#dshm-command-menu {',
+      '  position: fixed; pointer-events: auto; box-sizing: border-box;',
+      '  width: min(220px, calc(100vw - 24px)); overflow: auto; border-radius: 18px; padding: 4px;',
+      '  background: var(--dsw-specific-selector, #232324);',
+      '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
+      '  box-shadow: var(--dsw-elevation-prominent, 0 12px 40px rgba(0,0,0,.5));',
+      '}',
+      '#dshm-command-menu .dshm-mmenu-row {',
+      '  display: flex; align-items: center; gap: 8px; width: 100%;',
+      '  min-height: 34px; padding: 4px 10px; border: none; border-radius: 12px;',
+      '  background: transparent; color: var(--dsw-alias-label-primary);',
+      '  font-size: 13px; line-height: 18px; text-align: left; cursor: pointer; box-sizing: border-box;',
+      '}',
+      '#dshm-command-menu .dshm-mmenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
       '#dshm-attach:disabled { opacity: .5; cursor: default; }',
       '[data-composer-card="true"] > [class*="_row"] {',
       '  --dsh-composer-model-text-display: none !important;',
@@ -14014,6 +14037,172 @@
     }
   }
 
+  /* ═══════════ 自绘「命令」菜单（round 210 ✓）═══════════
+   * 用户："这个菜单也和模型菜单一样重做吧，没办法了" ✓。
+   * DSH 那张触发器菜单贴着光标弹、被键盘盖住 ✓（抬升那版治标不治本 ✓）⇒ 重做 ✓：
+   *   开它但**藏着** ✓ → 读它的条目 → 用我们这块显示 ✓ → 点我们的条目**替你点它那一条** ✓。
+   * ★ 内容以 DSH 为准 ✓（它列什么我们显什么 ✓）；**重复的「附件/文件」那条跳过** ✓
+   *   （用户："多了个功能重复的添加附件" ✓ —— 我们已有独立附件键 ✓）。
+   */
+  var commandMenuHost = null
+  var commandMenuPanel = null
+  var commandMenuRows = []
+
+  function commandMenuEnsure() {
+    if (commandMenuHost !== null) return true
+    if (document.body === null) return false
+    commandMenuHost = document.createElement('div')
+    commandMenuHost.id = 'dshm-command-menu-host'
+    commandMenuHost.setAttribute('data-open', '0')
+    commandMenuPanel = document.createElement('div')
+    commandMenuPanel.id = 'dshm-command-menu'
+    commandMenuHost.appendChild(commandMenuPanel)
+    document.body.appendChild(commandMenuHost)
+    return true
+  }
+
+  function commandMenuClose() {
+    if (commandMenuHost !== null) commandMenuHost.setAttribute('data-open', '0')
+  }
+
+  function commandMenuPlace() {
+    if (commandMenuPanel === null) return
+    var plusEntry = attachAnchor()
+    var rect = plusEntry === null || plusEntry.anchor === null ? null : plusEntry.anchor.getBoundingClientRect()
+    if (rect === null || !(rect.width > 0)) return
+    var width = commandMenuPanel.offsetWidth || 220
+    var left = Math.round(rect.left + rect.width / 2 - width / 2)
+    if (left < 8) left = 8
+    if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8
+    commandMenuPanel.style.maxHeight = ''
+    var gap = 8
+    var safeTop = 8
+    try {
+      var topBar = document.getElementById('dsh-mobile-top')
+      if (topBar !== null) {
+        var barTop = topBar.getBoundingClientRect().top
+        if (barTop > 0) safeTop = Math.round(barTop)
+      }
+    } catch (error) {
+      void error
+    }
+    var availableAbove = Math.round(rect.top - gap - safeTop)
+    if (availableAbove >= 100) {
+      var wanted = commandMenuPanel.scrollHeight || 100
+      var height = Math.min(wanted, availableAbove)
+      commandMenuPanel.style.maxHeight = height + 'px'
+      commandMenuPanel.style.top = Math.round(rect.top - gap - height) + 'px'
+    } else {
+      commandMenuPanel.style.top = Math.round(rect.bottom + gap) + 'px'
+    }
+    commandMenuPanel.style.left = left + 'px'
+  }
+
+  /** 从 DSH 那张（被我们藏着的）触发器菜单里读条目 ✓。 */
+  function commandMenuCollect() {
+    var items = []
+    try {
+      var popups = document.querySelectorAll('[role="listbox"], [role="menu"]')
+      for (var i = 0; i < popups.length; i++) {
+        var popup = popups[i]
+        if (popup.closest('#dshm-model-menu') !== null || popup.closest('#dshm-command-menu') !== null) continue
+        var rows = popup.querySelectorAll('button, [role="option"], [role="menuitem"]')
+        for (var r = 0; r < rows.length; r++) {
+          var text = (rows[r].innerText || rows[r].textContent || '').trim()
+          if (text.length === 0) continue
+          // ★ 与附件键重复的那条跳过 ✓（用户："多了个功能重复的添加附件" ✓）
+          if (/附件|文件/.test(text) === true) continue
+          items.push({ label: text.replace(/\s+/g, ' '), node: rows[r] })
+        }
+      }
+    } catch (error) {
+      void error
+    }
+    return items
+  }
+
+  /** 给 DSH 那一条发一整串指针/点击事件 ✓（只发事件、不碰节点 ✓）。 */
+  function fireTap(node) {
+    try {
+      var opts = { bubbles: true, cancelable: true }
+      node.dispatchEvent(new PointerEvent('pointerdown', opts))
+      node.dispatchEvent(new MouseEvent('mousedown', opts))
+      node.dispatchEvent(new PointerEvent('pointerup', opts))
+      node.dispatchEvent(new MouseEvent('mouseup', opts))
+      node.dispatchEvent(new MouseEvent('click', opts))
+    } catch (error) {
+      try {
+        node.click()
+      } catch (fallbackError) {
+        void fallbackError
+      }
+    }
+  }
+
+  function commandMenuRender() {
+    if (commandMenuPanel === null) return
+    while (commandMenuPanel.firstChild !== null) commandMenuPanel.removeChild(commandMenuPanel.firstChild)
+    if (commandMenuRows.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'dshm-mmenu-note'
+      empty.textContent = '没有可调用的指令'
+      commandMenuPanel.appendChild(empty)
+      return
+    }
+    for (var i = 0; i < commandMenuRows.length; i++) {
+      var entry = commandMenuRows[i]
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'dshm-mmenu-row'
+      var label = document.createElement('span')
+      label.textContent = entry.label
+      button.appendChild(label)
+      button.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+      })
+      button.addEventListener('pointerdown', (function (target) {
+        return function (event) {
+          event.stopPropagation()
+          fireTap(target)
+          commandMenuClose()
+        }
+      })(entry.node))
+      commandMenuPanel.appendChild(button)
+    }
+  }
+
+  /**
+   * 打开我们这块 ✓：先替 DSH 开它那张（**藏着** ✓）⇒ 读条目 ⇒ 渲染我们的 ✓。
+   * DSH 那张藏在根标记后面 ✓（`data-dsh-command-menu="hidden"` ✓）⇒ 用户只看得见我们这块 ✓。
+   */
+  function commandMenuOpen() {
+    if (commandMenuEnsure() !== true) return
+    var plusEntry = attachAnchor()
+    if (plusEntry === null || plusEntry.anchor === null) return
+    // 让 DSH 把它的菜单渲染出来 ✓（aria-expanded=false ⇒ 替它点开 ✓；true ⇒ 已经开着 ✓）
+    if (plusEntry.anchor.getAttribute('aria-expanded') !== 'true') plusEntry.anchor.click()
+    document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
+    commandMenuHost.setAttribute('data-open', '1')
+    commandMenuRows = []
+    commandMenuRender()
+    commandMenuPlace()
+    // 条目要等 DSH 渲染 ✓ ⇒ 一小步轮询 ✓（有界 ✓：最多 400ms ✓）
+    var tries = 0
+    var timer = setInterval(function () {
+      tries += 1
+      commandMenuRows = commandMenuCollect()
+      if (commandMenuRows.length === 0 && tries < 8) return
+      clearInterval(timer)
+      commandMenuRender()
+      commandMenuPlace()
+    }, 50)
+  }
+
+  function commandMenuIsOpen() {
+    return commandMenuHost !== null && commandMenuHost.getAttribute('data-open') === '1'
+  }
+
   function modelMenuOpen() {
     if (modelMenuEnsure() !== true) return
     modelMenuView = 'root'
@@ -14041,9 +14230,22 @@
       },
       true,
     )
+    document.addEventListener(
+      'pointerdown',
+      function (event) {
+        if (commandMenuIsOpen() !== true) return
+        var target = event.target
+        var inside = target !== null && target !== undefined && target.closest !== undefined && target.closest('#dshm-command-menu') !== null
+        var onTrigger = target !== null && target !== undefined && target.closest !== undefined && target.closest('#dshm-command-btn') !== null
+        if (inside === true || onTrigger === true) return
+        commandMenuClose()
+      },
+      true,
+    )
     document.addEventListener('keydown', function (event) {
-      if (modelMenuIsOpen() !== true) return
-      if (event.key === 'Escape' || event.key === 'Esc') modelMenuClose()
+      if (event.key !== 'Escape' && event.key !== 'Esc') return
+      if (modelMenuIsOpen() === true) modelMenuClose()
+      if (commandMenuIsOpen() === true) commandMenuClose()
     })
   }
 
@@ -14647,14 +14849,12 @@
        *   · 否则 ⇒ 撤标记 + 替它点开 ✓。
        *   ⇒ 与它那个坏掉的 toggle 无关 ✓（我们只翻自己的标记 ✓）。
        */
-      var expanded = found.anchor.getAttribute('aria-expanded') === 'true'
-      if (expanded === true) {
-        document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
-        focusGuardStats.menuToggleFallback += 1
+      // ★ round 210：**开我们自己那块** ✓（DSH 那张只当"条目来源" ✓，藏着 ✓）。
+      if (commandMenuIsOpen() === true) {
+        commandMenuClose()
         return
       }
-      document.documentElement.removeAttribute('data-dsh-command-menu')
-      found.anchor.click()
+      commandMenuOpen()
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -20823,7 +21023,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001163059'
+    var BOOT_STAMP = 'BUILD-1001171241'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
