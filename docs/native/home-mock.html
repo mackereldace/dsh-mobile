@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原生首页 · 电脑面（设计稿 v2）</title>
+<!--
+  ★ 这是**设计稿**，不是产品页面（产品是 native/android 的 Java 层）。
+  用途：把原生首页「电脑」面的形状、层级、状态定下来，给用户过目后再照搬进 Java。
+
+  三层数据模型（★ 这一版改对的地方）：
+    机器 fingerprint（manifest.hostFingerprint）
+      └─ 智能体/实例 hostId（manifest.hostId）—— 一个实例可以有多个地址（局域网 / Tailscale / 明文 / TLS）
+           └─ 地址 authority（host:port）
+
+  ★ 为什么必须有这一层：桌面版那台**一个实例同时听 3091（明文）与 3453（TLS）**，
+    实测两边 `/mobile/manifest` 回的是同一个 `hostId` ⇒ 端口 ≠ 实例 ✗。
+    旧网页版按"端口 = 实例"列（35 号文档的口径），加上"当前那条"没有指纹 ⇒ 当前智能体自己站一张卡。
+
+  约束（照搬进 Java 时必须成立）：
+  1. 只用系统字体（安卓上是 Roboto / Noto Sans CJK），不打包字体；
+  2. 配色跟随系统（浅/暗两套 token；Java 侧读 Configuration.uiMode）；
+  3. 不用任何图片资源 —— 真截图缩略图由"电脑端截屏推送"通道提供（另开一单），
+     这里用 CSS 画一块示意屏，只为看清比例与留白；
+  4. 视口 400 × 869（与真机一致）。
+-->
+<style>
+  :root {
+    --bg: #EEF0F4;
+    --surface: #FFFFFF;
+    --tint: #F4F7FA;
+    --ink: #14161A;
+    --ink-2: #5B6270;
+    --ink-3: #8D95A3;
+    --line: #E2E5EA;
+    --line-soft: #EDEFF3;
+    --rail: #14161A;
+    --pill-bg: #14161A;
+    --pill-ink: #FFFFFF;
+    --dot-on: #37A066;
+    --dot-off: #B9BFC9;
+    --thumb-bg: #1B1F26;
+    --thumb-ink: rgba(255, 255, 255, .30);
+    --thumb-bubble: rgba(255, 255, 255, .16);
+    --thumb-accent: #2E9E6B;
+  }
+  @media (prefers-color-scheme: dark) {
+    html[data-theme="auto"] {
+      --bg: #0D0F12;
+      --surface: #17191E;
+      --tint: #1E2229;
+      --ink: #E9EBEF;
+      --ink-2: #9AA1AC;
+      --ink-3: #6E7681;
+      --line: #262A31;
+      --line-soft: #21252B;
+      --rail: #E9EBEF;
+      --pill-bg: #E9EBEF;
+      --pill-ink: #14161A;
+      --dot-on: #4FBF7F;
+      --dot-off: #454B54;
+      --thumb-bg: #0A0C0F;
+      --thumb-ink: rgba(255, 255, 255, .22);
+      --thumb-bubble: rgba(255, 255, 255, .13);
+      --thumb-accent: #4FBF7F;
+    }
+  }
+  html[data-theme="dark"] {
+    --bg: #0D0F12; --surface: #17191E; --tint: #1E2229;
+    --ink: #E9EBEF; --ink-2: #9AA1AC; --ink-3: #6E7681;
+    --line: #262A31; --line-soft: #21252B;
+    --rail: #E9EBEF; --pill-bg: #E9EBEF; --pill-ink: #14161A;
+    --dot-on: #4FBF7F; --dot-off: #454B54;
+    --thumb-bg: #0A0C0F; --thumb-ink: rgba(255,255,255,.22);
+    --thumb-bubble: rgba(255,255,255,.13); --thumb-accent: #4FBF7F;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    width: 400px; height: 869px; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px; line-height: 1.42;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; flex-direction: column; height: 100%; }
+
+  /* 系统状态栏：真机上由壳的 insets 让出，这里只为看清留白 */
+  .status {
+    height: 44px; flex: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; color: var(--ink-2);
+  }
+  .status .glyphs { font-size: 11px; letter-spacing: 1px; }
+
+  header { flex: none; display: flex; align-items: flex-end; gap: 10px; padding: 2px 14px 14px 20px; }
+  header h1 { margin: 0; font-size: 27px; font-weight: 700; letter-spacing: -.5px; }
+  header .sub { margin: 6px 0 0; font-size: 13px; color: var(--ink-2); }
+  header .grow { flex: 1; }
+  .icon-btn {
+    width: 38px; height: 38px; border: 0; border-radius: 11px; background: transparent;
+    color: var(--ink-2); font-size: 19px; line-height: 1; cursor: pointer;
+  }
+  .icon-btn:active { background: rgba(125, 135, 150, .16); }
+
+  main { flex: 1; overflow: auto; padding: 0 14px 16px; }
+  .group-label { padding: 12px 8px 8px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+
+  /* 一张"面板"里排机器，而不是一堆各自浮起的卡 —— 少一层装饰，多一层秩序 */
+  .sheet {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+  }
+  .machine { position: relative; background: var(--surface); }
+  .machine + .machine { border-top: 1px solid var(--line); }
+  .machine.is-current { background: var(--tint); }
+  /* 「当前」不靠颜色，靠**左缘实心条 + 字重**：全屏唯一的彩色留给"在线"那个点 */
+  .machine.is-current::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--rail); }
+
+  .mrow { display: flex; align-items: center; gap: 13px; padding: 13px 14px 13px 16px; }
+  .machine.is-current .mrow { padding-left: 18px; }
+
+  .thumb {
+    flex: none; width: 92px; height: 57px; border-radius: 8px; overflow: hidden;
+    background: var(--thumb-bg); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07);
+    display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 9px 10px;
+  }
+  .thumb .u { align-self: flex-end; width: 46%; height: 8px; border-radius: 5px; background: var(--thumb-bubble); }
+  .thumb .a { align-self: flex-start; width: 74%; height: 8px; border-radius: 5px; background: var(--thumb-accent); opacity: .55; }
+  .thumb .c { width: 88%; height: 5px; border-radius: 3px; background: var(--thumb-ink); }
+  .thumb .c.s { width: 56%; }
+  .machine.is-off .thumb { filter: grayscale(.85); opacity: .55; }
+
+  .meta { flex: 1; min-width: 0; }
+  .name { display: flex; align-items: center; gap: 8px; font-size: 16.5px; font-weight: 650; letter-spacing: -.2px; }
+  .machine.is-off .name { color: var(--ink-2); font-weight: 600; }
+  .pill {
+    flex: none; font-size: 11px; font-weight: 650; padding: 2px 8px 3px; border-radius: 999px;
+    background: var(--pill-bg); color: var(--pill-ink);
+  }
+  .state { display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: 12.5px; color: var(--ink-2); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.on { background: var(--dot-on); }
+  .dot.off { background: var(--dot-off); }
+  .vsep { width: 1px; height: 10px; background: var(--line); }
+
+  .chev { flex: none; width: 20px; text-align: center; color: var(--ink-3); font-size: 13px; transition: transform .18s ease; }
+  .machine[data-open="1"] .chev { transform: rotate(180deg); }
+
+  .agents { margin: 0; padding: 0 14px 6px 18px; list-style: none; }
+  .machine[data-open="0"] .agents { display: none; }
+  .agent { position: relative; display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid var(--line-soft); }
+  .agent .txt { flex: 1; min-width: 0; }
+  .agent .aname { font-size: 14.5px; font-weight: 600; }
+  .agent .asub { margin-top: 3px; font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 7px; }
+  .agent .anote { flex: none; font-size: 11.5px; font-weight: 650; color: var(--ink-2); }
+  .agent .go { flex: none; width: 14px; text-align: center; color: var(--ink-3); font-size: 15px; }
+  .agent.is-current .aname { font-weight: 700; }
+  .agent.is-current .aname::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--rail); margin-right: 7px; vertical-align: 2px; }
+  .agent.is-off .aname, .agent.is-off .asub { color: var(--ink-3); }
+  .agent.is-off .aname { font-weight: 500; }
+
+  .ghost {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-top: 12px; height: 52px; border-radius: 14px;
+    border: 1px dashed var(--line); color: var(--ink-2); font-size: 14px; font-weight: 600;
+    background: transparent; width: 100%; font-family: inherit;
+  }
+  .ghost .plus { font-size: 17px; line-height: 1; color: var(--ink-3); }
+
+  .tabs {
+    flex: none; display: flex; border-top: 1px solid var(--line);
+    background: var(--surface); padding-bottom: 22px; /* 小白条让位 */
+  }
+  .tab {
+    flex: 1; border: 0; background: transparent; padding: 11px 0 4px; font-family: inherit;
+    font-size: 11.5px; font-weight: 600; color: var(--ink-3);
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+  }
+  .tab .g { font-size: 17px; line-height: 1; }
+  .tab.on { color: var(--ink); }
+  .tab[disabled] { opacity: .4; }
+</style>
+</head>
+<body>
+<script>
+  // 设计稿专用：`?theme=light|dark` 强制一套；不带参数就跟随系统（CSS 的 prefers-color-scheme）。
+  (function () {
+    var requested = new URLSearchParams(location.search).get('theme')
+    if (requested === 'light' || requested === 'dark') document.documentElement.setAttribute('data-theme', requested)
+  })()
+</script>
+<div class="app">
+
+  <div class="status"><span>9:41</span></div>
+
+  <header>
+    <div>
+      <h1>电脑</h1>
+      <p class="sub">1 台在线，1 台离线，1 个会话在跑</p>
+    </div>
+    <span class="grow"></span>
+    <button class="icon-btn" title="刷新">⟳</button>
+    <button class="icon-btn" title="配对新电脑">＋</button>
+  </header>
+
+  <main>
+    <div class="group-label">在线</div>
+    <div class="sheet">
+      <article class="machine is-current" data-open="1">
+        <div class="mrow">
+          <div class="thumb"><span class="u"></span><span class="a"></span><span class="c"></span><span class="c s"></span></div>
+          <div class="meta">
+            <div class="name">Mac mini 2024 <span class="pill">当前</span></div>
+            <div class="state"><i class="dot on"></i>在线<span class="vsep"></span>2 个智能体</div>
+          </div>
+          <div class="chev">▾</div>
+        </div>
+        <ul class="agents">
+          <li class="agent is-current">
+            <div class="txt">
+              <div class="aname">桌面版</div>
+              <div class="asub">局域网 3453<span class="vsep"></span>dsh 0.1.5-rc.2</div>
+            </div>
+            <span class="anote">正在用</span>
+          </li>
+          <li class="agent">
+            <div class="txt">
+              <div class="aname">网页版</div>
+              <div class="asub">局域网 3443<span class="vsep"></span>dsh 0.1.5-rc.2</div>
+            </div>
+            <span class="go">›</span>
+          </li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="group-label">离线</div>
+    <div class="sheet">
+      <article class="machine is-off" data-open="0">
+        <div class="mrow">
+          <div class="thumb"><span class="u"></span><span class="a"></span><span class="c"></span></div>
+          <div class="meta">
+            <div class="name">MacBook Pro</div>
+            <div class="state"><i class="dot off"></i>离线<span class="vsep"></span>2 个地址无响应</div>
+          </div>
+          <div class="chev">▾</div>
+        </div>
+        <ul class="agents">
+          <li class="agent is-off">
+            <div class="txt">
+              <div class="aname">桌面版</div>
+              <div class="asub">局域网 3453<span class="vsep"></span>无响应</div>
+            </div>
+          </li>
+          <li class="agent is-off">
+            <div class="txt">
+              <div class="aname">网页版</div>
+              <div class="asub">Tailscale 3443<span class="vsep"></span>无响应</div>
+            </div>
+          </li>
+        </ul>
+      </article>
+    </div>
+
+    <button class="ghost"><span class="plus">＋</span>添加电脑</button>
+  </main>
+
+  <nav class="tabs">
+    <button class="tab on"><span class="g">▤</span>电脑</button>
+    <button class="tab" disabled><span class="g">▧</span>会话</button>
+    <button class="tab" disabled><span class="g">⚙</span>设置</button>
+  </nav>
+
+</div>
+</body>
+</html>
