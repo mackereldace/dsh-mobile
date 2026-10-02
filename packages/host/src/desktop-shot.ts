@@ -1,3 +1,8 @@
+import { execFile } from 'node:child_process'
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 /**
  * 桌面截屏缩略图 —— 宿主侧 ✓（手机首页机器卡上那张小图 ✓）。
  *
@@ -28,7 +33,14 @@
  *    （原文里往往带着真正的原因，比如路径不对、磁盘满 ✓）。
  */
 
-/** 跑命令的出口 ✓（生产里就是 `child_process`，单测里是假的 ✓）。 */
+/**
+ * 跑命令的出口 ✓（生产里就是 `child_process`，单测里是假的 ✓）。
+ *
+ * ★ 真实实现放在本文件底部（{@link createNodeShotRunner} ✓）——
+ *   这样 `index.ts` 那边只需要 import 两三个名字 ✓，
+ *   而且 `scripts/check-desktop-shot-live.mjs` 用的**就是**这个实现 ✓
+ *   ⇒ 这条"胶水"不是没验过的死代码 ✓。
+ */
 export interface ShotRunner {
   run(command: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }>
   exists(path: string): boolean
@@ -149,4 +161,44 @@ export async function captureShot(
     throw Object.assign(new Error('截出来的图是空的'), { code: 'shot/empty' })
   }
   return { bytes, capturedAt: deps.now(), width }
+}
+
+
+/**
+ * 真实的 runner ✓（`child_process` + `node:fs`）。
+ *
+ * ★ 它**故意不做任何策略判断** ✗（策略在 {@link captureShot} 与那几个纯函数里 ✓）——
+ *   这一层只负责"把系统命令跑起来、把文件读回来"，越薄越好 ✓。
+ */
+export function createNodeShotRunner(): ShotRunner {
+  /**
+   * ★ 用 `execFile`（异步 ✓）而不是 `execFileSync` ✗ ——
+   *   同步跑会**阻塞宿主的事件循环** ✓，而宿主同时还在给手机端上服务 ✓
+   *   （本项目在 TLS 探针那里栽过一次同款 ✓：`execFileSync` 让事件循环停住、
+   *    夹具服务根本没机会应答 ✓）。截屏要几百毫秒，不能拿它去堵别人 ✓。
+   */
+  const runCommand = (command: string, args: string[], timeoutMs: number) =>
+    new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      execFile(command, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+        const code = error === null ? 0 : typeof (error as { code?: unknown }).code === 'number' ? ((error as { code: number }).code) : 1
+        resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })
+      })
+    })
+
+  return {
+    run: runCommand,
+    exists: (path) => existsSync(path),
+    size: (path) => {
+      try {
+        return statSync(path).size
+      } catch {
+        return 0
+      }
+    },
+    readFile: (path) => readFileSync(path),
+    remove: (path) => {
+      rmSync(path, { force: true })
+    },
+    tmpPath: (name) => join(tmpdir(), name),
+  }
 }

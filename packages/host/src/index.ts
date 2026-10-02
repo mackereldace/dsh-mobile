@@ -207,6 +207,18 @@ export const DEFAULT_CONFIG: MobileHostConfig = {
  * 宿主身份签名密钥的结构面。
  * 只声明本插件真正用到的字段，避免绑死具体实现（Node KeyObject 结构上满足它）。
  */
+/**
+ * ★★ 缩略图那两个函数**在这里 import** ✗ —— 而不是文件顶部 ✓。
+ *   理由与 `mobile/dsh/*` 当初用动态 import 完全一样 ✓：
+ *   **顶部那一段正被别的单改着** ✓，插进去就会把两单搅进同一次提交 ✓。
+ *   `import` 出现在模块顶层**任何位置**语义都一样（会被提升 ✓）——
+ *   放在这个"两面都是已提交代码"的空档里 ✓，它就是一个能单独提交的 hunk ✓。
+ */
+import { captureShot, createNodeShotRunner, explainCaptureFailure } from './desktop-shot.ts'
+
+/** 截屏用的 runner ✓（无状态 ✓，建一次就够 ✓）。 */
+const shotRunner = createNodeShotRunner()
+
 export interface SigningKeyLike {
   readonly publicKey: string
   /**
@@ -3083,6 +3095,41 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           'x-dsh-mobile': 'dsh-chat-page',
         })
         res.end(body)
+        return true
+      }
+
+      /**
+       * ★★ 桌面缩略图：手机首页那张小图 ✓（用户 2026-10-03 选的是"真截图"✓）。
+       *
+       * ★ 这个处理函数**不是 async** ✗（同一个处理链里的路由都不是 ✓）——
+       *   而截屏是异步的 ✓ ⇒ 这里**不 await** ✗：**先认领请求**（`return true` ✓），
+       *   等 Promise 落地时**再写响应** ✓。认领后必须保证一定写回去 ✗，
+       *   否则手机会一直等到自己的超时 ✓（`ShotFetch` 那边 6 秒 ✓）。
+       *
+       * ★ 失败时回 502 + **人话** ✓（`explainCaptureFailure` ✓ 把
+       *   "could not create image from display" 翻成"去哪儿开权限"✓）——
+       *   手机上那张卡就会如实说"截不到图"✓，而不是白着 ✓。
+       */
+      if (req.method === 'GET' && url.pathname === '/mobile/desktop/shot') {
+        captureShot({ runner: shotRunner, now: () => Date.now() })
+          .then((shot) => {
+            res.writeHead(200, {
+              'content-type': 'image/png',
+              'content-length': String(shot.bytes.length),
+              'cache-control': 'no-store, must-revalidate',
+              pragma: 'no-cache',
+              'x-dsh-mobile': 'desktop-shot',
+            })
+            res.end(shot.bytes)
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : explainCaptureFailure(String(error), 1)
+            // ★ 日志走 `console.warn` ✓（这个文件里没有 `Log` 这个符号 ✗ ——
+            //   我第一版凭空写了 `Log.warn` ✓，而 TS 的类型擦除**不会**替我抓它 ✓，
+            //   它会变成一个运行时 ReferenceError ✓：截图失败时反而把处理链炸掉 ✗）
+            console.warn('[dsh-mobile] 截图失败：' + message)
+            respondJson(res, 502, wireError(ErrorCode.Internal, message))
+          })
         return true
       }
 

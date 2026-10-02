@@ -17,12 +17,8 @@
  *
  * 用法：`node scripts/check-desktop-shot-live.mjs`
  */
-import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 
-import { captureShot, explainCaptureFailure, SHOT_COMMAND_TIMEOUT_MS } from '../packages/host/src/desktop-shot.ts'
+import { SHOT_COMMAND_TIMEOUT_MS, captureShot, createNodeShotRunner, explainCaptureFailure } from '../packages/host/src/desktop-shot.ts'
 
 let checks = 0
 let failed = 0
@@ -35,28 +31,12 @@ const check = (name, ok, detail) => {
   }
 }
 
-/** 真的跑命令 ✓（超时**真的**杀掉 ✓ —— 与壳里那条看门狗同一个理由 ✓）。 */
-const runner = {
-  run: (command, args, timeoutMs) =>
-    new Promise((resolve) => {
-      const child = execFile(command, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
-        resolve({ code: error === null ? 0 : typeof error.code === 'number' ? error.code : 1, stdout: String(stdout), stderr: String(stderr) })
-      })
-      child.on('error', () => resolve({ code: 127, stdout: '', stderr: '命令起不来' }))
-    }),
-  exists: (path) => existsSync(path),
-  size: (path) => {
-    try {
-      return statSync(path).size
-    } catch (error) {
-      void error
-      return 0
-    }
-  },
-  readFile: (path) => readFileSync(path),
-  remove: (path) => rmSync(path, { force: true }),
-  tmpPath: (name) => join(tmpdir(), name),
-}
+/**
+ * ★ **用产品里那个 runner** ✓（`createNodeShotRunner()` ✓）——
+ *   我第一版本脚本自己搭了一份 ✓：那样"产品里那份胶水"就一次都没被跑过 ✓，
+ *   而它恰恰是最容易写错的地方（`execFile` 的参数、超时、tmp 路径 ✓）。
+ */
+const runner = createNodeShotRunner()
 
 const started = Date.now()
 let shot = null
