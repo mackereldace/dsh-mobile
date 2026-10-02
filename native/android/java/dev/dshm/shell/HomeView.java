@@ -68,6 +68,16 @@ final class HomeView extends FrameLayout {
      * 那是无障碍设置，必须尊重 ✓；读不到就当 1 ✓）。时长一律经 {@link HomeAnim} 换算 ✓。
      */
     private final float animScale;
+
+    /** 当前那棵滚动视图 ✓（重建时要用它把滚动位置接过来 ✓）。 */
+    private ScrollView scrollView;
+    /**
+     * ★★ 重建前记下的滚动位置 ✓ —— `rebuild()` 会 `removeAllViews()` 再把整棵树**换新** ✗
+     *   （新的 `ScrollView` 天然从 0 开始 ✓）⇒ 不记这一笔，**每次刷新都会把用户弹回顶部** ✗
+     *   （而 `rebuild()` 有六个调用点 ✓：刷新 ✓、回前台时的尺寸变化 ✓、转屏 ✓、键盘 ✓、
+     *   主题切换 ✓ …… ⇒ 用户正看着下面的电脑时，被弹回顶部的机会非常多 ✓）。
+     */
+    private int savedScrollY = 0;
     /** 展开的机器（键是 `Machine.key` ✓）—— 重建时用它恢复 ✓。 */
     private final LinkedHashSet<String> expanded = new LinkedHashSet<String>();
 
@@ -177,6 +187,8 @@ final class HomeView extends FrameLayout {
     // ───────────────────────── 画 ─────────────────────────
 
     private void rebuild() {
+        // ★ 先把用户滚到哪儿了记下来 ✓（下面整棵树都要换掉 ✗ —— 见 savedScrollY 的说明 ✓）
+        if (scrollView != null) savedScrollY = scrollView.getScrollY();
         removeAllViews();
         setBackgroundColor(theme.bg);
 
@@ -194,8 +206,23 @@ final class HomeView extends FrameLayout {
         list.setPadding(dp(14), 0, dp(14), dp(16));
         scroll.addView(list, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         column.addView(scroll, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f));
+        scrollView = scroll;
 
         fillList(list);
+        /**
+         * ★ 恢复滚动位置 ✓ —— 必须**等到布局完成之后**再 `scrollTo` ✗：
+         *   布局之前滚是**无效**的 ✓（那一刻内容高度还是 0 ✓，滚了也白滚 ✓，
+         *   而它看起来"代码明明写了" ✓ —— 又一处静默失效 ✓）。
+         * 内容变矮时（某台电脑消失了 ✓）系统会自己夹住 ✓，不需要我们判断 ✓。
+         */
+        if (savedScrollY > 0) {
+            scroll.post(new Runnable() {
+                @Override
+                public void run() {
+                    scrollView.scrollTo(0, savedScrollY);
+                }
+            });
+        }
         /**
          * ★ 底部这一行**小字**：真机排障时，用户能读、能念回来的唯一证据 ✓。
          *
