@@ -332,7 +332,12 @@ public final class HomeLoaderTest {
     private static final class FakeProbes implements HomeLoader.ProbeFn {
         final Map<String, HomeModel.Probe> byAuthority = new LinkedHashMap<String, HomeModel.Probe>();
         /** 每次调用记一行 `authority|caPem` ✓ —— "用错 pin"这类错只有记下来才看得见 ✓。 */
-        final List<String> calls = new ArrayList<String>();
+        /**
+         * ★ 必须是**并发安全**的容器 ✗（2026-10-03 当场抓到一次偶发红 ✓）：
+         *   编排层是**并行**探的 ✓，普通 `ArrayList.add` 在多线程下会丢元素 ✗
+         *   ⇒ 断言偶尔红、重跑又绿 —— 那种"重跑一次就好了"最会把真 bug 一起盖掉 ✗。
+         */
+        final List<String> calls = new java.util.concurrent.CopyOnWriteArrayList<String>();
         long delayMs = 0;
         boolean throwAlways = false;
 
