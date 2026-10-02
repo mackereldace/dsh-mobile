@@ -3796,6 +3796,18 @@ public class MainActivity extends android.app.Activity {
                             Log.w(TAG, "原生首页加载失败：" + message);
                         }
                     });
+            /**
+             * ★ 接上**缩略图**那一截 ✓（宿主截屏 ⇒ 手机取 ✓）。
+             *   `Sink` 一律在主线程被回调 ✓（`HomeShots` 保证 ✓）⇒ 这里直接动 View 是安全的 ✓。
+             */
+            final HomeShots shots = new HomeShots(homeWiring.pins(), new HomeShots.Sink() {
+                @Override
+                public void onShot(String key, android.graphics.Bitmap bitmap, String hint) {
+                    if (nativeHome != null) nativeHome.applyShot(key, bitmap, hint);
+                }
+            });
+            nativeHome.setShotSource(shots);
+
             applyInsetsToNativeHome();
             refreshNativeHome();
         } catch (Throwable error) {

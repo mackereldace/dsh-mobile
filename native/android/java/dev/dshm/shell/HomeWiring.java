@@ -78,12 +78,19 @@ final class HomeWiring implements HomeController.Loader {
     }
 
     /** 组装一次加载要的全部输入 ✓（判断都在 `HomeStore` / `HomePinSource` 里 ✓）。 */
+    /** 钉子来源 ✓（探针与**取缩略图**共用同一个 ✓ —— 两处各建一个就会飘 ✗）。 */
+    HomePinSource pins() {
+        return new HomePinSource(kv, fallbackCaPem);
+    }
+
     HomeLoader.Source source() {
         return HomeStore.source(
                 vaultJson(),
                 endpointSlotsJson(),
                 currentUrl,
-                new HomePinSource(kv, fallbackCaPem),
+                // ★ 用同一个工厂 ✓（`pins()` ✓）—— 我第一版这里是就地 new 一个 ✓，
+                //   于是钉子来源有了**两处**构造点 ✓：改一处漏一处，而且两处看起来都对 ✗
+                pins(),
                 new HomeLoader.ProbeFn() {
                     @Override
                     public HomeModel.Probe probe(String url, String caPem, int timeoutMs) {

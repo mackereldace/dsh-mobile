@@ -79,6 +79,13 @@ final class HomeView extends FrameLayout {
      */
     private int savedScrollY = 0;
 
+    /** 取缩略图的那一截 ✓（可能没有 ⇒ 就永远画示意屏 ✓）。 */
+    private HomeShots shots;
+    /** 这一轮建出来的缩略图视图 ✓（按缓存键 ✓）—— 图回来时直接落到那一张上 ✓，不整屏重画 ✗。 */
+    private final java.util.Map<String, ThumbView> thumbs = new java.util.HashMap<String, ThumbView>();
+    /** ★ 图取不到时那句说明 ✓（**优先于**下面那行报告 ✓ —— 它是"为什么没有图"的唯一答案 ✓）。 */
+    private String shotHint = "";
+
     /**
      * ★ 上一次**自动**展开的是哪一台 ✓（空 = 还没自动展开过 ✓）。
      *
@@ -128,6 +135,26 @@ final class HomeView extends FrameLayout {
         insetBottomDp = Math.max(0, bottomDp);
         if (densityPx > 0) density = densityPx;
         rebuild();
+    }
+
+    /** 接上取图那一截 ✓（`MainActivity` 在 onCreate 里给 ✓）。 */
+    void setShotSource(HomeShots source) {
+        this.shots = source;
+    }
+
+    /**
+     * 一张图回来了 ✓（**主线程** ✓ —— 由 {@link HomeShots} 保证 ✓）。
+     * ★ 只更新那一张缩略图 ✗，不整屏重画 ✓（重画会把用户滚到哪儿、展开哪张都再赌一次 ✓）。
+     */
+    void applyShot(String key, android.graphics.Bitmap bitmap, String hint) {
+        if (hint != null && !hint.isEmpty() && !hint.equals(shotHint)) {
+            shotHint = hint;
+            rebuild();
+            return;
+        }
+        if (bitmap == null) return;
+        ThumbView target = thumbs.get(key);
+        if (target != null) target.setShot(bitmap);
     }
 
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {
@@ -208,6 +235,8 @@ final class HomeView extends FrameLayout {
     private void rebuild() {
         // ★ 先把用户滚到哪儿了记下来 ✓（下面整棵树都要换掉 ✗ —— 见 savedScrollY 的说明 ✓）
         if (scrollView != null) savedScrollY = scrollView.getScrollY();
+        // ★ 这一轮的缩略图视图都跟着换新 ⇒ 表也要清 ✗（留着旧引用就是往已摘下的 View 上贴图 ✓）
+        thumbs.clear();
         removeAllViews();
         setBackgroundColor(theme.bg);
 
@@ -356,6 +385,27 @@ final class HomeView extends FrameLayout {
         }
 
         ThumbView thumb = new ThumbView(getContext(), theme, machine.online);
+        /**
+         * ★★ 缩略图：**有图就用图** ✓、没图就画示意屏 ✓（不假装有截图 ✗）——
+         *   取图由 {@link HomeShots} 在后台做 ✓，这一层只管"现在手上有哪张" ✓。
+         *   ★ 键用**这台电脑的身份** ✓（`machine.key` 就是指纹 ✓）：
+         *     同一台电脑的多条地址共用一个缩略图 ✓（按地址存会让图在两条地址间来回换 ✓）。
+         */
+        // ★ 地址挂在 Address 上 ✗（`Instance` 本身没有 authority ✓ —— 我第一版凭记忆写错了 ✓）
+        final String firstAuthority = firstAuthorityOf(machine);
+        final String shotKey = HomeShot.cacheKey(machine.key, firstAuthority);
+        if (!shotKey.isEmpty()) {
+            thumbs.put(shotKey, thumb);
+            if (shots != null) {
+                android.graphics.Bitmap cached = shots.cached(shotKey);
+                if (cached != null) {
+                    thumb.setShot(cached);
+                } else if (!machine.instances.isEmpty()) {
+                    // ★ 按需去取 ✓（要不要取由 `HomeShot.shouldFetch` 决定 ✓：可见 / 节流 / 够新 ✓）
+                    shots.maybeRequest(shotKey, firstAuthority, isShown());
+                }
+            }
+        }
         LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(82), dp(52));
         thumbParams.rightMargin = dp(13);
         row.addView(thumb, thumbParams);
@@ -553,6 +603,17 @@ final class HomeView extends FrameLayout {
     private String instanceSubtitle(HomeModel.Instance instance) {
         String kind = instance.addresses.isEmpty() ? "" : instance.addresses.get(0).kind;
         return HomeLabels.instanceSubtitle(kind, instance.version, instance.identified, instance.online);
+    }
+
+    /** 这台电脑第一条可用的地址 ✓（缩略图就按它去取 ✓；没有就空串 ✓）。 */
+    private String firstAuthorityOf(HomeModel.Machine machine) {
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            if (!instance.addresses.isEmpty() && !instance.addresses.get(0).authority.isEmpty()) {
+                return instance.addresses.get(0).authority;
+            }
+        }
+        return "";
     }
 
     private String stateText(HomeModel.Machine machine) {

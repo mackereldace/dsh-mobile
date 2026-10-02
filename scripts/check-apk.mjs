@@ -1066,6 +1066,9 @@ if (existsSync(aapt2)) {
     // ★ 界面上的**每一句字**都在这里 ✓（视图里不许再有内联中文 ✗）——
     //   少了它，屏幕上那些字就没有任何断言守着 ✓
     'HomeLabels',
+    // ★ 缩略图那条链：策略（HomeShot ✓）+ 取图胶水（HomeShots ✓）
+    'HomeShot',
+    'HomeShots',
     'dsh-mobile.hosts',
   ]
   check(
