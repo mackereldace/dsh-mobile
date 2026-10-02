@@ -9216,7 +9216,7 @@
       '}',
       '#dshm-home-head .dshm-home-title { font-size: 16px; font-weight: 600; text-align: center; flex: 1; }',
       '#dshm-home-body { flex: 1; overflow: auto; padding: 12px; }',
-      '#dshm-home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }',
+      '#dshm-home-grid { display: flex; flex-direction: column; gap: 10px; }',
       '.dshm-home-card {',
       '  border-radius: 18px; padding: 12px; box-sizing: border-box; min-height: 108px;',
       '  background: var(--dsw-alias-bg-layer-1, #232324);',
@@ -9250,8 +9250,16 @@
       '.dshm-home-empty { padding: 16px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }',
       '#dshm-home-tabs {',
       '  display: flex; border-top: .5px solid var(--dsw-alias-border-l3, rgba(255,255,255,.08));',
+      /* ★ round 212（用户反馈 ⑤ ✓）："最底栏太丑……让最底栏的颜色和小白条那一栏的颜色一样，
+         然后背景改成其他颜色" ⇒ 栏体用**层级底色** ✓、贴着小白条那条带用 **bg-base** ✓
+         （与系统栏同色 ⇒ 看起来连成一体 ✓）。 */
       '  background: var(--dsw-alias-bg-layer-1, #232324);',
+      '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
+      '  background-clip: padding-box;',
       '}',
+      '#dshm-home-tabs::after { content: none; }',
+      '#dshm-home[data-open="1"] { background: var(--dsw-alias-bg-base, #151517); }',
+      '#dshm-home-tabs .dshm-home-tab { padding-bottom: 2px; }',
       '.dshm-home-tab {',
       '  flex: 1; min-height: 52px; border: none; background: transparent; color: var(--dsw-alias-label-tertiary);',
       '  font-size: 12px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;',
@@ -14552,7 +14560,14 @@
         homeState.sessionsError = '隧道未连接 ⇒ 拿不到会话清单'
         return
       }
-      var response = await link.rpc('session/list', { args: { request: { limit: 30 } } }, undefined)
+      /**
+       * ★ round 212（用户反馈 ⑥ ✓ 真机报错原文 ✓）：
+       *   `typert gateway: session/list: args fields do not match the descriptor:
+       *    missing "_request"; unexpected "request"` ⇒ 这个方法的参数名是 **`_request`** ✗
+       *   （不是 `request` ✗ —— 每个方法的参数名以它自己的 descriptor 为准 ✓，
+       *   `session/selectModel` 才是 `request` ✓、`session/modelCatalog` 无参数 ✓）。
+       */
+      var response = await link.rpc('session/list', { args: { _request: { limit: 30 } } }, undefined)
       var result = response === undefined || response === null ? undefined : response.result
       if (result === undefined || result === null || result.ok !== true) {
         var err = result === undefined || result === null ? {} : result.error || {}
@@ -14613,33 +14628,21 @@
     while (homePanel.firstChild !== null) homePanel.removeChild(homePanel.firstChild)
     var head = document.createElement('div')
     head.id = 'dshm-home-head'
-    var back = document.createElement('button')
-    back.type = 'button'
-    back.className = 'dshm-home-btn'
-    back.textContent = '返回'
-    back.addEventListener('click', function () { homeClose() })
+    /**
+     * ★ round 212（用户反馈 ① ✓）："我打算让这个页面成为 app 的首页，并且嵌入到 app 里，
+     *   因此左上右上的返回和刷新是不必要的，去掉" ✓ ⇒ 头部只留标题 ✓。
+     */
     var title = document.createElement('div')
     title.className = 'dshm-home-title'
-    var machinesNow = homeMachines()
+    var computersNow = homeComputers()
     var online = 0
-    for (var m = 0; m < machinesNow.length; m++) {
-      var rowM = machinesNow[m]
-      if (rowM.active === true || homePing[rowM.authority] === 'online') online += 1
+    for (var m = 0; m < computersNow.length; m++) {
+      if (computersNow[m].active === true || homePing[computersNow[m].ip] === 'online') online += 1
     }
-    var summary = machinesNow.length + ' 台 · ' + online + ' 在线'
+    var summary = computersNow.length + ' 台 · ' + online + ' 在线'
     if (homeState.agents.awaiting > 0) summary += ' · ' + homeState.agents.awaiting + ' 等审批'
     title.textContent = summary
-    var refresh = document.createElement('button')
-    refresh.type = 'button'
-    refresh.className = 'dshm-home-btn'
-    refresh.textContent = '刷新'
-    refresh.addEventListener('click', function () {
-      homeRender()
-      homeRefresh()
-    })
-    head.appendChild(back)
     head.appendChild(title)
-    head.appendChild(refresh)
     homePanel.appendChild(head)
 
     var body = document.createElement('div')
@@ -14683,14 +14686,22 @@
   function homeMachinesTab() {
     var grid = document.createElement('div')
     grid.id = 'dshm-home-grid'
-    var machines = homeMachines()
-    if (machines.length === 0) {
+    var computers = homeComputers()
+    if (computers.length === 0) {
       var empty = document.createElement('div')
       empty.className = 'dshm-home-empty'
       empty.textContent = '还没有电脑：在设置里配对一台'
       return empty
     }
-    for (var i = 0; i < machines.length; i++) grid.appendChild(homeCard(machines[i]))
+    for (var i = 0; i < computers.length; i++) {
+      var computer = computers[i]
+      grid.appendChild(homeComputerRow(computer))
+      if (homeExpanded[computer.ip] === true) {
+        for (var j = 0; j < computer.agents.length; j++) {
+          grid.appendChild(homeAgentRow(computer, computer.agents[j]))
+        }
+      }
+    }
     return grid
   }
 
@@ -14787,6 +14798,131 @@
       void error
     }
     return ''
+  }
+
+  /**
+   * ★ round 212（用户反馈 ②④ ✓）：**电脑 = 横向长矩形** ✓，点它展开其下所有**智能体** ✓；
+   *   电脑显示 **IP**（局域网 / Tailscale 两个 ✓），智能体只显示**端口 + 名字/版本** ✓。
+   */
+  function homeComputerRow(computer) {
+    var bar = document.createElement('button')
+    bar.type = 'button'
+    bar.className = 'dshm-home-card'
+    bar.setAttribute('data-active', computer.active === true ? '1' : '0')
+    var name = document.createElement('div')
+    name.className = 'dshm-home-name'
+    name.textContent = (computer.label === '' ? computer.ip : computer.label) + (homeExpanded[computer.ip] === true ? ' ⌃' : ' ⌄')
+    var state = document.createElement('div')
+    state.className = 'dshm-home-state'
+    var dot = document.createElement('span')
+    dot.className = 'dshm-home-dot'
+    var probe = homePing[computer.ip]
+    dot.setAttribute('data-tone', computer.active === true || probe === 'online' ? 'online' : 'idle')
+    var label = document.createElement('span')
+    label.textContent =
+      computer.active === true
+        ? '当前 · 在线'
+        : probe === 'online'
+          ? '在线 · 未连接'
+          : probe === 'unknown'
+            ? '状态未知'
+            : '离线或不可达'
+    state.appendChild(dot)
+    state.appendChild(label)
+    var meta = document.createElement('div')
+    meta.className = 'dshm-home-meta'
+    var ipBits = []
+    for (var a = 0; a < computer.agents.length; a++) {
+      var url = computer.agents[a].url
+      try {
+        var parsed = new URL(url, location.href)
+        if (ipBits.indexOf(parsed.hostname) < 0) ipBits.push(parsed.hostname)
+      } catch (error) {
+        void error
+      }
+    }
+    meta.textContent = computer.ip + '（' + homeIpLabel(computer.ip) + '）· ' + computer.agents.length + ' 个智能体'
+    bar.appendChild(name)
+    bar.appendChild(state)
+    bar.appendChild(meta)
+    bar.addEventListener('click', function () {
+      homeExpanded[computer.ip] = homeExpanded[computer.ip] !== true
+      homeRender()
+    })
+    return bar
+  }
+
+  /** 一台电脑下的**智能体**行 ✓（端口 + 名字/版本 ✓ + 进入 ✓）。 */
+  function homeAgentRow(computer, agent) {
+    var row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'dshm-home-row'
+    var label = document.createElement('span')
+    var nameText = agent.label === '' ? '智能体' : agent.label
+    label.textContent = ':' + agent.port + ' · ' + nameText
+    var note = document.createElement('span')
+    note.className = 'dshm-home-row-note'
+    note.textContent = agent.version === '' ? '版本未知' : agent.version
+    row.appendChild(label)
+    row.appendChild(note)
+    var go = document.createElement('span')
+    go.className = 'dshm-home-btn'
+    go.setAttribute('data-tone', 'primary')
+    go.textContent = '进入'
+    row.appendChild(go)
+    row.addEventListener('click', function () {
+      homeEnterAgent(computer, agent)
+    })
+    return row
+  }
+
+  /**
+   * 进入一个智能体 ✓（用户反馈 ④ ✓）：按**智能选路**挑地址 ✓ ——
+   * 手机在 100.x ⇒ 先 Tail ✓；在 10.33/10.34 ⇒ 先局域网 ✓；其它 ⇒ 先局域网再 Tail ✓。
+   */
+  function homeEnterAgent(computer, agent) {
+    var preference = homeRoutePreference()
+    var candidates = []
+    var seen = {}
+    for (var i = 0; i < computer.agents.length; i++) {
+      var url = computer.agents[i].url
+      var host = ''
+      try {
+        host = new URL(url, location.href).hostname
+      } catch (error) {
+        continue
+      }
+      if (host !== computer.ip || computer.agents[i].port !== agent.port) continue
+      if (seen[url] === true) continue
+      seen[url] = true
+      candidates.push({ url: url, host: host })
+    }
+    if (candidates.length === 0) candidates.push({ url: agent.url, host: computer.ip })
+    var tails = []
+    var lan = []
+    for (var c = 0; c < candidates.length; c++) {
+      if (/^100\./.test(candidates[c].host) === true) tails.push(candidates[c])
+      else lan.push(candidates[c])
+    }
+    var ordered = preference === 'tail' ? tails.concat(lan) : lan.concat(tails)
+    if (ordered.length === 0) {
+      homeToast('这台智能体没有可用地址')
+      return
+    }
+    var pick = ordered[0]
+    try {
+      var bridge = shellBridge()
+      if (bridge !== undefined && bridge !== null && typeof bridge.switchHost === 'function') {
+        var raw = bridge.switchHost(pick.url)
+        var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (parsed !== null && parsed !== undefined && parsed.ok === true) return
+        homeToast('切不过去：' + (parsed && parsed.error ? String(parsed.error) : '壳没有受理'))
+        return
+      }
+      globalThis.location.href = pick.url
+    } catch (error) {
+      homeToast('切不过去：' + String(error && error.message ? error.message : error))
+    }
   }
 
   function homeCard(row) {
@@ -14891,6 +15027,70 @@
    *     —— 那要宿主侧上报（13 号方案 §四 ✓）。
    */
   var homePing = {}
+  /** 每台电脑的**智能体**（= 这台机器上的 DSH 实例 ✓ = 一个端口 ✓）带名字与版本 ✓（round 212 ✓）。 */
+  var homeAgentsByIp = {}
+  var homeExpanded = {}
+
+  /**
+   * 把 `homeMachines()` 的行按 **IP（hostname）** 聚成"电脑" ✓，每台下挂它的"智能体"✓
+   * （用户反馈 ② ✓："一台电脑上多个智能体集成到一个菜单上，横向长矩形，点击那一栏就展开其下的
+   * 所有智能体，并标注智能体的名字和版本" ✓）。
+   * ★ 端口 = 实例 ✓（3453 = 0.2.0 桌面版 / 3443 = 0.1.5 生产 / 3741 = 0.1.7 … 未来 codex ✓）；
+   *   版本从 `/mobile/manifest` 探 ✓，探不到就写「版本未知」✓（**不猜** ✗）。
+   */
+  function homeComputers() {
+    var byIp = {}
+    var order = []
+    var machines = homeMachines()
+    for (var i = 0; i < machines.length; i++) {
+      var row = machines[i]
+      var host = ''
+      var port = ''
+      try {
+        var parsed = new URL(row.appUrl, location.href)
+        host = parsed.hostname
+        port = parsed.port === '' ? (parsed.protocol === 'https:' ? '443' : '80') : parsed.port
+      } catch (error) {
+        continue
+      }
+      if (byIp[host] === undefined) {
+        byIp[host] = { ip: host, label: row.label, active: false, agents: [], updatedAt: row.updatedAt }
+        order.push(host)
+      }
+      var computer = byIp[host]
+      if (row.active === true) computer.active = true
+      if (row.label !== '' && computer.label === '') computer.label = row.label
+      computer.agents.push({
+        port: port,
+        url: row.appUrl,
+        label: row.label,
+        version: homeAgentsByIp[host + ':' + port] === undefined ? '' : homeAgentsByIp[host + ':' + port],
+        active: row.active === true,
+      })
+    }
+    var list = []
+    for (var o = 0; o < order.length; o++) list.push(byIp[order[o]])
+    return list
+  }
+
+  /**
+   * 智能选路（用户反馈 ④ ✓）：
+   *   · 手机自己连在 **100.x**（Tailscale 网段 ✓）⇒ **先 Tail** ✓；
+   *   · 连在 **10.33 / 10.34**（校园网可互联的两段 ✓，其余有 AP 隔离 ✓）⇒ **先局域网** ✓；
+   *   · 其它 ⇒ 照旧"先局域网、再 Tail" ✓。
+   */
+  function homeRoutePreference() {
+    var here = location.hostname
+    if (/^100\./.test(here) === true) return 'tail'
+    if (/^10\.33\./.test(here) === true || /^10\.34\./.test(here) === true) return 'lan'
+    return 'lan-first'
+  }
+
+  /** 这台电脑的两个 IP（局域网 / Tailscale ✓）——**电脑才展示 IP** ✓，智能体只显示端口 ✓。 */
+  function homeIpLabel(ip) {
+    if (/^100\./.test(ip) === true) return 'Tailscale'
+    return '局域网'
+  }
 
   function homeProbeAll(machines) {
     for (var i = 0; i < machines.length; i++) {
@@ -14917,9 +15117,27 @@
             }
           }, 3000)
           fetch(origin + '/mobile/manifest', { signal: controller === null ? undefined : controller.signal })
-            .then(function () {
+            .then(function (response) {
               clearTimeout(timer)
               homePing[row.authority] = 'online'
+              // ★ 顺带抓**版本** ✓（用户："标注智能体的名字和版本" ✓）；抓不到就留空 ⇒ 显示「版本未知」✓（不猜 ✗）
+              try {
+                var portOf = ''
+                var parsedUrl = new URL(row.appUrl, location.href)
+                portOf = parsedUrl.port === '' ? (parsedUrl.protocol === 'https:' ? '443' : '80') : parsedUrl.port
+                response.json().then(function (manifest) {
+                  var version = ''
+                  if (manifest !== null && typeof manifest === 'object') {
+                    version = String(manifest.version || manifest.dshVersion || manifest.appVersion || '')
+                  }
+                  if (version !== '') homeAgentsByIp[parsedUrl.hostname + ':' + portOf] = version
+                  if (homeIsOpen() === true) homeRender()
+                }).catch(function () {
+                  void 0
+                })
+              } catch (error) {
+                void error
+              }
               if (homeIsOpen() === true) homeRender()
             })
             .catch(function () {
@@ -21631,7 +21849,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1001180525'
+    var BOOT_STAMP = 'BUILD-1002051010'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
