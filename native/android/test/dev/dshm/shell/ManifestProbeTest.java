@@ -32,7 +32,7 @@ public final class ManifestProbeTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓ —— 理由见 `HomeModelTest` 同名常量 ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 29;
+    private static final int EXPECTED_MIN_CHECKS = 34;
 
     public static void main(String[] args) throws Exception {
         String base = required("dshm.probe.correct.base");
@@ -49,6 +49,7 @@ public final class ManifestProbeTest {
         onlyHttps(plainBase, ca);
         badResponses(base, ca);
         neverThrows(base, ca);
+        hangingResolverGivesUpFast(base, ca);
         readCap();
 
         System.out.println();
@@ -127,6 +128,51 @@ public final class ManifestProbeTest {
         check("同一个 URL 连着探两次都稳（无状态）",
                 ManifestProbe.fetch(base + ManifestProbe.MANIFEST_PATH, ca).reachable
                         && ManifestProbe.fetch(base + ManifestProbe.MANIFEST_PATH, ca).reachable);
+    }
+
+    /**
+     * ★★★ 2026-10-04（用户："应用刚进首页时加载有点问题"✓）：
+     *   **名字解析**卡住 ⇒ 必须**快速认输** ✓ —— 而不是把首屏拖着 ✗。
+     *
+     * 现场形状：用户槽里有 `Mac-mini-2024.local:*` ✓（mDNS 名 ✓），
+     * 在 Tailscale 网络上它**解析不出来** ✓；而 `setConnectTimeout/ReadTimeout`
+     * **管不到解析那一段** ✗ ⇒ 一条坏名字能把整屏拖十几秒 ✓
+     * （`HomeLoader` 要等**所有**地址回来才落地 ✓ ⇒ 一直"正在看…"✓）。
+     */
+    private static void hangingResolverGivesUpFast(String base, String ca) {
+        /** 一个**永远不返回**的解析器 ✓（模拟 mDNS 卡住 ✓）。 */
+        ManifestProbe.Resolver hanging = new ManifestProbe.Resolver() {
+            @Override
+            public void resolve(String host) throws Exception {
+                Thread.sleep(60000L);
+            }
+        };
+        long started = System.currentTimeMillis();
+        HomeModel.Probe probe = ManifestProbe.fetch("https://Mac-mini-2024.local:3733" + ManifestProbe.MANIFEST_PATH, ca, 300, hanging);
+        long elapsed = System.currentTimeMillis() - started;
+        check("★ 解析卡住 ⇒ 不抛、当不可用", !probe.reachable);
+        check("★★ 而且**快速认输**（实测 " + elapsed + "ms，要求 < 2000ms）", elapsed < 2000L);
+
+        /** ★ 反向：解析器**正常**时，不许被这段上界弄坏 ✓（它照旧能探通 ✓）。 */
+        ManifestProbe.Resolver instant = new ManifestProbe.Resolver() {
+            @Override
+            public void resolve(String host) throws Exception {
+                // 什么都不做 = 立刻成功 ✓
+            }
+        };
+        HomeModel.Probe ok = ManifestProbe.fetch(base + ManifestProbe.MANIFEST_PATH, ca, 3000, instant);
+        check("★★ 注入一个正常的解析器 ⇒ 照旧探得通（上界不许误伤正常路径 ✗）", ok.reachable);
+        check("★ 而且探到的身份还是真的", "host-probe-test".equals(ok.hostId));
+
+        /** ★ 解析器**立刻失败**（域名不存在 ✓）⇒ 也当不可用 ✓、也不抛 ✓。 */
+        ManifestProbe.Resolver failing = new ManifestProbe.Resolver() {
+            @Override
+            public void resolve(String host) throws Exception {
+                throw new java.net.UnknownHostException(host);
+            }
+        };
+        check("★ 解析立刻失败 ⇒ 当不可用、不抛",
+                !ManifestProbe.fetch("https://nope.invalid:3733" + ManifestProbe.MANIFEST_PATH, ca, 300, failing).reachable);
     }
 
     private static void readCap() {
