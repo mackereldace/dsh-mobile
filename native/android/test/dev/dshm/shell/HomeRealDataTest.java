@@ -92,8 +92,12 @@ public final class HomeRealDataTest {
         if (machine.instances.size() == 1) {
             HomeModel.Instance instance = machine.instances.get(0);
             check("★ 身份被认出来了（不是 `addr:` 那种未知键 ✓）", instance.identified);
-            check("★ 键就是**真 hostId**（不是端口 ✓）", instance.key.equals(hostId),
-                    "键=" + instance.key + " 真hostId=" + hostId);
+            /**
+             * ★ 键的**内部形状**是 `hid:<hostId>` ✓（见 `HomeModel.buildInstances` ✓）——
+             *   我第一版拿它跟裸 `hostId` 比 ✓ ⇒ 永远不相等 ✗（断言自己写错了 ✓）。
+             */
+            check("★ 键就是**真 hostId**（不是端口 ✓）", instance.key.equals("hid:" + hostId),
+                    "键=" + instance.key + " 期望=hid:" + hostId);
             check("★ 版本号来自真 manifest ✓", instance.version.equals(version), instance.version);
             check("★ 标题给得出（有标签就用标签 ✓）",
                     HomeLabels.instanceTitle(instance.title, instance.portText(), instance.version).length() > 0);

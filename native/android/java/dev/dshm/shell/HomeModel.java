@@ -434,18 +434,54 @@ public final class HomeModel {
     private static List<Instance> buildInstances(List<Row> bucket, String currentHost) {
         LinkedHashMap<String, List<Row>> byInstance = new LinkedHashMap<String, List<Row>>();
         LinkedHashMap<String, Boolean> identified = new LinkedHashMap<String, Boolean>();
+
+        /**
+         * ★★★ 先扫一遍：这个桶里有没有**恰好一个**已识别的实例 ✓。
+         *
+         * 为什么需要 ✗（2026-10-04 用真数据跑出来的缺陷 B ✓）：
+         *   `HomeLoader` 会**跳过"当前那条"地址** ✓（不探自己正在用的那条 ✓，省一次往返 ✓）——
+         *   于是当前那条**没有探测结果** ✓，落到 `addr:<authority>` 上 ✓
+         *   ⇒ 卡片上多出一行「端口 3453 · 身份未知」✓：用户报的"算成两台"
+         *     在**实例**维度上重演 ✓（卡片是一张、里面却像有两个智能体 ✓）。
+         *
+         * ★ 为什么"并进去"是有根据的、不是猜的 ✗：
+         *   那条地址是**手机此刻正在用的** ✓，而它所在的桶（= 这台电脑 ✓）里
+         *   已经有**一个**被指纹认出来的实例 ✓ ⇒ 它属于这台电脑是确凿的 ✓。
+         * ★ 什么时候**不并**（保守 ✓）：桶里没有已识别的 ✓、或有**多个**已识别的 ✓
+         *   ⇒ 那就不敢说它属于哪一个 ✓，照旧各成一行 ✓（宁可多一行，也不张冠李戴 ✓）。
+         */
+        String onlyIdentified = null;
+        boolean severalIdentified = false;
+        for (int i = 0; i < bucket.size(); i += 1) {
+            Row row = bucket.get(i);
+            Probe probe = row.probe;
+            if (probe == null || !probe.reachable || probe.hostId.trim().isEmpty()) continue;
+            String key = "hid:" + probe.hostId.trim();
+            if (onlyIdentified == null) onlyIdentified = key;
+            else if (!onlyIdentified.equals(key)) severalIdentified = true;
+        }
+        if (severalIdentified) onlyIdentified = null;
+
         for (int i = 0; i < bucket.size(); i += 1) {
             Row row = bucket.get(i);
             Probe probe = row.probe;
             boolean up = probe != null && probe.reachable && !probe.hostId.trim().isEmpty();
-            String key = up ? "hid:" + probe.hostId.trim() : "addr:" + row.authority;
+            boolean mergeCurrent = !up && onlyIdentified != null && probe == null && row.authority.equals(currentHost);
+            String key = up ? "hid:" + probe.hostId.trim() : (mergeCurrent ? onlyIdentified : "addr:" + row.authority);
             List<Row> group = byInstance.get(key);
             if (group == null) {
                 group = new ArrayList<Row>();
                 byInstance.put(key, group);
             }
             group.add(row);
-            if (!identified.containsKey(key)) identified.put(key, Boolean.valueOf(up));
+            /**
+             * ★★ 组的"已识别"= **组里有任意一行**探到了 hostId ✓ —— 不是"第一行说了算" ✗。
+             *   （2026-10-04 我自己引入的 bug ✓：被并进来的"当前那条"没有探测结果 ✓，
+             *    它若排在前面 ⇒ 整组被标成"身份未知" ✓ —— 于是合并了、却仍然显示「身份未知」✓，
+             *    看起来像"合并没生效" ✗。真数据检查当场把它抓了出来 ✓。）
+             */
+            Boolean known = identified.get(key);
+            if (known == null || (!known.booleanValue() && up)) identified.put(key, Boolean.valueOf(up));
         }
 
         List<Instance> instances = new ArrayList<Instance>();

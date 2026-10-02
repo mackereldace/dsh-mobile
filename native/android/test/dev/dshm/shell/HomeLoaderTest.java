@@ -25,7 +25,7 @@ public final class HomeLoaderTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓ —— 理由见 `HomeModelTest` 同名常量 ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 48;
+    private static final int EXPECTED_MIN_CHECKS = 54;
 
     public static void main(String[] args) {
         throwingPinSourceIsJustNoPin();
@@ -41,6 +41,7 @@ public final class HomeLoaderTest {
         everyAddressIsAccountedFor();
         noDuplicateProbes();
         summaryIsReadable();
+        probeUrlIsTheManifestNotTheSlot();
 
         System.out.println();
         System.out.println("── check-home-loader ──────────────────────────");
@@ -95,6 +96,21 @@ public final class HomeLoaderTest {
         HomeLoader.Result result = HomeLoader.load(source);
         check("当前那条**不重复探**", result.report.skippedCurrent.contains("10.0.0.5:3443"));
         check("当前那条没进探测列表", !result.report.probed.contains("10.0.0.5:3443"));
+        /**
+         * ★★★ 但它**不许**因此变成"另一个智能体" ✗（2026-10-04 真数据跑出来的缺陷 B ✓）：
+         *   同一台电脑上只应看到**一个**实例 ✓（它只是没被探而已 ✓）。
+         */
+        check("★★ 当前那条**并进了**已识别的那个实例（不是另起一行「身份未知」✗）",
+                result.snapshot.machines.size() == 1 && result.snapshot.machines.get(0).instances.size() == 1);
+        /**
+         * ★ 这个用例里**一条都没探** ✓（`probe.calls.isEmpty()` ✓）⇒ 没有"已识别实例"可并 ✓
+         *   ⇒ 当前那条仍自成一行、只带**一条**地址 ✓ —— 我先前写"两条地址"是想当然了 ✗
+         *   （"合并"真正发生的样子，由 `scripts/check-home-realdata.mjs` 用**真数据**验 ✓：
+         *    那里有两条地址、其中一条被真的探到 ✓）。
+         */
+        check("★ 这个用例里它仍只带一条地址（因为一条都没探、没有可并的已识别实例 ✓）",
+                !result.snapshot.machines.isEmpty() && result.snapshot.machines.get(0).instances.size() == 1
+                        && result.snapshot.machines.get(0).instances.get(0).addresses.size() == 1);
         check("一次探测都没发生", probe.calls.isEmpty());
         check("但它照样在快照里（当前那台不能消失）", result.snapshot.machines.size() == 1 && result.snapshot.machines.get(0).current);
     }
@@ -353,6 +369,35 @@ public final class HomeLoaderTest {
         check("summary 不是空的", summary.length() > 20);
     }
 
+    /**
+     * ★★★ 交给探测函数的地址**必须是 `/mobile/manifest`** ✗ —— 不是端点槽那个 `/mobile/app` ✓。
+     *
+     * 这条断言是 2026-10-04 补上的 ✓：此前**没有任何断言看过那个 URL** ✓，
+     * 于是"真机上每台电脑都未知"这个缺陷在 48 条断言底下活了下来 ✓
+     * （见 `36` 号 §四点十八 缺陷 A ✓）。
+     */
+    private static void probeUrlIsTheManifestNotTheSlot() {
+        List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
+        endpoints.add(new HomeModel.Slot("https://10.0.2.1:3443/mobile/app", ""));
+        endpoints.add(new HomeModel.Slot("https://10.0.2.2:3443/", ""));
+        List<String> urls = new ArrayList<String>();
+        for (int i = 1; i <= 2; i += 1) urls.add("https://10.0.2." + i + ":3443");
+        FakeProbes probes = new FakeProbes();
+        HomeLoader.Result result = HomeLoader.load(source(records(), endpoints, "", pinsFor(urls, "CA"), probes, 2, 12));
+        check("★ 夹具自检：这一趟真的探过（否则下面两条是空转 ✓）（探了 " + probes.urls.size() + " 条）",
+                !probes.urls.isEmpty());
+        boolean allManifest = true;
+        boolean anySlot = false;
+        for (String url : probes.urls) {
+            if (!url.endsWith(ManifestProbe.MANIFEST_PATH)) allManifest = false;
+            if (url.contains("/mobile/app")) anySlot = true;
+        }
+        check("★★ 探的是 `<地址>/mobile/manifest`（实测 " + probes.urls + "）", allManifest);
+        check("★★ 没有任何一条把 `/mobile/app` 当探测地址（那会让整屏变「未知」✗）", !anySlot);
+        check("★ 而首页那边的地址照旧是 slotted 的（两件事别混 ✗）",
+                result.snapshot != null);
+    }
+
     // ───────────────────────── 架子 ─────────────────────────
 
     private static final class FakeProbes implements HomeLoader.ProbeFn {
@@ -364,6 +409,13 @@ public final class HomeLoaderTest {
          *   ⇒ 断言偶尔红、重跑又绿 —— 那种"重跑一次就好了"最会把真 bug 一起盖掉 ✗。
          */
         final List<String> calls = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        /**
+         * ★★ 还要把**完整的 URL** 记下来 ✗ ——
+         *   原先只记 `authority|caPem` ✓ ⇒ 于是"交给探测函数的到底是哪个地址"**没人看得见** ✓，
+         *   而真机上每台电脑都显示"未知 / 没响应"的那个缺陷（探测地址带着 `/mobile/app` ✓）
+         *   就这样在 48 条断言底下**活了下来** ✓。
+         */
+        final List<String> urls = new java.util.concurrent.CopyOnWriteArrayList<String>();
         long delayMs = 0;
         boolean throwAlways = false;
 
@@ -371,6 +423,7 @@ public final class HomeLoaderTest {
         public HomeModel.Probe probe(String url, String caPem, int timeoutMs) {
             String authority = HomeModel.authorityOf(url);
             calls.add(authority + "|" + caPem);
+            urls.add(url);
             if (throwAlways) throw new IllegalStateException("假探测函数故意炸");
             if (delayMs > 0) {
                 try {

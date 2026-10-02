@@ -190,7 +190,19 @@ public final class HomeLoader {
                 report.skippedOverLimit.add(authority);
                 continue;
             }
-            plan.add(new Plan(authority, url, caPem));
+            /**
+             * ★★★ 交给探测函数的**必须是 manifest 的地址** ✗ ——
+             *   不是端点槽那个 `…/mobile/app` ✓。
+             *
+             * 2026-10-04 用**真数据**跑出来的缺陷 ✓：少了这一步，
+             * `ManifestProbe` 会去拉那个 **HTML 外壳** ✓、`HomeManifest.parse` 解析失败 ✓
+             * ⇒ **每一台电脑都显示"未知 / 没响应"** ✓，没有任何实例会被认出来 ✓
+             * （于是「正在用」/ 版本号 / 智能体行全部退化成"端口 + 身份未知" ✓）。
+             *
+             * ★ 它为什么一直没露 ✗：假探测只记 `authority|caPem` ✓、**从没记过 URL** ✓
+             * ⇒ 错 URL 谁也看不见 ✓（现在补了断言 ✓）。
+             */
+            plan.add(new Plan(authority, manifestUrl(url), caPem));
         }
 
         Map<String, HomeModel.Probe> probes = runPlan(source, plan, report);
@@ -244,6 +256,25 @@ public final class HomeLoader {
             if (!probe.reachable) report.unreachable.add(item.authority);
         }
         return probes;
+    }
+
+    /**
+     * 把端点槽的 URL 换成**探测要的那个地址** ✓：`<scheme>://<authority>/mobile/manifest` ✓。
+     *
+     * ★ 认不出形状就**原样返回** ✓（宁可让它探一次失败 ✓，也不猜一个地址出来 ✗）。
+     */
+    static String manifestUrl(String slotUrl) {
+        String raw = slotUrl == null ? "" : slotUrl.trim();
+        if (raw.isEmpty()) return raw;
+        try {
+            java.net.URI uri = java.net.URI.create(raw);
+            String scheme = uri.getScheme();
+            String authority = uri.getRawAuthority();
+            if (scheme == null || authority == null || scheme.isEmpty() || authority.isEmpty()) return raw;
+            return scheme + "://" + authority + ManifestProbe.MANIFEST_PATH;
+        } catch (Throwable error) {
+            return raw;
+        }
     }
 
     /** 探测函数**抛异常 ⇒ 当不可用** ✓（首页不能因为一条地址把整屏带崩 ✗）。 */

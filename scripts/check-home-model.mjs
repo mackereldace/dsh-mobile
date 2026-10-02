@@ -53,9 +53,19 @@ const testClasses = [
   'dev.dshm.shell.HomeShotTest',
 ]
 
+/**
+ * ★★ 测试源码路径**从类名派生** ✗ —— 而不是再写一份路径清单 ✓：
+ *   我那次"把源文件清单收成一份"的重构里 ✓，一不小心把**测试**那一份从 javac 调用里弄丢了 ✓
+ *   ⇒ 编译只编了生产代码 ✓ ⇒ 跑的时候"找不到主类 HomeModelTest" ✓
+ *   （★ 症状很有欺骗性：编译那行还写着"✓ 已编译 … + 十份测试" ✓ —— 那句是我手写的标签 ✗，
+ *    它跟真正编了什么**没有任何关系** ✓）。
+ *   ⇒ 现在路径由 `testClasses` 推出来 ✓ ⇒ 两者要飘就一起飘 ✓。
+ */
+const testSources = testClasses.map((name) => homeTest(name.slice(name.lastIndexOf('.') + 1) + '.java'))
+
 try {
-  execFileSync('javac', ['--release', '11', '-d', outDir, ...sources], { stdio: ['ignore', 'pipe', 'pipe'] })
-  console.log(`[check-home-model] 已编译 ✓（${sources.length} 个源文件：Json + HomeModel + HomeManifest + ManifestProbe + HomeLoader + HomeStore + PinStore + HomePinSource + HomeEntry + HomeController + HomeAnim + HomeLabels + HomeShot + 十份测试）`)
+  execFileSync('javac', ['--release', '11', '-d', outDir, ...sources, ...testSources], { stdio: ['ignore', 'pipe', 'pipe'] })
+  console.log(`[check-home-model] 已编译 ✓（${sources.length} 个源文件 + ${testSources.length} 份测试 ✓）`)
   console.log('[check-home-model] 跑断言（下面每一条都是**真的执行**了壳里那段代码）：')
 } catch (error) {
   fail(`javac 失败：\n${String(error?.stdout ?? '').slice(-2000)}\n${String(error?.stderr ?? '').slice(-2000)}`)
