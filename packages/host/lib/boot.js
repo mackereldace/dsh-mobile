@@ -9217,12 +9217,35 @@
       '#dshm-home-head .dshm-home-title { font-size: 16px; font-weight: 600; text-align: center; flex: 1; }',
       '#dshm-home-body { flex: 1; overflow: auto; padding: 12px; }',
       '#dshm-home-grid { display: flex; flex-direction: column; gap: 10px; }',
+      /* ★ round 213（用户发来 UU 远程截图 ✓："ui 的具体美学设计见我发你的截图" ✓）：
+         卡片改成 UU 那种**横向长卡** ✓ —— 左边**缩略图块** ✓、右边 名称/状态/展开 ✓、
+         按 **在线 / 离线** 分组 ✓；底栏标签带图标 ✓。我们仍用手机端的暗色 token ✓
+         （用户早先定的"复刻手机端设计" ✓；要浅色版再说一句 ✓）。 */
       '.dshm-home-card {',
-      '  border-radius: 18px; padding: 12px; box-sizing: border-box; min-height: 108px;',
+      '  border-radius: 18px; padding: 10px; box-sizing: border-box; min-height: 96px;',
       '  background: var(--dsw-alias-bg-layer-1, #232324);',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
-      '  display: flex; flex-direction: column; gap: 6px; text-align: center; align-items: center;',
-      '  justify-content: center; cursor: pointer; width: 100%; color: inherit; font: inherit;',
+      '  display: flex; flex-direction: row; gap: 12px; align-items: center; text-align: left;',
+      '  cursor: pointer; width: 100%; color: inherit; font: inherit;',
+      '}',
+      '.dshm-home-thumb {',
+      '  width: 132px; height: 84px; border-radius: 12px; flex: none; position: relative;',
+      '  background: linear-gradient(135deg, #2b4a7a, #1b2b45); overflow: hidden;',
+      '}',
+      '.dshm-home-thumb[data-tone="2"] { background: linear-gradient(135deg, #6b3fa0, #2b1b45); }',
+      '.dshm-home-thumb[data-tone="3"] { background: linear-gradient(135deg, #1f7a5a, #123a2c); }',
+      '.dshm-home-thumb .dshm-home-badge {',
+      '  position: absolute; left: 8px; top: 8px; border-radius: 999px; padding: 2px 8px;',
+      '  font-size: 11px; background: rgba(0,0,0,.55); color: #fff; display: inline-flex; gap: 5px; align-items: center;',
+      '}',
+      '.dshm-home-thumb .dshm-home-badge i { width: 7px; height: 7px; border-radius: 999px; background: var(--dsw-alias-state-success-primary, #34c759); display: inline-block; }',
+      '.dshm-home-thumb .dshm-home-badge i[data-tone="idle"] { background: var(--dsw-alias-state-idle-primary, #8a8f98); }',
+      '.dshm-home-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }',
+      '.dshm-home-name { font-size: 15px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; text-align: left; }',
+      '.dshm-home-chev { color: var(--dsw-alias-label-tertiary); flex: none; font-size: 16px; }',
+      '.dshm-home-sec-head {',
+      '  display: flex; align-items: center; gap: 6px; padding: 10px 2px 6px; font-size: 12px;',
+      '  color: var(--dsw-alias-label-tertiary);',
       '}',
       '.dshm-home-card[data-active="1"] { border-color: var(--dsw-alias-state-business-primary, #7aaaff); }',
       '.dshm-home-name { font-size: 14px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }',
@@ -9256,9 +9279,10 @@
       '  background: var(--dsw-alias-bg-layer-1, #232324);',
       '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
       '  background-clip: padding-box;',
-      /* 贴着小白条那条带 = **系统栏同色**（bg-base ✓）⇒ 看起来与系统栏连成一体 ✓；
-         栏体自己是层级底色 ✓（"背景改成其他颜色" ✓）。用内衬阴影画那条带 ✓。 */
-      '  box-shadow: inset 0 calc(0px - max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px))) 0 var(--dsw-alias-bg-base, #151517);',
+      /* ★ round 213（用户："小白条那一行和栏体一个颜色，面板是另一个颜色" ✓）：
+         栏体 + 小白条那条带 **同一色**（bg-layer-1 ✓，整块连成一体 ✓）⇒ 去掉上一版画的内衬带 ✗；
+         **面板**是另一个色（bg-base ✓ 深一档 ✓）。 */
+      '  box-shadow: none;',
       '}',
       '#dshm-home-tabs::after { content: none; }',
       '#dshm-home[data-open="1"] { background: var(--dsw-alias-bg-base, #151517); }',
@@ -14667,16 +14691,34 @@
     homePanel.appendChild(tabs)
   }
 
+  /** 标签图标 ✓（UU 那种"图标 + 文字"✓；线性 20px ✓，同手机端图标语言 ✓）。 */
+  function homeTabIcon(key) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('width', '20')
+    svg.setAttribute('height', '20')
+    svg.setAttribute('viewBox', '0 0 20 20')
+    svg.setAttribute('fill', 'none')
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('stroke', 'currentColor')
+    path.setAttribute('stroke-width', '1.5')
+    path.setAttribute('stroke-linecap', 'round')
+    path.setAttribute('stroke-linejoin', 'round')
+    if (key === 'machines') path.setAttribute('d', 'M3 5.5h9v8H3zM14 8.5h3v8h-3zM6 16h5')
+    else if (key === 'sessions') path.setAttribute('d', 'M4 5h12v8H8l-4 3z')
+    else path.setAttribute('d', 'M10 6.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zM10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4')
+    svg.appendChild(path)
+    return svg
+  }
+
   function homeTabButton(tab) {
     var button = document.createElement('button')
     button.type = 'button'
     button.className = 'dshm-home-tab'
     button.setAttribute('data-active', homeState.tab === tab.key ? '1' : '0')
-    var dot = document.createElement('span')
-    dot.className = 'dshm-home-tab-dot'
+    var icon = homeTabIcon(tab.key)
     var label = document.createElement('span')
     label.textContent = tab.label
-    button.appendChild(dot)
+    button.appendChild(icon)
     button.appendChild(label)
     button.addEventListener('click', function () {
       homeState.tab = tab.key
@@ -14684,6 +14726,16 @@
       if (tab.key === 'sessions') homeRefresh()
     })
     return button
+  }
+
+  /** UU 式分组头 ✓（在线设备 N / 离线设备 N ✓）。 */
+  function homeSectionHead(text) {
+    var head = document.createElement('div')
+    head.className = 'dshm-home-sec-head'
+    var label = document.createElement('span')
+    label.textContent = text
+    head.appendChild(label)
+    return head
   }
 
   function homeMachinesTab() {
@@ -14696,16 +14748,31 @@
       empty.textContent = '还没有电脑：在设置里配对一台'
       return empty
     }
+    var online = []
+    var offline = []
     for (var i = 0; i < computers.length; i++) {
       var computer = computers[i]
-      grid.appendChild(homeComputerRow(computer))
-      if (homeExpanded[computer.ip] === true) {
-        for (var j = 0; j < computer.agents.length; j++) {
-          grid.appendChild(homeAgentRow(computer, computer.agents[j]))
-        }
+      var probe = homePing[computer.ip]
+      var isOnline = computer.active === true || probe === 'online'
+      if (isOnline === true) online.push(computer)
+      else offline.push(computer)
+    }
+    if (online.length > 0) grid.appendChild(homeSectionHead('在线设备 ' + online.length))
+    for (var a = 0; a < online.length; a++) grid.appendChild(homeComputerBlock(online[a]))
+    if (offline.length > 0) grid.appendChild(homeSectionHead('离线设备 ' + offline.length))
+    for (var b = 0; b < offline.length; b++) grid.appendChild(homeComputerBlock(offline[b]))
+    return grid
+  }
+
+  function homeComputerBlock(computer) {
+    var wrap = document.createElement('div')
+    wrap.appendChild(homeComputerRow(computer))
+    if (homeExpanded[computer.ip] === true) {
+      for (var j = 0; j < computer.agents.length; j++) {
+        wrap.appendChild(homeAgentRow(computer, computer.agents[j]))
       }
     }
-    return grid
+    return wrap
   }
 
   function homeSessionsTab() {
@@ -14823,20 +14890,40 @@
    * ★ round 212（用户反馈 ②④ ✓）：**电脑 = 横向长矩形** ✓，点它展开其下所有**智能体** ✓；
    *   电脑显示 **IP**（局域网 / Tailscale 两个 ✓），智能体只显示**端口 + 名字/版本** ✓。
    */
+  /** UU 式缩略图块 ✓（我们没有真机壁纸 ✗ ⇒ 用按机器取色的渐变块 ✓ + 在线徽标 ✓）。 */
+  function homeThumb(computer, online) {
+    var thumb = document.createElement('div')
+    thumb.className = 'dshm-home-thumb'
+    var tone = 1
+    for (var i = 0; i < computer.ip.length; i++) tone = (tone + computer.ip.charCodeAt(i)) % 3
+    thumb.setAttribute('data-tone', String(tone + 1))
+    var badge = document.createElement('span')
+    badge.className = 'dshm-home-badge'
+    var dot = document.createElement('i')
+    dot.setAttribute('data-tone', online === true ? 'online' : 'idle')
+    var text = document.createElement('span')
+    text.textContent = online === true ? '在线' : '离线'
+    badge.appendChild(dot)
+    badge.appendChild(text)
+    thumb.appendChild(badge)
+    return thumb
+  }
+
   function homeComputerRow(computer) {
+    var probe = homePing[computer.ip]
+    var online = computer.active === true || probe === 'online'
     var bar = document.createElement('button')
     bar.type = 'button'
     bar.className = 'dshm-home-card'
     bar.setAttribute('data-active', computer.active === true ? '1' : '0')
+    bar.appendChild(homeThumb(computer, online))
+    var info = document.createElement('div')
+    info.className = 'dshm-home-info'
     var name = document.createElement('div')
     name.className = 'dshm-home-name'
-    name.textContent = (computer.label === '' ? computer.ip : computer.label) + (homeExpanded[computer.ip] === true ? ' ⌃' : ' ⌄')
+    name.textContent = computer.label === '' ? computer.ip : computer.label
     var state = document.createElement('div')
     state.className = 'dshm-home-state'
-    var dot = document.createElement('span')
-    dot.className = 'dshm-home-dot'
-    var probe = homePing[computer.ip]
-    dot.setAttribute('data-tone', computer.active === true || probe === 'online' ? 'online' : 'idle')
     var label = document.createElement('span')
     label.textContent =
       computer.active === true
@@ -14846,24 +14933,18 @@
           : probe === 'unknown'
             ? '状态未知'
             : '离线或不可达'
-    state.appendChild(dot)
     state.appendChild(label)
     var meta = document.createElement('div')
     meta.className = 'dshm-home-meta'
-    var ipBits = []
-    for (var a = 0; a < computer.agents.length; a++) {
-      var url = computer.agents[a].url
-      try {
-        var parsed = new URL(url, location.href)
-        if (ipBits.indexOf(parsed.hostname) < 0) ipBits.push(parsed.hostname)
-      } catch (error) {
-        void error
-      }
-    }
     meta.textContent = computer.ip + '（' + homeIpLabel(computer.ip) + '）· ' + computer.agents.length + ' 个智能体'
-    bar.appendChild(name)
-    bar.appendChild(state)
-    bar.appendChild(meta)
+    info.appendChild(name)
+    info.appendChild(state)
+    info.appendChild(meta)
+    bar.appendChild(info)
+    var chev = document.createElement('div')
+    chev.className = 'dshm-home-chev'
+    chev.textContent = homeExpanded[computer.ip] === true ? '⌃' : '⌄'
+    bar.appendChild(chev)
     bar.addEventListener('click', function () {
       homeExpanded[computer.ip] = homeExpanded[computer.ip] !== true
       homeRender()
@@ -21882,7 +21963,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1002051917'
+    var BOOT_STAMP = 'BUILD-1002052801'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
