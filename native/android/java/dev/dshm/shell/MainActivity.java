@@ -3492,6 +3492,11 @@ public class MainActivity extends android.app.Activity {
         promptForAddress(hint);
     }
 
+    /** dp ⇒ px ✓（只给诊断弹窗用 ✓ —— 上次那条底栏撤回时把同名方法一起撤了 ✗，不再共用 ✓）。 */
+    private int dpToPxLocal(int dp) {
+        return Math.round(dp * getResources().getDisplayMetrics().density);
+    }
+
     private void promptForAddress(String hint) {
         runOnUiThread(() -> {
             if (addressDialogOpen) {
@@ -3776,6 +3781,11 @@ public class MainActivity extends android.app.Activity {
     private void installNativeHome() {
         try {
             HomeTheme theme = HomeTheme.forContext(this);
+            /**
+             * ★★ 先建视图 ✓，建完**立刻**把本 APK 的构建戳交给它 ✓ ——
+             *   2026-10-04 用户连报两轮"没修好"✓，而我和他都**无法确认手机上跑的是哪一版** ✗
+             *   ⇒ 读数那一行带上它 ✓（和宿主 manifest 里那个戳对得上，才说明装的是新包 ✓）。
+             */
             nativeHome = new HomeView(this, theme, new HomeView.Callbacks() {
                 @Override
                 public void onRefresh() {
@@ -3793,6 +3803,32 @@ public class MainActivity extends android.app.Activity {
                  *   框里**预填当前地址** ✓，所以你只要改主机名那一段 ✓）。
                  *   ★ 取消也不至于把人关在外面：按返回就回到首页 ✓（见 `handleBackPressed` ✓）。
                  */
+                /**
+                 * ★★★ 长按卡片 ⇒ 弹出"这张卡为什么是它自己"✓（键 / 身份 / 每条地址的结果 ✓）——
+                 *   前两轮我靠截图猜，两次都没猜对 ✗ ⇒ 改成让手机把**判据**念出来 ✓。
+                 * ★ 文字**可选中** ✗：用户能直接复制发给我 ✓（比截图更准 ✓）。
+                 */
+                public void onInspectMachine(HomeModel.Machine machine) {
+                    String text;
+                    try {
+                        android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                        text = HomeLabels.machineInspect(machine, info.versionName == null ? "" : info.versionName);
+                    } catch (Throwable error) {
+                        text = HomeLabels.machineInspect(machine, "");
+                    }
+                    final android.widget.TextView body = new android.widget.TextView(MainActivity.this);
+                    body.setText(text);
+                    body.setTextSize(12f);
+                    body.setPadding(dpToPxLocal(16), dpToPxLocal(12), dpToPxLocal(16), dpToPxLocal(4));
+                    body.setTextIsSelectable(true);
+                    body.setTypeface(android.graphics.Typeface.MONOSPACE);
+                    new android.app.AlertDialog.Builder(MainActivity.this)
+                            .setTitle("这台电脑的判据")
+                            .setView(body)
+                            .setPositiveButton("知道了", null)
+                            .show();
+                }
+
                 public void onAddComputerByAddress() {
                     showWebView();
                     promptForAddress(getString(R.string.change_hint));
@@ -3807,6 +3843,12 @@ public class MainActivity extends android.app.Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             nativeHome.setVisibility(View.VISIBLE);
 
+            try {
+                android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                nativeHome.setBuildStamp(info.versionName == null ? "" : info.versionName);
+            } catch (Throwable error) {
+                nativeHome.setBuildStamp("");
+            }
             homeWiring = new HomeWiring(prefs, prefsKv, null);
             homeController = new HomeController(
                     HomeWiring.scheduler(new android.os.Handler(getMainLooper())),

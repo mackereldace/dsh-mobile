@@ -50,6 +50,9 @@ final class HomeView extends FrameLayout {
 
         void onAddComputer();
 
+        /** ★ 长按一台电脑 ⇒ 弹出"这张卡的全部判据" ✓（真机排障只有屏幕上的字 ✓）。 */
+        void onInspectMachine(HomeModel.Machine machine);
+
         /** ★ 「手输地址」✓ —— 不在同一网络（例如走 Tailscale）时，这是唯一能自救的入口 ✓。 */
         void onAddComputerByAddress();
 
@@ -62,6 +65,8 @@ final class HomeView extends FrameLayout {
     private HomeModel.Snapshot snapshot;
     private HomeLoader.Report report;
     private boolean busy;
+    /** ★ 本 APK 的构建戳 ✓（显示在读数里 —— 一眼看出"装的到底是哪一版"✗）。 */
+    private String buildStamp = "";
     private String error = "";
     private int insetTopDp;
     private int insetBottomDp;
@@ -187,6 +192,12 @@ final class HomeView extends FrameLayout {
         rebuild();
     }
 
+    /** 记下构建戳 ✓（由 `MainActivity` 从 `PackageInfo.versionName` 取 ✓）。 */
+    void setBuildStamp(String stamp) {
+        buildStamp = stamp == null ? "" : stamp;
+        rebuild();
+    }
+
     void setBusy(boolean next) {
         busy = next;
         rebuild();
@@ -234,9 +245,10 @@ final class HomeView extends FrameLayout {
 
     /** 一行可念的读数 ✓（调试框那一行 ✓）。 */
     String statusLine() {
-        if (!error.isEmpty()) return "[home] ✗ " + error;
-        if (snapshot == null) return "[home] 还没加载";
-        return "[home] " + snapshot.machines.size() + " 台（在线 " + snapshot.onlineCount
+        String stamp = buildStamp.isEmpty() ? "" : buildStamp + " · ";
+        if (!error.isEmpty()) return "[home] " + stamp + "✗ " + error;
+        if (snapshot == null) return "[home] " + stamp + (busy ? "正在看…" : "还没加载");
+        return "[home] " + stamp + snapshot.machines.size() + " 台（在线 " + snapshot.onlineCount
                 + " / 离线 " + snapshot.offlineCount + " / 未知 " + snapshot.unknownCount + "）"
                 + (report == null ? "" : "；" + report.summary());
     }
@@ -382,6 +394,17 @@ final class HomeView extends FrameLayout {
         LinearLayout wrap = new LinearLayout(getContext());
         wrap.setOrientation(LinearLayout.VERTICAL);
         if (machine.current) wrap.setBackgroundColor(theme.tint);
+        /**
+         * ★★ 长按 ⇒ 弹出这张卡的全部判据 ✓（键 / 身份 / 每条地址 ✓）——
+         *   真机排障只有屏幕上的字 ✓，而前两轮我都在看截图猜 ✗。
+         */
+        wrap.setOnLongClickListener(new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                if (callbacks != null) callbacks.onInspectMachine(machine);
+                return true;
+            }
+        });
 
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(LinearLayout.HORIZONTAL);

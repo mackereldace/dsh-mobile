@@ -17,7 +17,7 @@ public final class HomeLabelsTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 24;
+    private static final int EXPECTED_MIN_CHECKS = 33;
 
     public static void main(String[] args) {
         summary();
@@ -25,6 +25,7 @@ public final class HomeLabelsTest {
         titles();
         subtitles();
         machineStates();
+        machineInspectText();
 
         System.out.println();
         System.out.println("── check-home-labels ──────────────────────────");
@@ -53,6 +54,42 @@ public final class HomeLabelsTest {
         check("在刷新 ⇒ 尾巴上写清（不静默地卡着 ✓）",
                 HomeLabels.summary(1, 0, 0, true, "").equals("1 台在线 · 正在刷新"));
         check("负数是坏输入 ⇒ 返回空串（不编 ✓）", HomeLabels.summary(-1, -1, 0, false, "").isEmpty());
+    }
+
+    /**
+     * ★★★ 2026-10-04：长按卡片弹出的那段文字 ✓ —— 它要能回答"**这张卡为什么是它自己**"✓。
+     * （前两轮我都在看截图猜 ✗，两次没猜对 ✓ ⇒ 这段文字现在是真机排障的**唯一**输入 ✓，
+     *  所以它自己也得有断言 ✓：键、身份、每条地址的结果，一样都不能少 ✓。）
+     */
+    private static void machineInspectText() {
+        java.util.List<HomeModel.Instance> instances = new java.util.ArrayList<HomeModel.Instance>();
+        java.util.List<HomeModel.Address> addresses = new java.util.ArrayList<HomeModel.Address>();
+        addresses.add(new HomeModel.Address("100.123.136.82:3453", "https://100.123.136.82:3453/mobile/app",
+                "Tailscale", true, true, "0.2.0-rc.2"));
+        addresses.add(new HomeModel.Address("10.34.255.229:3082", "https://10.34.255.229:3082/mobile/app",
+                "局域网", false, false, ""));
+        instances.add(new HomeModel.Instance("hid:host-BCsQL", true, "端口 3453", "0.2.0-rc.2", true, true, addresses));
+        HomeModel.Machine known = new HomeModel.Machine("fp:3e9f7f3a", true, "Mac-mini-2024.local", true, true, false, false, instances);
+
+        String text = HomeLabels.machineInspect(known, "0.1.0+BUILD-1");
+        check("诊断文本：带构建戳（「装的哪一版」✗ 靠它 ✓）", text.contains("0.1.0+BUILD-1"));
+        check("诊断文本：带**分卡依据**（键 ✓ —— 这就是「为什么它自成一张」✓）", text.contains("fp:3e9f7f3a"));
+        check("诊断文本：说清身份（有指纹 ✓）", text.contains("已知（有指纹）"));
+        check("诊断文本：逐条地址都在 ✓", text.contains("100.123.136.82:3453") && text.contains("10.34.255.229:3082"));
+        check("诊断文本：标出「通/没响应」✓", text.contains("—— 通") && text.contains("—— 没响应"));
+        check("诊断文本：标出「正在用」✓", text.contains("正在用"));
+
+        java.util.List<HomeModel.Instance> unknownInstances = new java.util.ArrayList<HomeModel.Instance>();
+        java.util.List<HomeModel.Address> unknownAddresses = new java.util.ArrayList<HomeModel.Address>();
+        unknownAddresses.add(new HomeModel.Address("Mac-mini-2024.local:3733", "https://Mac-mini-2024.local:3733/mobile/app",
+                "局域网", false, false, ""));
+        unknownInstances.add(new HomeModel.Instance("addr:Mac-mini-2024.local:3733", false, "端口 3733", "", false, false, unknownAddresses));
+        HomeModel.Machine ghost = new HomeModel.Machine("host:Mac-mini-2024.local", false, "Mac-mini-2024.local", false, false, true, false, unknownInstances);
+        String ghostText = HomeLabels.machineInspect(ghost, "0.1.0+BUILD-1");
+        check("诊断文本：没有指纹时**明说**（「未知（没有指纹 —— 就是它自成一张的原因）」✓）",
+                ghostText.contains("没有指纹"));
+        check("诊断文本：幽灵卡也把自己的键念出来 ✓", ghostText.contains("host:Mac-mini-2024.local"));
+        check("诊断文本：没有数据时不炸 ✓", "（没有数据）".equals(HomeLabels.machineInspect(null, "x")));
     }
 
     private static void emptyAndTails() {

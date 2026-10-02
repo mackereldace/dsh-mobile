@@ -26,6 +26,48 @@ public final class HomeLabels {
     // ── 固定文案（各只出现一次 ✓）──────────────────────────────────────
 
     public static final String TITLE = "电脑";
+    /**
+     * ★★★ 长按卡片时弹出的"这张卡的全部判据" ✓（2026-10-04 用户连报两轮没修好之后加的 ✓）。
+     *
+     * ## 为什么必须有它 ✗（我是被逼出来的 ✓）
+     *
+     * 前两轮我都在**看截图猜** ✗ —— 猜"是名字对不上" ✓、猜"是解析卡住" ✓，
+     * 结果两次都没修对 ✓。而真机上唯一可靠的输入是"**用户能念回来的东西**" ✓
+     * ⇒ 那就让这张卡把自己**为什么是它自己**念出来 ✓：
+     * 键（分卡的唯一依据 ✓）、身份（有没有指纹 ✓）、每条地址各自的结果 ✓。
+     *
+     * ★ 由纯逻辑拼（不碰 View ✓）⇒ 能在电脑上断言 ✓。
+     */
+    public static String machineInspect(HomeModel.Machine machine, String buildStamp) {
+        if (machine == null) return "（没有数据）";
+        StringBuilder text = new StringBuilder();
+        text.append("版本：").append(buildStamp == null || buildStamp.isEmpty() ? "（未知）" : buildStamp).append('\n');
+        text.append("电脑：").append(machine.name).append('\n');
+        text.append("分卡依据（键）：").append(machine.key).append('\n');
+        text.append("身份：").append(machine.known ? "已知（有指纹）" : "未知（没有指纹 —— 就是它自成一张的原因）").append('\n');
+        text.append("状态：").append(machine.online ? "在线" : (machine.offline ? "离线" : "未知（还没探到）"));
+        if (machine.current) text.append(" · 当前这台");
+        text.append('\n');
+        int addresses = 0;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            addresses += machine.instances.get(i).addresses.size();
+        }
+        text.append("地址（").append(addresses).append(" 条）：").append('\n');
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            text.append("  · 实例 ").append(instance.identified ? instance.key : "身份未知").append('\n');
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                HomeModel.Address address = instance.addresses.get(j);
+                text.append("      ").append(address.authority);
+                text.append(address.reachable ? " —— 通" : " —— 没响应");
+                if (address.current) text.append("（正在用）");
+                if (address.version != null && !address.version.isEmpty()) text.append(" · ").append(address.version);
+                text.append('\n');
+            }
+        }
+        return text.toString();
+    }
+
     public static final String ADD_COMPUTER = "＋  添加电脑";
     /**
      * ★★ 「手输地址」—— 为"**不在同一个网络时**"准备的那条路 ✓（2026-10-04 用户实际撞上 ✓）：
