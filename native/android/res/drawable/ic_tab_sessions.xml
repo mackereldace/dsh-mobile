@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  底部标签「会话」的图标 —— 对话气泡（带左下角小尾巴）✓。
+  ★ 与设计稿里那段 SVG **同一份路径数据** ✓。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M20.6,6.3 a1.8,1.8 0 0 0 -1.8,-1.8 H5.2 a1.8,1.8 0 0 0 -1.8,1.8 v7.4 a1.8,1.8 0 0 0 1.8,1.8 h1.7 v3.6 l4,-3.6 h7.9 a1.8,1.8 0 0 0 1.8,-1.8 z" />
+</vector>

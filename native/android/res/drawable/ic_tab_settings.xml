@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  底部标签「设置」的图标 —— 齿轮（环 + 八颗**咬着环**的齿）✓。
+  ★ 与设计稿里那段 SVG **同一份路径数据** ✓。
+  ★ 齿与环之间**不能留缝** ✗ —— 留缝在 22px 下看起来是"太阳"☀（第一版就是这么翻的 ✓，
+    用户看到的就是那颗太阳 ✗）。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,6.4 a5.6,5.6 0 1 1 0,11.2 a5.6,5.6 0 1 1 0,-11.2 z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M17.6,12 h2 M15.96,15.96 l1.42,1.42 M12,17.6 v2 M8.04,15.96 l-1.42,1.42 M6.4,12 h-2 M8.04,8.04 L6.62,6.62 M12,6.4 v-2 M15.96,8.04 l1.42,-1.42" />
+</vector>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  底部标签「电脑」的图标 —— 显示器 ✓。
+  ★ 与设计稿 `docs/native/home-mock.html` 里那段 SVG **同一份路径数据** ✓
+    （稿子好看、装机变样是这类活最典型的翻车 ✓ —— 所以两处必须逐字一致 ✓）。
+  描边式：fill 透明、stroke 由代码按状态上色（`setColorFilter` ✓）。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M5.2,4.6 h13.6 a2.2,2.2 0 0 1 2.2,2.2 v7 a2.2,2.2 0 0 1 -2.2,2.2 H5.2 a2.2,2.2 0 0 1 -2.2,-2.2 v-7 a2.2,2.2 0 0 1 2.2,-2.2 z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,16 v3.4 M8.6,19.4 h6.8" />
+</vector>

@@ -79,7 +79,7 @@ let failed = 0
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
  * ★★ **现在的构成（保活轮之后 ✓）：包信息 13 + APK 内容 4 + 资源文案 3 + dex 符号 26 +
- *   TOFU/链 3 = 49 ✓ + **原生首页那一套 1 = 50** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
+ *   TOFU/链 3 = 49 ✓ + 原生首页那一套 1 ✓ + **底部标签图标 1 = 51** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
  *   ⚠️ 这一行此前写的是"40 = …dex 符号 22…"✗ —— 那个数**与代码从来就对不上** ✓：
  *      round 174 时 dex 实际已经是 **23** 组 ✓（下面历史段落里的"22"是漏算了一组 ✓）。
  *      以本行为准 ✓（数错不会让任何断言变红 ✗，只会让下一个人以为"删几条也没事"✗ —— 正是防呆要防的东西 ✓）。
@@ -140,7 +140,7 @@ let failed = 0
  *        "实现完全正确也**永远红**"的假断言 ✗（比没有断言更糟 ✓）。
  *        ★ 类型的判据在**清单**那边 ✓（`foregroundServiceType=0x40000000` ✓）—— 那也正是安卓自己读的地方 ✓。
  */
-const EXPECTED_MIN_CHECKS = 50
+const EXPECTED_MIN_CHECKS = 51
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -996,6 +996,47 @@ if (existsSync(aapt2)) {
    * `HomeEntry`（点智能体打开哪条地址 ✓ 少了它点了没反应 ✓）、
    * `HomeController`（合并/线程 ✓ 少了它可能连点就发起好几趟、或回调跑到后台线程 ✓）。
    */
+  /**
+   * ★ 底部标签那三颗矢量图（2026-10-03 用户点名改了图标 ✓）。
+   *
+   * 为什么值得断言 ✗：图标这种东西"文件在、却没进资源表 / 名字对不上 / 被换成另一张"
+   * 在手机上只表现为"那颗图标不见了或长得不对"✗ —— 而这台的构建链是 aapt2 手写的 ✓，
+   * 没有 Gradle 帮你兜住 ✓。这里连**路径数据**一起查 ✓：
+   * 稿子（`docs/native/home-mock.html`）与包里那份必须是**同一份形状** ✓，
+   * 否则就是"稿子好看、装机变样"这条最典型的翻车 ✓。
+   */
+  const tabIcons = [
+    ['res/drawable/ic_tab_computer.xml', ['13.6', '19.4']],
+    ['res/drawable/ic_tab_sessions.xml', ['20.6', '3.6']],
+    ['res/drawable/ic_tab_settings.xml', ['5.6', '1.42']],
+  ]
+  let iconsOk = true
+  let iconsDetail = ''
+  for (const [member, needles] of tabIcons) {
+    let body = ''
+    try {
+      body = unzip(member).toString('utf8')
+    } catch (error) {
+      iconsOk = false
+      iconsDetail += `${member} 不在包里 ✗ `
+      continue
+    }
+    // aapt2 会把矢量图编成二进制 XML ✓ —— 路径数据仍在字符串池里 ✓（实测可读 ✓）
+    const printable = body.replace(/[^\x20-\x7e]/g, ' ')
+    const missingNeedles = needles.filter((needle) => !printable.includes(needle))
+    if (missingNeedles.length > 0) {
+      iconsOk = false
+      iconsDetail += `${member} 少了路径数据 ${missingNeedles.join('/')} ✗ `
+    } else {
+      iconsDetail += `${member.split('/').pop()} ✓ `
+    }
+  }
+  check(
+    iconsOk,
+    '★ 底部标签三颗矢量图在包内且形状与设计稿一致（`ic_tab_computer` 显示器 ✓ / `ic_tab_sessions` 对话气泡 ✓ / `ic_tab_settings` 齿轮——★ 齿必须**咬着环** ✗，留缝在 22px 下看起来是"太阳"☀，第一版就是这么翻的 ✓）',
+    iconsDetail.trim(),
+  )
+
   const nativeHome = [
     'HomeStore',
     'HomeLoader',
