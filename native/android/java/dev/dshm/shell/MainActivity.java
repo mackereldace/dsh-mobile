@@ -3724,18 +3724,26 @@ public class MainActivity extends android.app.Activity {
         homeController.refresh();
     }
 
-    /** 把原生首页抬到最上面 ✓（并顺手刷新一次 ✓）。 */
+    /** 把原生首页抬到最上面 ✓（并顺手刷新一次 ✓）—— **淡入** ✓。 */
     private void showNativeHome() {
         if (nativeHome == null) return;
         nativeHome.setVisibility(View.VISIBLE);
+        nativeHome.animateIn();
         refreshNativeHome();
         Log.i(TAG, "回到原生首页");
     }
 
-    /** 收走原生首页 ⇒ 露出来的就是会话页 ✓。 */
+    /** 收走原生首页 ⇒ 露出来的就是会话页 ✓（**淡出到位再收** ✗ 硬切会闪一下白 ✓）。 */
     private void showWebView() {
-        if (nativeHome == null) return;
-        nativeHome.setVisibility(View.GONE);
+        if (nativeHome == null) {
+            return;
+        }
+        nativeHome.animateOut(new Runnable() {
+            @Override
+            public void run() {
+                if (nativeHome != null) nativeHome.setVisibility(View.GONE);
+            }
+        });
     }
 
     /**
@@ -3758,6 +3766,7 @@ public class MainActivity extends android.app.Activity {
             return;
         }
         hostSwitchPending = true;
+        // ★ 淡出与加载**并行** ✓（先等动画再加载就白白多花 160ms ✗）
         showWebView();
         applyHostUrl(target, "原生首页点了智能体");
     }

@@ -47,6 +47,7 @@ const sources = [
   join(sourceDir, 'dev', 'dshm', 'shell', 'HomePinSource.java'),
   join(sourceDir, 'dev', 'dshm', 'shell', 'HomeEntry.java'),
   join(sourceDir, 'dev', 'dshm', 'shell', 'HomeController.java'),
+  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeAnim.java'),
   join(testDir, 'dev', 'dshm', 'shell', 'HomeModelTest.java'),
   join(testDir, 'dev', 'dshm', 'shell', 'HomeManifestTest.java'),
   join(testDir, 'dev', 'dshm', 'shell', 'HomeLoaderTest.java'),
@@ -54,6 +55,7 @@ const sources = [
   join(testDir, 'dev', 'dshm', 'shell', 'HomePinSourceTest.java'),
   join(testDir, 'dev', 'dshm', 'shell', 'HomeEntryTest.java'),
   join(testDir, 'dev', 'dshm', 'shell', 'HomeControllerTest.java'),
+  join(testDir, 'dev', 'dshm', 'shell', 'HomeAnimTest.java'),
 ]
 
 const testClasses = [
@@ -64,11 +66,12 @@ const testClasses = [
   'dev.dshm.shell.HomePinSourceTest',
   'dev.dshm.shell.HomeEntryTest',
   'dev.dshm.shell.HomeControllerTest',
+  'dev.dshm.shell.HomeAnimTest',
 ]
 
 try {
   execFileSync('javac', ['--release', '11', '-d', outDir, ...sources], { stdio: ['ignore', 'pipe', 'pipe'] })
-  console.log(`[check-home-model] 已编译 ✓（${sources.length} 个源文件：Json + HomeModel + HomeManifest + ManifestProbe + HomeLoader + HomeStore + PinStore + HomePinSource + HomeEntry + HomeController + 七份测试）`)
+  console.log(`[check-home-model] 已编译 ✓（${sources.length} 个源文件：Json + HomeModel + HomeManifest + ManifestProbe + HomeLoader + HomeStore + PinStore + HomePinSource + HomeEntry + HomeController + HomeAnim + 八份测试）`)
   console.log('[check-home-model] 跑断言（下面每一条都是**真的执行**了壳里那段代码）：')
 } catch (error) {
   fail(`javac 失败：\n${String(error?.stdout ?? '').slice(-2000)}\n${String(error?.stderr ?? '').slice(-2000)}`)

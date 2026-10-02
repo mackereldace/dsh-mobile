@@ -63,6 +63,11 @@ final class HomeView extends FrameLayout {
     private int insetTopDp;
     private int insetBottomDp;
     private float density = 1f;
+    /**
+     * 系统「动画程序时长缩放」✓（**0 = 用户关了动画** ⇒ 我们直接到终态 ✗ ——
+     * 那是无障碍设置，必须尊重 ✓；读不到就当 1 ✓）。时长一律经 {@link HomeAnim} 换算 ✓。
+     */
+    private final float animScale;
     /** 展开的机器（键是 `Machine.key` ✓）—— 重建时用它恢复 ✓。 */
     private final LinkedHashSet<String> expanded = new LinkedHashSet<String>();
 
@@ -75,6 +80,16 @@ final class HomeView extends FrameLayout {
         } catch (Throwable ignored) {
             this.density = 1f;
         }
+        float scale = 1f;
+        try {
+            scale = android.provider.Settings.Global.getFloat(
+                    context.getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                    1f);
+        } catch (Throwable ignored) {
+            scale = 1f;
+        }
+        this.animScale = scale > 0f ? scale : 0f;
         rebuild();
     }
 
@@ -114,6 +129,40 @@ final class HomeView extends FrameLayout {
         error = message == null ? "" : message;
         busy = false;
         rebuild();
+    }
+
+    /**
+     * 收走首页（进会话页 ✓）：**淡出到位再交出去** ✓。
+     *
+     * ★ 为什么要"到位再交"✗：直接 `setVisibility(GONE)` 是一记硬切 ✓ ——
+     *   上面那层消失、下面那层又还没画出来 ⇒ 中间会闪一下白 ✓（本项目在文件面板上吃过同款 ✓）。
+     * ★ 系统关了动画 ⇒ 直接交出去 ✓（不走一条零时长的空动画 ✗）。
+     */
+    void animateOut(final Runnable whenDone) {
+        long ms = HomeAnim.duration(HomeAnim.FADE_BASE_MS, animScale);
+        if (!HomeAnim.shouldAnimate(ms)) {
+            setAlpha(1f);
+            if (whenDone != null) whenDone.run();
+            return;
+        }
+        animate().alpha(0f).setDuration(ms).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                setAlpha(1f);
+                if (whenDone != null) whenDone.run();
+            }
+        }).start();
+    }
+
+    /** 回到首页 ✓：淡入（调用方负责先 `setVisibility(VISIBLE)` ✓）。 */
+    void animateIn() {
+        long ms = HomeAnim.duration(HomeAnim.FADE_BASE_MS, animScale);
+        if (!HomeAnim.shouldAnimate(ms)) {
+            setAlpha(1f);
+            return;
+        }
+        setAlpha(0f);
+        animate().alpha(1f).setDuration(ms).start();
     }
 
     /** 一行可念的读数 ✓（调试框那一行 ✓）。 */
@@ -303,25 +352,89 @@ final class HomeView extends FrameLayout {
         row.addView(chevron, new LinearLayout.LayoutParams(dp(20), LayoutParams.WRAP_CONTENT));
         wrap.addView(row, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
+        // 智能体列表**先建好**（不管现在展不展开 ✓）—— 展开时才有东西可动画 ✓
+        final LinearLayout agents = new LinearLayout(getContext());
+        agents.setOrientation(LinearLayout.VERTICAL);
+        agents.setPadding(dp(18), 0, dp(12), dp(6));
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            if (i > 0) agents.addView(divider());
+            agents.addView(buildAgent(machine.instances.get(i)));
+        }
+        boolean open = machineExpanded(machine);
+        chevron.setText(open ? "▴" : "▾");
+        if (open) {
+            wrap.addView(agents);
+        } else {
+            agents.setVisibility(GONE);
+            wrap.addView(agents);
+        }
+
+        final LinearLayout card = wrap;
         row.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (!expanded.remove(machine.key)) expanded.add(machine.key);
-                rebuild();
+                boolean nowExpanded = !expanded.contains(machine.key);
+                if (nowExpanded) expanded.add(machine.key);
+                else expanded.remove(machine.key);
+                toggleAgents(card, agents, chevron, nowExpanded);
             }
         });
-
-        if (machineExpanded(machine)) {
-            LinearLayout agents = new LinearLayout(getContext());
-            agents.setOrientation(LinearLayout.VERTICAL);
-            agents.setPadding(dp(18), 0, dp(12), dp(6));
-            for (int i = 0; i < machine.instances.size(); i += 1) {
-                if (i > 0) agents.addView(divider());
-                agents.addView(buildAgent(machine.instances.get(i)));
-            }
-            wrap.addView(agents);
-        }
         return wrap;
+    }
+
+    /**
+     * 展开 / 收起一张卡 ✓ —— **动高度，不重建界面** ✗。
+     *
+     * 原先这里是 `rebuild()` ✓：整屏重画 ⇒ 展不开的动画、还会把用户的滚动位置弹回去 ✗
+     * （这正是"动画落在 APK 端"要解决的那一类 ✓）。时长一律经 {@link HomeAnim} ✓。
+     */
+    private void toggleAgents(final LinearLayout card, final LinearLayout agents, final TextView chevron, final boolean expand) {
+        final int target;
+        if (expand) {
+            int width = card.getWidth() > 0 ? card.getWidth() : getWidth();
+            if (width <= 0) width = getResources().getDisplayMetrics().widthPixels;
+            agents.setVisibility(VISIBLE);
+            agents.measure(
+                    MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+            target = agents.getMeasuredHeight();
+        } else {
+            target = agents.getHeight() > 0 ? agents.getHeight() : 0;
+        }
+        long ms = HomeAnim.expandDuration(target, animScale);
+        chevron.setText(expand ? "▴" : "▾");
+
+        final ViewGroup.LayoutParams params = agents.getLayoutParams();
+        if (!HomeAnim.shouldAnimate(ms)) {
+            // ★ 用户关了动画 ⇒ **直接到终态** ✓（不走零时长动画的空路 ✓）
+            params.height = expand ? ViewGroup.LayoutParams.WRAP_CONTENT : 0;
+            agents.setVisibility(expand ? VISIBLE : GONE);
+            agents.requestLayout();
+            return;
+        }
+        final int from = expand ? 0 : target;
+        android.animation.ValueAnimator animator = android.animation.ValueAnimator.ofInt(from, expand ? target : 0);
+        animator.setDuration(ms);
+        animator.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
+            @Override
+            public void onAnimationUpdate(android.animation.ValueAnimator value) {
+                Object raw = value.getAnimatedValue();
+                int height = raw instanceof Integer ? ((Integer) raw).intValue() : 0;
+                params.height = height;
+                agents.requestLayout();
+            }
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                params.height = expand ? ViewGroup.LayoutParams.WRAP_CONTENT : 0;
+                if (!expand) agents.setVisibility(GONE);
+                agents.requestLayout();
+            }
+        });
+        agents.setVisibility(VISIBLE);
+        animator.start();
+        return;
     }
 
     private View buildAgent(final HomeModel.Instance instance) {
