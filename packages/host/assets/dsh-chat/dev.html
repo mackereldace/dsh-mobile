@@ -48,7 +48,23 @@
   .app { display: flex; flex-direction: column; height: 100%; }
   .status { height: 44px; flex: none; display: flex; align-items: center; padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; color: var(--ink2); }
   header { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 14px 12px 20px; }
-  header h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.2px; }
+  /* ★ 标题做成按钮以后必须给宽度约束 ✗ —— 否则它会被内容撑成好几行、把页头吃掉 ✓ */
+  header > div { flex: 1; min-width: 0; }
+  header .title {
+    display: block; width: 100%; max-width: 100%; margin: 0; padding: 0;
+    border: 0; background: transparent; color: var(--ink); font: inherit;
+    font-size: 18px; font-weight: 650; letter-spacing: -.2px; text-align: left;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  header .title::after { content: " ▾"; color: var(--ink3); font-size: 13px; }
+  header .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #sessions { border-bottom: 1px solid var(--line); background: var(--surface); max-height: 300px; overflow: auto; }
+  #sessions[hidden] { display: none; }
+  #sessions .session-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 11px 20px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--ink); font: inherit; font-size: 14px; text-align: left; }
+  #sessions .session-row.is-current { background: var(--tint); }
+  #sessions .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sessions .session-flag { font-size: 10px; font-weight: 650; padding: 1px 6px 2px; border-radius: 999px; background: var(--tint); color: var(--ink2); border: 1px solid var(--line); }
+  #sessions .session-mark { color: var(--ink2); font-size: 13px; }
   header .sub { margin: 3px 0 0; font-size: 12px; color: var(--ink3); }
   header .grow { flex: 1; }
   header button { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--ink2); font-size: 17px; }
@@ -104,13 +120,14 @@
   <div class="status">9:41</div>
   <header>
     <div>
-      <h1>Mac mini 2024</h1>
-      <p class="sub">端口 3453 · 局域网</p>
+      <button id="title" class="title" type="button">换图标那两个标签</button>
+      <p class="sub">Mac mini 2024 · 端口 3453 · 局域网</p>
     </div>
     <span class="grow"></span>
     <button id="refresh" title="刷新">⟳</button>
   </header>
   <div id="status">已连上，正在读…</div>
+  <div id="sessions" hidden></div>
   <main>
     <div id="state" hidden></div>
     <div id="messages"></div>
@@ -166,9 +183,30 @@
     devErrors.push('rejection: ' + (reason !== null && typeof reason === 'object' ? reason.message : String(reason)))
   })
 
+  // 假会话列表（形状按 bridges 的归一化输出 ✓）
+  let fakeSessions = [
+    { id: 's-1', title: '换图标那两个标签', updatedAt: 30 },
+    { id: 's-2', title: '原生首页的卡片间距', updatedAt: 90, running: true },
+    { id: 's-3', title: '会话页骨架', updatedAt: 10, awaitingApproval: true },
+  ]
+  let currentId = 's-1'
+  // 另一个会话的事件（切过去以后应当**替换**掉 s-1 的内容 ✓，但切换的瞬间不许白屏 ✓）
+  const fakeOther = [
+    { seq: 1, time: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, time: 2, type: 'userMessage', data: { text: '首页机器卡的间距我想再紧一点' } },
+    { seq: 3, time: 3, type: 'agentMessage', data: { text: '好，我把卡片内边距从 14 收到 12，行距不动。' } },
+  ]
+
   let received = 0
   const page = mountChat({
     root: document,
+    onSwitch: (id) => {
+      // ★ 切到另一个会话：**立刻**把游标清零、让它去取新会话的（旧内容此刻仍在屏上 ✓）
+      currentId = id
+      received = 0
+      page.setSessions(fakeSessions, id)
+      void poller.refreshNow()
+    },
     send: async (text) => {
       if (devState === 'send-fail') {
         // ★ 立刻失败（不加假延迟）：渲染脚本用的是虚拟时钟，带延迟的失败会被截在"发送中…"那一步 ✗
@@ -183,7 +221,8 @@
       if (devState === 'error') throw new Error('隧道断了：socket closed')
       if (devState === 'loading') return new Promise(() => {})
       if (devState === 'empty') return []
-      const slice = fake.slice(received, received + 2)
+      const source = currentId === 's-2' ? fakeOther : fake
+      const slice = source.slice(received, received + 2)
       received += slice.length
       return slice
     },
@@ -205,7 +244,15 @@
     }, 400)
   }
 
+  page.setSessions(fakeSessions, currentId)
   if (devState === 'offline') page.setConnection('offline')
+  if (devState === 'sessions') {
+    // 开发态：把会话面板展开（看列表长什么样 ✓）
+    const panel = document.querySelector('#sessions')
+    panel.hidden = false
+    document.querySelector('#title').dispatchEvent(new Event('click'))
+    document.querySelector('#title').dispatchEvent(new Event('click'))
+  }
   poller.start()
 
   // 开发壳专有：把游标显示出来（只在这一页有 ✓，产品页没有这行 ✓）

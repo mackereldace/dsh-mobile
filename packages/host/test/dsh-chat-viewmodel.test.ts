@@ -13,6 +13,11 @@ import {
   classify,
   composerHeight,
   computePageState,
+  filterSessions,
+  getDraft,
+  putDraft,
+  resolveDelivery,
+  sortSessions,
   isFailure,
   sendBegin,
   sendFailureHint,
@@ -294,5 +299,97 @@ describe('输入区：能不能发 / 高度 / ★ 失败不许丢字', () => {
     assert.equal(sendBegin(null).pending, '')
     assert.equal(sendSettled(false, null).draft, '')
     assert.equal(sendSettled(undefined, '甲').draft, '甲')
+  })
+})
+
+
+describe('会话列表：顺序要稳，别让用户点不准', () => {
+  it('★ 等审批 > 在跑 > 其余；其余按最近更新降序', () => {
+    const out = sortSessions([
+      { id: 'c', updatedAt: 5 },
+      { id: 'b', updatedAt: 90, running: true },
+      { id: 'a', updatedAt: 1, awaitingApproval: true },
+      { id: 'd', updatedAt: 50 },
+    ])
+    assert.deepEqual(out.map((x) => x.id), ['a', 'b', 'd', 'c'])
+  })
+
+  it('★ 同分时按 id ⇒ **顺序确定**（每次刷新都换位置等于点不准）', () => {
+    const out = sortSessions([{ id: 'b' }, { id: 'a' }, { id: 'c' }])
+    assert.deepEqual(out.map((x) => x.id), ['a', 'b', 'c'])
+  })
+
+  it('不改原数组（列表是外面喂进来的，别被我们搅乱）', () => {
+    const input = [{ id: 'b' }, { id: 'a' }]
+    sortSessions(input)
+    assert.deepEqual(input.map((x) => x.id), ['b', 'a'])
+  })
+
+  it('坏输入不抛（null / 混垃圾）', () => {
+    assert.deepEqual(sortSessions(null), [])
+    assert.equal(sortSessions([null, 42, { id: 'a' }]).length, 3)
+  })
+})
+
+describe('会话过滤：空查询就是全部', () => {
+  it('标题与 id 都能搜到，大小写不挑', () => {
+    const list = [{ id: 's-1', title: '换图标' }, { id: 's-2', title: 'Card 间距' }]
+    assert.equal(filterSessions(list, '').length, 2)
+    assert.equal(filterSessions(list, '图标')[0].id, 's-1')
+    assert.equal(filterSessions(list, 'card')[0].id, 's-2')
+    assert.equal(filterSessions(list, 's-2')[0].id, 's-2')
+    assert.equal(filterSessions(list, '没有这个').length, 0)
+  })
+
+  it('坏输入不抛', () => {
+    assert.deepEqual(filterSessions(null, 'x'), [])
+    assert.equal(filterSessions([null, { id: 'a' }], 'a').length, 1)
+  })
+})
+
+describe('★ 切换：替换还是追加（决定"切换时会不会白屏"）', () => {
+  it('★★ 等着切换 + 这一批有内容 ⇒ **替换**（这时候才清屏）', () => {
+    assert.equal(resolveDelivery(true, [{ seq: 1 }]), 'replace')
+  })
+
+  it('★★ 等着切换但这一批是空的 ⇒ **追加**（旧内容还得留着，不许白屏）', () => {
+    assert.equal(resolveDelivery(true, []), 'append')
+    assert.equal(resolveDelivery(true, null), 'append')
+  })
+
+  it('没在切换 ⇒ 一律追加', () => {
+    assert.equal(resolveDelivery(false, [{ seq: 1 }]), 'append')
+    assert.equal(resolveDelivery(undefined, [{ seq: 1 }]), 'append')
+  })
+})
+
+describe('★ 草稿柜：按会话分开存（切走再切回来，字还在）', () => {
+  it('各存各的，互不影响', () => {
+    let drafts = putDraft({}, 's-1', '甲在打字')
+    drafts = putDraft(drafts, 's-2', '乙在打字')
+    assert.equal(getDraft(drafts, 's-1'), '甲在打字')
+    assert.equal(getDraft(drafts, 's-2'), '乙在打字')
+    assert.equal(getDraft(drafts, 's-3'), '')
+  })
+
+  it('清空就把那一条删掉（别留空串占位置）', () => {
+    let drafts = putDraft({}, 's-1', '甲')
+    drafts = putDraft(drafts, 's-1', '')
+    assert.equal(getDraft(drafts, 's-1'), '')
+    assert.equal('s-1' in drafts, false)
+  })
+
+  it('不改原对象（纯函数式：给一份进、还一份新的出）', () => {
+    const before = { 's-1': '甲' }
+    const after = putDraft(before, 's-2', '乙')
+    assert.equal('s-2' in before, false)
+    assert.equal(getDraft(after, 's-2'), '乙')
+  })
+
+  it('坏输入不抛（null / 非字符串 / 空 id）', () => {
+    assert.deepEqual(putDraft(null, 's-1', '甲'), { 's-1': '甲' })
+    assert.equal(getDraft(null, 's-1'), '')
+    assert.equal(getDraft({ 's-1': 42 }, 's-1'), '')
+    assert.deepEqual(putDraft({}, '', '甲'), {})
   })
 })

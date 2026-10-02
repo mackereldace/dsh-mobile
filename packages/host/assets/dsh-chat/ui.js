@@ -253,6 +253,84 @@ function toolCard(view) {
 }
 
 /**
+ * 会话列表与切换的纯判断 ✓（不碰 DOM ⇒ 能断言 ✓）。
+ *
+ * ## 三条规矩
+ *
+ * 1. ★ **切换时不清屏** ✗：切走的瞬间旧内容**留在原地** ✓，等新会话的**第一批**到了才替换 ✓ ——
+ *    否则就是"点了名字 ⇒ 白屏一下 ⇒ 内容出来" ✓（本项目对"白屏一下"一贯是零容忍 ✓）。
+ * 2. ★ **草稿按会话分开存** ✓：在 A 里打了一半、切到 B、再切回 A ⇒ **字还在** ✓
+ *    （全局一个草稿框就会把 A 的字弄丢 ✗，而这与"发失败丢字"是同一类伤害 ✓）。
+ * 3. 列表顺序**稳定** ✓：正在跑 / 等审批的排前面 ✓（那时用户最需要找到它 ✓），
+ *    其余按最近更新降序 ✓，同分按 id ✓（**不许靠运气** ✗ —— 每次刷新都换位置等于点不准 ✓）。
+ */
+
+/** 会话列表排序 ✓（不改原数组 ✓）。`running`/`awaitingApproval` 优先 ✓，再按 `updatedAt` 降序 ✓。 */
+export function sortSessions(sessions) {
+  const list = Array.isArray(sessions) ? sessions.slice() : []
+  const rank = (item) => {
+    if (item === null || typeof item !== 'object') return 2
+    if (item.awaitingApproval === true) return 0
+    if (item.running === true) return 1
+    return 2
+  }
+  return list.sort((a, b) => {
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra !== rb) return ra - rb
+    const ta = a !== null && typeof a === 'object' && typeof a.updatedAt === 'number' ? a.updatedAt : 0
+    const tb = b !== null && typeof b === 'object' && typeof b.updatedAt === 'number' ? b.updatedAt : 0
+    if (ta !== tb) return tb - ta
+    const ia = a !== null && typeof a === 'object' && typeof a.id === 'string' ? a.id : ''
+    const ib = b !== null && typeof b === 'object' && typeof b.id === 'string' ? b.id : ''
+    return ia < ib ? -1 : ia > ib ? 1 : 0
+  })
+}
+
+/** 过滤 ✓（空查询 ⇒ 全部 ✓；标题与 id 都不含才算不匹配 ✓；大小写不挑 ✓）。 */
+export function filterSessions(sessions, query) {
+  const list = Array.isArray(sessions) ? sessions : []
+  const needle = typeof query === 'string' ? query.trim().toLowerCase() : ''
+  if (needle.length === 0) return list
+  return list.filter((item) => {
+    if (item === null || typeof item !== 'object') return false
+    const title = typeof item.title === 'string' ? item.title.toLowerCase() : ''
+    const id = typeof item.id === 'string' ? item.id.toLowerCase() : ''
+    return title.includes(needle) || id.includes(needle)
+  })
+}
+
+/**
+ * ★ 新到的一批事件该**替换**还是**追加** ✓。
+ *
+ * 只有一种情况替换 ✓：**正等着切换** 且 这一批**有内容** ✓。
+ * 其余一律追加 ✓（包括"切换中但这一批是空的"✓ —— 那时候旧内容还得留着 ✓）。
+ */
+export function resolveDelivery(pendingSwitch, events) {
+  const has = Array.isArray(events) && events.length > 0
+  if (pendingSwitch === true && has) return 'replace'
+  return 'append'
+}
+
+/** 草稿柜：**按会话存** ✓（纯函数式：给一份进、还一份新的出 ✓，方便断言 ✓）。 */
+export function putDraft(drafts, sessionId, text) {
+  const next = drafts !== null && typeof drafts === 'object' ? { ...drafts } : {}
+  const key = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : ''
+  if (key.length === 0) return next
+  const value = typeof text === 'string' ? text : ''
+  if (value.length === 0) delete next[key]
+  else next[key] = value
+  return next
+}
+
+/** 取某个会话的草稿 ✓（没有就是空串 ✓）。 */
+export function getDraft(drafts, sessionId) {
+  if (drafts === null || typeof drafts !== 'object') return ''
+  const value = drafts[sessionId]
+  return typeof value === 'string' ? value : ''
+}
+
+/**
  * 输入区的三条纯判断 ✓（不碰 DOM ⇒ 能断言 ✓）。
  *
  * ## ★ 最要紧的一条规矩：**发出去的字不许凭空消失** ✗
@@ -394,6 +472,13 @@ export function mountChat(options) {
    *   清空时机：新事件到达 ✓ / 用户点刷新 ✓ / 下一次发送 ✓。
    */
   let notice = ''
+  /** 会话列表（已排序 ✓）与当前会话 id ✓ —— 由外面喂（`setSessions` ✓）。 */
+  let sessions = []
+  let currentSessionId = ''
+  /** ★ 正等着切换（**旧内容留在原地** ✓，等新会话第一批到了才替换 ✗）。 */
+  let pendingSwitch = false
+  /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
+  let drafts = {}
   /** ★ 由下面赋值（输入区那一段）—— `paint` 里会调它 ✓。
    *  刻意**不**用"事后包一层 paint"的写法 ✗：那既容易写成 `const` 重赋值（运行时才炸 ✓），
    *  也正是上一轮记下的坏味道（别靠改别人的东西接线 ✓）。 */
@@ -401,8 +486,9 @@ export function mountChat(options) {
 
   const paint = () => {
     const view = computePageState({ loading, eventCount, error, connection })
-    if (status !== null && status !== undefined) status.textContent = notice.length > 0 ? notice : view.statusText
-    if (typeof options.onStatus === 'function') options.onStatus(view.statusText)
+    const line = notice.length > 0 ? notice : pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText
+    if (status !== null && status !== undefined) status.textContent = line
+    if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true
       stateBox.innerHTML = ''
@@ -432,6 +518,88 @@ export function mountChat(options) {
    *   `mountChat` 收到的是新字面量、而 poller 持有的是**另一个** options 对象 ⇒
    *   处理器根本没接上 ⇒ 画面空白、**渲染脚本的体积从 258KB 掉到 72KB 才露馅** ✗）。
    */
+  // ── 会话切换：列表、草稿、切换（★ 不清屏 ✓）────────────────────────────
+  const sessionPanel = root.querySelector('#sessions')
+  const titleButton = root.querySelector('#title')
+
+  /** 画会话列表 ✓（当前那个打勾 ✓；正在跑 / 等审批的带标记 ✓）。 */
+  const paintSessions = () => {
+    if (sessionPanel === null || sessionPanel === undefined) return
+    sessionPanel.innerHTML = ''
+    const ordered = sortSessions(sessions)
+    if (ordered.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'state-hint'
+      empty.textContent = '这台电脑上没有别的会话'
+      sessionPanel.appendChild(empty)
+      return
+    }
+    for (const item of ordered) {
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'session-row' + (item.id === currentSessionId ? ' is-current' : '')
+      const name = document.createElement('span')
+      name.className = 'session-title'
+      name.textContent = item.title !== undefined && item.title.length > 0 ? item.title : item.id
+      row.appendChild(name)
+      if (item.awaitingApproval === true || item.running === true) {
+        const flag = document.createElement('span')
+        flag.className = 'session-flag'
+        flag.textContent = item.awaitingApproval === true ? '等审批' : '在跑'
+        row.appendChild(flag)
+      }
+      if (item.id === currentSessionId) {
+        const mark = document.createElement('span')
+        mark.className = 'session-mark'
+        mark.textContent = '✓'
+        row.appendChild(mark)
+      }
+      row.addEventListener('click', () => {
+        if (item.id === currentSessionId) {
+          hideSessions()
+          return
+        }
+        // ★ 切走前先把当前草稿**存进柜子** ✓（切回来字还在 ✓）
+        if (input !== null && input !== undefined) drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
+        pendingSwitch = true
+        hideSessions()
+        paint()
+        if (typeof options.onSwitch === 'function') options.onSwitch(item.id)
+      })
+      sessionPanel.appendChild(row)
+    }
+  }
+
+  const hideSessions = () => {
+    if (sessionPanel !== null && sessionPanel !== undefined) sessionPanel.hidden = true
+  }
+
+  if (titleButton !== null && titleButton !== undefined) {
+    titleButton.addEventListener('click', () => {
+      if (sessionPanel === null || sessionPanel === undefined) return
+      const willShow = sessionPanel.hidden !== false
+      sessionPanel.hidden = !willShow
+      if (willShow) paintSessions()
+    })
+  }
+
+  /** 外面喂列表 ✓（`currentId` 变了就顺手把草稿换过来 ✓）。 */
+  const setSessions = (next, currentId, titleText) => {
+    sessions = Array.isArray(next) ? next : []
+    if (typeof titleText === 'string' && titleButton !== null && titleButton !== undefined) {
+      titleButton.textContent = titleText
+    }
+    if (typeof currentId === 'string' && currentId !== currentSessionId) {
+      if (input !== null && input !== undefined) {
+        // 存起旧的、换上新的（★ 这就是"切回来字还在"的全部机制 ✓）
+        drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
+        input.value = getDraft(drafts, currentId)
+      }
+      currentSessionId = currentId
+    }
+    paintSessions()
+  }
+
   /** 写一条临时消息 ✓（并立刻重画 ✓）。 */
   const setNotice = (text) => {
     notice = typeof text === 'string' ? text : ''
@@ -440,11 +608,18 @@ export function mountChat(options) {
 
   const handleEvents = (events) => {
     if (Array.isArray(events) && events.length > 0) {
-      eventCount += events.length
       error = ''
       // ★ 刻意**不**在这里清临时消息 ✗：那样"没发出去：…（字还在输入框里）"会被
       //   下一趟历史轮询**冲掉** ✓ —— 用户根本没看清就没了 ✓（与"字丢了"同一类伤害 ✓）。
       //   清空时机只有**用户的下一次动作**：再发一次 ✓ / 点刷新 ✓。
+      if (resolveDelivery(pendingSwitch, events) === 'replace') {
+        // ★ 新会话的第一批到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓）
+        list.innerHTML = ''
+        eventCount = 0
+        pendingSwitch = false
+        paintSessions()
+      }
+      eventCount += events.length
       appendEvents(list, events)
     }
     loading = false
@@ -533,6 +708,14 @@ export function mountChat(options) {
   return {
     /** ★ 交给 `new ChatPoller({ …page.handlers })` ✓ */
     handlers: { onEvents: handleEvents, onError: handleError },
+    /** 喂会话列表 ✓（第三个参数是标题栏文字 ✓）。 */
+    setSessions,
+    /** 当前会话 id ✓。 */
+    current: () => currentSessionId,
+    /** 草稿柜读数 ✓（开发壳与测试用 ✓）。 */
+    drafts: () => ({ ...drafts }),
+    /** 切换是否还等着替换 ✓。 */
+    isSwitching: () => pendingSwitch,
     appendEvents: (events) => appendEvents(list, events),
     setConnection: (next) => {
       connection = next === 'offline' ? 'offline' : next === 'online' ? 'online' : 'unknown'
