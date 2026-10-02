@@ -1040,6 +1040,19 @@ if (existsSync(aapt2)) {
     iconsDetail.trim(),
   )
 
+  // ★ 一句**特有**的话：只有 HomeLabels 会产出它 ✓ ——
+  //   它同时证明"那个类真的进了包"✓ 与"那两类未知没有被合并成一句"✓
+  /**
+   * ★ 注意：`dexText` 是 `latin1` 解的 ✓ —— 拿它查 ASCII 没问题 ✓（既有的断言全是 ASCII ✓），
+   *   但**查中文一定查不到** ✗（中文在 dex 里是 MUTF-8 三字节 ✓，latin1 解出来是乱码 ✓）。
+   *   ⇒ 查中文要**另解一份 utf8** ✓（BMP 内的字符 MUTF-8 与 UTF-8 一致 ✓）。
+   */
+  const dexUtf8 = dexBytes.toString('utf8')
+  check(
+    dexUtf8.includes('没有它的证书'),
+    '★ 「未知（没有它的证书）」这句特有的字在 dex 里（它区分了"没探到"与"没配对过"✓）',
+  )
+
   const nativeHome = [
     'HomeStore',
     'HomeLoader',
@@ -1050,6 +1063,9 @@ if (existsSync(aapt2)) {
     'HomeWiring',
     'HomeView',
     'HomeTheme',
+    // ★ 界面上的**每一句字**都在这里 ✓（视图里不许再有内联中文 ✗）——
+    //   少了它，屏幕上那些字就没有任何断言守着 ✓
+    'HomeLabels',
     'dsh-mobile.hosts',
   ]
   check(

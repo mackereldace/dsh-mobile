@@ -217,7 +217,7 @@ final class HomeView extends FrameLayout {
 
         LinearLayout titles = new LinearLayout(getContext());
         titles.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text("电脑", 27, theme.ink, true);
+        TextView title = text(HomeLabels.TITLE, 27, theme.ink, true);
         titles.addView(title);
         TextView sub = text(summaryText(), 13, theme.ink2, false);
         LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
@@ -244,21 +244,20 @@ final class HomeView extends FrameLayout {
         return header;
     }
 
+    /**
+     * 页头那行摘要 ✓ —— 字全在 {@link HomeLabels} 里 ✓（那里有断言守着 ✓）。
+     *
+     * ★ 视图里**不许**再出现内联的中文句子 ✗：同一句话写两遍，早晚只改一处 ✓。
+     */
     private String summaryText() {
-        if (!error.isEmpty()) return "刷新失败：" + error;
-        if (snapshot == null) return busy ? "正在看…" : "还没有电脑";
-        StringBuilder builder = new StringBuilder();
-        builder.append(snapshot.onlineCount).append(" 台在线");
-        if (snapshot.offlineCount > 0) builder.append("，").append(snapshot.offlineCount).append(" 台离线");
-        if (snapshot.unknownCount > 0) builder.append("，").append(snapshot.unknownCount).append(" 台未知");
-        if (busy) builder.append(" · 正在刷新");
-        return builder.toString();
+        if (!error.isEmpty()) return HomeLabels.summary(0, 0, 0, false, error);
+        if (snapshot == null) return HomeLabels.summary(0, 0, 0, busy, "");
+        return HomeLabels.summary(snapshot.onlineCount, snapshot.offlineCount, snapshot.unknownCount, busy, "");
     }
 
     private void fillList(LinearLayout list) {
         if (snapshot == null || snapshot.machines.isEmpty()) {
-            TextView empty = text(busy ? "正在看有哪些电脑…" : "还没有电脑。点右上角 ＋ 扫一次码就能加上。",
-                    14, theme.ink2, false);
+            TextView empty = text(HomeLabels.emptyHint(busy), 14, theme.ink2, false);
             empty.setPadding(dp(6), dp(18), dp(6), dp(18));
             list.addView(empty);
             list.addView(buildAddRow());
@@ -272,8 +271,8 @@ final class HomeView extends FrameLayout {
             if (machine.online) online.add(machine);
             else others.add(machine);
         }
-        addGroup(list, "在线", online);
-        addGroup(list, "离线 / 未知", others);
+        addGroup(list, HomeLabels.GROUP_ONLINE, online);
+        addGroup(list, HomeLabels.GROUP_OTHER, others);
         list.addView(buildAddRow());
     }
 
@@ -461,7 +460,7 @@ final class HomeView extends FrameLayout {
         texts.addView(text(instanceSubtitle(instance), 12, theme.ink3, false));
         row.addView(texts, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
 
-        String right = instance.current ? "正在用" : (instance.online ? "›" : "");
+        String right = HomeLabels.agentTail(instance.current, instance.online);
         TextView tail = text(right, instance.current ? 11.5f : 15, instance.current ? theme.ink2 : theme.ink3, instance.current);
         tail.setGravity(Gravity.CENTER);
         row.addView(tail, new LinearLayout.LayoutParams(dp(44), LayoutParams.WRAP_CONTENT));
@@ -502,43 +501,18 @@ final class HomeView extends FrameLayout {
      *   等用户定了要不要给 manifest 加 `profileName` 再换成名字 ✓。
      */
     private String instanceTitle(HomeModel.Instance instance) {
-        if (!instance.title.isEmpty()) return instance.title;
-        String ports = instance.portText();
-        return ports.isEmpty() ? (instance.version.isEmpty() ? "智能体" : "dsh " + instance.version) : "端口 " + ports;
+        return HomeLabels.instanceTitle(instance.title, instance.portText(), instance.version);
     }
 
     private String instanceSubtitle(HomeModel.Instance instance) {
-        StringBuilder builder = new StringBuilder();
-        if (!instance.addresses.isEmpty()) {
-            HomeModel.Address address = instance.addresses.get(0);
-            if (!address.kind.isEmpty()) builder.append(address.kind);
-        }
-        if (!instance.version.isEmpty()) {
-            if (builder.length() > 0) builder.append(" · ");
-            builder.append("dsh ").append(instance.version);
-        }
-        if (!instance.identified) {
-            if (builder.length() > 0) builder.append(" · ");
-            builder.append("身份未知");
-        }
-        if (!instance.online) {
-            if (builder.length() > 0) builder.append(" · ");
-            builder.append("没响应");
-        }
-        return builder.length() == 0 ? "—" : builder.toString();
+        String kind = instance.addresses.isEmpty() ? "" : instance.addresses.get(0).kind;
+        return HomeLabels.instanceSubtitle(kind, instance.version, instance.identified, instance.online);
     }
 
     private String stateText(HomeModel.Machine machine) {
-        if (machine.online) {
-            int count = machine.identifiedInstanceCount();
-            return count > 0 ? "在线 · " + count + " 个智能体" : "在线";
-        }
-        if (machine.offline) {
-            int count = 0;
-            for (int i = 0; i < machine.instances.size(); i += 1) count += machine.instances.get(i).addresses.size();
-            return count > 1 ? "离线 · " + count + " 个地址无响应" : "离线";
-        }
-        return machine.known ? "未知（还没探到）" : "未知（没有它的证书）";
+        int addresses = 0;
+        for (int i = 0; i < machine.instances.size(); i += 1) addresses += machine.instances.get(i).addresses.size();
+        return HomeLabels.machineState(machine.online, machine.identifiedInstanceCount(), machine.offline, addresses, machine.known);
     }
 
     private boolean machineExpanded(HomeModel.Machine machine) {
@@ -546,7 +520,7 @@ final class HomeView extends FrameLayout {
     }
 
     private View buildAddRow() {
-        TextView ghost = text("＋  添加电脑", 14, theme.ink2, true);
+        TextView ghost = text(HomeLabels.ADD_COMPUTER, 14, theme.ink2, true);
         ghost.setGravity(Gravity.CENTER);
         ghost.setPadding(0, dp(16), 0, dp(16));
         ghost.setBackground(roundRect(0x00000000, theme.line, 14));
@@ -570,7 +544,7 @@ final class HomeView extends FrameLayout {
         bar.setBackgroundColor(theme.surface);
         bar.setPadding(0, dp(9), 0, dp(9) + dp(insetBottomDp));
 
-        bar.addView(tab("电脑", R.drawable.ic_tab_computer, true, null));
+        bar.addView(tab(HomeLabels.TAB_COMPUTER, R.drawable.ic_tab_computer, true, null));
         bar.addView(tab("会话", R.drawable.ic_tab_sessions, false, null));
         bar.addView(tab("设置", R.drawable.ic_tab_settings, false, null));
         return bar;

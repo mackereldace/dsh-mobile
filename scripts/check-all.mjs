@@ -126,6 +126,13 @@ for (const [label, command, args] of steps) {
     if (retry.code === 0) {
       flaky = true
       console.log(`⚠ ${label}：首跑失败、重跑通过 ⇒ 判定为**抖动**（工程债里那条 ✓）`)
+      /**
+       * ★★ 这里必须把 `result` **换成重跑那次** ✗ ——
+       *   我第一版只置了 `flaky` ✓，于是汇总里同时出现"有 1 道抖动"与"有 1 道没过" ✗
+       *   （**自相矛盾的汇总比没有汇总更糟** ✓：看的人不知道该信哪句 ✓）。
+       *   但**首跑那次失败的名字要留着** ✓（抖动报告要能说出是哪条 ✓）。
+       */
+      result = { ...retry, failures: failures(result.output), flakyFirstFailures: failures(result.output) }
     } else {
       result = retry
     }
