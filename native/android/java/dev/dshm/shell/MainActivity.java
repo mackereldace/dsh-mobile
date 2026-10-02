@@ -789,7 +789,6 @@ public class MainActivity extends android.app.Activity {
                 + "px gestureBottom=" + gesture + "px systemGestureBottom=" + systemGesture
                 + "px edgeToEdge=" + edgeToEdge + " density=" + density);
         applyInsetsToPage();
-        applyInsetsToNativeHome();
     }
 
     /**
@@ -807,6 +806,17 @@ public class MainActivity extends android.app.Activity {
      * 也定义了同名变量作为兜底 ✓，行内这条**必须**赢 ✓。
      */
     private void applyInsetsToPage() {
+        /**
+         * ★ 名字里虽然有 `Page` ✓，但它其实是"**把尺寸下发给各层**"的唯一出口 ✓ ——
+         *   所以原生首页也在这里一起下 ✓。
+         *
+         * ★★ 为什么放这里、而不是在 {@link #captureInsets} 里单独叫一次 ✗：
+         *   `applyInsetsToPage()` 一共有**四个**调用点 ✓（insets 回调 ✓ / `onPageStarted` ✓ /
+         *   页面加载完 ✓ / `onResume` ✓）—— 我第一版只在 `captureInsets` 里叫了一次 ✓
+         *   ⇒ 另外三处**都不会**更新首页 ✓（回前台、转屏、键盘变化时首页的安全区会**悄悄变旧** ✗，
+         *   而它看起来完全正常 ✓）。放在这里，四个入口自动全覆盖 ✓。
+         */
+        applyInsetsToNativeHome();
         WebView view = webView;
         if (view == null) return;
         int top = Math.max(safeTopCss, 0);
@@ -3811,6 +3821,14 @@ public class MainActivity extends android.app.Activity {
         super.onResume();
         if (root != null) root.requestApplyInsets();
         applyInsetsToPage();
+        /**
+         * ★ 回前台时：**首页可见才刷新一次** ✓（别在会话页上白探一轮 ✗）。
+         *   为什么需要它 ✗：用户可能刚在别的设备/浏览器上动过会话 ✓，
+         *   而首页上的"在跑 / 等审批"是上一次探测的旧读数 ✓（看起来正常，其实过期 ✓）。
+         */
+        if (nativeHome != null && nativeHome.getVisibility() == View.VISIBLE) {
+            refreshNativeHome();
+        }
         startKeepAliveService();
     }
 
