@@ -464,6 +464,19 @@ public class MainActivity extends android.app.Activity {
     private boolean hostSwitchPending = false;
 
     /**
+     * ★★★ "**我是为了配对才让位的**" ✓ —— 只有它为 true 时，"身份库写完了"才把首页叫回来 ✓。
+     *
+     * 我第 26 轮埋的 bug ✗：那个钩子的判据写成了"身份库**被写过任何东西**" ✓，
+     * 而网页层**每次连上都会上报一次身份库** ✓（端点头像 / 身份记录 ✓）——
+     * ⇒ 于是用户**点进任意一台电脑**、页面刚开始画 ✓ ⇒ 身份库被写 ✓ ⇒ 首页被**立刻**拉回来 ✗✗。
+     * 症状正是用户报的："**页面闪一下就被弹回首页**" ✓（那看起来像"连不上"，其实是连上了 ✓）。
+     *
+     * ⇒ 判据换成"**这次让位是不是为了配对**" ✓：进会话页那条路**从不**置它 ✓
+     *   ⇒ 再也不会被拉回来 ✓；而配对那条路（扫完码让位 ✓）仍旧能自己回来 ✓。
+     */
+    private boolean homeStepsAsideForPairing = false;
+
+    /**
      * ★★ 换源**看门狗** ✓ —— 那道闸的复位点只有两处（`onPageFinished` ✓ / 主文档出错 ✓），
      *   而**手动/原生进入某一台**时，`applyHostUrl` 会先 `stopAutoConnect` ✓
      *   ⇒ 自动换槽的槽超时**被撤掉了** ✗ ⇒ 只剩那两个复位点 ✓。
@@ -1474,7 +1487,9 @@ public class MainActivity extends android.app.Activity {
                      *   "Only the original thread that created a view hierarchy can touch its views" ✗。
                      *   ⇒ 一律 `post` 回主线程 ✓（并且 `root` 可能还没建好 ⇒ 先判空 ✓）。
                      */
-                    if (written > 0 && root != null) {
+                    if (written > 0 && homeStepsAsideForPairing && root != null) {
+                        // ★ 只叫一次 ✓（配对这件事已经落地了 ✓）
+                        homeStepsAsideForPairing = false;
                         root.post(new Runnable() {
                             @Override
                             public void run() {
@@ -3275,6 +3290,8 @@ public class MainActivity extends android.app.Activity {
          * ★ 首页什么时候回来 ✗：见 `vaultSet` —— **配对真的写进身份库**那一刻 ✓
          *   （不是"页面加载完" ✗：那时可能还没配上 ✓）。
          */
+        // ★ 记下"这次让位是为了配对" ✓ —— 只有它才会在配对完成后把首页叫回来 ✓
+        homeStepsAsideForPairing = true;
         showWebView();
         beginSlot(0, "扫码配对（" + how + "）");
         return true;
