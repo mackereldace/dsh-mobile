@@ -20,6 +20,7 @@
     --ink: #14161A; --ink2: #5B6270; --ink3: #8D95A3;
     --line: #E2E5EA; --line-soft: #EDEFF3;
     --rail: #14161A; --accent: #2E9E6B; --code-bg: #F6F7F9;
+    --danger: #B3261E; --danger-line: #E8C4C1;
   }
   :root {
     --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
@@ -33,6 +34,7 @@
       --ink: #E9EBEF; --ink2: #9AA1AC; --ink3: #6E7681;
       --line: #262A31; --line-soft: #21252B;
       --rail: #E9EBEF; --accent: #4FBF7F; --code-bg: #101317;
+      --danger: #F2B8B5; --danger-line: #5A2A28;
     }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -62,8 +64,15 @@
     border-radius: 14px 14px 14px 4px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
   }
   .ev-reasoning .dim { border-left: 2px solid var(--line); padding-left: 10px; }
-  .ev-tool { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-  .ev-tool .tool-head { padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--ink2); border-bottom: 1px solid var(--line-soft); }
+  .ev-tool .tool { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .ev-tool .tool-error { border-color: var(--danger-line); }
+  .ev-tool .tool-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--ink2); border-bottom: 1px solid var(--line-soft); }
+  .ev-tool .tool-error .tool-head { color: var(--danger); }
+  .ev-tool .tool-flag { font-size: 10px; font-weight: 650; padding: 1px 6px 2px; border-radius: 999px; background: var(--danger); color: #fff; }
+  .ev-tool .tool-hidden { font-size: 11px; font-weight: 500; color: var(--ink3); }
+  .ev-tool .grow { flex: 1; }
+  .ev-tool .tool-toggle { border: 0; background: transparent; color: var(--ink2); font: inherit; font-size: 12px; font-weight: 600; padding: 2px 6px; border-radius: 8px; }
+  .ev-tool .tool-toggle:active { background: var(--line-soft); }
   .ev-tool .tool-body { margin: 0; padding: 10px 12px; background: var(--code-bg); font-size: 12px; line-height: 1.45; color: var(--ink2); white-space: pre-wrap; word-break: break-all; }
   .ev-step { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--ink3); }
   .ev-step::before, .ev-step::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -119,7 +128,18 @@
     { seq: 3, time: 3, type: 'reasoning', data: { text: '用户要换图标。先看现有实现，再决定要不要新画矢量图。' } },
     { seq: 4, time: 4, type: 'commandExecution', data: { command: 'grep -n "dshm-command-btn" packages/client/src/boot.js' } },
     { seq: 5, time: 5, type: 'agentMessage', data: { text: '图标换成矢量后我渲染出来看了一眼：齿轮第一版环与齿之间有缝，看起来像太阳，已改成齿咬着环。' } },
-    { seq: 6, time: 6, type: 'someUnknownEvent', data: { whatever: 1 } },
+    { seq: 6, time: 6, type: 'commandExecution', data: { command: [
+        'node scripts/check-apk.mjs --verbose \\',
+        '  | tee /tmp/apk.log \\',
+        '  | tail -40',
+        '……（这里省略 26 行，用来验"长输出默认收起 + 说清还藏了几行"）',
+        'line 05','line 06','line 07','line 08','line 09','line 10',
+        'line 11','line 12','line 13','line 14','line 15','line 16',
+        'line 17','line 18','line 19','line 20','line 21','line 22',
+        'line 23','line 24','line 25','line 26',
+      ].join('\n'), exitCode: 0 } },
+    { seq: 7, time: 7, type: 'commandExecution', data: { command: 'adb install -r dist/dsh-mobile.apk', exitCode: 1, output: 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]' } },
+    { seq: 8, time: 8, type: 'someUnknownEvent', data: { whatever: 1 } },
   ]
 
   const state = { received: 0 }
