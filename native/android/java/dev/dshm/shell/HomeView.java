@@ -50,6 +50,9 @@ final class HomeView extends FrameLayout {
 
         void onAddComputer();
 
+        /** ★ 「手输地址」✓ —— 不在同一网络（例如走 Tailscale）时，这是唯一能自救的入口 ✓。 */
+        void onAddComputerByAddress();
+
         /** @param url 由 `HomeEntry` 选好的那条 ✓（这里**不再挑**✗） */
         void onEnter(String url, String authority);
     }
@@ -634,6 +637,14 @@ final class HomeView extends FrameLayout {
         return expanded.contains(machine.key);
     }
 
+    /**
+     * 「添加电脑」+ 「手输地址」两行 ✓。
+     *
+     * ★ 为什么必须有第二行 ✗（2026-10-04 用户实际撞上 ✓）：
+     *   不在同一局域网时（走 Tailscale ✓），机器手里只有局域网地址 ✓
+     *   ⇒ 首页"没响应" ✓、点进去也连不上 ✓ —— 而**网页层那个「电脑地址」入口被我挡在首页后面** ✓
+     *   ⇒ 用户当时**无路可走** ✓。这一行就是把那条路还回去 ✓。
+     */
     private View buildAddRow() {
         TextView ghost = text(HomeLabels.ADD_COMPUTER, 14, theme.ink2, true);
         ghost.setGravity(Gravity.CENTER);
@@ -649,7 +660,27 @@ final class HomeView extends FrameLayout {
                 if (callbacks != null) callbacks.onAddComputer();
             }
         });
-        return ghost;
+
+        TextView byAddress = text(HomeLabels.ADD_BY_ADDRESS, 13, theme.ink3, false);
+        byAddress.setGravity(Gravity.CENTER);
+        byAddress.setPadding(0, dp(13), 0, dp(13));
+        byAddress.setBackground(roundRect(0x00000000, theme.line, 14));
+        LinearLayout.LayoutParams byParams = new LinearLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        byParams.topMargin = dp(8);
+        byAddress.setLayoutParams(byParams);
+        byAddress.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onAddComputerByAddress();
+            }
+        });
+
+        LinearLayout wrap = new LinearLayout(getContext());
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.addView(ghost);
+        wrap.addView(byAddress);
+        return wrap;
     }
 
     /** 底部标签栏（本轮**只有「电脑」那一面通电** ✓ —— 另外两个如实置灰 ✓，不假装能用 ✗）。 */

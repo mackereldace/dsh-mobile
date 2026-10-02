@@ -3770,6 +3770,17 @@ public class MainActivity extends android.app.Activity {
                     startScan();
                 }
 
+                /**
+                 * ★★ 「手输地址」✓ —— 不在同一个局域网时（走 Tailscale ✓）的**唯一**出路 ✓。
+                 *   收走首页（让地址框落在网页层上 ✓ —— 它与网页那套"改地址"共用同一个框 ✓，
+                 *   框里**预填当前地址** ✓，所以你只要改主机名那一段 ✓）。
+                 *   ★ 取消也不至于把人关在外面：按返回就回到首页 ✓（见 `handleBackPressed` ✓）。
+                 */
+                public void onAddComputerByAddress() {
+                    showWebView();
+                    promptForAddress(getString(R.string.change_hint));
+                }
+
                 @Override
                 public void onEnter(String url, String authority) {
                     enterHost(url);

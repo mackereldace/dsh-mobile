@@ -27,6 +27,12 @@ public final class HomeLabels {
 
     public static final String TITLE = "电脑";
     public static final String ADD_COMPUTER = "＋  添加电脑";
+    /**
+     * ★★ 「手输地址」—— 为"**不在同一个网络时**"准备的那条路 ✓（2026-10-04 用户实际撞上 ✓）：
+     *   手机不在局域网、走 Tailscale 时，机器手里只有局域网地址 ✓
+     *   ⇒ 首页显示"没响应" ✓、点进去也连不上 ✓（那时**唯一**的出路就是手输那条 tailnet 地址 ✓）。
+     */
+    public static final String ADD_BY_ADDRESS = "⌨  手输地址（换了网络、不在一个局域网时用）";
     public static final String TAB_COMPUTER = "电脑";
     public static final String GROUP_ONLINE = "在线";
     public static final String GROUP_OTHER = "离线 / 未知";
