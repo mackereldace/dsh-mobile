@@ -147,14 +147,22 @@ final class HomeView extends FrameLayout {
      * ★ 只更新那一张缩略图 ✗，不整屏重画 ✓（重画会把用户滚到哪儿、展开哪张都再赌一次 ✓）。
      */
     void applyShot(String key, android.graphics.Bitmap bitmap, String hint) {
-        if (hint != null && !hint.isEmpty() && !hint.equals(shotHint)) {
-            shotHint = hint;
-            rebuild();
-            return;
+        /**
+         * ★★ 说明**跟着结果走** ✗：拿到图 ⇒ 说明清空 ✓；没拿到 ⇒ 换上这次的说明 ✓。
+         *
+         * 我第一版只在"说明变了"时更新它 ✓ ⇒ 后来**取图成功**了，
+         * 底部那行还一直写着「缩略图：电脑没允许截屏」✓ ——
+         * 与"过期提示盖住真实错误"是同一族（**说过的话要跟着事实改** ✗）。
+         */
+        String nextHint = bitmap != null ? "" : (hint == null ? "" : hint);
+        if (bitmap != null) {
+            ThumbView target = thumbs.get(key);
+            if (target != null) target.setShot(bitmap);
         }
-        if (bitmap == null) return;
-        ThumbView target = thumbs.get(key);
-        if (target != null) target.setShot(bitmap);
+        if (!nextHint.equals(shotHint)) {
+            shotHint = nextHint;
+            rebuild();
+        }
     }
 
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {

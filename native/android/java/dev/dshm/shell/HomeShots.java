@@ -48,7 +48,13 @@ final class HomeShots {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<String, Entry> cache = new ConcurrentHashMap<String, Entry>();
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
-    private long lastAttemptAt = 0L;
+    /**
+     * ★★ 节流**按机器**记 ✗ —— 原先是一个 `long` 给所有机器共用 ✓：
+     *   于是"给 A 取过一张"会把 B、C 的时间窗也占掉 ✓
+     *   ⇒ 三台电脑的首页上，**只有一台能在每个窗口里拿到图** ✓（另两台一直是示意屏 ✓），
+     *   而且看起来完全正常 ✓（"怎么有的有图有的没有"✓）。
+     */
+    private final Map<String, Long> lastAttemptAt = new ConcurrentHashMap<String, Long>();
 
     HomeShots(HomePinSource pins, Sink sink) {
         this.pins = pins;
@@ -59,6 +65,18 @@ final class HomeShots {
     Bitmap cached(String key) {
         Entry entry = key == null ? null : cache.get(key);
         return entry == null ? null : entry.bitmap;
+    }
+
+    /**
+     * ★ 这次抓取**失败之后**，界面上该显示哪张 ✓ —— 就是 {@link HomeShot#showShot} 那条规矩 ✓：
+     *   **手上有图就还是那张** ✗（绝不因为一次失败抹成空白 ✓）。
+     *
+     * ★ 为什么要有这个方法 ✗：`HomeShot.showShot` 原先**没人调** ✓ ——
+     *   一条"有断言守着的规矩"却不在任何一条执行路径上 ✓（测试全绿、行为照旧 ✗）。
+     */
+    Bitmap shownAfter(boolean fetchFailed, String key) {
+        Bitmap held = cached(key);
+        return HomeShot.showShot(held != null, fetchFailed) ? held : null;
     }
 
     long ageOf(String key, long now) {
@@ -74,7 +92,8 @@ final class HomeShots {
     void maybeRequest(String key, String authority, boolean homeVisible) {
         if (key == null || key.isEmpty() || authority == null || authority.isEmpty()) return;
         long now = System.currentTimeMillis();
-        if (!HomeShot.shouldFetch(homeVisible, lastAttemptAt, inFlight.contains(key),
+        Long last = lastAttemptAt.get(key);
+        if (!HomeShot.shouldFetch(homeVisible, last == null ? 0L : last.longValue(), inFlight.contains(key),
                 cached(key) != null, Math.max(-1L, ageOf(key, now)), now, HomeShot.MIN_INTERVAL_MS, HomeShot.TTL_MS)) {
             return;
         }
@@ -86,7 +105,7 @@ final class HomeShots {
             return;
         }
         if (!inFlight.add(key)) return;
-        lastAttemptAt = now;
+        lastAttemptAt.put(key, Long.valueOf(now));
         final String url = "https://" + authority + "/mobile/desktop/shot";
         Thread worker = new Thread(new Runnable() {
             @Override
@@ -111,7 +130,7 @@ final class HomeShots {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        sink.onShot(key, result != null ? result : cached(key), message);
+                        sink.onShot(key, result != null ? result : shownAfter(true, key), message);
                     }
                 });
             }
