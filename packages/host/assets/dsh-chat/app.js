@@ -65,6 +65,24 @@ const page = mountChat({
     void loadSessions()
     return poller.refreshNow()
   },
+  /**
+   * 新建一个会话 ✓（没有它，一台还没有会话的手机**什么也做不了** ✗）。
+   * 页面那边（`ui.js` 的「＋ 新会话」）已经把"切换状态"置好了 ✓：
+   * 旧内容先留着，等新会话的**第一趟回应**到了才替换 ✓。
+   */
+  onCreate: function () {
+    return rpc('mobile/dsh/create', {}).then(function (value) {
+      const created = value !== null && typeof value === 'object' && typeof value.sessionId === 'string' ? value.sessionId : ''
+      if (created.length === 0) throw new Error('DSH 没给出新会话的 id')
+      currentId = created
+      received = 0
+      return loadSessions()
+    }).then(function () {
+      return poller.refreshNow()
+    }).catch(function (error) {
+      page.handlers.onError('新建会话失败：' + (error instanceof Error ? error.message : String(error)))
+    })
+  },
   send: function (text) {
     return rpc('mobile/dsh/send', { sessionId: currentId, text: text }).then(function () {
       return poller.refreshNow()
@@ -79,7 +97,14 @@ const poller = new ChatPoller({
     // ★ 刻意不用 sinceSeq 拼游标（语义未验 ✓）—— 每趟取最近一窗，去重收敛 ✓
     void sinceSeq
     if (currentId.length === 0) return Promise.resolve([])
-    return rpc('mobile/dsh/read', { sessionId: currentId, maxMessages: WINDOW }).then(function (value) {
+    /**
+     * ★★ 这一趟是"发给哪个会话"的，**在发出去之前记下来** ✓。
+     *   慢网 + 用户切换 ⇒ 旧会话的答案会**晚于**切换到达 ✓：
+     *   不认这一条，那一批事件会被当成新会话的内容画上去 ✓（张冠李戴 ✓，而且看不出来 ✗）。
+     */
+    const requested = currentId
+    return rpc('mobile/dsh/read', { sessionId: requested, maxMessages: WINDOW }).then(function (value) {
+      if (requested !== currentId) return [] // 过期答案 ⇒ 作废（也不许改游标/连接状态 ✗）
       page.setConnection('online')
       const events = value !== null && typeof value === 'object' && Array.isArray(value.events) ? value.events : []
       if (typeof value.sessionId === 'string' && value.sessionId.length > 0) currentId = value.sessionId

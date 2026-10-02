@@ -36,7 +36,7 @@ const ASSETS = join(HERE, '..', 'packages', 'host', 'assets', 'dsh-chat')
 const KEEP = process.argv.includes('--keep')
 
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 12
+const EXPECTED_MIN_CHECKS = 15
 
 let checks = 0
 let failed = 0
@@ -74,7 +74,15 @@ const FAKE_BOOT = `
       rpc: function (method, payload) {
         calls.push(method)
         if (method === 'mobile/dsh/sessions') return ok({ ok: true, sessions: sessions })
-        if (method === 'mobile/dsh/read') return ok({ ok: true, sessionId: 's-1', events: events, hasMore: false })
+        if (method === 'mobile/dsh/read') {
+          var want = payload && payload.args ? payload.args.sessionId : ''
+          if (want === 's-new') return ok({ ok: true, sessionId: 's-new', events: [], hasMore: false })
+          return ok({ ok: true, sessionId: 's-1', events: events, hasMore: false })
+        }
+        if (method === 'mobile/dsh/create') {
+          sessions = sessions.concat([{ id: 's-new', title: '新会话', updatedAt: 999 }])
+          return ok({ ok: true, sessionId: 's-new' })
+        }
         if (method === 'mobile/dsh/send') {
           var text = payload && payload.args ? payload.args.text : ''
           sent.push(text)
@@ -116,8 +124,28 @@ const FAKE_BOOT = `
       box.value = '这条是端到端检查发出去的'
       box.dispatchEvent(new Event('input'))
       form.dispatchEvent(new Event('submit', { cancelable: true }))
-      // 把"跑完了"写在 DOM 上 ⇒ dump-dom 有个稳定标记可等 ✓
-      setTimeout(function () { document.documentElement.setAttribute('data-e2e', 'done') }, 300)
+      /*
+       * ★ --dump-dom 只给一帧（虚拟时钟跑完那一帧）✗ ⇒ 想看两个阶段就得跑两趟 ✓：
+       *   ?phase=sent   ⇒ 只看"发出去之后"（那时旧会话的内容还在 ✓）
+       *   ?phase=create ⇒ 再点一次「＋ 新会话」（看"切到空会话之后"✓）
+       * ★ 注意：这段是**模板字符串**里的内容 ✗ —— 里面不许出现反引号，
+       *   我第一次就在这儿写了反引号，把 FAKE_BOOT 整段截断了 ✓（与 codex 页那条教训同款 ✓）。
+       */
+      var phase = new URLSearchParams(location.search).get('phase') || 'sent'
+      if (phase !== 'create') {
+        setTimeout(function () { document.documentElement.setAttribute('data-e2e', 'sent') }, 300)
+        return
+      }
+      // 会话列表可能还没到 ⇒ 等一拍再点开标题 ⇒ 再点「＋ 新会话」✓
+      setTimeout(function () {
+        var title = document.getElementById('title')
+        if (title !== null) title.dispatchEvent(new Event('click'))
+        setTimeout(function () {
+          var create = document.querySelector('.session-create')
+          if (create !== null) create.dispatchEvent(new Event('click'))
+          setTimeout(function () { document.documentElement.setAttribute('data-e2e', 'done') }, 600)
+        }, 250)
+      }, 400)
     }, 300)
   })
 })()
@@ -217,22 +245,28 @@ const base = `http://127.0.0.1:${setup.port}`
 console.log(`[check-chat-page] 假宿主 http://127.0.0.1:${setup.port} ✓（/mobile/chat + 假 boot.js）`)
 
 try {
-  console.log('\n── 正向：假隧道在 ⇒ 页面应当把宿主给的东西都画出来 ──')
-  const html = await dumpDom(`${base}/mobile/chat`, 'data-e2e="done"', 40_000)
-  const probe = await dumpDom(`${base}/mobile/chat`, 'data-e2e="done"', 5_000)
+  console.log('\n── 正向（第一趟 · 发出去之后）：页面应当把宿主给的东西都画出来 ──')
+  const html = await dumpDom(`${base}/mobile/chat?phase=sent`, 'data-e2e="sent"', 40_000)
 
   // ★ 夹具自检：页面确实跑到了"发完"那一步（否则下面每一条都可能是在空 DOM 上"通过" ✗）
-  check('夹具自检：页面跑完了测试驱动（DOM 上有 data-e2e=done）', html.includes('data-e2e="done"'))
+  check('夹具自检：页面跑完了测试驱动（DOM 上有 data-e2e=sent）', html.includes('data-e2e="sent"'))
   check('夹具自检：产品页面里**没有**开发壳那行内部读数（说明发的是产品页 ✓）', !html.includes('dev：'))
-  check('夹具自检：页面确实问过 mobile/dsh/sessions 与 read（说明隧道被用上了 ✓）', probe.length > 0)
+  check('夹具自检：会话列表已到（标题来自宿主 ✓ —— 说明隧道被用上了 ✓）', html.includes('换图标那两个标签'))
 
-  check('会话标题出现在页头上（来自宿主给的会话列表 ✓）', html.includes('换图标那两个标签'))
+  check('页头显示的是当前会话的标题 ✓', html.includes('换图标那两个标签'))
   check('用户消息被画出来了', html.includes('把首页那两颗图标的圆角再收一点'))
   check('助手消息被画出来了', html.includes('我把圆角从 14 收到 12'))
   check('审批卡片被画出来了，且选项按钮是**置灰**的（不假装能用 ✓）', html.includes('允许一次') && /class="approval-option"[^>]*disabled/.test(html))
   check('★ 认不出的事件类型也画了出来（没有静默丢弃 ✓）', html.includes('someUnknownEvent'))
   check('★ 发出去的这条以用户气泡出现在页面上（走的是真实提交路径 ✓）', html.includes('这条是端到端检查发出去的'))
   check('发送之后输入框是空的（清空立刻 ✓）', !/id="input"[^>]*>这条是端到端检查发出去的</.test(html))
+
+  console.log('\n── 正向（第二趟 · 新建会话之后）：切到空会话，旧内容必须让位 ──')
+  const after = await dumpDom(`${base}/mobile/chat?phase=create`, 'data-e2e="done"', 40_000)
+  check('夹具自检：第二趟也跑完了（DOM 上有 data-e2e=done）', after.includes('data-e2e="done"'))
+  check('★ 新建的会话出现在页头上（走的是真实点击路径 ✓）', after.includes('新会话'))
+  check('★★ 切到空会话后，**上一个会话的消息必须消失**（成功返回空也要清 ✓）', !after.includes('把首页那两颗图标的圆角再收一点'))
+  check('★★ 而且不许白屏：空会话该显示"还没有内容"✓', after.includes('还没有内容'))
 
   console.log('\n── 反向：假隧道缺席 ⇒ 页面必须落到"读不出来"，而不是白屏 ──')
   const noTunnelSetup = await serve('no-tunnel')

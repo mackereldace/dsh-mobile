@@ -49,6 +49,7 @@ export const DSH_CHAT_PATHS = {
   sessions: 'mobile/dsh/sessions',
   read: 'mobile/dsh/read',
   send: 'mobile/dsh/send',
+  create: 'mobile/dsh/create',
 } as const
 
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
@@ -71,6 +72,7 @@ export async function handleDshChatEndpoint(
   if (endpoint === DSH_CHAT_PATHS.sessions) return listSessions(deps, signal)
   if (endpoint === DSH_CHAT_PATHS.read) return readPage(deps, args, signal)
   if (endpoint === DSH_CHAT_PATHS.send) return sendPrompt(deps, args, signal)
+  if (endpoint === DSH_CHAT_PATHS.create) return createSession(deps, args, signal)
   return undefined
 }
 
@@ -104,6 +106,35 @@ async function sendPrompt(deps: DshChatDeps, args: Record<string, unknown>, sign
   }
   const value = unwrap(await deps.call('session/prompt', { args: { request } }, signal))
   return { ok: true, requestId, mode, sessionId, value: value === undefined ? null : value }
+}
+
+/**
+ * 新建一个会话 ✓（`session/create` ✓）。
+ *
+ * ★ 为什么需要它 ✗：没有它，**一个还没有会话的手机什么也做不了** ✓ ——
+ *   输入框发出去只会得到一个"缺 sessionId"的错 ✓（用户被卡死 ✓）。
+ *
+ * ★ 形状是**实测**的（`37` 号探针从 `0.2.0-rc.2` 的 `$schema` 里读的 ✓）：
+ *   参数名 `request` ✓，`invocation: direct` ✓；请求字段有
+ *   `workspaceId` / `cwd` / `sessionId` / `agentPreset` / `address` ✓；返回里带 `sessionId` ✓。
+ *   ★ 但**哪些字段是必填的没验过** ✗ ⇒ 这里**只搬调用方真给了的** ✓，
+ *     其余交给 DSH 自己决定 ✓；它要是缺必填项，会把原因写在错误里 ✓（那时把原文给用户 ✓）。
+ */
+async function createSession(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const request: Record<string, unknown> = {}
+  for (const key of ['cwd', 'workspaceId', 'agentPreset'] as const) {
+    const value = args[key]
+    if (typeof value === 'string' && value.length > 0) request[key] = value
+  }
+  const value = unwrap(await deps.call('session/create', { args: { request } }, signal))
+  const sessionId = value !== null && typeof value === 'object' && typeof (value as Record<string, unknown>)['sessionId'] === 'string'
+    ? ((value as Record<string, unknown>)['sessionId'] as string)
+    : ''
+  if (sessionId.length === 0) {
+    // ★ 拿不到会话 id 就算失败 ✓ —— 界面上"以为建好了、其实没有"比报错糟得多 ✗
+    throw Object.assign(new Error('DSH 建了会话但没给出会话 id'), { code: ErrorCode.Internal })
+  }
+  return { ok: true, sessionId }
 }
 
 // ────────────────────────────── 归一化（都是纯函数 ✓，单测直接打 ✓）──────────────────────────────

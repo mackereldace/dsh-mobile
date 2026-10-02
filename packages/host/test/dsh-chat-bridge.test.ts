@@ -203,3 +203,34 @@ describe('pageRequest：游标**原样透传**（不发明语义）', () => {
     assert.equal('throughSeq' in request, false)
   })
 })
+
+
+describe('mobile/dsh/create：没有会话的手机也能开工', () => {
+  it('只搬调用方真给了的字段（cwd / workspaceId / agentPreset），其余交给 DSH', async () => {
+    const { call, calls } = fakeGateway({ 'session/create': { ok: true, value: { sessionId: 's-new' } } })
+    const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.create, args({ cwd: '/tmp/mobile', 乱入: 1 }))) as {
+      ok: boolean
+      sessionId: string
+    }
+    assert.equal(result.ok, true)
+    assert.equal(result.sessionId, 's-new')
+    assert.equal(calls[0]?.endpoint, 'session/create')
+    assert.deepEqual(calls[0]?.payload, { args: { request: { cwd: '/tmp/mobile' } } })
+  })
+
+  it('什么都不给 ⇒ 发一个空 request（让 DSH 自己决定），不替它编参数', async () => {
+    const { call, calls } = fakeGateway({ 'session/create': { ok: true, value: { sessionId: 's-1' } } })
+    await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.create, args({}))
+    assert.deepEqual(calls[0]?.payload, { args: { request: {} } })
+  })
+
+  it('★ DSH 没给出会话 id ⇒ **算失败**（"以为建好了、其实没有"比报错糟得多）', async () => {
+    const { call } = fakeGateway({ 'session/create': { ok: true, value: {} } })
+    await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.create, args({})), /会话 id/)
+  })
+
+  it('网关说 ok:false ⇒ 把原文抛出来（手机上要能念）', async () => {
+    const { call } = fakeGateway({ 'session/create': { ok: false, error: { message: '没有工作区' } } })
+    await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.create, args({})), /没有工作区/)
+  })
+})

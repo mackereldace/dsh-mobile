@@ -482,12 +482,17 @@ export function filterSessions(sessions, query) {
 /**
  * ★ 新到的一批事件该**替换**还是**追加** ✓。
  *
- * 只有一种情况替换 ✓：**正等着切换** 且 这一批**有内容** ✓。
- * 其余一律追加 ✓（包括"切换中但这一批是空的"✓ —— 那时候旧内容还得留着 ✓）。
+ * ★★ 判据是"**切换之后的第一趟回应**"，不是"这一趟有内容" ✗ ——
+ *   我原先写的是后者 ✓，结果：切到一个**空会话**时，旧会话的消息会**一直留在屏上** ✗
+ *   （"成功返回了空"本来就是一句明确的话："这个会话没有内容"✓，该清就清 ✓）。
+ *   而"切换**还没**收到任何回应"那段时间仍然留着旧内容 ✓ —— 那才是要避免白屏的那一段 ✓。
+ *
+ * @param {boolean} pendingSwitch 正等着切换 ✓
+ * @param {boolean} sawResponse 切换之后**是否已经收到过**一趟回应 ✓
  */
-export function resolveDelivery(pendingSwitch, events) {
-  const has = Array.isArray(events) && events.length > 0
-  if (pendingSwitch === true && has) return 'replace'
+export function resolveDelivery(pendingSwitch, sawResponse, events) {
+  void events
+  if (pendingSwitch === true && sawResponse !== true) return 'replace'
   return 'append'
 }
 
@@ -656,6 +661,8 @@ export function mountChat(options) {
   let currentSessionId = ''
   /** ★ 正等着切换（**旧内容留在原地** ✓，等新会话第一批到了才替换 ✗）。 */
   let pendingSwitch = false
+  /** 切换之后是否已经收到过一趟回应 ✓（用来判"该不该把旧内容换掉"✓）。 */
+  let sawResponseSinceSwitch = false
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
   /** ★ 由下面赋值（输入区那一段）—— `paint` 里会调它 ✓。
@@ -705,6 +712,22 @@ export function mountChat(options) {
   const paintSessions = () => {
     if (sessionPanel === null || sessionPanel === undefined) return
     sessionPanel.innerHTML = ''
+    // ★ 「＋ 新会话」—— 没有它，一个还没有会话的手机**什么也做不了** ✗
+    //   （输入框发出去只会得到"缺 sessionId"的错 ✓）
+    const createRow = document.createElement('button')
+    createRow.type = 'button'
+    createRow.className = 'session-row session-create'
+    createRow.textContent = '＋ 新会话'
+    createRow.addEventListener('click', () => {
+      hideSessions()
+      // ★ 与"切到某个已有会话"同一套状态 ✓：旧内容先留着，等新会话的**第一趟回应**到了才替换 ✓
+      pendingSwitch = true
+      sawResponseSinceSwitch = false
+      paint()
+      if (typeof options.onCreate === 'function') options.onCreate()
+    })
+    sessionPanel.appendChild(createRow)
+
     const ordered = sortSessions(sessions)
     if (ordered.length === 0) {
       const empty = document.createElement('div')
@@ -741,6 +764,7 @@ export function mountChat(options) {
         // ★ 切走前先把当前草稿**存进柜子** ✓（切回来字还在 ✓）
         if (input !== null && input !== undefined) drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
         pendingSwitch = true
+        sawResponseSinceSwitch = false
         hideSessions()
         paint()
         if (typeof options.onSwitch === 'function') options.onSwitch(item.id)
@@ -786,18 +810,20 @@ export function mountChat(options) {
   }
 
   const handleEvents = (events) => {
+    const willReplace = resolveDelivery(pendingSwitch, sawResponseSinceSwitch, events) === 'replace'
+    if (pendingSwitch) sawResponseSinceSwitch = true
+    if (willReplace) {
+      // ★ 第一趟回应到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓；空会话也该清 ✓）
+      list.innerHTML = ''
+      eventCount = 0
+      pendingSwitch = false
+      paintSessions()
+    }
     if (Array.isArray(events) && events.length > 0) {
       error = ''
       // ★ 刻意**不**在这里清临时消息 ✗：那样"没发出去：…（字还在输入框里）"会被
       //   下一趟历史轮询**冲掉** ✓ —— 用户根本没看清就没了 ✓（与"字丢了"同一类伤害 ✓）。
       //   清空时机只有**用户的下一次动作**：再发一次 ✓ / 点刷新 ✓。
-      if (resolveDelivery(pendingSwitch, events) === 'replace') {
-        // ★ 新会话的第一批到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓）
-        list.innerHTML = ''
-        eventCount = 0
-        pendingSwitch = false
-        paintSessions()
-      }
       eventCount += events.length
       appendEvents(list, events)
     }

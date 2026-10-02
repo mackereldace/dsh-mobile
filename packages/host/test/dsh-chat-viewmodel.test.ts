@@ -351,18 +351,20 @@ describe('会话过滤：空查询就是全部', () => {
 })
 
 describe('★ 切换：替换还是追加（决定"切换时会不会白屏"）', () => {
-  it('★★ 等着切换 + 这一批有内容 ⇒ **替换**（这时候才清屏）', () => {
-    assert.equal(resolveDelivery(true, [{ seq: 1 }]), 'replace')
+  it('★★ 切换后的**第一趟回应**（此前没收到过）⇒ 替换 —— 哪怕它是空的（空会话也要把旧内容清掉）', () => {
+    assert.equal(resolveDelivery(true, false, [{ seq: 1 }]), 'replace')
+    assert.equal(resolveDelivery(true, false, []), 'replace')
   })
 
-  it('★★ 等着切换但这一批是空的 ⇒ **追加**（旧内容还得留着，不许白屏）', () => {
-    assert.equal(resolveDelivery(true, []), 'append')
-    assert.equal(resolveDelivery(true, null), 'append')
+  it('★★ 切换之后**已经收到过回应**了 ⇒ 后续一律追加（不然每趟都把画面重画一遍 ✗）', () => {
+    assert.equal(resolveDelivery(true, true, [{ seq: 2 }]), 'append')
+    assert.equal(resolveDelivery(true, true, []), 'append')
   })
 
-  it('没在切换 ⇒ 一律追加', () => {
-    assert.equal(resolveDelivery(false, [{ seq: 1 }]), 'append')
-    assert.equal(resolveDelivery(undefined, [{ seq: 1 }]), 'append')
+  it('没在切换 ⇒ 一律追加（不管收没收到过回应）', () => {
+    assert.equal(resolveDelivery(false, true, [{ seq: 1 }]), 'append')
+    assert.equal(resolveDelivery(false, false, [{ seq: 1 }]), 'append')
+    assert.equal(resolveDelivery(undefined, undefined, [{ seq: 1 }]), 'append')
   })
 })
 
