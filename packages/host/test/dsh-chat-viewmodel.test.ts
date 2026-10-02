@@ -9,9 +9,14 @@ import { describe, it } from 'node:test'
 
 import {
   MAX_VISIBLE_LINES,
+  canSend,
   classify,
+  composerHeight,
   computePageState,
   isFailure,
+  sendBegin,
+  sendFailureHint,
+  sendSettled,
   textOf,
   titleFor,
   toViewModel,
@@ -237,5 +242,57 @@ describe('computePageState：三种"没内容"的屏 + 一条压倒一切的规�
     assert.equal(computePageState({}).kind, 'empty')
     assert.equal(computePageState({ eventCount: '12' }).kind, 'empty')
     assert.equal(computePageState({ error: 42 }).kind, 'empty')
+  })
+})
+
+
+describe('输入区：能不能发 / 高度 / ★ 失败不许丢字', () => {
+  it('空与纯空白都不能发（按了没反应最糟 ⇒ 由按钮禁用挡住）', () => {
+    assert.equal(canSend({ text: '' }), false)
+    assert.equal(canSend({ text: '   \n  ' }), false)
+    assert.equal(canSend({ text: '在' }), true)
+    assert.equal(canSend(null), false)
+  })
+
+  it('正在发 / 断线 ⇒ 不能发', () => {
+    assert.equal(canSend({ text: '甲', sending: true }), false)
+    assert.equal(canSend({ text: '甲', connection: 'offline' }), false)
+    assert.equal(canSend({ text: '甲', connection: 'online' }), true)
+  })
+
+  it('输入框高度夹在 min..max 之间（超过就自己滚，别把消息区挤没）', () => {
+    assert.equal(composerHeight(10, 38, 132), 38)
+    assert.equal(composerHeight(80, 38, 132), 80)
+    assert.equal(composerHeight(999, 38, 132), 132)
+    assert.equal(composerHeight(0, 38, 132), 38)
+    assert.equal(composerHeight(-5, 38, 132), 38)
+  })
+
+  it('★★ 按下发送那一刻：输入框清空、但**原文留了一份**', () => {
+    const begun = sendBegin('这段字打了两分钟')
+    assert.equal(begun.draft, '')
+    assert.equal(begun.pending, '这段字打了两分钟')
+  })
+
+  it('★★ 成功 ⇒ 留存丢掉；失败 ⇒ **原文放回输入框**（这是本轮最要紧的一条）', () => {
+    const ok = sendSettled(true, '甲')
+    assert.equal(ok.draft, '')
+    assert.equal(ok.pending, null)
+    const fail = sendSettled(false, '甲')
+    assert.equal(fail.draft, '甲')
+    assert.equal(fail.pending, null)
+  })
+
+  it('失败那句话必须**说清字还在**（别只写"失败"）', () => {
+    const hint = sendFailureHint('隧道断了')
+    assert.ok(hint.includes('隧道断了'))
+    assert.ok(hint.includes('还在'))
+    assert.ok(sendFailureHint('').includes('没发出去'))
+  })
+
+  it('坏输入不抛（sendBegin / sendSettled 收到非字符串）', () => {
+    assert.equal(sendBegin(null).pending, '')
+    assert.equal(sendSettled(false, null).draft, '')
+    assert.equal(sendSettled(undefined, '甲').draft, '甲')
   })
 })

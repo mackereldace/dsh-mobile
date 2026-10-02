@@ -157,10 +157,23 @@
     { seq: 8, time: 8, type: 'someUnknownEvent', data: { whatever: 1 } },
   ]
 
+  // ★ 开发壳专有：把页面里的 JS 错误**抓下来画在屏幕上** ✓
+  //   （"点了没反应"最难查 ✓ —— 这一行让它在截图里自证 ✓）
+  const devErrors = []
+  window.addEventListener('error', (e) => devErrors.push('error: ' + e.message))
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason = e.reason
+    devErrors.push('rejection: ' + (reason !== null && typeof reason === 'object' ? reason.message : String(reason)))
+  })
+
   let received = 0
   const page = mountChat({
     root: document,
     send: async (text) => {
+      if (devState === 'send-fail') {
+        // ★ 立刻失败（不加假延迟）：渲染脚本用的是虚拟时钟，带延迟的失败会被截在"发送中…"那一步 ✗
+        throw new Error('隧道断了：socket closed')
+      }
       page.appendEvents([{ seq: null, time: Date.now(), type: 'userMessage', data: { text } }])
     },
   })
@@ -181,6 +194,17 @@
   const refresh = document.querySelector('#refresh')
   if (refresh !== null) refresh.addEventListener('click', () => { void poller.refreshNow() })
 
+  // ★ 开发态 `?send=fail`：填一段草稿 ⇒ **触发真实的提交路径** ⇒ 发送失败
+  //   ⇒ 期望：输入框里**字还在**（这是本轮最要紧的一条 ✓），状态行说明白 ✓
+  if (devState === 'send-fail') {
+    const box = document.querySelector('#input')
+    box.value = '这段字打了两分钟，发失败也必须还在——把首页那两颗图标的圆角再收一点，另外底部标签的间距我看还可以再紧 2px。'
+    box.dispatchEvent(new Event('input'))
+    setTimeout(() => {
+      document.querySelector('#composer').dispatchEvent(new Event('submit', { cancelable: true }))
+    }, 400)
+  }
+
   if (devState === 'offline') page.setConnection('offline')
   poller.start()
 
@@ -190,7 +214,16 @@
   dev.textContent = 'dev：' + (devState || 'normal')
   document.querySelector('.app').insertBefore(dev, document.querySelector('#messages').parentElement)
   setInterval(() => {
-    dev.textContent = 'dev：' + (devState || 'normal') + '｜游标 ' + String(poller.cursor) + '｜状态 ' + page.state().kind
+    // ★ 开发壳把**输入区的真实状态**也画出来 ✓ —— 截图本身就是证据 ✓
+    //   （"发送中"卡住 / 草稿丢没丢，一眼就能看出来 ✓）
+    const box = document.querySelector('#input')
+    const btn = document.querySelector('#composer button')
+    dev.textContent = 'dev：' + (devState || 'normal')
+      + '｜游标 ' + String(poller.cursor)
+      + '｜状态 ' + page.state().kind
+      + '｜按钮 ' + (btn === null ? '?' : btn.textContent) + (btn !== null && btn.disabled ? '(禁用)' : '')
+      + '｜草稿 ' + String(box === null ? 0 : box.value.length) + ' 字'
+      + (devErrors.length > 0 ? '｜✗ ' + devErrors.join(' / ') : '')
   }, 250)
 </script>
 </body>

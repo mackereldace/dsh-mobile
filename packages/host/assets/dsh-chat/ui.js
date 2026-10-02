@@ -253,6 +253,66 @@ function toolCard(view) {
 }
 
 /**
+ * 输入区的三条纯判断 ✓（不碰 DOM ⇒ 能断言 ✓）。
+ *
+ * ## ★ 最要紧的一条规矩：**发出去的字不许凭空消失** ✗
+ *
+ * "点了发送 ⇒ 输入框清空 ⇒ 结果没发出去 ⇒ 字没了" ✓ 是聊天页最气人的一种失败 ✓
+ * （用户刚打完一长段，还得重打 ✗）。⇒ 本文件的口径是：
+ * **清空要立刻**（手感 ✓）、**但那份内容先留着**（{@link sendBegin} ✓），
+ * **失败就原样放回去**（{@link sendSettled} ✓）并明说"字还在输入框里" ✓。
+ */
+
+/** 现在能不能发 ✓（空 / 空白 / 正在发 / 断线 ⇒ 都不能 ✓ —— 别让用户按了没反应 ✗）。 */
+export function canSend(input) {
+  const text = input !== null && typeof input === 'object' && typeof input.text === 'string' ? input.text : ''
+  if (text.trim().length === 0) return false
+  if (input !== null && typeof input === 'object' && input.sending === true) return false
+  if (input !== null && typeof input === 'object' && input.connection === 'offline') return false
+  return true
+}
+
+/** 输入框高度：跟着内容长，但夹在 `min..max` 之间 ✓（超过就自己滚 ✓，不许把消息区挤没 ✗）。 */
+export function composerHeight(scrollHeightPx, minPx, maxPx) {
+  const raw = typeof scrollHeightPx === 'number' && scrollHeightPx > 0 ? scrollHeightPx : 0
+  const min = typeof minPx === 'number' && minPx > 0 ? minPx : 0
+  const max = typeof maxPx === 'number' && maxPx > 0 ? maxPx : 0
+  if (max <= 0) return Math.max(min, raw)
+  if (raw < min) return min
+  if (raw > max) return max
+  return raw
+}
+
+/**
+ * 按下发送的那一刻 ✓：**输入框立刻清空**（手感 ✓），但把原文**留一份** ✓。
+ *
+ * @returns {{ draft: string, pending: string }}
+ */
+export function sendBegin(text) {
+  const value = typeof text === 'string' ? text : ''
+  return { draft: '', pending: value }
+}
+
+/**
+ * 这一次发完了 ✓：成功 ⇒ 那份留存丢掉 ✓；失败 ⇒ **原文放回输入框** ✓ + 一句说明 ✓。
+ *
+ * @param {boolean} ok
+ * @param {string} pending
+ * @returns {{ draft: string, pending: null, error: string }}
+ */
+export function sendSettled(ok, pending) {
+  const value = typeof pending === 'string' ? pending : ''
+  if (ok === true) return { draft: '', pending: null, error: '' }
+  return { draft: value, pending: null, error: '' }
+}
+
+/** 失败时给用户的那句话 ✓（**别只说"失败"** ✗ —— 要说清字还在 ✓）。 */
+export function sendFailureHint(message) {
+  const why = typeof message === 'string' && message.length > 0 ? message : '没发出去'
+  return '没发出去：' + why + '（字还在输入框里）'
+}
+
+/**
  * 这一页**现在该显示哪种状态** ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能断言 ✓）。
  *
  * ## ★ 一条压倒一切的规矩：**已经有内容时，错误与断线只进状态行，绝不覆盖画面** ✗
@@ -324,10 +384,24 @@ export function mountChat(options) {
   let loading = false
   let error = ''
   let connection = 'unknown'
+  /**
+   * 状态行的**临时消息** ✓（"发送中…"/"已发出"/"没发出去：…"✓）。
+   *
+   * ★ 为什么单独一条通道 ✗：状态行平时由 `paint()` 按页面状态写 ✓，
+   *   而 `paint()` 会被任何一次事件到达触发 ✓ ⇒ 临时消息必须**优先级更高** ✓，
+   *   否则"没发出去：…（字还在输入框里）"会被下一趟轮询**立刻冲掉** ✗ ——
+   *   用户根本没看清就没了 ✓（这跟"字丢了"是同一类伤害 ✓）。
+   *   清空时机：新事件到达 ✓ / 用户点刷新 ✓ / 下一次发送 ✓。
+   */
+  let notice = ''
+  /** ★ 由下面赋值（输入区那一段）—— `paint` 里会调它 ✓。
+   *  刻意**不**用"事后包一层 paint"的写法 ✗：那既容易写成 `const` 重赋值（运行时才炸 ✓），
+   *  也正是上一轮记下的坏味道（别靠改别人的东西接线 ✓）。 */
+  let paintComposer = () => {}
 
   const paint = () => {
     const view = computePageState({ loading, eventCount, error, connection })
-    if (status !== null && status !== undefined) status.textContent = view.statusText
+    if (status !== null && status !== undefined) status.textContent = notice.length > 0 ? notice : view.statusText
     if (typeof options.onStatus === 'function') options.onStatus(view.statusText)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true
@@ -346,6 +420,8 @@ export function mountChat(options) {
         stateBox.appendChild(card)
       }
     }
+    // ★ 输入区的可用状态跟着页面状态走 ✓（断线时那颗按钮要立刻变灰 ✓）
+    paintComposer()
   }
 
   /**
@@ -356,10 +432,19 @@ export function mountChat(options) {
    *   `mountChat` 收到的是新字面量、而 poller 持有的是**另一个** options 对象 ⇒
    *   处理器根本没接上 ⇒ 画面空白、**渲染脚本的体积从 258KB 掉到 72KB 才露馅** ✗）。
    */
+  /** 写一条临时消息 ✓（并立刻重画 ✓）。 */
+  const setNotice = (text) => {
+    notice = typeof text === 'string' ? text : ''
+    paint()
+  }
+
   const handleEvents = (events) => {
     if (Array.isArray(events) && events.length > 0) {
       eventCount += events.length
       error = ''
+      // ★ 刻意**不**在这里清临时消息 ✗：那样"没发出去：…（字还在输入框里）"会被
+      //   下一趟历史轮询**冲掉** ✓ —— 用户根本没看清就没了 ✓（与"字丢了"同一类伤害 ✓）。
+      //   清空时机只有**用户的下一次动作**：再发一次 ✓ / 点刷新 ✓。
       appendEvents(list, events)
     }
     loading = false
@@ -376,26 +461,74 @@ export function mountChat(options) {
     refresh.addEventListener('click', () => {
       loading = true
       error = ''
+      notice = ''
       paint()
       if (typeof options.onRefresh === 'function') options.onRefresh()
     })
   }
 
 
+  // ── 输入区：清空要立刻（手感 ✓），但失败**把字放回去**（见 canSend/sendBegin/sendSettled ✓）──
+  let sending = false
+  const sendButton = form === null || form === undefined ? null : form.querySelector('button')
+
+  const growInput = () => {
+    if (input === null || input === undefined || input.style === undefined) return
+    try {
+      input.style.height = 'auto'
+      input.style.height = composerHeight(input.scrollHeight, 38, 132) + 'px'
+    } catch (error) {
+      void error
+    }
+  }
+
+  paintComposer = () => {
+    if (input !== null && input !== undefined) input.disabled = sending
+    if (sendButton !== null && sendButton !== undefined) {
+      sendButton.disabled = sending || !canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection })
+      sendButton.textContent = sending ? '发送中…' : '发送'
+    }
+  }
+
+  if (input !== null && input !== undefined) {
+    input.addEventListener('input', () => {
+      growInput()
+      paintComposer()
+    })
+  }
+
   if (form !== null && form !== undefined) {
     form.addEventListener('submit', async (submitEvent) => {
       if (submitEvent.preventDefault) submitEvent.preventDefault()
-      const text = input === null || input === undefined ? '' : String(input.value || '').trim()
-      if (text.length === 0) return
-      input.value = ''
-      try {
-        await options.send(text)
-        setStatus('已发出')
-      } catch (error) {
-        setStatus('发送失败：' + (error instanceof Error ? error.message : String(error)))
+      const current = input === null || input === undefined ? '' : String(input.value || '')
+      if (!canSend({ text: current, sending, connection })) {
+        // ★ 按了没反应是最糟的 ✓ —— 断线时说清楚 ✓
+        if (connection === 'offline') setNotice('断线中，等连上再发（字还在）')
+        return
       }
+      const begun = sendBegin(current)
+      if (input !== null && input !== undefined) input.value = begun.draft
+      sending = true
+      growInput()
+      paintComposer()
+      setNotice('发送中…')
+      try {
+        await options.send(begun.pending)
+        sending = false
+        sendSettled(true, begun.pending)
+        setNotice('已发出')
+      } catch (error) {
+        // ★★ 失败 ⇒ **原文放回输入框** ✗（"发出去的字突然没了"是我最想避免的一种）
+        const settled = sendSettled(false, begun.pending)
+        if (input !== null && input !== undefined) input.value = settled.draft
+        sending = false
+        growInput()
+        setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
+      }
+      paintComposer()
     })
   }
+
   paint()
   return {
     /** ★ 交给 `new ChatPoller({ …page.handlers })` ✓ */

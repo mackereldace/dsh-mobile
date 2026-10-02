@@ -13,7 +13,10 @@
  * 3. **本机文件沙箱里必须 `--no-sandbox`** ✗（否则 Chrome 自己的 macOS sandbox 起不来、
  *    GPU 进程直接 FATAL ✓）。
  *
- * 用法：`node docs/native/shot-chat.mjs [--out /tmp]`
+ * 用法：
+ *   node docs/native/shot-chat.mjs                    # 正常态（浅/暗各一张）
+ *   node docs/native/shot-chat.mjs --state error      # 某种状态屏（empty/loading/error/offline/send-fail）
+ *   node docs/native/shot-chat.mjs --out /tmp         # 指定输出目录
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
