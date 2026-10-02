@@ -571,7 +571,25 @@ export function apply(ctx, config = {}) {
         // 真实运行时版本（诊断字段）。**不要**再写死任何具体版本 ✗：
         // 原先是 `process.env['DSH_VERSION'] ?? '0.1.5-rc.1'`，而 DSH 从不设置
         // `DSH_VERSION`（全包 grep 命中 0 次）→ 升级后手机会永远报旧版本（见 dsh-version.ts）。
-        dshVersion: resolveDshRuntimeVersion({ dshHome }),
+        dshVersion: resolveDshRuntimeVersion({
+            dshHome,
+            /**
+             * ★ `exactOptionalPropertyTypes: true` ✗ —— 所以**不能**直接把 `string | undefined`
+             *   赋给可选属性 ✓（我第一次就是这么写的，`npm run build` 当场报 TS2379 ✓）。
+             *   按本项目既有写法用**条件展开** ✓：没这个字段时就不放这个键 ✓。
+             */
+            ...(process.resourcesPath === undefined
+                ? {}
+                : { resourcesPath: process.resourcesPath }),
+            /**
+             * ★★ 把宿主进程的 Electron resources 目录传进去 ✗ ——
+             *   于是版本探测**先**读正在跑的那个 app 里那份 `dsh/package.json` ✓
+             *   （2026-10-04：用户报"明明是 0.2.0 桌面版却显示 0.1.5-rc.2"✓ ——
+             *    因为原先那条路在桌面版里**根本解析不到** ✓，读到的是进程启动时的旧值 ✓；
+             *    重启之后还会退化成 `unknown` ✗。见 `dsh-version.ts` 的模块说明 ✓。）
+             * ★ 非 Electron 环境（独立服务 / 本仓库跑测试 ✓）里它是 undefined ✓ ⇒ 自动跳过 ✓。
+             */
+        }),
         ...(bootScript === undefined ? {} : { bootScript }),
         trustedHosts,
         ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0

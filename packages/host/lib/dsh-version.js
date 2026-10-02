@@ -31,6 +31,24 @@
  * 两个来源都拿不到时回 **`'unknown'`** ✓ —— 绝不再写死某个具体版本 ✗。
  * `'unknown'` 是诚实的"不知道"，而不是一个会被误读的假版本号 ✓。
  *
+ * ## ★★ 为什么**先**读"正在运行的那个 app"（2026-10-04 被真机上的错版本号逼出来）
+ *
+ * 用户报："版本号没读对，生产实例明明是 0.2.0 桌面版，却显示 0.1.5-rc.2" ✓。查下去发现：
+ *
+ * · 桌面版磁盘上的 `app.asar` 里 `dsh/package.json` 是 **0.2.0-rc.2** ✓；
+ * · 而从**插件自己的模块路径**按 Node 规则解析 `@deepseek-ai/dsh-app-boot/package.json`
+ *   **解析失败** ✗（仓库 `node_modules` 里根本没有它 ✓）；
+ * · `$DSH_HOME/profiles/node_modules` 那层镜像**也不存在** ✗
+ * ⇒ 也就是说：这套探测**压根找不到"正在运行的那个 DSH"** ✓ ——
+ *   它报出来的 0.1.5-rc.2 是**进程启动那一刻**读到的旧值 ✓，
+ *   而**重启之后它会退化成 `unknown`** ✗（比报旧版本更糟 ✓）。
+ *
+ * ⇒ 加一条**最权威**的来源：宿主进程自己的 Electron resources 目录 ✓
+ *   （`process.resourcesPath` ✓）⇒ 读 `<resources>/app.asar/dsh/package.json` ✓ ——
+ *   **那就是此刻正在跑的那份代码** ✓，也是 `getDshRuntimeVersion()` 想表达的东西 ✓。
+ *   它排在 `resolve` 与 `profiles/node_modules` **之前** ✗（前面那些描述的是"某个安装副本"✓，
+ *   而这里描述的是"**此刻在跑的这个**"✓）。
+ *
  * ## 为什么除 Node 解析外还要查 `$DSH_HOME/profiles/node_modules`
  *
  * 插件是被**复制**到 `<DSH_HOME>/profiles/web/node_modules/@dsh-mobile/host/` 再加载的
@@ -78,6 +96,21 @@ export function moduleFallbackManifestPaths(dshHome) {
         return [];
     return MANIFEST_SPECIFIERS.map((specifier) => join(dshHome, 'profiles', 'node_modules', specifier));
 }
+/**
+ * ★★ 正在运行的那个 DSH app 的清单路径 ✓（Electron 打包形态 ✓）。
+ *
+ * · 打包后：`<resources>/app.asar/dsh/package.json` ✓（Electron 的 fs 能直接读 asar 内部 ✓）；
+ * · 也有解包形态：`<resources>/app.asar.unpacked/dsh/package.json` ✓ ⇒ 两条都试 ✓；
+ * · `resourcesPath` 没给（非 Electron ✓）⇒ 空数组 ✓。
+ */
+export function runtimeAppManifestPaths(resourcesPath) {
+    if (resourcesPath === undefined || resourcesPath.length === 0)
+        return [];
+    return [
+        join(resourcesPath, 'app.asar', 'dsh', 'package.json'),
+        join(resourcesPath, 'app.asar.unpacked', 'dsh', 'package.json'),
+    ];
+}
 function defaultResolve(specifier) {
     return createRequire(import.meta.url).resolve(specifier);
 }
@@ -88,6 +121,15 @@ function defaultResolve(specifier) {
  * @returns app-boot 的 version → CLI 的 version → `'unknown'`。**永不返回写死的版本号** ✓。
  */
 export function resolveDshRuntimeVersion(sources = {}) {
+    /**
+     * ★★ **先**读"正在跑的那个 app" ✗ —— 它才是 `getDshRuntimeVersion()` 想表达的东西 ✓
+     *   （下面那两条描述的是"某个安装副本"✓，混版时可能与正在跑的那份不同 ✓）。
+     */
+    for (const manifestPath of runtimeAppManifestPaths(sources.resourcesPath)) {
+        const version = readManifestVersion(manifestPath);
+        if (version !== undefined)
+            return version;
+    }
     const resolve = sources.resolve ?? defaultResolve;
     for (const specifier of MANIFEST_SPECIFIERS) {
         try {
