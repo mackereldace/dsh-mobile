@@ -30,7 +30,13 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..')
 const roots = [join(repoRoot, 'native', 'android', 'java'), join(repoRoot, 'native', 'android', 'test')]
 
-const isCjk = (ch) => ch !== '' && /[\u3400-\u9fff\uf900-\ufaff]/.test(ch)
+/**
+ * ★★ "两侧"的判据：中日韩文字 **或全角标点** ✓。
+ *   ★ 2026-10-04 补全角标点 ✗：我写了一句 `（"它们确实是存在的"✗` ✓ ——
+ *   那个引号左边是全角括号 `（`（U+FF08 ✓，**不在** CJK 区 ✓）⇒ 旧判据**静默漏掉**了它 ✗，
+ *   直到 javac 报错 ✓ ⇒ 守卫漏报比误报更糟 ✓（它会让人以为"这条有人看着"✓）。
+ */
+const isCjk = (ch) => ch !== '' && /[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch)
 
 /** 这一行里有没有"两侧都是中文"的双引号 ✓（逐字符扫，避开正则转义地狱 ✓）。 */
 function scanLine(line) {
@@ -54,6 +60,8 @@ const SELF_TEST = [
   { line: 'check("★ 说它是「未知」那台", x);', mustFlag: false, why: '正确的写法（用「」✓）' },
   { line: 'String js = "…tick(\\\'" + name + "\\\')…";', mustFlag: false, why: 'JS 片段跨行拼接（合法的奇数引号 ✓）' },
   { line: "case '\"': out.append(\"\\\\\\\"\"); break;", mustFlag: false, why: '字符字面量（合法的引号 ✓）' },
+  // ★ 漏报过的那种形状 ✓（引号左边是**全角括号**，不是汉字 ✓）
+  { line: 'check("（"它们确实是存在的"✗）", x);', mustFlag: true, why: '全角括号旁边的半角引号（2026-10-04 真漏过 ✓）' },
 ]
 
 let selfTestFailures = 0
@@ -66,8 +74,8 @@ for (const sample of SELF_TEST) {
     console.log(`    期望 ${sample.mustFlag ? '抓到' : '放过'}，实际 ${got ? '抓到' : '放过'} ✗`)
   }
 }
-if (SELF_TEST.length < 4) {
-  console.log('✗ 自检样例少于 4 条 —— 有人删了体检项 ✗')
+if (SELF_TEST.length < 5) {
+  console.log('✗ 自检样例少于 5 条 —— 有人删了体检项 ✗')
   selfTestFailures += 1
 }
 console.log(`守卫自检：${SELF_TEST.length - selfTestFailures} ✓ / ${selfTestFailures} ✗（共 ${SELF_TEST.length} 条样例 ✓）`)

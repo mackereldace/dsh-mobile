@@ -368,6 +368,52 @@ public final class HomeModel {
             }
         }
 
+        /**
+         * ★★★ ③' **机器级归并**（2026-10-04 用户纠正后的做法 ✓）。
+         *
+         * 用户原话："我说的是你识别出来的那三个电脑啊，你把端口都合并了，
+         * 但实际上**它们确实是存在的**呀"✓ —— 两句话分别对应两件事 ✗：
+         *   · "那三个电脑" ⇒ 同一台 Mac 不该有**三张卡** ✓（要**一张** ✓）；
+         *   · "端口确实是存在的" ⇒ 那些端口**不许被合并掉** ✓（每个端口各自一行 ✓）。
+         *
+         * 做法：**没身份**（没有指纹 ✓）的地址，只要**主机对得上**某台**已识别**的机器，
+         * 就**并进那台机器** ✓ —— 卡片合成一张 ✓，而桶里每一行**原样保留** ✓
+         * （于是每个端口仍是自己的一行 ✓，信息一点没少 ✓）。
+         *
+         * 判据（两条都很硬 ✓，不是猜 ✗）：
+         *   (a) 主机名去掉 `.local`、不分大小写之后，**等于那台机器的名字**
+         *       （探测到的 `machineName` ✓ —— `Mac-mini-2024.local:3733` 对上 `Mac-mini-2024` ✓）；
+         *   (b) 或者这个主机**本来就是那台机器的一个地址** ✓（同主机、不同端口 ✓）。
+         * ★ 对不上就**照旧自己一张卡** ✓（"不许猜"那条精神不变 ✓）。
+         */
+        LinkedHashMap<String, List<Row>> attributed = new LinkedHashMap<String, List<Row>>();
+        for (Map.Entry<String, List<Row>> entry : byMachine.entrySet()) {
+            if (machineFingerprint.containsKey(entry.getKey())) {
+                attributed.put(entry.getKey(), entry.getValue());
+                continue;
+            }
+            String host = stripLocalSuffix(hostnameOf(entry.getValue().get(0).authority)).toLowerCase();
+            String target = null;
+            for (Map.Entry<String, List<Row>> candidate : attributed.entrySet()) {
+                if (!machineFingerprint.containsKey(candidate.getKey())) continue;
+                String candidateName = probedMachineName(candidate.getValue()).toLowerCase();
+                String candidateHost = stripLocalSuffix(hostnameOf(candidate.getKey().substring("host:".length()))).toLowerCase();
+                boolean match = (!host.isEmpty() && host.equals(candidateName))
+                        || (!host.isEmpty() && host.equals(candidateHost));
+                for (int i = 0; i < candidate.getValue().size() && !match; i += 1) {
+                    String other = stripLocalSuffix(hostnameOf(candidate.getValue().get(i).authority)).toLowerCase();
+                    if (!host.isEmpty() && host.equals(other)) match = true;
+                }
+                if (match) {
+                    target = candidate.getKey();
+                    break;
+                }
+            }
+            if (target == null) attributed.put(entry.getKey(), entry.getValue());
+            else attributed.get(target).addAll(entry.getValue());
+        }
+        byMachine = attributed;
+
         // ④ 机器名：目录里的人工 label（**非占位** ✓）> 探测到的 machineName（去掉 `.local` ✓）> 主机名 ✓。
         List<Machine> machines = new ArrayList<Machine>();
         int onlineCount = 0;
@@ -431,8 +477,13 @@ public final class HomeModel {
              * ⇒ 代价：这类地址不能从首页点进去了 ✓ —— 它们本来点了也只会被弹回来 ✓，
              *   真要连新地址走「＋ 添加电脑 / ⌨ 手输地址」✓。
              */
-            if (!known && !anyReachable && !machineCurrent) continue;
-
+            /**
+             * ★★★ 2026-10-04 **再改**（用户纠正）：这里原先会**隐藏**"三无卡"✗ ——
+             *   用户原话："我说的是你识别出来的那三个电脑啊，你把端口都合并了，
+             *   但实际上**它们确实是存在的**呀"✓。
+             *   ⇒ **不隐藏** ✗；它们该做的是**并进那台电脑**（见下面 ③' 的机器级归并 ✓），
+             *     而每个端口**各自保留一行** ✓。
+             */
             if (anyReachable) onlineCount += 1;
             else if (anyProbed) offlineCount += 1;
             else unknownCount += 1;
@@ -490,23 +541,16 @@ public final class HomeModel {
             Probe probe = row.probe;
             boolean up = probe != null && probe.reachable && !probe.hostId.trim().isEmpty();
             /**
-             * ★★★ 2026-10-04（用户截图的第二层同一问题）：**带不来身份的行，并进那个已识别的实例** ✓。
-             *
-             * 截图里那张在线卡下面挂着四行"端口 … · 局域网 · 身份未知 · 没响应" ✓ ——
-             * 它们**不是别的智能体** ✗：它们带着**同一枚指纹**（目录记录里的 slots ✓）
-             * ⇒ 分组时早就归到这台机器了 ✓，只是**那几条地址现在不通** ✓、
-             * 拿不到 `hostId` ⇒ 于是各自成行 ✗（同一台电脑内部又"裂"了一次 ✓）。
-             *
-             * ★ 这不是"猜" ✗：指纹已经把话说死了 ✓（是同一台电脑 ✓）；
-             *   要决定的只是"显示成**一个智能体的几条地址** ✓，还是**几个智能体** ✗" ✓。
-             *   前者对 ✓ —— 因为"智能体"是按 `hostId` 算的 ✓，而它们**没有** `hostId` ✓。
-             *
-             * ★ 什么时候不并（保守 ✓）：桶里没有已识别的 ✗、或有**多个**已识别的 ✗
-             *   ⇒ 不敢说它是哪一个 ✓ ⇒ 照旧各成一行 ✓。
+             * ★★★ 2026-10-04 **再改**（用户纠正）：这里原先把"带不来身份的行"**并进那个已识别实例** ✗
+             *   ⇒ 同一台 Mac 的四个端口被合成了"几条地址" ✓ —— 而用户的话是：
+             *   "你把端口都合并了，但实际上**它们确实是存在的**呀"✓
+             *   ⇒ 那些端口是**真实存在的服务**（3082 独立服务 / 3091 明文 / 3444 独立服务 TLS / 3453 TLS ✓）
+             *   ⇒ **每个端口各自成一行** ✓（信息不许抹掉 ✗）。
+             *   ★ 于是回到这条**保守**判据 ✓：只有"**当前那条、且没被探过**"才并进去 ✓
+             *     （那是第 40 轮为"当前智能体不算两台"修的 ✓，与端口无关 ✓）。
              */
-            boolean noIdentity = !up;
-            boolean mergeIntoIdentified = noIdentity && onlyIdentified != null
-                    && (row.authority.equals(currentHost) || probe == null || !probe.reachable);
+            boolean mergeIntoIdentified = !up && onlyIdentified != null && probe == null
+                    && row.authority.equals(currentHost);
             String key = up ? "hid:" + probe.hostId.trim() : (mergeIntoIdentified ? onlyIdentified : "addr:" + row.authority);
             List<Row> group = byInstance.get(key);
             if (group == null) {
@@ -635,6 +679,17 @@ public final class HomeModel {
         }
         int colon = text.indexOf(':');
         return colon >= 0 ? text.substring(0, colon) : text;
+    }
+
+    /** 这个桶里**探测到的**机器名（去掉 `.local` ✓）；没有 ⇒ 空串 ✓。 */
+    private static String probedMachineName(List<Row> rows) {
+        for (int i = 0; i < rows.size(); i += 1) {
+            Probe probe = rows.get(i).probe;
+            if (probe != null && probe.reachable && !probe.machineName.trim().isEmpty()) {
+                return stripLocalSuffix(probe.machineName.trim());
+            }
+        }
+        return "";
     }
 
     /** `host:port` ⇒ 端口 ✓（缺省按协议补：调用方给不出 ⇒ 空串 ✓）。 */

@@ -34,7 +34,7 @@ public final class HomeModelTest {
      * "删掉几条断言"在输出上表现为"更短的全绿"，与"全都验过了"长得一模一样。
      * 只认**实际跑过**的条数。**只许上调**。
      */
-    private static final int EXPECTED_MIN_CHECKS = 82;
+    private static final int EXPECTED_MIN_CHECKS = 86;
 
     public static void main(String[] args) {
         currentAgentAndSameMachineAgentsAreOneMachine();
@@ -279,20 +279,23 @@ public final class HomeModelTest {
          *   这条地址**既没被并进**已知那台（下面直接查它的地址列表 ✓），
          *   **也没被单独显示**出来 ✓ —— 它只是不存在于界面上 ✓。
          */
-        check("★ 三无地址（没身份 + 不通 + 不是当前）⇒ **不显示**（不是单独一张卡 ✗）",
-                snapshot.machines.size() == 1);
-        /** ★ 只看**已知那台**的地址列表 ✗ —— "不许猜"说的正是这件事 ✓（不是"它不存在于任何地方"✓）。 */
-        boolean mergedIntoKnown = false;
-        for (int i = 0; i < snapshot.machines.size(); i += 1) {
-            HomeModel.Machine machine = snapshot.machines.get(i);
-            if (!machine.known) continue;
-            for (int j = 0; j < machine.instances.size(); j += 1) {
-                for (int k = 0; k < machine.instances.get(j).addresses.size(); k += 1) {
-                    if (machine.instances.get(j).addresses.get(k).authority.equals("10.34.255.229:3999")) mergedIntoKnown = true;
-                }
+        /**
+         * ★★★ 2026-10-04 **按用户纠正后的意图**（原话："我说的是你识别出来的那三个电脑啊，
+         *   你把端口都合并了，但实际上**它们确实是存在的**呀"✓）：
+         *   · 同一**主机**的另一个端口（哪怕探不通、目录里没记 ✓）⇒ **并进那台机器** ✓
+         *     （卡片只有一张 ✓ —— 不允许同一台电脑裂成两张卡 ✗）；
+         *   · ★ 而它**自己仍是一行** ✓（那个端口是真实存在的 ✓，信息不许抹掉 ✗）。
+         */
+        check("★★ 同一主机的另一个端口 ⇒ **并进那台机器**（不裂成两张卡 ✓）", snapshot.machines.size() == 1);
+        HomeModel.Machine only = snapshot.machines.get(0);
+        boolean portHasItsOwnRow = false;
+        for (int j = 0; j < only.instances.size(); j += 1) {
+            for (int k = 0; k < only.instances.get(j).addresses.size(); k += 1) {
+                if (only.instances.get(j).addresses.get(k).authority.equals("10.34.255.229:3999")) portHasItsOwnRow = true;
             }
         }
-        check("★★ 而它也**没有**被并进已知那台（不许猜 ✗ —— 这才是这条用例的本意 ✓）", !mergedIntoKnown);
+        check("★★★ 而且那个端口**仍是一行/一条地址** ✓（「它们确实是存在的」✗ —— 不许合并掉 ✓）", portHasItsOwnRow);
+        check("★ 于是这台机器下有 **2 个实例行**（探通的那个 + 那个端口 ✓）", only.instances.size() == 2);
         check("★ 剩下那张就是已知那台（在线 ✓）", snapshot.machines.get(0).online && snapshot.machines.get(0).known);
     }
 
@@ -348,6 +351,9 @@ public final class HomeModelTest {
         records.add(record);
         List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
         endpoints.add(new HomeModel.Slot("https://100.123.136.82:3453/mobile/app", ""));
+        // ★ 用户截图里那条**自成一张卡**的 mDNS 地址（端口 3733 ✓）——
+        //   它没有指纹 ✓，但主机名就是这台机器的名字 ⇒ 该并进来 ✓
+        endpoints.add(new HomeModel.Slot("https://Mac-mini-2024.local:3733/mobile/app", ""));
 
         HomeModel.Input input = new HomeModel.Input(records, endpoints, "100.123.136.82:3453",
                 "https://100.123.136.82:3453/mobile/app", probes);
@@ -360,14 +366,38 @@ public final class HomeModelTest {
         check("★ 名字用目录里那个（Mac mini 2024 ✓）", "Mac mini 2024".equals(machine.name));
         check("★ 它是「当前」那台 ✓", machine.current);
         /**
-         * ★ 7 = 目录里那 6 条 + 当前那条 Tailscale（端点槽给的 ✓）——
-         *   我第一版断言写的是 6 ✗（**自己算错了数** ✓；模型是对的 ✓，
-         *   靠一次临时调试打印才看清真实形状 ✓）。
+         * ★★★ 用户纠正后的口径 ✗：**每个端口各自一行** ✓（它们真实存在 ✓）——
+         *   所以这里**不**断言"一个实例"✗，而是断言"**每个端口都在** ✓、
+         *   而机器只有**一张卡** ✓"（两者同时成立才是他要的 ✓）。
          */
-        check("★ 七条地址都在**同一个实例**下面（旧地址只是没响应 ✓，不是别的智能体 ✗）",
-                machine.instances.size() == 1 && machine.instances.get(0).addresses.size() == 7);
+        /**
+         * ★★★ 改成"**这几条地址必须在同一张卡里**"✗ —— 而不是看 `machines.get(0)` ✓。
+         *   ★ 原因是变异验证抓到的 ✗：原先那版靠"第一张卡的次序"碰巧通过 ✓
+         *     （把归并取消掉、次序一变，它照样绿 ✗）⇒ **断言不硬** ✓。
+         */
+        int tailscaleCard = cardIndexOf(snapshot, "100.123.136.82:3453");
+        int lanPortCard = cardIndexOf(snapshot, "10.34.255.229:3453");
+        int mdnsPortCard = cardIndexOf(snapshot, "Mac-mini-2024.local:3733");
+        check("★ Tailscale 那条在一张卡里 ✓", tailscaleCard >= 0);
+        check("★ 局域网那个端口也在（各自一行 ✓，没被合并掉 ✗）", lanPortCard >= 0);
+        check("★★★ 三条地址**同属一张卡**（原先那条 mDNS 自成一张 ✗ ⇒ 这就是「一台电脑被拆开」✓）",
+                tailscaleCard >= 0 && tailscaleCard == lanPortCard && tailscaleCard == mdnsPortCard);
+        check("★ 端口各自成行 ⇒ 实例行数 > 1 ✓（不是被压成「一个智能体」✗）", machine.instances.size() > 1);
         check("★ 计数：1 台在线、0 台离线/未知（幽灵卡不再计数 ✗）",
                 snapshot.onlineCount == 1 && snapshot.offlineCount == 0 && snapshot.unknownCount == 0);
+    }
+
+    /** 这条地址落在**第几张卡**里（-1 = 哪张都没有 ✓）—— 用它来断言"同属一张卡" ✓。 */
+    private static int cardIndexOf(HomeModel.Snapshot snapshot, String authority) {
+        for (int i = 0; i < snapshot.machines.size(); i += 1) {
+            HomeModel.Machine machine = snapshot.machines.get(i);
+            for (int j = 0; j < machine.instances.size(); j += 1) {
+                for (int k = 0; k < machine.instances.get(j).addresses.size(); k += 1) {
+                    if (machine.instances.get(j).addresses.get(k).authority.equals(authority)) return i;
+                }
+            }
+        }
+        return -1;
     }
 
     // ───────────────────────── 小工具 ─────────────────────────

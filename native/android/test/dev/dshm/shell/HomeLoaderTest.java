@@ -271,20 +271,8 @@ public final class HomeLoaderTest {
     private static void throwingProbeIsJustUnreachable() {
         FakeProbes probe = new FakeProbes();
         probe.throwAlways = true;
-        /**
-         * ★★ 2026-10-04：给这条地址**配一条目录记录** ✗ ——
-         *   否则它就成了"三无地址"（没身份 + 不通 + 不是当前 ✓）
-         *   ⇒ 被新规矩**隐藏** ✗ ⇒ 这个用例会 `找不到 host:10.0.2.1 对应的机器` 而**抛异常** ✓
-         *   （★ 那次是 `check-all` 抓到的 ✓ —— 我只 grep `✗` 时漏看了异常行 ✗，
-         *    整套跑会把它标成"这道没过" ✓。这条纪律值得记：**异常不等于没有失败行** ✓）。
-         *   ⇒ 本用例要验的是"**探测函数抛异常 ⇒ 当不可用**"✓，
-         *     那就该让这台机器**看得见**（有指纹 ⇒ 永远显示 ✓）✓。
-         */
-        List<HomeModel.HostRecord> withRecord = records(
-                new HomeModel.HostRecord("FP-THROW", "抛异常的机器",
-                        new ArrayList<String>(java.util.Arrays.asList("https://10.0.2.1:3443/mobile/app")), 1L));
         HomeLoader.Source source = source(
-                withRecord,
+                new ArrayList<HomeModel.HostRecord>(),
                 slots("https://10.0.2.1:3443"),
                 "10.0.0.9:3443",
                 pins("10.0.2.1:3443", "CA"),
@@ -293,8 +281,8 @@ public final class HomeLoaderTest {
 
         HomeLoader.Result result = HomeLoader.load(source);
         check("探测函数抛异常 ⇒ 不炸（当不可用）", result.report.unreachable.contains("10.0.2.1:3443"));
-        check("抛异常那条机器标离线（不是「未知」）", machineByKey(result, "fp:FP-THROW").offline);
-        check("抛异常那条的实例身份也是未知（没探到 hostId）", !machineByKey(result, "fp:FP-THROW").instances.get(0).identified);
+        check("抛异常那条机器标离线（不是「未知」）", machineByKey(result, "host:10.0.2.1").offline);
+        check("抛异常那条的实例身份也是未知（没探到 hostId）", !machineByKey(result, "host:10.0.2.1").instances.get(0).identified);
     }
 
     private static void parallelismDoesNotChangeTheResult() {

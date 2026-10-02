@@ -125,6 +125,19 @@ public final class HomeRealDataTest {
          * ★★★ 2026-10-04 **反向修正**：两条**都要探** ✓（原先钉的是"当前那条被跳过"✗）——
          *   跳过当前那条 ⇒ 它没有指纹 ⇒ 同一台 Mac **裂成两张卡** ✓（用户真机报的 ✓）。
          */
+        /**
+         * ★★★ 加一条硬的 ✗（变异验证逼出来的 ✓）：夹具里那三条**旧端口**（3082/3091/3444 ✓）
+         *   必须**待在这一张卡里** —— 它们是这台机器上的端口 ✓，不是另外三台电脑 ✗。
+         *   （只断言"卡数 == 1"不够硬 ✓：次序一变它就可能碰巧通过 ✓。）
+         */
+        /**
+         * ★★ 判据写成"**同属一张卡**"✗（不写"在 0 号卡里"✓ —— 那又变成靠次序 ✗，
+         *   这件事我在这轮里犯了两次 ✓，第一次是 `HomeModelTest` 那条 ✓）。
+         */
+        check("★★★ 那几条旧端口与那条已识别的地址**同属一张卡**（不是另外三台电脑 ✗）",
+                cardIndexOf(snapshot, ":3082") >= 0
+                        && cardIndexOf(snapshot, ":3082") == cardIndexOf(snapshot, "10.34.255.229:3453"),
+                String.valueOf(probed));
         check("★★★ 两条地址都探了（含当前那条 —— 不探它就会裂成两张卡 ✗）",
                 probed.size() >= 2, String.valueOf(probed));
         /**
@@ -138,6 +151,19 @@ public final class HomeRealDataTest {
         check("★ 给探测用的那条（第二条地址）也在探测列表里 ✓", probedTheOther, String.valueOf(probed));
 
         finish();
+    }
+
+    /** 这条地址落在**第几张卡**里（-1 = 哪张都没有 ✓）—— 用它断言"同属一张卡" ✓。 */
+    private static int cardIndexOf(HomeModel.Snapshot snapshot, String authoritySuffix) {
+        for (int i = 0; i < snapshot.machines.size(); i += 1) {
+            HomeModel.Machine machine = snapshot.machines.get(i);
+            for (int j = 0; j < machine.instances.size(); j += 1) {
+                for (int k = 0; k < machine.instances.get(j).addresses.size(); k += 1) {
+                    if (machine.instances.get(j).addresses.get(k).authority.endsWith(authoritySuffix)) return i;
+                }
+            }
+        }
+        return -1;
     }
 
     private static void finish() {
