@@ -25,9 +25,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { HOME_SOURCES, homeTest, sourceDir, testDir } from './lib/home-sources.mjs'
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const sourceDir = join(repoRoot, 'native', 'android', 'java')
-const testDir = join(repoRoot, 'native', 'android', 'test')
 const outDir = mkdtempSync(join(tmpdir(), 'dshm-home-model-'))
 
 const fail = (message) => {
@@ -37,29 +37,7 @@ const fail = (message) => {
 
 /** 编译用的是**仓库里那份**原文 —— 不是副本、不是重写（副本会"测试过了但壳里是另一份代码"✗）。 */
 const sources = [
-  join(sourceDir, 'dev', 'dshm', 'shell', 'Json.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeModel.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeManifest.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'ManifestProbe.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeLoader.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeStore.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'PinStore.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomePinSource.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeEntry.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeController.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeAnim.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeLabels.java'),
-  join(sourceDir, 'dev', 'dshm', 'shell', 'HomeShot.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeModelTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeManifestTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeLoaderTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeStoreTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomePinSourceTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeEntryTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeControllerTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeAnimTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeLabelsTest.java'),
-  join(testDir, 'dev', 'dshm', 'shell', 'HomeShotTest.java'),
+  ...HOME_SOURCES,
 ]
 
 const testClasses = [
