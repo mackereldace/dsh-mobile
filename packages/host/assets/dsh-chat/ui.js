@@ -93,11 +93,88 @@ export function toViewModel(event) {
   return view
 }
 
+/**
+ * 一条**审批**事件 ⇒ view model ✓（纯函数 ✓）。
+ *
+ * ★★ 三条自我约束（"审批"是**会改变电脑上正在发生的事**的按钮 ✗，比"发送"更该保守 ✓）：
+ *
+ * 1. **解析不出选项 ⇒ 一颗按钮都不给** ✗ —— 页面上写清"选项没解析出来" + 把原文摊开 ✓。
+ *    绝不默认摆一个「允许 / 拒绝」✗：把没看懂的审批按下去，可能会让智能体做用户没同意的事 ✓；
+ * 2. **已经裁决过的**（有对应 `approval/decided` ✓）⇒ 只显示结果，**不再给按钮** ✗；
+ * 3. 认不出的形状 ⇒ **原文照摊** ✓（`raw` ✓）—— 绝不因为"看不懂"就什么都不显示 ✗。
+ *
+ * @param {object} event 事件本身（`{seq,time,type,data}` ✓）
+ * @param {object|null} decided 已经收到的裁决（同一条请求的 `approval/decided` ✓），没有就 null ✓
+ */
+export function toApprovalViewModel(event, decided) {
+  const data = event !== null && typeof event === 'object' && event.data !== null && typeof event.data === 'object' ? event.data : {}
+  const text = textOf(event)
+  const requestId = firstString(data, ['requestId', 'request_id', 'id', 'approvalId'])
+  const title = firstString(data, ['title', 'tool', 'toolName', 'name', 'command']) || '需要你确认'
+  const detail = firstString(data, ['detail', 'description', 'message', 'reason', 'prompt']) || text
+  const options = parseOptions(data)
+  const decision = decided !== null && decided !== undefined
+    ? firstString(decided.data !== null && typeof decided.data === 'object' ? decided.data : {}, ['decision', 'option', 'choice', 'result', 'answer']) || '已处理'
+    : ''
+  return {
+    kind: 'approval',
+    requestId,
+    title,
+    detail,
+    options,
+    decided: decision.length > 0,
+    decision,
+    raw: options.length > 0 ? '' : safeJson(data),
+  }
+}
+
+/** 选项：`options` / `choices` / `actions` 里挑一个数组 ✓；元素可以是字符串或 `{id,label}` ✓。 */
+export function parseOptions(data) {
+  if (data === null || typeof data !== 'object') return []
+  for (const key of ['options', 'choices', 'actions', 'buttons']) {
+    const value = data[key]
+    if (!Array.isArray(value)) continue
+    const out = []
+    for (const item of value) {
+      if (typeof item === 'string' && item.length > 0) {
+        out.push({ id: item, label: item })
+        continue
+      }
+      if (item !== null && typeof item === 'object') {
+        const id = firstString(item, ['id', 'value', 'key', 'action'])
+        const label = firstString(item, ['label', 'title', 'text', 'name']) || id
+        if (id.length > 0) out.push({ id, label: label.length > 0 ? label : id, kind: firstString(item, ['kind', 'tone', 'style']) })
+      }
+    }
+    if (out.length > 0) return out
+  }
+  return []
+}
+
+function firstString(source, keys) {
+  if (source === null || typeof source !== 'object') return ''
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return ''
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value)
+  } catch (error) {
+    return ''
+  }
+}
+
 /** 事件的"种类"⇒ 画法。认不出的一律走 `other`（**仍然画** ✓）。 */
 export function classify(type) {
   const text = typeof type === 'string' ? type.toLowerCase() : ''
   if (text.includes('usermessage') || text.includes('user/') || text.includes('prompt')) return 'user'
   if (text.includes('agentmessage') || text.includes('assistant') || text.includes('message')) return 'agent'
+  // ★ 审批要**排在工具之前**判 ✓ —— `approval/asked` 里没有 tool 字样，但审批常被包在工具事件里 ✓
+  if (text.includes('approval') || text.includes('permission')) return 'approval'
   if (text.includes('reasoning') || text.includes('thinking')) return 'reasoning'
   if (text.includes('command') || text.includes('tool') || text.includes('exec')) return 'tool'
   if (text.includes('error') || text.includes('failed')) return 'error'
@@ -139,11 +216,26 @@ export function textOf(event) {
  */
 export function appendEvents(container, events) {
   if (container === null || container === undefined) return
+  /**
+   * ★ 要滚的是**真正的滚动容器** ✗，不是消息列表本身 ✓ ——
+   *   页面结构改成"外层 `main` 滚、里面 `#messages` 只排"之后 ✓，
+   *   再给 `#messages` 设 `scrollTop` 就是一个**静默无效**的赋值 ✓
+   *   ⇒ 表现是"新消息永远在屏幕外、看着像卡住" ✓（本轮截图抓到的就是这个 ✓）。
+   *   若 DOM 结构改回列表自己滚，这里**也**还能对（取到的就是它自己 ✓）。
+   */
+  const scroller = typeof container.closest === 'function'
+    ? (container.closest('main') || container.parentElement || container)
+    : (container.parentElement || container)
+  const follow = shouldAutoScroll(
+    { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight },
+    80,
+  )
   for (const event of Array.isArray(events) ? events : []) {
     const node = renderEvent(event)
     if (node !== null) container.appendChild(node)
   }
-  if (container.scrollHeight !== undefined) container.scrollTop = container.scrollHeight
+  // ★ 用户手动往上翻的时候**不许把他拽回去** ✗（`follow` 是在追加之前量的 ✓）
+  if (follow && typeof scroller.scrollTop === 'number') scroller.scrollTop = scroller.scrollHeight
 }
 
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
@@ -174,6 +266,11 @@ export function renderEvent(event) {
     return wrapper
   }
 
+  if (view.kind === 'approval') {
+    wrapper.appendChild(approvalCard(toApprovalViewModel(event, null)))
+    return wrapper
+  }
+
   if (view.kind === 'step') {
     // ★ 一轮的开始不该是"孤零零一个词" ✓ —— 做成一条带小标签的分隔线 ✓
     //   （`turn/start` 的 data 里带轮号时写"第 N 轮"✓，没有就写事件名 ✓ —— 不编 ✗）
@@ -194,6 +291,67 @@ export function renderEvent(event) {
   fallback.textContent = view.title + (view.text.length > 0 ? '：' + view.text.slice(0, 200) : '')
   wrapper.appendChild(fallback)
   return wrapper
+}
+
+/**
+ * 审批卡片 ✓。
+ *
+ * ★ 按钮**一律置灰**（`disabled` ✓）并且写清原因 ✓ —— 这是本项目的既定纪律：
+ *   **不假装能用** ✗（与首页那两个还没通电的标签同一个处理 ✓）。
+ *   为什么：按下去会**改变电脑上正在发生的事** ✓，而"决策走哪条通道"还没在真机上验过 ✗
+ *   （见 `37-会话页数据面探针.md` §十四 ✓）。等验过再把 `disabled` 摘掉 ✓。
+ */
+function approvalCard(view) {
+  const card = document.createElement('div')
+  card.className = 'approval' + (view.decided ? ' approval-decided' : '')
+
+  const head = document.createElement('div')
+  head.className = 'approval-head'
+  const title = document.createElement('div')
+  title.className = 'approval-title'
+  title.textContent = view.decided ? '已处理：' + view.decision : view.title
+  head.appendChild(title)
+  card.appendChild(head)
+
+  if (view.detail.length > 0) {
+    const detail = document.createElement('pre')
+    detail.className = 'approval-detail'
+    detail.textContent = view.detail
+    card.appendChild(detail)
+  }
+
+  if (!view.decided) {
+    const actions = document.createElement('div')
+    actions.className = 'approval-actions'
+    if (view.options.length > 0) {
+      for (const option of view.options) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'approval-option'
+        button.textContent = option.label
+        button.disabled = true
+        actions.appendChild(button)
+      }
+    } else {
+      const note = document.createElement('div')
+      note.className = 'dim small'
+      note.textContent = '这条审批的选项没能解析出来（原文在下面）—— 先不给你能按的按钮'
+      actions.appendChild(note)
+    }
+    card.appendChild(actions)
+    const why = document.createElement('div')
+    why.className = 'approval-why'
+    why.textContent = '裁决通道还没接通（正在真机上验），所以这里的按钮先置灰'
+    card.appendChild(why)
+  }
+
+  if (view.raw.length > 0) {
+    const raw = document.createElement('pre')
+    raw.className = 'approval-raw'
+    raw.textContent = view.raw
+    card.appendChild(raw)
+  }
+  return card
 }
 
 /**
@@ -250,6 +408,27 @@ function toolCard(view) {
   card.appendChild(head)
   card.appendChild(body)
   return card
+}
+
+/**
+ * 新内容到达时，**要不要自动跟到底部** ✓（纯函数 ✓）。
+ *
+ * 两条都别做错 ✗：
+ * · 不该跟的时候跟了 ⇒ 用户正翻上面的历史，被**一把拽回底部** ✓（很气人 ✓）；
+ * · 该跟的时候没跟 ⇒ 新消息在屏幕外 ✓，用户以为"卡住了" ✓
+ *   （这正是本轮截图暴露的那个 bug：滚动容器改了，`scrollTop` 还设在旧元素上 ✗）。
+ *
+ * @param {{scrollTop:number, scrollHeight:number, clientHeight:number}} metrics 追加**之前**量 ✓
+ * @param {number} nearBottomPx 离底部多近算"还在跟" ✓（默认 80）
+ */
+export function shouldAutoScroll(metrics, nearBottomPx) {
+  const threshold = typeof nearBottomPx === 'number' && nearBottomPx >= 0 ? nearBottomPx : 80
+  if (metrics === null || typeof metrics !== 'object') return true
+  const top = typeof metrics.scrollTop === 'number' ? metrics.scrollTop : 0
+  const height = typeof metrics.scrollHeight === 'number' ? metrics.scrollHeight : 0
+  const client = typeof metrics.clientHeight === 'number' ? metrics.clientHeight : 0
+  if (height <= 0 || client <= 0) return true // 量不出来 ⇒ 当作"在跟" ✓（宁可跟到底 ✓）
+  return height - top - client <= threshold
 }
 
 /**

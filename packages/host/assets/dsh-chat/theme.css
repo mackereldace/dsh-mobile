@@ -101,3 +101,16 @@
     background: var(--rail); color: var(--bg); font: inherit; font-size: 14px; font-weight: 600;
   }
   .homebar { height: 22px; flex: none; background: var(--surface); }
+
+/* ── 审批卡片 ✓（按钮一律置灰 —— 裁决通道还没接通，不假装能用 ✗）── */
+.approval { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.approval-decided { opacity: .72; }
+.approval .approval-head { padding: 9px 12px; border-bottom: 1px solid var(--line-soft); }
+.approval .approval-title { font-size: 13px; font-weight: 650; color: var(--ink); }
+.approval-decided .approval-title { color: var(--ink2); }
+.approval .approval-detail { margin: 0; padding: 9px 12px; background: var(--code-bg); font-size: 12px; line-height: 1.5; color: var(--ink2); white-space: pre-wrap; word-break: break-word; }
+.approval .approval-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px 4px; }
+.approval .approval-option { border: 1px solid var(--line); background: var(--tint); color: var(--ink2); font: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 10px; }
+.approval .approval-option[disabled] { opacity: .55; }
+.approval .approval-why { padding: 0 12px 10px; font-size: 11px; color: var(--ink3); }
+.approval .approval-raw { margin: 0; padding: 9px 12px; background: var(--code-bg); border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.45; color: var(--ink3); white-space: pre-wrap; word-break: break-all; }

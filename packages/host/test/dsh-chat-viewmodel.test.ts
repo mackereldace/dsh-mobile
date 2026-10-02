@@ -16,8 +16,11 @@ import {
   filterSessions,
   getDraft,
   putDraft,
+  parseOptions,
   resolveDelivery,
+  shouldAutoScroll,
   sortSessions,
+  toApprovalViewModel,
   isFailure,
   sendBegin,
   sendFailureHint,
@@ -391,5 +394,83 @@ describe('★ 草稿柜：按会话分开存（切走再切回来，字还在）
     assert.equal(getDraft(null, 's-1'), '')
     assert.equal(getDraft({ 's-1': 42 }, 's-1'), '')
     assert.deepEqual(putDraft({}, '', '甲'), {})
+  })
+})
+
+
+describe('审批：★★ 会改变电脑上正在发生的事，所以比"发送"更保守', () => {
+  it('审批事件被认成一类（排在工具之前判）', () => {
+    assert.equal(classify('approval/asked'), 'approval')
+    assert.equal(classify('permission/request'), 'approval')
+  })
+
+  it('选项从 options / choices / actions 里认，字符串与 {id,label} 都行', () => {
+    assert.deepEqual(parseOptions({ options: [{ id: 'a', label: '允许一次' }, { id: 'b' }] }), [
+      { id: 'a', label: '允许一次', kind: '' },
+      { id: 'b', label: 'b', kind: '' },
+    ])
+    assert.deepEqual(parseOptions({ choices: ['允许', '拒绝'] }), [
+      { id: '允许', label: '允许' },
+      { id: '拒绝', label: '拒绝' },
+    ])
+    assert.equal(parseOptions({ actions: [{ value: 'deny', text: '拒绝' }] })[0].id, 'deny')
+    assert.deepEqual(parseOptions({}), [])
+    assert.deepEqual(parseOptions(null), [])
+  })
+
+  it('★ 解析不出选项 ⇒ **一颗按钮都不给** + 原文照摊（绝不默认摆"允许/拒绝"）', () => {
+    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { requestId: 'ap-2', tool: '写文件', 说不清: true } }, null)
+    assert.equal(view.options.length, 0)
+    assert.ok(view.raw.length > 0)
+    assert.ok(view.raw.includes('说不清'))
+  })
+
+  it('有选项 ⇒ 正常解析出 id 与 label，且 raw 不再需要', () => {
+    const view = toApprovalViewModel(
+      { seq: 1, type: 'approval/asked', data: { requestId: 'ap-1', tool: '执行命令', detail: 'npm test', options: [{ id: 'allow', label: '允许一次' }] } },
+      null,
+    )
+    assert.equal(view.requestId, 'ap-1')
+    assert.equal(view.title, '执行命令')
+    assert.equal(view.detail, 'npm test')
+    assert.equal(view.options.length, 1)
+    assert.equal(view.raw, '')
+    assert.equal(view.decided, false)
+  })
+
+  it('★ 已经裁决过 ⇒ 只显示结果，**不再给按钮**', () => {
+    const decided = { seq: 2, type: 'approval/decided', data: { requestId: 'ap-1', decision: 'allow' } }
+    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { requestId: 'ap-1' } }, decided)
+    assert.equal(view.decided, true)
+    assert.equal(view.decision, 'allow')
+  })
+
+  it('坏输入不抛（null / 没 data / 没 requestId）', () => {
+    const view = toApprovalViewModel(null, null)
+    assert.equal(view.requestId, '')
+    assert.equal(view.options.length, 0)
+    assert.equal(view.decided, false)
+    assert.ok(view.title.length > 0)
+  })
+})
+
+describe('★ 自动跟随：该跟的跟、不该跟的别拽人', () => {
+  it('本来就在底部 ⇒ 跟', () => {
+    assert.equal(shouldAutoScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }), true)
+  })
+
+  it('★ 用户手动往上翻了 ⇒ **不跟**（不许把他一把拽回底部）', () => {
+    assert.equal(shouldAutoScroll({ scrollTop: 100, scrollHeight: 1000, clientHeight: 100 }), false)
+  })
+
+  it('阈值附近：80px 以内算"还在跟"', () => {
+    assert.equal(shouldAutoScroll({ scrollTop: 820, scrollHeight: 1000, clientHeight: 100 }, 80), true)
+    assert.equal(shouldAutoScroll({ scrollTop: 819, scrollHeight: 1000, clientHeight: 100 }, 80), false)
+  })
+
+  it('量不出来（高度 0 / 坏输入）⇒ 当作在跟（宁可跟到底）', () => {
+    assert.equal(shouldAutoScroll({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 }), true)
+    assert.equal(shouldAutoScroll(null), true)
+    assert.equal(shouldAutoScroll({}), true)
   })
 })

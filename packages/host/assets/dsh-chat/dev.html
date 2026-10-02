@@ -75,7 +75,9 @@
         'line 23', 'line 24', 'line 25', 'line 26',
       ].join('\n'), exitCode: 0 } },
     { seq: 7, time: 7, type: 'commandExecution', data: { command: 'adb install -r dist/dsh-mobile.apk', exitCode: 1, output: 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]' } },
-    { seq: 8, time: 8, type: 'someUnknownEvent', data: { whatever: 1 } },
+    { seq: 8, time: 8, type: 'approval/asked', data: { requestId: 'ap-1', tool: '执行命令', detail: 'npm test -- --runInBand\n（会动到 packages/ 下的文件）', options: [{ id: 'allow', label: '允许一次' }, { id: 'allow-always', label: '总是允许' }, { id: 'deny', label: '拒绝' }] } },
+    { seq: 9, time: 9, type: 'approval/asked', data: { requestId: 'ap-2', tool: '写文件', detail: '写入 /tmp/out.log', 说不清: true } },
+    { seq: 10, time: 10, type: 'someUnknownEvent', data: { whatever: 1 } },
   ]
 
   // ★ 开发壳专有：把页面里的 JS 错误**抓下来画在屏幕上** ✓
