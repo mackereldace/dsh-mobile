@@ -99,10 +99,13 @@
   header .sub { margin: 6px 0 0; font-size: 13px; color: var(--ink-2); }
   header .grow { flex: 1; }
   .icon-btn {
-    width: 38px; height: 38px; border: 0; border-radius: 11px; background: transparent;
+    width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 11px; background: transparent;
     color: var(--ink-2); font-size: 19px; line-height: 1; cursor: pointer;
   }
   .icon-btn:active { background: rgba(125, 135, 150, .16); }
+  /* 页头两颗动作图标：与 `native/android/res/drawable/ic_action_*.xml` 同一份路径数据 */
+  .icon-btn svg { width: 21px; height: 21px; display: block; margin: 0 auto; }
+  .icon-btn .ic { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
   main { flex: 1; overflow: auto; padding: 0 14px 16px; }
   .group-label { padding: 12px 8px 8px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
@@ -201,8 +204,17 @@
       <p class="sub">1 台在线，1 台离线，1 个会话在跑</p>
     </div>
     <span class="grow"></span>
-    <button class="icon-btn" title="刷新">⟳</button>
-    <button class="icon-btn" title="配对新电脑">＋</button>
+    <button class="icon-btn" title="刷新">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path class="ic" d="M17.37,6.63 A7.6,7.6 0 1 0 19.6,12"/>
+        <path class="ic" d="M19.6,12 l-3,-1.5 M19.6,12 l-3,1.5"/>
+      </svg>
+    </button>
+    <button class="icon-btn" title="配对新电脑">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path class="ic" d="M12,5.5 v13 M5.5,12 h13"/>
+      </svg>
+    </button>
   </header>
 
   <main>

@@ -1009,6 +1009,9 @@ if (existsSync(aapt2)) {
     ['res/drawable/ic_tab_computer.xml', ['13.6', '19.4']],
     ['res/drawable/ic_tab_sessions.xml', ['20.6', '3.6']],
     ['res/drawable/ic_tab_settings.xml', ['5.6', '1.42']],
+    // 页头那两颗（刷新 / 配对新电脑 ✓）—— 同样是"文件在、却没进资源表"就静默消失的那一类 ✓
+    ['res/drawable/ic_action_refresh.xml', ['17.37', '19.6,12']],
+    ['res/drawable/ic_action_add.xml', ['12,5.5', '5.5,12']],
   ]
   let iconsOk = true
   let iconsDetail = ''
@@ -1033,7 +1036,7 @@ if (existsSync(aapt2)) {
   }
   check(
     iconsOk,
-    '★ 底部标签三颗矢量图在包内且形状与设计稿一致（`ic_tab_computer` 显示器 ✓ / `ic_tab_sessions` 对话气泡 ✓ / `ic_tab_settings` 齿轮——★ 齿必须**咬着环** ✗，留缝在 22px 下看起来是"太阳"☀，第一版就是这么翻的 ✓）',
+    '★ 首页那五颗矢量图在包内且形状与设计稿一致（底部三颗：`ic_tab_computer` 显示器 ✓ / `ic_tab_sessions` 对话气泡 ✓ / `ic_tab_settings` 齿轮——★ 齿必须**咬着环** ✗，留缝在 22px 下看起来是"太阳"☀，第一版就是这么翻的 ✓；页头两颗：`ic_action_refresh` 刷新 ✓ / `ic_action_add` 加号 ✓）',
     iconsDetail.trim(),
   )
 
@@ -1044,11 +1047,14 @@ if (existsSync(aapt2)) {
     'HomePinSource',
     'HomeEntry',
     'HomeController',
+    'HomeWiring',
+    'HomeView',
+    'HomeTheme',
     'dsh-mobile.hosts',
   ]
   check(
     hasAll(nativeHome),
-    '★★ 原生首页那一套在 dex 里（`HomeStore` 读壳身份库/端点槽 ✓ + `HomeLoader` 探哪些与用哪张 CA ✓ + `ManifestProbe` ✓ + `HomePinSource` ✓ + `HomeEntry` 点进哪条地址 ✓ + `HomeController` 合并与线程 ✓ + 身份库键 `dsh-mobile.hosts` ✓ —— 少了任意一个，首页都会"永远空 / 永远未知 / 点了没反应"，而手机上**不报任何错** ✗；它们现在还没被 MainActivity 调用，所以这类事故连症状都没有 ✓）',
+    '★★ 原生首页那一套在 dex 里（`HomeStore` 读壳身份库/端点槽 ✓ + `HomeLoader` 探哪些与用哪张 CA ✓ + `ManifestProbe` ✓ + `HomePinSource` ✓ + `HomeEntry` 点进哪条地址 ✓ + `HomeController` 合并与线程 ✓ + `HomeWiring` 接线 ✓ + `HomeView`/`HomeTheme` 视图与跟随系统的两套色 ✓ + 身份库键 `dsh-mobile.hosts` ✓ —— 少了任意一个，首页都会"永远空 / 永远未知 / 点了没反应"，而手机上**不报任何错** ✗；它们由 MainActivity 在 onCreate 里装上 ✓）',
     missing(nativeHome).length === 0 ? nativeHome.join('、') : `缺 ${missing(nativeHome).join('、')}`,
   )
 }

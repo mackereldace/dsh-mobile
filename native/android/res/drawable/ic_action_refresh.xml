@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  页头「刷新」—— 环形箭头（环 + 右端一个小箭头 ✓）。
+  ★ 与设计稿 `docs/native/home-mock.html` 里那段 SVG **同一份路径数据** ✓。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M17.37,6.63 A7.6,7.6 0 1 0 19.6,12" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M19.6,12 l-3,-1.5 M19.6,12 l-3,1.5" />
+</vector>

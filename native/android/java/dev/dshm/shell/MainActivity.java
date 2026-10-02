@@ -25,6 +25,7 @@ import android.text.InputType;
 import android.util.Base64;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.window.OnBackInvokedCallback;
@@ -387,6 +388,16 @@ public class MainActivity extends android.app.Activity {
     private SharedPreferences prefs;
     private String currentUrl;
 
+    // ── ★★ 原生首页（2026-10-03 起 ✓）──────────────────────────────────
+    //
+    // 形态：**盖在 WebView 上面的一层原生视图** ✓ —— WebView **留在下面继续活着** ✗
+    // （隧道 / 保活 / 通知 / 会话页全在它里面 ✓，销毁它 = 断联 ✗）。
+    // 判断全在 `HomeStore`/`HomeLoader`/`HomePinSource`/`HomeEntry`/`HomeController` 里 ✓
+    // （各有断言守着，见 `10-交接文档` §4.1bg ✓）；这一层只管接线与画 ✓。
+    private HomeView nativeHome;
+    private HomeWiring homeWiring;
+    private HomeController homeController;
+
     // ── ★★ 端点槽状态机（round 129 ✓）────────────────────────────────────
     //
     // 三个动作：**取消**（服务器已经响应了 ⇒ 这一槽有戏 ✓）、
@@ -585,6 +596,7 @@ public class MainActivity extends android.app.Activity {
         root.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        installNativeHome();
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -777,6 +789,7 @@ public class MainActivity extends android.app.Activity {
                 + "px gestureBottom=" + gesture + "px systemGestureBottom=" + systemGesture
                 + "px edgeToEdge=" + edgeToEdge + " density=" + density);
         applyInsetsToPage();
+        applyInsetsToNativeHome();
     }
 
     /**
@@ -3533,6 +3546,21 @@ public class MainActivity extends android.app.Activity {
             view.goBack();
             return true;
         }
+        /**
+         * ★ 2026-10-03：会话页退到根 ⇒ **回原生首页** ✓（不是退到后台 ✗）。
+         *
+         * 为什么加在这一层 ✗：这一段是"没吃掉时干什么"的**唯一**判定处 ✓
+         * （上面那句注释写明了它只回答"要不要吃掉" ✓）—— 所以只动这里，
+         * 两条入口（API 33+ 的手势回调 ✓ 与老 `onBackPressed` ✓）**一起**生效 ✓，
+         * 不会出现"某类设备上少一层"✗。
+         *
+         * 而原生首页已经在最上面时，这一条**不成立** ⇒ 自然落回
+         * {@link #moveToBackground}（= 既有行为 ✓ 一个字没改 ✓）。
+         */
+        if (nativeHome != null && nativeHome.getVisibility() != View.VISIBLE) {
+            showNativeHome();
+            return true;
+        }
         return false;
     }
 
@@ -3627,6 +3655,123 @@ public class MainActivity extends android.app.Activity {
      *   真正回调发生在 key-up ✓（我们自己的 `onKeyDown` 也只是把事件交回 `super` ✓）；
      *   API 33+ 上则是 dispatcher 回调那一次 ✓。两条路互斥，见 {@link #onKeyDown} 的注释 ✓。
      */
+    // ─────────────────────── 原生首页：接线 ───────────────────────
+
+    /**
+     * 把原生首页叠到 WebView 上面 ✓，并把数据那一套接上 ✓。
+     *
+     * ★ 它**一开始就可见** ✓ —— 用户 2026-10-03 明确："目前 uu 那个页面要作为 app 的首页" ✓。
+     *   WebView 照旧在下面加载 ✓（隧道要它 ✓），只是被盖住 ✓。
+     */
+    private void installNativeHome() {
+        try {
+            HomeTheme theme = HomeTheme.forContext(this);
+            nativeHome = new HomeView(this, theme, new HomeView.Callbacks() {
+                @Override
+                public void onRefresh() {
+                    refreshNativeHome();
+                }
+
+                @Override
+                public void onAddComputer() {
+                    startScan();
+                }
+
+                @Override
+                public void onEnter(String url, String authority) {
+                    enterHost(url);
+                }
+            });
+            root.addView(nativeHome, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            nativeHome.setVisibility(View.VISIBLE);
+
+            homeWiring = new HomeWiring(prefs, prefsKv, null);
+            homeController = new HomeController(
+                    HomeWiring.scheduler(new android.os.Handler(getMainLooper())),
+                    homeWiring,
+                    new HomeController.Listener() {
+                        @Override
+                        public void onSnapshot(HomeModel.Snapshot snapshot, HomeLoader.Report report) {
+                            if (nativeHome != null) nativeHome.setSnapshot(snapshot, report);
+                            if (homeWiring != null && report != null) Log.i(TAG, homeWiring.debugLine(report));
+                        }
+
+                        @Override
+                        public void onError(String message) {
+                            if (nativeHome != null) nativeHome.setError(message);
+                            Log.w(TAG, "原生首页加载失败：" + message);
+                        }
+                    });
+            applyInsetsToNativeHome();
+            refreshNativeHome();
+        } catch (Throwable error) {
+            // ★ 原生首页起不来 ⇒ **绝不拖垮整个 App** ✗：WebView 照旧能用 ✓（老路一条没动 ✓）
+            Log.w(TAG, "原生首页没能装上（按没有它继续跑 ✓）", error);
+            nativeHome = null;
+        }
+    }
+
+    /** 请求一次加载 ✓（在飞时由控制器合并 ✓ —— 连点不会开好几趟探测 ✓）。 */
+    private void refreshNativeHome() {
+        if (nativeHome == null || homeController == null || homeWiring == null) return;
+        try {
+            homeWiring.setCurrentUrl(webView == null || webView.getUrl() == null ? currentUrl : webView.getUrl());
+        } catch (Throwable ignored) {
+            homeWiring.setCurrentUrl(currentUrl);
+        }
+        nativeHome.setBusy(true);
+        homeController.refresh();
+    }
+
+    /** 把原生首页抬到最上面 ✓（并顺手刷新一次 ✓）。 */
+    private void showNativeHome() {
+        if (nativeHome == null) return;
+        nativeHome.setVisibility(View.VISIBLE);
+        refreshNativeHome();
+        Log.i(TAG, "回到原生首页");
+    }
+
+    /** 收走原生首页 ⇒ 露出来的就是会话页 ✓。 */
+    private void showWebView() {
+        if (nativeHome == null) return;
+        nativeHome.setVisibility(View.GONE);
+    }
+
+    /**
+     * 从原生首页进某一台智能体 ✓。
+     *
+     * ★ 地址是 `HomeEntry` **早就选好的** ✓（这里**不再挑一次** ✗ —— 两份选路逻辑必然飘 ✓）。
+     *   本方法只做"归一化 + 交给既有换源路径"✓，与网页那条 `switchHost` **同一套** ✓
+     *   （`hostSwitchPending` 那把闸也共用 ✓ ⇒ 连点两下不会叠两次换源 ✓）。
+     */
+    private void enterHost(String url) {
+        final String target = MobileUrl.normalize(url);
+        if (target == null) {
+            Log.w(TAG, "原生首页给的地址认不出（不加载）：" + url);
+            showWebView();
+            promptForAddress(getString(R.string.address_unreadable));
+            return;
+        }
+        if (hostSwitchPending) {
+            Log.i(TAG, "已经在换源了，这一下忽略");
+            return;
+        }
+        hostSwitchPending = true;
+        showWebView();
+        applyHostUrl(target, "原生首页点了智能体");
+    }
+
+    /** insets（**dp** ✓，与写进网页 CSS 的那两个数同源 ✓）。 */
+    private void applyInsetsToNativeHome() {
+        if (nativeHome == null) return;
+        try {
+            nativeHome.applyInsets(safeTopCss, safeBottomCss, density);
+        } catch (Throwable ignored) {
+            // 画不出来也不许影响别处 ✓
+        }
+    }
+
     private void moveToBackground() {
         boolean moved = false;
         try {
@@ -3691,6 +3836,8 @@ public class MainActivity extends android.app.Activity {
     @Override
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        // ★ 跟随系统：浅/暗两套 token 在这里切 ✓（设计稿两张图就是这两套 ✓）
+        if (nativeHome != null) nativeHome.applyTheme(HomeTheme.forContext(this));
         if (root != null) root.requestApplyInsets();
     }
 
