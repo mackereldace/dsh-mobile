@@ -28,8 +28,18 @@ const INTERVAL_MS = 900
 const boot = globalThis.__DSH_MOBILE_BOOT__
 const tunnel = boot !== null && typeof boot === 'object' ? boot.tunnel : null
 
+/**
+ * ★★ 这一条守卫的形状是**端到端检查抓出来的** ✗（第 21 轮）：
+ *   原来是 `tunnel === null || typeof tunnel.rpc !== 'function'` ✓ ——
+ *   可当隧道**整个缺席**时它是 `undefined` ✓，`tunnel === null` 不成立 ✓
+ *   于是紧接着读 `tunnel.rpc` **当场抛 TypeError** ✗（同步抛，不是 reject ✓）。
+ *   后果一路放大 ✓：`loadSessions()` 里那个 `.catch` **根本没挂上** ✗
+ *   ⇒ 模块初始化中断 ⇒ `poller.start()` 从未执行 ⇒ **页面永远停在"还没有内容"** ✗
+ *   ⇒ 在手机上就是**跟用户说假话**（明明没连上，却说"还没有内容"）✗。
+ *   规矩：① `rpc` **只许 reject、绝不许同步抛** ✓；② 读属性之前先判对象 ✓。
+ */
 function rpc(method, args) {
-  if (tunnel === null || typeof tunnel.rpc !== 'function') {
+  if (tunnel === null || typeof tunnel !== 'object' || typeof tunnel.rpc !== 'function') {
     return Promise.reject(new Error('隧道还没就绪'))
   }
   return tunnel.rpc(method, { args: args || {} }).then(function (response) {
@@ -88,7 +98,11 @@ poller.options.onError = function (message) {
 }
 
 function loadSessions() {
-  return rpc('mobile/dsh/sessions').then(function (value) {
+  // ★ 再包一层 `Promise.resolve().then(...)` ✓：即使 rpc 将来又出现"同步抛"，
+  //   这里也会变成一次**可 catch 的拒绝** ✓（模块初始化不许被它打断 ✗）
+  return Promise.resolve().then(function () {
+    return rpc('mobile/dsh/sessions')
+  }).then(function (value) {
     const list = value !== null && typeof value === 'object' && Array.isArray(value.sessions) ? value.sessions : []
     let title = '会话'
     if (currentId.length === 0 && list.length > 0 && typeof list[0].id === 'string') {
@@ -114,5 +128,14 @@ if (refresh !== null) {
   })
 }
 
-void loadSessions()
-poller.start()
+// ★ 启动也要护住 ✓：任何一处抛出去，模块就断了 —— 而"断掉的页面"看起来完全是好的 ✗
+try {
+  void loadSessions()
+} catch (error) {
+  page.handlers.onError(error instanceof Error ? error.message : String(error))
+}
+try {
+  poller.start()
+} catch (error) {
+  page.handlers.onError(error instanceof Error ? error.message : String(error))
+}
