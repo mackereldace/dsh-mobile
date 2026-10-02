@@ -18,6 +18,7 @@ import {
   putDraft,
   parseOptions,
   resolveDelivery,
+  resolveStatusLine,
   shouldAutoScroll,
   sortSessions,
   toApprovalViewModel,
@@ -474,5 +475,29 @@ describe('★ 自动跟随：该跟的跟、不该跟的别拽人', () => {
     assert.equal(shouldAutoScroll({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 }), true)
     assert.equal(shouldAutoScroll(null), true)
     assert.equal(shouldAutoScroll({}), true)
+  })
+})
+
+
+describe('★ 状态行优先级：错误 > 一次性提示 > 正常读数', () => {
+  it('★★ 有错误 ⇒ 错误说话（哪怕还挂着一条"已发出"的提示）', () => {
+    assert.equal(
+      resolveStatusLine({ notice: '已发出', problem: '读取出错：隧道断了（已读到的都还在）', normal: '' }),
+      '读取出错：隧道断了（已读到的都还在）',
+    )
+  })
+
+  it('没错误 ⇒ 提示说话（"没发出去"要留到用户下次动作）', () => {
+    assert.equal(resolveStatusLine({ notice: '没发出去：…（字还在输入框里）', problem: '', normal: '' }), '没发出去：…（字还在输入框里）')
+  })
+
+  it('都没有 ⇒ 正常读数', () => {
+    assert.equal(resolveStatusLine({ notice: '', problem: '', normal: '正在切换会话…' }), '正在切换会话…')
+  })
+
+  it('坏输入不抛，且返回空串（不编）', () => {
+    assert.equal(resolveStatusLine(null), '')
+    assert.equal(resolveStatusLine({}), '')
+    assert.equal(resolveStatusLine({ notice: 42, problem: null, normal: undefined }), '')
   })
 })

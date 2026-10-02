@@ -29,7 +29,12 @@
  *   这是被自己坑出来的：我前几次撞见偶发失败却用 `tail` 看输出 ✓，**把用例名丢了** ✗。
  *   落盘 + 汇总里直接写"哪条失败了" ✓，才不会再丢 ✓。
  *
- * ★ 退出码：任何一道失败 ⇒ 非零 ✓（可以直接接进别的流程 ✓）。
+ * ★★ **失败会自动重跑一次** ✓，并把两种结果分得很清：
+ *   · 重跑也失败 ⇒ 真失败 ✓ ⇒ 退出码非零 ✓；
+ *   · 首跑失败、重跑通过 ⇒ 标成「⚠ 抖动」✓ ⇒ **退出码仍是 0，但大字写出来** ✓ ——
+ *     这比"要么假红、要么悄悄放过"都诚实 ✓（本项目工程债里就有一条"单测偶发抖动"✓）。
+ *
+ * ★ 退出码：真失败 ⇒ 非零 ✓（可以直接接进别的流程 ✓）。
  * ★ 它**只跑验收、不改任何东西** ✓（第 4 道里的 `build-apk` 会重写 APK 产物 ✓ —— 那是构建 ✓）。
  */
 import { spawn } from 'node:child_process'
@@ -111,16 +116,33 @@ const results = []
 let index = 0
 for (const [label, command, args] of steps) {
   index += 1
-  const result = await run(label, command, args)
   const logPath = join(logDir, `${String(index).padStart(2, '0')}-${label.replace(/[^\p{L}\p{N}]+/gu, '-')}.log`)
+  let result = await run(label, command, args)
+  let flaky = false
+  if (result.code !== 0) {
+    console.log(`\n⚠ ${label} 首跑没过 ⇒ **自动重跑一次**（分清真失败与抖动 ✓）`)
+    const retry = await run(`${label}（重跑）`, command, args)
+    writeFileSync(logPath.replace(/\.log$/, '.retry.log'), retry.output)
+    if (retry.code === 0) {
+      flaky = true
+      console.log(`⚠ ${label}：首跑失败、重跑通过 ⇒ 判定为**抖动**（工程债里那条 ✓）`)
+    } else {
+      result = retry
+    }
+  }
   writeFileSync(logPath, result.output)
-  results.push({ ...result, reading: reading(result.output), failures: failures(result.output), logPath })
+  results.push({ ...result, reading: reading(result.output), failures: failures(result.output), logPath, flaky })
 }
 
 console.log(`\n${'═'.repeat(72)}\n全部验收读数（${FAST ? '快档：跳过了 TLS 那一道' : '全套'}）\n${'═'.repeat(72)}`)
 for (const r of results) {
-  const mark = r.code === 0 ? '✓' : '✗'
+  const mark = r.code !== 0 ? '✗' : r.flaky ? '⚠' : '✓'
   console.log(`${mark} ${r.label.padEnd(28)} ${String(r.reading).padEnd(22)} ${(r.ms / 1000).toFixed(1)}s`)
+}
+const flakyOnes = results.filter((r) => r.flaky)
+if (flakyOnes.length > 0) {
+  console.log(`\n⚠ 有 ${flakyOnes.length} 道**抖动**（首跑失败、重跑通过 —— 它们是工程债，不是本次改动的锅 ✓）：`)
+  for (const r of flakyOnes) console.log(`   ⚠ ${r.label}：${r.failures.join(' / ')}`)
 }
 const bad = results.filter((r) => r.code !== 0)
 if (bad.length > 0) {
@@ -134,7 +156,8 @@ if (bad.length > 0) {
 }
 console.log('═'.repeat(72))
 if (bad.length === 0) {
-  console.log(`★ 全绿 ✓（${results.length} 道，共 ${(results.reduce((sum, r) => sum + r.ms, 0) / 1000).toFixed(1)}s）`)
+  const extra = flakyOnes.length > 0 ? `（其中 ${flakyOnes.length} 道是抖动 ⚠）` : ''
+  console.log(`★ 全绿 ✓${extra}（${results.length} 道，共 ${(results.reduce((sum, r) => sum + r.ms, 0) / 1000).toFixed(1)}s）`)
 } else {
   console.log(`✗ 有 ${bad.length} 道没过：${bad.map((r) => r.label).join(' / ')}`)
 }

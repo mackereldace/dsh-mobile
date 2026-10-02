@@ -575,6 +575,26 @@ export function sendFailureHint(message) {
 }
 
 /**
+ * 状态行**该显示哪一句** ✓（纯函数 ✓）。
+ *
+ * ★★ 优先级：**错误/断线 > 一次性提示 > 正常读数** ✗ ——
+ *   这一条是被端到端检查逼出来的 ✓：我第 17 轮定的是"提示只由用户的下一次动作清掉"✓，
+ *   本意是别让轮询把"没发出去"冲掉 ✓；可它太绝对了 ⇒
+ *   **一条过期的提示能把真实错误永久盖住** ✓ ——
+ *   现场就是：读取一直在失败 ✓，而状态行始终写着上一次的"已发出" ✓（页面装作没事 ✓）。
+ *   ⇒ 现在的规矩：**错误/断线一出现，提示立刻作废** ✓（它本来就该让位 ✓）；
+ *     而正常读数**不许**盖掉提示 ✓（"没发出去"要留到用户下次动作 ✓，这条原来就对 ✓）。
+ */
+export function resolveStatusLine(input) {
+  const notice = input !== null && typeof input === 'object' && typeof input.notice === 'string' ? input.notice : ''
+  const problem = input !== null && typeof input === 'object' && typeof input.problem === 'string' ? input.problem : ''
+  const normal = input !== null && typeof input === 'object' && typeof input.normal === 'string' ? input.normal : ''
+  if (problem.length > 0) return problem
+  if (notice.length > 0) return notice
+  return normal
+}
+
+/**
  * 这一页**现在该显示哪种状态** ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能断言 ✓）。
  *
  * ## ★ 一条压倒一切的规矩：**已经有内容时，错误与断线只进状态行，绝不覆盖画面** ✗
@@ -672,7 +692,12 @@ export function mountChat(options) {
 
   const paint = () => {
     const view = computePageState({ loading, eventCount, error, connection })
-    const line = notice.length > 0 ? notice : pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText
+    const line = resolveStatusLine({
+      notice,
+      // ★ 错误/断线 > 一次性提示（提示是"上一次动作的回音"，错误是"现在的事实"✓）
+      problem: view.kind === 'ready' ? (view.statusText.length > 0 ? view.statusText : '') : '',
+      normal: pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText,
+    })
     if (status !== null && status !== undefined) status.textContent = line
     if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
@@ -834,6 +859,9 @@ export function mountChat(options) {
     // ★ 出错**不清屏** ✗ —— 有内容就走状态行 ✓，没内容才占屏 ✓（判据在 computePageState 里）
     error = message
     loading = false
+    // ★★ 并且把一次性提示**收走** ✗ —— 否则一条过期的"已发出"会把真实错误永久盖住 ✓
+    //   （端到端检查抓到的真事：读取一直在失败，状态行却始终写着"已发出"✓）
+    notice = ''
     paint()
   }
 

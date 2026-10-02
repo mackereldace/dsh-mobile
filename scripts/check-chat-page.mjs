@@ -36,7 +36,7 @@ const ASSETS = join(HERE, '..', 'packages', 'host', 'assets', 'dsh-chat')
 const KEEP = process.argv.includes('--keep')
 
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 15
+const EXPECTED_MIN_CHECKS = 24
 
 let checks = 0
 let failed = 0
@@ -69,12 +69,22 @@ const FAKE_BOOT = `
   var sent = []
   var calls = []
   function ok(value) { return Promise.resolve({ type: 'server-response', rpcId: 'r1', result: { ok: true, value: value } }) }
+  function bad(message) { return Promise.resolve({ type: 'server-response', rpcId: 'r1', result: { ok: false, error: { message: message } } }) }
+  /*
+   * ★ 夹具按 phase 造两种"半路出事"（都不是"一开始就连不上"✗ —— 那一种已经有反向断言了 ✓）：
+   *   phase=send-fail ⇒ 发送失败（要验："字必须还在输入框里" ✓）
+   *   phase=read-fail ⇒ 先成功渲染一轮、之后读取开始失败（要验："已画出来的内容不许被清掉" ✓）
+   */
+  var phase = new URLSearchParams(location.search).get('phase') || 'sent'
+  var reads = 0
   globalThis.__DSH_MOBILE_BOOT__ = {
     tunnel: {
       rpc: function (method, payload) {
         calls.push(method)
         if (method === 'mobile/dsh/sessions') return ok({ ok: true, sessions: sessions })
         if (method === 'mobile/dsh/read') {
+          reads += 1
+          if (phase === 'read-fail' && reads > 1) { document.documentElement.setAttribute('data-e2e-badreads', String(reads - 1)); return bad('隧道断了：socket closed') }
           var want = payload && payload.args ? payload.args.sessionId : ''
           if (want === 's-new') return ok({ ok: true, sessionId: 's-new', events: [], hasMore: false })
           return ok({ ok: true, sessionId: 's-1', events: events, hasMore: false })
@@ -85,6 +95,7 @@ const FAKE_BOOT = `
         }
         if (method === 'mobile/dsh/send') {
           var text = payload && payload.args ? payload.args.text : ''
+          if (phase === 'send-fail') { sent.push(text); return bad('隧道断了：socket closed') }
           sent.push(text)
           // ★ 真宿主下一次读取就会带上这条 ⇒ 夹具也必须这样 ✓
           //   （否则"发出去的字出现在页面上"这条断言会在一个**不真**的夹具上失败 ✓）
@@ -131,8 +142,23 @@ const FAKE_BOOT = `
        * ★ 注意：这段是**模板字符串**里的内容 ✗ —— 里面不许出现反引号，
        *   我第一次就在这儿写了反引号，把 FAKE_BOOT 整段截断了 ✓（与 codex 页那条教训同款 ✓）。
        */
-      var phase = new URLSearchParams(location.search).get('phase') || 'sent'
-      if (phase !== 'create') {
+      var phase2 = new URLSearchParams(location.search).get('phase') || 'sent'
+      if (phase2 === 'send-fail' || phase2 === 'read-fail') {
+        /*
+         * ★ 两个取证上的坑（都是这轮踩出来的 ✓）：
+         *   ① --dump-dom **看不到 textarea 的 value** ✗（JS 设的 value 是属性、不是内容 ✓）
+         *      ⇒ 把"输入框里现在有什么"主动写到 DOM 上 ✓（编码一下，免得引号/换行毁掉 dump ✓）；
+         *   ② 读失败那条要**等失败真的发生** ✓（第一趟成功、第二趟才坏 ⇒ 大约在 1.2s ✓），
+         *      900ms 取帧太早 ⇒ 断言会假失败 ✗。
+         */
+        setTimeout(function () {
+          var box = document.getElementById('input')
+          document.documentElement.setAttribute('data-e2e-draft', encodeURIComponent(box === null ? '' : box.value))
+          document.documentElement.setAttribute('data-e2e', 'settled')
+        }, phase2 === 'read-fail' ? 1700 : 1000)
+        return
+      }
+      if (phase2 !== 'create') {
         setTimeout(function () { document.documentElement.setAttribute('data-e2e', 'sent') }, 300)
         return
       }
@@ -267,6 +293,32 @@ try {
   check('★ 新建的会话出现在页头上（走的是真实点击路径 ✓）', after.includes('新会话'))
   check('★★ 切到空会话后，**上一个会话的消息必须消失**（成功返回空也要清 ✓）', !after.includes('把首页那两颗图标的圆角再收一点'))
   check('★★ 而且不许白屏：空会话该显示"还没有内容"✓', after.includes('还没有内容'))
+
+  console.log('\n── 正向（第三趟 · 发失败）：★ "发出去的字必须还在" ──')
+  const sendFail = await dumpDom(`${base}/mobile/chat?phase=send-fail`, 'data-e2e="settled"', 40_000)
+  check('夹具自检：第三趟跑完了', sendFail.includes('data-e2e="settled"'))
+  const draft = (sendFail.match(/data-e2e-draft="([^"]*)"/) ?? [])[1] ?? ''
+  check(
+    '★★ 发送失败后，草稿**原样回到输入框**（本轮最要紧的一条规矩 ✓）',
+    decodeURIComponent(draft) === '这条是端到端检查发出去的',
+    `输入框里现在是 ${JSON.stringify(draft)}`,
+  )
+  check('★ 状态行说清"没发出去"，并告诉用户字还在', sendFail.includes('没发出去') && sendFail.includes('字还在'))
+  check('★ 按钮没被卡在"发送中…"（失败后要能再按一次 ✓）', !sendFail.includes('发送中…'))
+
+  console.log('\n── 正向（第四趟 · 读着读着坏掉）：★ "已画出来的内容不许被清掉" ──')
+  const readFail = await dumpDom(`${base}/mobile/chat?phase=read-fail`, 'data-e2e="settled"', 40_000)
+  check('夹具自检：第四趟跑完了', readFail.includes('data-e2e="settled"'))
+  const badReads = Number((readFail.match(/data-e2e-badreads="(\d+)"/) ?? [])[1] ?? '0')
+  check('夹具自检：这一趟**真的发生过读取失败**（否则下面那条是空转 ✓）', badReads >= 1, `坏回应 ${badReads} 次`)
+  check('★★ 读取出错后，**之前画出来的消息仍在**（出错绝不清屏 ✓）', readFail.includes('把首页那两颗图标的圆角再收一点'))
+  if (!readFail.includes('读取出错')) {
+    const statusLine = (readFail.match(/id="status"[^>]*>([^<]*)</) ?? [])[1] ?? '(空)'
+    const stateCls = (readFail.match(/class="state state-([a-z]+)"/) ?? [])[1] ?? '(没有状态块)'
+    const fixtureErr = (readFail.match(/id="fixture-errors"[^>]*>([^<]*)</) ?? [])[1] ?? '(无)'
+    console.log(`    现场：状态行=${JSON.stringify(statusLine)}｜状态块=${stateCls}｜夹具错误=${fixtureErr}`)
+  }
+  check('★ 而状态行确实在报错（不能"装作没事"✓）', readFail.includes('读取出错'))
 
   console.log('\n── 反向：假隧道缺席 ⇒ 页面必须落到"读不出来"，而不是白屏 ──')
   const noTunnelSetup = await serve('no-tunnel')
