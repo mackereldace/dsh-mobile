@@ -14093,11 +14093,60 @@
     }
   }
 
+  /**
+   * ★ round 214（用户："模型选择和思考强度可以点，但切换不了" ✗）：
+   *   `session/selectModel` 的 `sessionId` 要的是**对话会话**的 id ✗ ——
+   *   我上一版传的是 `tunnel.sessionId` ✓ 那是**隧道认证会话** ✗（两个完全不同的东西 ✗）。
+   *   ⇒ 按这个顺序认：URL 的 `?session=` ✓ → 会话清单里的"当前"（current/running ✓）→ 第一条 ✓；
+   *   认不到就**不发请求** ✓（如实报错 ✗，不猜 ✗）。
+   */
+  function modelMenuSessionId() {
+    try {
+      var fromUrl = new URLSearchParams(globalThis.location.search).get('session')
+      if (fromUrl !== null && fromUrl !== '') return fromUrl
+    } catch (error) {
+      void error
+    }
+    for (var i = 0; i < homeState.sessions.length; i++) {
+      var item = homeState.sessions[i]
+      if (item === null || typeof item !== 'object') continue
+      if (item.current === true || item.running === true) return String(item.id)
+    }
+    if (homeState.sessions.length > 0 && homeState.sessions[0] !== null && typeof homeState.sessions[0] === 'object') {
+      var first = homeState.sessions[0]
+      if (first.id !== undefined && first.id !== null) return String(first.id)
+    }
+    return ''
+  }
+
+  /** 把失败原文**显示出来** ✓（上一版只写调试框 ✗ 用户看不到 ⇒ "切换不了"没线索 ✗）。 */
+  function modelMenuFail(text) {
+    try {
+      if (modelMenuPanel !== null) {
+        var note = document.createElement('div')
+        note.className = 'dshm-mmenu-note'
+        note.textContent = text
+        modelMenuPanel.appendChild(note)
+      }
+    } catch (error) {
+      void error
+    }
+  }
+
   async function modelMenuSelectModel(pick) {
     try {
       var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+      var sessionId = modelMenuSessionId()
+      if (sessionId === '') {
+        await homeLoadSessions()
+        sessionId = modelMenuSessionId()
+      }
+      if (sessionId === '') {
+        modelMenuFail('认不出当前会话 ⇒ 改不了模型')
+        return
+      }
       var request = {
-        sessionId: link.sessionId,
+        sessionId: sessionId,
         provider: pick.provider,
         model: pick.model,
       }
@@ -14109,7 +14158,9 @@
       modelMenuRender()
       modelMenuClose()
     } catch (error) {
-      debugBoxLine('[model] ✗ 换模型失败：' + String(error && error.message ? error.message : error))
+      var why = String(error && error.message ? error.message : error)
+      modelMenuFail('换模型失败：' + why)
+      debugBoxLine('[model] ✗ 换模型失败：' + why)
     }
   }
 
@@ -14117,8 +14168,17 @@
     try {
       var link = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
       var current = modelMenuCurrent()
+      var sessionId = modelMenuSessionId()
+      if (sessionId === '') {
+        await homeLoadSessions()
+        sessionId = modelMenuSessionId()
+      }
+      if (sessionId === '') {
+        modelMenuFail('认不出当前会话 ⇒ 改不了推理等级')
+        return
+      }
       var request = {
-        sessionId: link.sessionId,
+        sessionId: sessionId,
         provider: current.provider,
         model: current.model,
         reasoningEffort: effortId,
@@ -14131,7 +14191,9 @@
       modelMenuRender()
       modelMenuClose()
     } catch (error) {
-      debugBoxLine('[model] ✗ 换推理等级失败：' + String(error && error.message ? error.message : error))
+      var whyEffort = String(error && error.message ? error.message : error)
+      modelMenuFail('换推理等级失败：' + whyEffort)
+      debugBoxLine('[model] ✗ 换推理等级失败：' + whyEffort)
     }
   }
 
@@ -21975,7 +22037,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1002054044'
+    var BOOT_STAMP = 'BUILD-1002080945'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
