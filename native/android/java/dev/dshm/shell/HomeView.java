@@ -65,6 +65,8 @@ final class HomeView extends FrameLayout {
     private HomeModel.Snapshot snapshot;
     private HomeLoader.Report report;
     private boolean busy;
+    /** 已经排了一帧待重建吗 ✓（一帧里只重建一次 ✓）。 */
+    private boolean rebuildPosted = false;
     /** ★ 本 APK 的构建戳 ✓（显示在读数里 —— 一眼看出"装的到底是哪一版"✗）。 */
     private String buildStamp = "";
     private String error = "";
@@ -194,8 +196,11 @@ final class HomeView extends FrameLayout {
 
     /** 记下构建戳 ✓（由 `MainActivity` 从 `PackageInfo.versionName` 取 ✓）。 */
     void setBuildStamp(String stamp) {
+        /**
+         * ★★ **不重建** ✗ —— 它只是记一个字符串 ✓，下一次重建自然就用上了 ✓。
+         *   （原来这里也 `rebuild()` ✓ ⇒ 进首页那一瞬间要连着重构两次 ✓ ⇒ 见下面 `rebuild()` 的说明 ✓。）
+         */
         buildStamp = stamp == null ? "" : stamp;
-        rebuild();
     }
 
     void setBusy(boolean next) {
@@ -255,7 +260,34 @@ final class HomeView extends FrameLayout {
 
     // ───────────────────────── 画 ─────────────────────────
 
+    /**
+     * ★★★ 重建界面 —— **合并到下一帧** ✓（2026-10-04 用户："刚打开的时候……它在加载的过程中，这个东西长这样"✗）。
+     *
+     * ## 为什么不能同步重建 ✗（症状就是"画到一半"✓）
+     *
+     * 这个 `rebuild()` 的做法是**整棵树 `removeAllViews()` 再重建** ✓ —— 很彻底 ✓，
+     * 但它一旦发生在**测量/绘制的过程当中** ✓，这一帧就会是**半成品** ✗：
+     * 用户看到的就是"标题只剩一个「电」字 ✓、标签上盖着一个黑圆 ✓"那种样子 ✓
+     * （他反馈的"加载不全"**不是卡住** ✓，是**加载过程中那一屏画得不对** ✓）。
+     * ★ 而进首页那一瞬间**恰好**会连着重构两次 ✓：`setBuildStamp`（记构建戳 ✓）+
+     *   `setBusy(true)`（转圈 ✓）⇒ 两次都撞在启动的那一帧上 ✓。
+     *
+     * ⇒ 改成"**先记一笔，下一帧再重建**" ✓：一帧里来多少次重建都只做一次 ✓，
+     *   而且**永远不在测量/绘制中途**换树 ✓。
+     */
     private void rebuild() {
+        if (rebuildPosted) return;
+        rebuildPosted = true;
+        post(new Runnable() {
+            @Override
+            public void run() {
+                rebuildPosted = false;
+                rebuildNow();
+            }
+        });
+    }
+
+    private void rebuildNow() {
         // ★ 先把用户滚到哪儿了记下来 ✓（下面整棵树都要换掉 ✗ —— 见 savedScrollY 的说明 ✓）
         if (scrollView != null) savedScrollY = scrollView.getScrollY();
         // ★ 这一轮的缩略图视图都跟着换新 ⇒ 表也要清 ✗（留着旧引用就是往已摘下的 View 上贴图 ✓）
