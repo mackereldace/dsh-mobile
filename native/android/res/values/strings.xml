@@ -101,4 +101,6 @@
     <string name="keepalive_exit">退出并断开</string>
     <!-- 换源看门狗到点时首页要说的话 ✓（它比"什么都没发生"强得多 ✓） -->
     <string name="home_switch_stuck">上次没能连上这台电脑（可能它不在线或换了地址）</string>
+    <!-- 会话页底部那条"回首页"的栏 ✓（用户：进去之后没有明确的回首页方法 ✗） -->
+    <string name="home_bar_back">⌂  返回首页</string>
 </resources>

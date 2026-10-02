@@ -477,6 +477,17 @@ public class MainActivity extends android.app.Activity {
     private boolean homeStepsAsideForPairing = false;
 
     /**
+     * ★★★ "返回首页"那条**底栏** ✓（用户 2026-10-04："进入会话后**没有明确的回到首页的方法**"✗）。
+     *
+     * 为什么由**壳**来做 ✗：首页是壳层的东西 ✓（"层与层之间归壳"✓）——
+     * 网页那边根本不知道有这么一个首页 ✓。
+     * 为什么放**底部** ✗：拇指够得到 ✓（放顶部要跨屏 ✓）；
+     * ★ 代价：它会占掉网页底部一条 ✓ ⇒ **必须把网页的底部安全区相应抬高** ✗
+     *   （否则会压住输入框 ✓ —— 见 {@link #applyInsetsToPage} ✓）。
+     */
+    private android.widget.TextView homeBar;
+
+    /**
      * ★★ 换源**看门狗** ✓ —— 那道闸的复位点只有两处（`onPageFinished` ✓ / 主文档出错 ✓），
      *   而**手动/原生进入某一台**时，`applyHostUrl` 会先 `stopAutoConnect` ✓
      *   ⇒ 自动换槽的槽超时**被撤掉了** ✗ ⇒ 只剩那两个复位点 ✓。
@@ -863,7 +874,12 @@ public class MainActivity extends android.app.Activity {
         WebView view = webView;
         if (view == null) return;
         int top = Math.max(safeTopCss, 0);
-        int bottom = Math.max(safeBottomCss, 0);
+        /**
+         * ★★ 底部安全区**要加上那条栏** ✗ —— 否则它会压住网页的输入框 ✓
+         *   （栏在壳上、输入框在网页里 ✓；壳必须把这件事**告诉**网页 ✓ —— 这正是
+         *    `--dshm-safe-bottom` 存在的意义 ✓）。
+         */
+        int bottom = Math.max(safeBottomCss, 0) + homeBarHeightPx();
         int ime = Math.max(imeCss, 0);
         int gesture = Math.max(gestureBottomCss, 0);
         int systemGesture = Math.max(systemGestureBottomCss, 0);
@@ -3807,6 +3823,7 @@ public class MainActivity extends android.app.Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             nativeHome.setVisibility(View.VISIBLE);
 
+            installHomeBar();
             homeWiring = new HomeWiring(prefs, prefsKv, null);
             homeController = new HomeController(
                     HomeWiring.scheduler(new android.os.Handler(getMainLooper())),
@@ -3857,11 +3874,55 @@ public class MainActivity extends android.app.Activity {
         homeController.refresh();
     }
 
+    /**
+     * 建那条「⌂ 返回首页」底栏 ✓（一开始**隐藏** ✓ —— 首页可见时它没有意义 ✓）。
+     */
+    private void installHomeBar() {
+        android.widget.TextView bar = new android.widget.TextView(this);
+        bar.setText(getString(R.string.home_bar_back));
+        bar.setTextSize(13f);
+        bar.setGravity(android.view.Gravity.CENTER);
+        bar.setTextColor(0xFF8D95A3);
+        android.graphics.drawable.GradientDrawable background = new android.graphics.drawable.GradientDrawable();
+        background.setColor(0xFF17191E);
+        bar.setBackground(background);
+        bar.setPadding(dpToPx(8), dpToPx(9), dpToPx(8), dpToPx(9));
+        bar.setVisibility(View.GONE);
+        bar.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showNativeHome();
+            }
+        });
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.gravity = android.view.Gravity.BOTTOM;
+        root.addView(bar, params);
+        homeBar = bar;
+    }
+
+    /** dp ⇒ px ✓（这条栏的高度要**同时**告诉网页 ✓，所以得用同一套换算 ✓）。 */
+    private int dpToPx(int dp) {
+        return Math.round(dp * getResources().getDisplayMetrics().density);
+    }
+
+    /** 那条底栏现在占掉多少高度 ✓（隐藏时是 0 ✓ —— 网页据此抬高底部安全区 ✓）。 */
+    private int homeBarHeightPx() {
+        if (homeBar == null || homeBar.getVisibility() != View.VISIBLE) return 0;
+        int measured = homeBar.getHeight();
+        if (measured > 0) return measured;
+        // 还没量过 ⇒ 按内容估一个 ✓（下一帧就会量准 ✓）
+        return dpToPx(36) + Math.max(gestureBottomCss, 0);
+    }
+
     /** 把原生首页抬到最上面 ✓（并顺手刷新一次 ✓）—— **淡入** ✓。 */
     private void showNativeHome() {
         if (nativeHome == null) return;
         nativeHome.setVisibility(View.VISIBLE);
         nativeHome.animateIn();
+        // ★ 首页可见 ⇒ 那条"返回首页"的栏没有意义 ✓ 收掉它 ✓（并把网页的底部安全区还原 ✓）
+        if (homeBar != null) homeBar.setVisibility(View.GONE);
+        applyInsetsToPage();
         refreshNativeHome();
         Log.i(TAG, "回到原生首页");
     }
@@ -3871,6 +3932,9 @@ public class MainActivity extends android.app.Activity {
         if (nativeHome == null) {
             return;
         }
+        // ★ 进会话页 ⇒ 把「返回首页」那条栏露出来 ✓（用户："进入会话后没有明确的回首页方法"✗）
+        if (homeBar != null) homeBar.setVisibility(View.VISIBLE);
+        applyInsetsToPage();
         nativeHome.animateOut(new Runnable() {
             @Override
             public void run() {

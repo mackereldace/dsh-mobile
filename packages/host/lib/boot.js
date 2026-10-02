@@ -10932,6 +10932,11 @@
       installComposerFocusProtection()
       installModelMenuDismiss()
       installHomeRoute()
+    /**
+     * ★★ 面板撤掉之后，**这份数据仍要有人拉** ✗（模型菜单在读它 ✓ —— 见
+     * `homeRefreshForSharedState` 的说明 ✓）。
+     */
+    homeRefreshForSharedState()
       // ★ round 194：附件键在滚动/回弹期间要按帧跟随（`position: fixed` 不会自己跟着内容走 ✗）
       installAttachFollowOnScroll()
       /**
@@ -15334,25 +15339,40 @@
     }
   }
 
+  /**
+   * ★★ 2026-10-04：面板虽然进不去了 ✓，但**这份数据还有人在用** ✗ ——
+   *   模型菜单（`modelMenuSessionId()` ✓）读的就是 `homeState.sessions` ✓。
+   *   ⇒ 启动时替它把数据拉一次 ✓（原先只在面板打开时拉 ✓ ⇒ 面板一关就没人拉了 ✗）。
+   */
+  function homeRefreshForSharedState() {
+    try {
+      if (homeState.busy === true) return
+      void homeRefresh()
+    } catch (error) {
+      void error
+    }
+  }
+
   async function homeRefresh() {
     await homeLoadSessions()
     if (homeIsOpen() === true) homeRender()
     homeProbeAll(homeMachines())
   }
 
-  /** hash 路由 ✓（刷新即生效 ✓ 不用重启 ✓）：`#dshm-home` ⇒ 打开面板 ✓。 */
+  /**
+   * ★★★ 2026-10-04：这里原先会**在启动时自动打开**旧的网页首页 ✗（`hash === ''` 也开 ✓）——
+   *   用户交办撤掉它 ✓（首页已搬到 APK 原生层 ✓）。
+   *
+   * ★ 现在**什么都不做** ✓：`#dshm-home` 这条 hash 也不再打开面板 ✓
+   *   （于是旧面板**没有入口** ✓ —— 整块删除等 `boot.js` 的 WIP 落定后再做 ✓）。
+   * ★ 函数留着不删 ✗：调用点在启动流程里 ✓，删它要动启动流程 ✓（那是 WIP 所在的地方 ✗）。
+   */
   function installHomeRoute() {
     try {
-      /**
-       * ★ round 213（用户："可以做成 app 原生首页了" ✓）：**打开应用就直接进这块面板** ✓
-       *   —— 没带 hash 也开 ✓（回会话走「会话」标签或设置里的「返回会话」✓）。
-       */
-      if (globalThis.location !== undefined && (globalThis.location.hash === '' || globalThis.location.hash === '#dshm-home')) {
-        homeOpen()
+      if (globalThis.location !== undefined && globalThis.location.hash === '#dshm-home') {
+        // 老书签/老 hash ⇒ 只把 hash 抹掉 ✓，不打开面板 ✓
+        globalThis.history.replaceState(null, '', globalThis.location.pathname + globalThis.location.search)
       }
-      globalThis.addEventListener('hashchange', function () {
-        if (globalThis.location.hash === '#dshm-home' || globalThis.location.hash === '') homeOpen()
-      })
     } catch (error) {
       void error
     }
@@ -16466,19 +16486,12 @@
    */
   function fillConnSettings(body, getTunnel, only) {
     /**
-     * ★ round 211：「电脑与智能体」入口 ✓（UU 远程式多机面板 ✓ 用户交办 ✓）——
-     *   点开我们的全屏面板 ✓（hash `#dshm-home` ✓ 刷新即生效 ✓）。
+     * ★★★ 2026-10-04：**「电脑与智能体」这颗入口撤掉了** ✗（用户交办 ✓）——
+     *   首页已经**搬到 APK 原生层** ✓（用户："目前 uu 那个页面要作为 app 的首页"✓），
+     *   网页层这套面板从此**进不去** ✓（面板代码随之成为不可达的旧代码 ✓，
+     *   整块删除等 `boot.js` 上那单在做的 WIP 落定后再做 ✓ —— 见交单报告 ✓）。
      */
-    var homeEntry = document.createElement('button')
-    homeEntry.type = 'button'
-    homeEntry.className = 'dshm-home-btn'
-    homeEntry.setAttribute('data-tone', 'primary')
-    homeEntry.setAttribute('data-dshm-action', 'open-home')
-    homeEntry.textContent = '电脑与智能体'
-    homeEntry.addEventListener('click', function () {
-      homeOpen()
-    })
-    body.appendChild(homeEntry)
+    void homeOpen
     var capabilitiesOnly = only === 'capabilities'
     /**
      * 第一行把"这一页管什么"说清楚，并指出**同一个页面在左边哪里** ✓
