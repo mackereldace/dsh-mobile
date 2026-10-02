@@ -307,7 +307,45 @@ final class HomeView extends FrameLayout {
                 }
             }
         }
+        /**
+         * ★★ 把**整个窗口**的孩子也列出来 ✓ ——
+         *   真机读数显示底栏三个标签几何**完全一致**（图标都是 72x72 ✓、位置一样 ✓）
+         *   ⇒ 那个黑圆**不是标签栏画的** ✗ ⇒ 得往外找一层 ✓
+         *   （若这里也找不到它，那就说明它根本不是我们窗口里的东西 ⇒ 是系统的 ✓）。
+         */
+        try {
+            android.view.View rootView = getRootView();
+            text.append("窗口树（顶层开始，只列有面积的）：").append('\n');
+            appendTree(text, rootView, 0);
+        } catch (Throwable error) {
+            text.append("窗口树：读不出来（").append(error.getClass().getSimpleName()).append("）").append('\n');
+        }
         return text.toString();
+    }
+
+    /** 递归列孩子 ✓（只列有面积的 ✓，最多三层 ✓ —— 目的是"把那个黑圆找出来"✓）。 */
+    private void appendTree(StringBuilder text, android.view.View view, int depth) {
+        if (view == null || depth > 3) return;
+        if (view.getWidth() > 0 && view.getHeight() > 0) {
+            text.append("  ".repeat(depth)).append(depth).append(" ")
+                    .append(view.getClass().getSimpleName())
+                    .append(" 宽 ").append(view.getWidth()).append(" 高 ").append(view.getHeight())
+                    .append(" x=").append(Math.round(view.getX())).append(" y=").append(Math.round(view.getY()))
+                    .append(" alpha ").append(view.getAlpha());
+            if (view.getId() != android.view.View.NO_ID) {
+                try {
+                    text.append(" id=").append(getResources().getResourceEntryName(view.getId()));
+                } catch (Throwable ignored) {
+                    // 有些 id 没有名字 ✓（无关紧要 ✓）
+                }
+            }
+            text.append('\n');
+        }
+        if (!(view instanceof android.view.ViewGroup)) return;
+        android.view.ViewGroup group = (android.view.ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i += 1) {
+            appendTree(text, group.getChildAt(i), depth + 1);
+        }
     }
 
     /** 一行可念的读数 ✓（调试框那一行 ✓）。 */
@@ -411,6 +449,15 @@ final class HomeView extends FrameLayout {
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = text(HomeLabels.TITLE, 27, theme.ink, true);
         titleView = title;
+        /**
+         * ★★★ 2026-10-04 真机读数：「标题 实测宽 **156** / 需要 **162** ⇒ ★ 被裁了」✗ ——
+         *   只差 **6px** 就把「脑」切掉了 ✓（`TextView` 自己量出来 156 ✓，而 `measureText` 要 162 ✓）。
+         *   ⇒ 与其让它"差一点"✓，不如**按实测文字宽兜一个最小宽度** ✓：
+         *     宁可多留几像素空白 ✗，也不能把字切掉 ✓。
+         */
+        title.setSingleLine(true);
+        title.setEllipsize(null);
+        title.setMinWidth((int) Math.ceil(title.getPaint().measureText(HomeLabels.TITLE)) + dp(6));
         titles.addView(title);
         TextView sub = text(summaryText(), 13, theme.ink2, false);
         LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
