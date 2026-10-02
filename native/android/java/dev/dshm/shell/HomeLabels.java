@@ -68,6 +68,25 @@ public final class HomeLabels {
         return text.toString();
     }
 
+    /**
+     * ★★ 「会话」标签里那一行的两句话 ✓（2026-10-04 用户选 (a) 之后加的 ✓）。
+     * · 标题：没标题就**如实说**（"（没标题的会话）"✓）—— 绝不编一个题目 ✗；
+     * · 状态：正在跑 / 等你确认 / 当前 / 空闲 ✓（与网页层那套四态**同一套口径** ✓）。
+     */
+    public static String sessionTitle(String title) {
+        String value = title == null ? "" : title.trim();
+        return value.isEmpty() ? "（没标题的会话）" : value;
+    }
+
+    public static String sessionState(boolean running, boolean awaiting, boolean current) {
+        StringBuilder text = new StringBuilder();
+        if (running) text.append("正在跑");
+        if (awaiting) text.append(text.length() == 0 ? "" : " · ").append("等你确认");
+        if (current) text.append(text.length() == 0 ? "" : " · ").append("当前");
+        if (text.length() == 0) text.append("空闲");
+        return text.toString();
+    }
+
     public static final String ADD_COMPUTER = "＋  添加电脑";
     /**
      * ★★ 「手输地址」—— 为"**不在同一个网络时**"准备的那条路 ✓（2026-10-04 用户实际撞上 ✓）：

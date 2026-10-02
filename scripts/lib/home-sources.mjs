@@ -37,6 +37,7 @@ export const HOME_SOURCES = [
   'HomeAnim.java',
   'HomeLabels.java',
   'HomeShot.java',
+  'ChatSessions.java',
 ].map((name) => join(sourceDir, 'dev', 'dshm', 'shell', name))
 
 /** 取测试源文件的绝对路径 ✓。 */

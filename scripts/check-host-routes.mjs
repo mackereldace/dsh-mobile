@@ -44,6 +44,11 @@ const freePort = () =>
 
 let checks = 0
 let failed = 0
+const post = async (path) => {
+  const response = await fetch(base + path, { method: 'POST', body: '{}' })
+  return { status: response.status, headers: response.headers, body: await response.text() }
+}
+
 const check = (name, ok, detail) => {
   checks += 1
   if (ok) console.log(`  ✓ ${name}`)
@@ -93,6 +98,21 @@ try {
   const app = await get('/mobile/chat/app.js')
   check('脚本回 200 且类型是 js', app.status === 200 && (app.headers.get('content-type') ?? '').includes('javascript'))
   check('★ 脚本里真去问宿主要数据（不是空壳 ✓）', app.body.includes('mobile/dsh/sessions'))
+  /**
+   * ★★★ 会话清单（只读 JSON ✓）—— 给**原生「会话」标签**用 ✓（用户选 (a) ✓）。
+   * ★ 独立服务里的网关桩**永远抛** ✓ ⇒ 这条路由的正确行为是：
+   *   **不是 404**（路由真的挂上了 ✓）+ **502 且说人话**（不是把异常原文扔出来 ✗）。
+   *   ★ 成功路径不在这里测 ✗ —— 它是一条**直通桥**的薄壳 ✓，桥自己有 23 条单测 ✓；
+   *     这里能验的是"路由挂上了 ✓ + 失败时诚实 ✓"，那正是这一层唯一的自留地 ✓。
+   */
+  const sessions = await get('/mobile/chat/sessions')
+  check('★★ 会话清单路由挂上了（不是 404 ✗）', sessions.status !== 404, String(sessions.status))
+  check('★ 独立服务没有 DSH 网关 ⇒ 502 且说人话（不是异常原文 ✗）',
+        sessions.status === 502 && sessions.body.includes('拿不到会话清单'), sessions.body.slice(0, 120))
+  check('★ 而且它是 JSON（原生侧要解析 ✓）',
+        (sessions.headers.get('content-type') ?? '').includes('application/json'))
+  check('★★ 它**只读**（POST 不该被它接走 ✗）', (await post('/mobile/chat/sessions')).status !== 200)
+
   const miss = await get('/mobile/chat/nope.js')
   check('★ 不认识的资源 ⇒ 404（不是把别的文件发出去 ✗）', miss.status === 404, String(miss.status))
 

@@ -51,6 +51,7 @@ const testClasses = [
   'dev.dshm.shell.HomeAnimTest',
   'dev.dshm.shell.HomeLabelsTest',
   'dev.dshm.shell.HomeShotTest',
+  'dev.dshm.shell.ChatSessionsTest',
 ]
 
 /**
