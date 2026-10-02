@@ -3852,6 +3852,14 @@ public class MainActivity extends android.app.Activity {
         cancelSlotTimeout();
         slotHandler.removeCallbacksAndMessages(null);
         /**
+         * ★ 原生首页的加载回调同理 ✓：`HomeController` 里那份"在飞"的加载跑在后台线程上 ✓，
+         *   它落地时会走 `Handler` 回到主线程 ✓ —— 不 dispose 就是"拿着已销毁的视图回调"✗
+         *   （本项目在换槽计时器上已经栽过同款 ✓，见上一条注释 ✓）。
+         */
+        if (homeController != null) homeController.dispose();
+        nativeHome = null;
+        homeController = null;
+        /**
          * ★★ round 183：**只有"真的退出"才停保活服务** ✗ —— 判据是 `isFinishing()` ✓。
          *
          * 为什么是它 ✗（把三条路摊开看 ✓，这也是"想清楚判据"的全部内容 ✓）：
