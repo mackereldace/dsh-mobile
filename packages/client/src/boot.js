@@ -9256,6 +9256,9 @@
       '  background: var(--dsw-alias-bg-layer-1, #232324);',
       '  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px));',
       '  background-clip: padding-box;',
+      /* 贴着小白条那条带 = **系统栏同色**（bg-base ✓）⇒ 看起来与系统栏连成一体 ✓；
+         栏体自己是层级底色 ✓（"背景改成其他颜色" ✓）。用内衬阴影画那条带 ✓。 */
+      '  box-shadow: inset 0 calc(0px - max(env(safe-area-inset-bottom, 0px), var(--dshm-safe-bottom, 0px))) 0 var(--dsw-alias-bg-base, #151517);',
       '}',
       '#dshm-home-tabs::after { content: none; }',
       '#dshm-home[data-open="1"] { background: var(--dsw-alias-bg-base, #151517); }',
@@ -14732,7 +14735,8 @@
     var wrap = document.createElement('div')
     wrap.id = 'dshm-home-sessions'
     var rows = [
-      { label: '连接与设备', note: '配对 / 默认链接 / 解除配对', action: 'conn' },
+      { label: '配对新电脑', note: '扫电脑屏幕上的二维码', action: 'pair' },
+      { label: '连接与设备', note: '默认链接 / 解除配对', action: 'conn' },
       { label: '默认链接', note: '学校 / Tailscale 两条入口', action: 'links' },
       { label: '返回会话', note: '回到聊天', action: 'back' },
     ]
@@ -14754,6 +14758,21 @@
     row.appendChild(label)
     row.appendChild(note)
     row.addEventListener('click', function () {
+      if (item.action === 'pair') {
+        try {
+          var bridgeForPair = shellBridge()
+          if (bridgeForPair !== undefined && bridgeForPair !== null && typeof bridgeForPair.scanPair === 'function') {
+            var rawPair = bridgeForPair.scanPair()
+            homeToast('扫码界面已打开 —— 对准电脑屏幕上那张配对二维码 ✓')
+            void rawPair
+            return
+          }
+          homeToast('壳没有扫码能力（APK 较旧？）')
+        } catch (error) {
+          homeToast('扫码失败：' + String(error && error.message ? error.message : error))
+        }
+        return
+      }
       if (item.action === 'back') {
         homeClose()
         return
@@ -14858,7 +14877,8 @@
     row.type = 'button'
     row.className = 'dshm-home-row'
     var label = document.createElement('span')
-    var nameText = agent.label === '' ? '智能体' : agent.label
+    // ★ 名字用「dsh + 版本」✓（用户举例："dsh 0.20 桌面版" ✓）；版本探不到就用槽名 ✓（不编 ✓）
+    var nameText = agent.version === '' ? (agent.label === '' ? '智能体' : agent.label) : 'dsh ' + agent.version
     label.textContent = ':' + agent.port + ' · ' + nameText
     var note = document.createElement('span')
     note.className = 'dshm-home-row-note'
@@ -14999,7 +15019,20 @@
     row.className = 'dshm-home-row'
     var label = document.createElement('span')
     var title = item !== null && typeof item === 'object' ? (item.title || item.label || item.id || '') : String(item)
-    label.textContent = String(title).slice(0, 42)
+    var linkNow = modelMenuGetTunnel === null ? null : modelMenuGetTunnel()
+    var hostNow = location.host
+    var computerTag = hostNow
+    var agentTag = ''
+    try {
+      var computersNow = homeComputers()
+      for (var ci = 0; ci < computersNow.length; ci++) {
+        if (computersNow[ci].ip === location.hostname) computerTag = computersNow[ci].label === '' ? computersNow[ci].ip : computersNow[ci].label
+      }
+    } catch (error) {
+      void error
+    }
+    agentTag = 'dsh ' + (homeAgentsByIp[location.hostname + ':' + (location.port === '' ? '443' : location.port)] || '当前')
+    label.textContent = '[' + computerTag + ' · ' + agentTag + '] ' + String(title).slice(0, 30)
     var note = document.createElement('span')
     note.className = 'dshm-home-row-note'
     var running = item !== null && typeof item === 'object' && (item.running === true || item.busy === true)
