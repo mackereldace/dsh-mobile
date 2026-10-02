@@ -23,7 +23,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
@@ -33,6 +33,7 @@ import {
   RUNTIME_VERSION_MANIFEST,
   readManifestVersion,
   resolveDshRuntimeVersion,
+  runtimeAppManifestPaths,
 } from '../src/dsh-version.ts'
 
 const dshHome = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
@@ -154,5 +155,57 @@ describe('DSH 版本：报出的必须是磁盘上的真实版本（不许写死
     assert.equal(readManifestVersion(noVersion), undefined)
 
     assert.equal(readManifestVersion(join(scratch, 'does-not-exist.json')), undefined)
+  })
+})
+
+
+/**
+ * ★★ 2026-10-04 新增：**先**读"正在跑的那个 app"✓
+ *
+ * 用户报："明明是 0.2.0 桌面版，手机上却显示 0.1.5-rc.2"✗。查下去：
+ * 桌面版磁盘上 `app.asar/dsh/package.json` 是 0.2.0-rc.2 ✓，
+ * 而按 Node 规则从插件自己的路径解析 `@deepseek-ai/dsh-app-boot/package.json` **解析不到** ✗
+ * ⇒ 报出来的是**进程启动时的旧值** ✓，重启后还会退化成 `unknown` ✗。
+ *
+ * ⇒ 加一条最权威的来源（Electron 的 `process.resourcesPath` ✓），并且要求它**排在前面** ✗。
+ */
+describe('DSH 版本：正在运行的那个 app 优先', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dshm-version-'))
+  const resources = join(root, 'Resources')
+  const asarDir = join(resources, 'app.asar', 'dsh')
+  mkdirSync(asarDir, { recursive: true })
+  writeFileSync(join(asarDir, 'package.json'), JSON.stringify({ name: 'dsh', version: '9.9.9-运行中' }))
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('打包形态：能读到 `<resources>/app.asar/dsh/package.json` 的版本', () => {
+    assert.equal(resolveDshRuntimeVersion({ resourcesPath: resources }), '9.9.9-运行中')
+  })
+
+  it('★ 而它**优先于**别的来源（那些描述的是"某个安装副本"，不是"此刻在跑的那个"）', () => {
+    const version = resolveDshRuntimeVersion({
+      resourcesPath: resources,
+      // 故意让"按包名解析"这条路给出另一个版本 ⇒ **必须**还是运行中那个赢 ✓
+      resolve: () => join(asarDir, 'package.json'),
+      dshHome: join(root, 'DshHome'),
+    })
+    assert.equal(version, '9.9.9-运行中')
+  })
+
+  it('· 解包形态也能读（app.asar.unpacked）', () => {
+    const unpacked = join(resources, 'app.asar.unpacked', 'dsh')
+    mkdirSync(unpacked, { recursive: true })
+    writeFileSync(join(unpacked, 'package.json'), JSON.stringify({ version: '8.8.8-解包' }))
+    const other = mkdtempSync(join(tmpdir(), 'dshm-version-unpacked-'))
+    const otherResources = join(other, 'Resources')
+    mkdirSync(join(otherResources, 'app.asar.unpacked', 'dsh'), { recursive: true })
+    writeFileSync(join(otherResources, 'app.asar.unpacked', 'dsh', 'package.json'), JSON.stringify({ version: '8.8.8-解包' }))
+    assert.equal(resolveDshRuntimeVersion({ resourcesPath: otherResources }), '8.8.8-解包')
+    rmSync(other, { recursive: true, force: true })
+  })
+
+  it('★ 没给 resourcesPath（非 Electron）⇒ 这条来源自动跳过，不抛', () => {
+    assert.deepEqual(runtimeAppManifestPaths(undefined), [])
+    assert.deepEqual(runtimeAppManifestPaths(''), [])
+    assert.equal(runtimeAppManifestPaths('/x').length, 2)
   })
 })
