@@ -65,6 +65,9 @@ final class HomeView extends FrameLayout {
     private HomeModel.Snapshot snapshot;
     private HomeLoader.Report report;
     private boolean busy;
+    /** ★ 记下标题与底栏 ✓（界面判据要读它们的实测宽/边界 ✓）。 */
+    private TextView titleView;
+    private android.widget.LinearLayout tabsBar;
     /** 已经排了一帧待重建吗 ✓（一帧里只重建一次 ✓）。 */
     private boolean rebuildPosted = false;
     /** ★ 本 APK 的构建戳 ✓（显示在读数里 —— 一眼看出"装的到底是哪一版"✗）。 */
@@ -248,6 +251,65 @@ final class HomeView extends FrameLayout {
         animate().alpha(1f).setDuration(ms).start();
     }
 
+    /**
+     * ★★★ **界面判据**（2026-10-04 用户："前三秒都显示这个页面"✓ 之后加的 ✓）。
+     *
+     * 用户报的是"**加载态的布局本身就是错的**"✓（不是某一帧画坏 ✓）：
+     * 标题只剩一个「电」字 ✗、底栏「电脑」图标上盖着一个黑圆 ✗。
+     * ★ 这类"只有真机能看见的布局问题"，我前三轮都在**看截图猜** ✗ ⇒ 改成**让它自己念** ✓：
+     * 标题的**文本 / 实测宽 / 需要宽 / 省略情况** ✓、字体缩放 ✓、底栏每个孩子的**边界与 alpha** ✓、
+     * 视口与 insets ✓ —— 这几项一出来，"为什么被裁"就只剩一个答案 ✓。
+     *
+     * ★ 纯读值 ✓（不改任何状态 ✓）。
+     */
+    String layoutDump() {
+        StringBuilder text = new StringBuilder();
+        text.append("构建：").append(buildStamp.isEmpty() ? "（未知）" : buildStamp).append('\n');
+        text.append("状态：").append(busy ? "加载中" : "已停").append(snapshot == null ? " · 还没有数据" : " · 有数据").append('\n');
+        float scale = getResources().getDisplayMetrics().density;
+        text.append("屏幕：").append(getWidth()).append('x').append(getHeight())
+                .append(" · 密度 ").append(scale)
+                .append(" · 字体缩放 ").append(getResources().getConfiguration().fontScale).append('\n');
+        text.append("insets：上 ").append(insetTopDp).append("dp / 下 ").append(insetBottomDp).append("dp\n");
+        if (titleView != null) {
+            String value = titleView.getText() == null ? "" : titleView.getText().toString();
+            float needed = titleView.getPaint().measureText(value);
+            text.append("标题：").append('「').append(value).append('」')
+                    .append(" 实测宽 ").append(titleView.getWidth())
+                    .append(" / 需要 ").append(Math.round(needed))
+                    .append(" / 文字大小 ").append(titleView.getTextSize())
+                    .append(titleView.getWidth() > 0 && titleView.getWidth() < needed ? " ⇒ ★ 被裁了" : " ⇒ 够宽")
+                    .append('\n');
+        }
+        if (tabsBar != null) {
+            text.append("底栏：宽 ").append(tabsBar.getWidth()).append(" 高 ").append(tabsBar.getHeight()).append('\n');
+            for (int i = 0; i < tabsBar.getChildCount(); i += 1) {
+                android.view.View child = tabsBar.getChildAt(i);
+                text.append("  · 第 ").append(i + 1).append(" 个：")
+                        .append(child.getClass().getSimpleName())
+                        .append(" 宽 ").append(child.getWidth())
+                        .append(" 高 ").append(child.getHeight())
+                        .append(" alpha ").append(child.getAlpha())
+                        .append(" 位置 x=").append(Math.round(child.getX())).append(" y=").append(Math.round(child.getY()))
+                        .append('\n');
+                if (child instanceof TextView) {
+                    android.widget.TextView tab = (android.widget.TextView) child;
+                    android.graphics.drawable.Drawable[] icons = tab.getCompoundDrawables();
+                    text.append("      文字「").append(tab.getText()).append("」· 图标 ");
+                    boolean anyIcon = false;
+                    for (int k = 0; k < icons.length; k += 1) {
+                        if (icons[k] == null) continue;
+                        anyIcon = true;
+                        text.append("第").append(k).append("位边界 ").append(icons[k].getBounds().toShortString()).append(' ');
+                    }
+                    if (!anyIcon) text.append("（没有 ✓）");
+                    text.append('\n');
+                }
+            }
+        }
+        return text.toString();
+    }
+
     /** 一行可念的读数 ✓（调试框那一行 ✓）。 */
     String statusLine() {
         String stamp = buildStamp.isEmpty() ? "" : buildStamp + " · ";
@@ -348,6 +410,7 @@ final class HomeView extends FrameLayout {
         LinearLayout titles = new LinearLayout(getContext());
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = text(HomeLabels.TITLE, 27, theme.ink, true);
+        titleView = title;
         titles.addView(title);
         TextView sub = text(summaryText(), 13, theme.ink2, false);
         LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
@@ -391,6 +454,17 @@ final class HomeView extends FrameLayout {
             empty.setPadding(dp(6), dp(18), dp(6), dp(18));
             list.addView(empty);
             list.addView(buildAddRow());
+        /**
+         * ★★ 加载那三秒里**只有空白可长按** ✗ ⇒ 给列表容器也挂上 ✓ ——
+         *   用户就是在这三秒里看到问题的 ✓，判据必须能在这三秒里取到 ✓。
+         */
+        list.setOnLongClickListener(new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                if (callbacks != null) callbacks.onInspectMachine(null);
+                return true;
+            }
+        });
             return;
         }
 
@@ -756,6 +830,7 @@ final class HomeView extends FrameLayout {
         bar.setBackgroundColor(theme.surface);
         bar.setPadding(0, dp(9), 0, dp(9) + dp(insetBottomDp));
 
+        tabsBar = bar;
         bar.addView(tab(HomeLabels.TAB_COMPUTER, R.drawable.ic_tab_computer, true, null));
         bar.addView(tab("会话", R.drawable.ic_tab_sessions, false, null));
         bar.addView(tab("设置", R.drawable.ic_tab_settings, false, null));

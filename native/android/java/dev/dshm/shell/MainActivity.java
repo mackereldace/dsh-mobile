@@ -3809,6 +3809,21 @@ public class MainActivity extends android.app.Activity {
                  * ★ 文字**可选中** ✗：用户能直接复制发给我 ✓（比截图更准 ✓）。
                  */
                 public void onInspectMachine(HomeModel.Machine machine) {
+                    if (machine == null && nativeHome != null) {
+                        /** ★ 长按空白处 ⇒ 弹**界面判据** ✓（加载那三秒里也能取到 ✓）。 */
+                        final android.widget.TextView dump = new android.widget.TextView(MainActivity.this);
+                        dump.setText(nativeHome.layoutDump());
+                        dump.setTextSize(12f);
+                        dump.setPadding(dpToPxLocal(16), dpToPxLocal(12), dpToPxLocal(16), dpToPxLocal(4));
+                        dump.setTextIsSelectable(true);
+                        dump.setTypeface(android.graphics.Typeface.MONOSPACE);
+                        new android.app.AlertDialog.Builder(MainActivity.this)
+                                .setTitle("界面的判据")
+                                .setView(dump)
+                                .setPositiveButton("知道了", null)
+                                .show();
+                        return;
+                    }
                     String text;
                     try {
                         android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
