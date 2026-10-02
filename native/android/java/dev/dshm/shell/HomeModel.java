@@ -396,7 +396,15 @@ public final class HomeModel {
             String target = null;
             for (Map.Entry<String, List<Row>> candidate : attributed.entrySet()) {
                 if (!machineFingerprint.containsKey(candidate.getKey())) continue;
-                String candidateName = probedMachineName(candidate.getValue()).toLowerCase();
+                /**
+                 * ★★★ 2026-10-04 **第二条判据**（用户："机器还是没合并"✗ ⇒ 查出 3733/3743 的真相 ✓）：
+                 *   那张幽灵卡的地址是 **`Mac-mini-2024.local:3733`**（mDNS 名 ✓），
+                 *   而真卡的地址是 **`10.34.255.229:*`**（IP ✓）⇒ 只比"同一主机"**对不上** ✗。
+                 *   ⇒ 加上"**卡片名字一样 ⇒ 同一台电脑**" ✓：
+                 *     用**与 ④ 同一套命名规则**算出候选机器的名字 ✓，去掉 `.local` 后比对 ✓
+                 *     —— 用户眼下看到两张卡**都叫** `Mac-mini-2024.local` ✓，这正是他要我们认出来的 ✓。
+                 */
+                String candidateName = machineDisplayName(candidate.getValue(), input.records).toLowerCase();
                 String candidateHost = stripLocalSuffix(hostnameOf(candidate.getKey().substring("host:".length()))).toLowerCase();
                 boolean match = (!host.isEmpty() && host.equals(candidateName))
                         || (!host.isEmpty() && host.equals(candidateHost));
@@ -679,6 +687,24 @@ public final class HomeModel {
         }
         int colon = text.indexOf(':');
         return colon >= 0 ? text.substring(0, colon) : text;
+    }
+
+    /**
+     * 一台机器的**显示名**（与 ④ 那套规则**同一份** ✓ —— 目录 label > 探测到的 machineName > 主机名 ✓），
+     * 去掉 `.local` ✓。用途：机器级归并时比"名字一样不一样" ✓。
+     */
+    private static String machineDisplayName(List<Row> rows, List<HostRecord> records) {
+        String fingerprint = "";
+        for (int i = 0; i < rows.size() && fingerprint.isEmpty(); i += 1) {
+            fingerprint = fingerprintOf(rows.get(i));
+        }
+        if (!fingerprint.isEmpty()) {
+            String label = labelOfRecord(fingerprint, records);
+            if (!isPlaceholderName(label)) return stripLocalSuffix(label.trim());
+        }
+        String probed = probedMachineName(rows);
+        if (!probed.isEmpty()) return probed;
+        return stripLocalSuffix(hostnameOf(rows.get(0).authority));
     }
 
     /** 这个桶里**探测到的**机器名（去掉 `.local` ✓）；没有 ⇒ 空串 ✓。 */

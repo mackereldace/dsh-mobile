@@ -34,7 +34,7 @@ public final class HomeModelTest {
      * "删掉几条断言"在输出上表现为"更短的全绿"，与"全都验过了"长得一模一样。
      * 只认**实际跑过**的条数。**只许上调**。
      */
-    private static final int EXPECTED_MIN_CHECKS = 86;
+    private static final int EXPECTED_MIN_CHECKS = 87;
 
     public static void main(String[] args) {
         currentAgentAndSameMachineAgentsAreOneMachine();
@@ -338,22 +338,27 @@ public final class HomeModelTest {
         probes.put("100.123.136.82:3453", HomeModel.Probe.up("host-BCsQL", "FP-REAL", "Mac-mini-2024.local", "0.2.0-rc.2"));
         probes.put("10.34.255.229:3453", HomeModel.Probe.down());
 
-        HomeModel.HostRecord record = new HomeModel.HostRecord("FP-REAL", "Mac mini 2024",
+        /**
+         * ★★★ 夹具**照用户真机的形状**搭 ✓（2026-10-04 第二次纠正 ✓）：
+         *   · 目录记录里那几条是**局域网 IP 形式**（`10.34.255.229:*` ✓）—— 真卡上的"端口 3082/3091/3444/3453"✓；
+         *   · ★ 而**幽灵卡的地址是 mDNS 名形式**（`Mac-mini-2024.local:3733` ✓ / 3743 ✓），
+         *     且它们来自**端点槽**（⇒ **没有指纹** ✓）—— 这正是"只比同一主机就漏掉"的那种 ✗；
+         *   · 记录的 label 就是卡上显示的那个名字 ✓（用户截图里两张卡**都叫** `Mac-mini-2024.local` ✓）。
+         */
+        HomeModel.HostRecord record = new HomeModel.HostRecord("FP-REAL", "Mac-mini-2024.local",
                 new ArrayList<String>(java.util.Arrays.asList(
                         "https://10.34.255.229:3082/mobile/app",
                         "https://10.34.255.229:3091/mobile/app",
                         "https://10.34.255.229:3444/mobile/app",
-                        "https://10.34.255.229:3453/mobile/app",
-                        "https://Mac-mini-2024.local:3733/mobile/app",
-                        "https://Mac-mini-2024.local:3743/mobile/app")),
+                        "https://10.34.255.229:3453/mobile/app")),
                 1L);
         List<HomeModel.HostRecord> records = new ArrayList<HomeModel.HostRecord>();
         records.add(record);
         List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
         endpoints.add(new HomeModel.Slot("https://100.123.136.82:3453/mobile/app", ""));
-        // ★ 用户截图里那条**自成一张卡**的 mDNS 地址（端口 3733 ✓）——
-        //   它没有指纹 ✓，但主机名就是这台机器的名字 ⇒ 该并进来 ✓
+        // ★ 两条幽灵卡（无指纹 ✓，mDNS 名 + IP 各一条 ✓）
         endpoints.add(new HomeModel.Slot("https://Mac-mini-2024.local:3733/mobile/app", ""));
+        endpoints.add(new HomeModel.Slot("https://10.34.255.229:3743/mobile/app", ""));
 
         HomeModel.Input input = new HomeModel.Input(records, endpoints, "100.123.136.82:3453",
                 "https://100.123.136.82:3453/mobile/app", probes);
@@ -363,27 +368,22 @@ public final class HomeModelTest {
         if (snapshot.machines.size() != 1) return;
         HomeModel.Machine machine = snapshot.machines.get(0);
         check("★ 那张卡在线 ✓、身份已知 ✓", machine.online && machine.known);
-        check("★ 名字用目录里那个（Mac mini 2024 ✓）", "Mac mini 2024".equals(machine.name));
+        check("★ 名字是 `Mac-mini-2024.local` ✓", "Mac-mini-2024.local".equals(machine.name));
         check("★ 它是「当前」那台 ✓", machine.current);
+
         /**
-         * ★★★ 用户纠正后的口径 ✗：**每个端口各自一行** ✓（它们真实存在 ✓）——
-         *   所以这里**不**断言"一个实例"✗，而是断言"**每个端口都在** ✓、
-         *   而机器只有**一张卡** ✓"（两者同时成立才是他要的 ✓）。
-         */
-        /**
-         * ★★★ 改成"**这几条地址必须在同一张卡里**"✗ —— 而不是看 `machines.get(0)` ✓。
-         *   ★ 原因是变异验证抓到的 ✗：原先那版靠"第一张卡的次序"碰巧通过 ✓
-         *     （把归并取消掉、次序一变，它照样绿 ✗）⇒ **断言不硬** ✓。
+         * ★★★ 判据写成"**同属一张卡**"✗（不写"在 0 号卡里"✓ —— 那会靠次序碰巧通过 ✗）。
          */
         int tailscaleCard = cardIndexOf(snapshot, "100.123.136.82:3453");
-        int lanPortCard = cardIndexOf(snapshot, "10.34.255.229:3453");
-        int mdnsPortCard = cardIndexOf(snapshot, "Mac-mini-2024.local:3733");
+        int ipPortCard = cardIndexOf(snapshot, "10.34.255.229:3453");
+        int mdnsGhostCard = cardIndexOf(snapshot, "Mac-mini-2024.local:3733");
+        int ipGhostCard = cardIndexOf(snapshot, "10.34.255.229:3743");
         check("★ Tailscale 那条在一张卡里 ✓", tailscaleCard >= 0);
-        check("★ 局域网那个端口也在（各自一行 ✓，没被合并掉 ✗）", lanPortCard >= 0);
-        check("★★★ 三条地址**同属一张卡**（原先那条 mDNS 自成一张 ✗ ⇒ 这就是「一台电脑被拆开」✓）",
-                tailscaleCard >= 0 && tailscaleCard == lanPortCard && tailscaleCard == mdnsPortCard);
+        check("★ 局域网那个端口也在（各自一行 ✓，没被合并掉 ✗）", ipPortCard >= 0);
+        check("★★★ mDNS 形式的幽灵卡（端口 3733）**并进这张卡** ✓", mdnsGhostCard == tailscaleCard);
+        check("★★★ IP 形式的幽灵卡（端口 3743）也并进这张卡 ✓", ipGhostCard == tailscaleCard);
         check("★ 端口各自成行 ⇒ 实例行数 > 1 ✓（不是被压成「一个智能体」✗）", machine.instances.size() > 1);
-        check("★ 计数：1 台在线、0 台离线/未知（幽灵卡不再计数 ✗）",
+        check("★ 计数：1 台在线、0 台离线/未知（幽灵卡不再各自计数 ✗）",
                 snapshot.onlineCount == 1 && snapshot.offlineCount == 0 && snapshot.unknownCount == 0);
     }
 
