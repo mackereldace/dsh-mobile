@@ -78,6 +78,16 @@ final class HomeView extends FrameLayout {
      *   主题切换 ✓ …… ⇒ 用户正看着下面的电脑时，被弹回顶部的机会非常多 ✓）。
      */
     private int savedScrollY = 0;
+
+    /**
+     * ★ 上一次**自动**展开的是哪一台 ✓（空 = 还没自动展开过 ✓）。
+     *
+     * 为什么要记 ✗：`setSnapshot` 每次刷新都会跑 ✓ ——
+     * 原来那里无条件 `expanded.add(当前那台)` ✓ ⇒ 用户**特意收起来**的那张卡，
+     * 会被下一次刷新（回前台就有一次 ✓）**一次次弹开** ✗：他收起、它展开、他再收起 ✓……
+     * ⇒ 只在"当前那台**变了**"或"第一次"时自动展开 ✓，之后尊重用户的手 ✓。
+     */
+    private String autoExpandedKey = "";
     /** 展开的机器（键是 `Machine.key` ✓）—— 重建时用它恢复 ✓。 */
     private final LinkedHashSet<String> expanded = new LinkedHashSet<String>();
 
@@ -125,8 +135,17 @@ final class HomeView extends FrameLayout {
         report = nextReport;
         error = "";
         busy = false;
-        // 默认把「当前」那台展开 ✓（用户一进来就看得见自己在哪个智能体上 ✓）
-        if (next != null && next.currentMachine() != null) expanded.add(next.currentMachine().key);
+        /**
+         * 默认把「当前」那台展开 ✓（用户一进来就看得见自己在哪个智能体上 ✓）——
+         * ★ 但**只在"当前那台变了"或"第一次"时** ✗：否则每次刷新都会把用户
+         * 特意收起来的那张卡**弹开** ✓（见 {@link #autoExpandedKey} ✓）。
+         */
+        HomeModel.Machine current = next == null ? null : next.currentMachine();
+        String currentKey = current == null ? "" : current.key;
+        if (!currentKey.isEmpty() && !currentKey.equals(autoExpandedKey)) {
+            autoExpandedKey = currentKey;
+            expanded.add(currentKey);
+        }
         rebuild();
     }
 
