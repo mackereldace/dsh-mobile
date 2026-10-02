@@ -2011,6 +2011,25 @@ export function createMobileHost(options: {
   ): Promise<unknown | undefined> {
     if (!endpoint.startsWith('mobile/')) return undefined
 
+    // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
+    // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
+    // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
+    if (endpoint.startsWith('mobile/dsh/')) {
+      // ★ 这里用**动态 import** ✗ 而不是文件顶部的静态 import ✓ ——
+      //   顶部那一段是**别的单正在改的地方** ✗，插进去就会把两单搅在同一次提交里 ✓。
+      //   动态 import 只加载一次（模块系统自己缓存 ✓），代价可以忽略 ✓。
+      const { handleDshChatEndpoint } = await import('./dsh-chat-bridge.ts')
+      return handleDshChatEndpoint(
+        {
+          call: (target, payload, bridgeSignal) =>
+            invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
+        },
+        endpoint,
+        payload,
+        signal,
+      )
+    }
+
     if (endpoint === 'mobile/openInApp/apps') {
       return listOpenInAppTargets()
     }
@@ -3024,6 +3043,69 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           return true
         }
         respondJson(res, 200, diagnosis)
+        return true
+      }
+
+      /**
+       * 会话页：我们自己的页面（承载 DSH 输出的那一层 ✓）。
+       * 与 Codex 页同样是"工具界面"⇒ 彻底不缓存 ✓；CSP 放开内联样式与同源脚本 ✓，
+       * 隧道是 wss: 同源升级，因此 connect-src 里显式带上 wss: ✓。
+       */
+      // 会话页（我们自己的页面 ✓）：HTML 与 css/js 都是 **assets/dsh-chat/ 下的真文件** ✓
+      //（HTML 也放文件里，是 codex 页那条教训的延伸：模板字符串转义会把脚本截断 ✗）
+      const chatAssets = { 'page.html': 'page.html', 'theme.css': 'theme.css', 'app.js': 'app.js', 'ui.js': 'ui.js', 'poller.js': 'poller.js' }
+      const chatAsset = (name) => {
+        const relative = Object.prototype.hasOwnProperty.call(chatAssets, name) ? chatAssets[name] : undefined
+        if (relative === undefined) return undefined
+        const candidates = [
+          join(dirname(fileURLToPath(import.meta.url)), 'assets', 'dsh-chat', relative),
+          join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'dsh-chat', relative),
+        ]
+        const found = candidates.find((candidate) => existsSync(candidate))
+        return found === undefined ? undefined : readFileSync(found)
+      }
+      if (req.method === 'GET' && (url.pathname === '/mobile/chat' || url.pathname === '/mobile/chat/')) {
+        const page = chatAsset('page.html')
+        if (page === undefined) {
+          respondJson(res, 404, wireError(ErrorCode.Internal, '会话页 HTML 未找到（assets/dsh-chat/page.html）'))
+          return true
+        }
+        const body = page
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': String(body.length),
+          'cache-control': 'no-store, must-revalidate',
+          pragma: 'no-cache',
+          'content-security-policy':
+            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
+          'referrer-policy': 'no-referrer',
+          'x-content-type-options': 'nosniff',
+          'x-dsh-mobile': 'dsh-chat-page',
+        })
+        res.end(body)
+        return true
+      }
+
+      /**
+       * 会话页的样式与脚本：**从磁盘的真文件发出去** ✓
+       * （理由见 dsh-chat-page.ts：模板字符串转义把脚本截断过一次又一次 ✗）。
+       */
+      if (req.method === 'GET' && url.pathname.startsWith('/mobile/chat/')) {
+        const name = url.pathname.slice('/mobile/chat/'.length)
+        const asset = name === 'page.html' ? undefined : chatAsset(name)
+        if (asset === undefined) {
+          respondJson(res, 404, wireError(ErrorCode.NotFound, `会话页没有这个资源：${name}`))
+          return true
+        }
+        const body = asset
+        const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8'
+        res.writeHead(200, {
+          'content-type': type,
+          'content-length': String(body.length),
+          'cache-control': 'no-store, must-revalidate',
+          pragma: 'no-cache',
+        })
+        res.end(body)
         return true
       }
 
