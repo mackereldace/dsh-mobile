@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>会话页骨架 · 开发预览（假数据）</title>
+<!--
+  ★ 这是**开发预览壳**，不是产品页面 ✓。
+  用途：改 `ui.js` 的观感/结构时，**先让自己看得见** —— 本项目吃过四次
+  "盲改 CSS ⇒ 连引回归"的亏（见 `10-交接文档` 的教训 ✓）。
+  产品里这一页由宿主发出来（与 `codex-page.ts` 同一类 ✓），数据来自 `mobile/dsh/*` ✓。
+
+  跑法（不依赖任何服务）：
+    node docs/native/shot-mock.mjs 那一套 Chrome 命令行，指向 file://…/dev.html 即可 ✓
+-->
+<style>
+  /* 开发用：`?theme=light|dark` 强制一套（不带参数就跟随系统 ✓）—— 与首页稿子同一套办法 ✓ */
+  html[data-theme="light"] {
+    --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
+    --ink: #14161A; --ink2: #5B6270; --ink3: #8D95A3;
+    --line: #E2E5EA; --line-soft: #EDEFF3;
+    --rail: #14161A; --accent: #2E9E6B; --code-bg: #F6F7F9;
+  }
+  :root {
+    --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
+    --ink: #14161A; --ink2: #5B6270; --ink3: #8D95A3;
+    --line: #E2E5EA; --line-soft: #EDEFF3;
+    --rail: #14161A; --accent: #2E9E6B; --code-bg: #F6F7F9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0D0F12; --surface: #17191E; --tint: #1E2229;
+      --ink: #E9EBEF; --ink2: #9AA1AC; --ink3: #6E7681;
+      --line: #262A31; --line-soft: #21252B;
+      --rail: #E9EBEF; --accent: #4FBF7F; --code-bg: #101317;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    width: 400px; height: 869px; overflow: hidden; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px; line-height: 1.5; font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; flex-direction: column; height: 100%; }
+  .status { height: 44px; flex: none; display: flex; align-items: center; padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; color: var(--ink2); }
+  header { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 14px 12px 20px; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.2px; }
+  header .sub { margin: 3px 0 0; font-size: 12px; color: var(--ink3); }
+  header .grow { flex: 1; }
+  header button { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--ink2); font-size: 17px; }
+  #status { padding: 0 20px 8px; font-size: 11px; color: var(--ink3); min-height: 22px; }
+  #messages { flex: 1; overflow: auto; padding: 4px 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .ev-user { display: flex; justify-content: flex-end; }
+  .ev-user .bubble {
+    max-width: 84%; background: var(--tint); border: 1px solid var(--line);
+    border-radius: 14px 14px 4px 14px; padding: 9px 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .ev-agent .bubble {
+    max-width: 94%; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 14px 14px 14px 4px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .ev-reasoning .dim { border-left: 2px solid var(--line); padding-left: 10px; }
+  .ev-tool { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .ev-tool .tool-head { padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--ink2); border-bottom: 1px solid var(--line-soft); }
+  .ev-tool .tool-body { margin: 0; padding: 10px 12px; background: var(--code-bg); font-size: 12px; line-height: 1.45; color: var(--ink2); white-space: pre-wrap; word-break: break-all; }
+  .ev-step { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--ink3); }
+  .ev-step::before, .ev-step::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .dim { color: var(--ink3); }
+  .small { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .composer { flex: none; display: flex; gap: 8px; align-items: flex-end; padding: 10px 14px 6px; border-top: 1px solid var(--line); background: var(--surface); }
+  .composer textarea {
+    flex: 1; min-height: 38px; max-height: 120px; resize: none; padding: 9px 11px;
+    border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--ink);
+    font: inherit; font-size: 14px;
+  }
+  .composer button {
+    height: 38px; padding: 0 15px; border: 0; border-radius: 12px;
+    background: var(--rail); color: var(--bg); font: inherit; font-size: 14px; font-weight: 600;
+  }
+  .homebar { height: 22px; flex: none; background: var(--surface); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="status">9:41</div>
+  <header>
+    <div>
+      <h1>Mac mini 2024</h1>
+      <p class="sub">端口 3453 · 局域网</p>
+    </div>
+    <span class="grow"></span>
+    <button title="刷新">⟳</button>
+  </header>
+  <div id="status">已连上，正在读…</div>
+  <main id="messages"></main>
+  <form class="composer" id="composer">
+    <textarea id="input" placeholder="给 DSH 发一条消息…" rows="1"></textarea>
+    <button type="submit">发送</button>
+  </form>
+  <div class="homebar"></div>
+</div>
+<script>
+  // 开发壳专用：`?theme=` 强制一套配色（产品页跟随系统 ✓）
+  ;(function () {
+    var t = new URLSearchParams(location.search).get('theme')
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t)
+  })()
+</script>
+<script type="module">
+  import { appendEvents, mountChat, classify, textOf } from './ui.js'
+  import { ChatPoller } from './poller.js'
+
+  // 假事件（形状按 37 号探针：{seq, time, type, data} ✓）—— 只为看观感
+  const fake = [
+    { seq: 1, time: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, time: 2, type: 'userMessage', data: { content: [{ type: 'text', text: '帮我把首页那两个标签的图标换掉' }] } },
+    { seq: 3, time: 3, type: 'reasoning', data: { text: '用户要换图标。先看现有实现，再决定要不要新画矢量图。' } },
+    { seq: 4, time: 4, type: 'commandExecution', data: { command: 'grep -n "dshm-command-btn" packages/client/src/boot.js' } },
+    { seq: 5, time: 5, type: 'agentMessage', data: { text: '图标换成矢量后我渲染出来看了一眼：齿轮第一版环与齿之间有缝，看起来像太阳，已改成齿咬着环。' } },
+    { seq: 6, time: 6, type: 'someUnknownEvent', data: { whatever: 1 } },
+  ]
+
+  const state = { received: 0 }
+  window.__dev = { classify, textOf }
+  const poller = new ChatPoller({
+    read: async () => {
+      // 一次给两条，模拟"分页/轮询"；给完就没有新的了
+      const slice = fake.slice(state.received, state.received + 2)
+      state.received += slice.length
+      return slice
+    },
+    onEvents: () => {},
+    intervalMs: 300,
+  })
+  mountChat({
+    root: document,
+    poller,
+    send: async (text) => {
+      appendEvents(document.querySelector('#messages'), [
+        { seq: null, time: Date.now(), type: 'userMessage', data: { text } },
+      ])
+    },
+  })
+  const originalOnEvents = poller.options.onEvents
+  poller.options.onEvents = (events) => {
+    appendEvents(document.querySelector('#messages'), events)
+    document.querySelector('#status').textContent =
+      events.length > 0 ? `收到 ${events.length} 条（游标 ${poller.cursor}）` : `没有新的（游标 ${poller.cursor}）`
+  }
+  poller.start()
+  void originalOnEvents
+</script>
+</body>
+</html>
