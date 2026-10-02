@@ -306,6 +306,13 @@ public class MainActivity extends android.app.Activity {
 
     /** 计时器默认值（用户定的 2000ms ✓）。 */
     private static final int DEFAULT_SWITCH_TIMEOUT_MS = 2000;
+
+    /**
+     * ★ 换源看门狗的等待时长 ✓（见 {@link #homeSwitchWatchdog} ✓）。
+     *   比单槽超时（默认 2000ms ✓）宽得多 ✓ —— 局域网正常一两秒就完事 ✓，
+     *   给到 8 秒是"真的卡住了"再动手 ✓，免得把慢但正常的加载打断 ✗。
+     */
+    private static final long HOME_SWITCH_TIMEOUT_MS = 8000;
     /** 合理区间 ✓ —— 太小会"还没握手就切"✗，太大会让"校外打不通学校 IP"白等 ✗。 */
     private static final int MIN_SWITCH_TIMEOUT_MS = 200;
     private static final int MAX_SWITCH_TIMEOUT_MS = 10000;
@@ -455,6 +462,29 @@ public class MainActivity extends android.app.Activity {
      * （手机上只表现为"再点没反应"✗，没有任何报错可查 ✓）。
      */
     private boolean hostSwitchPending = false;
+
+    /**
+     * ★★ 换源**看门狗** ✓ —— 那道闸的复位点只有两处（`onPageFinished` ✓ / 主文档出错 ✓），
+     *   而**手动/原生进入某一台**时，`applyHostUrl` 会先 `stopAutoConnect` ✓
+     *   ⇒ 自动换槽的槽超时**被撤掉了** ✗ ⇒ 只剩那两个复位点 ✓。
+     *
+     * 于是这种情形就**永远关着**：对面接受了连接、但既不完、也不报错 ✓（卡在中间 ✓）
+     * ⇒ 首页**整体变哑** ✓：点任何一台都没反应 ✓（而屏幕上没有任何异常 ✓ ——
+     * 本项目最忌讳的"点了没反应" ✗）。看门狗到点就放开那道闸 ✓ + 让首页说清原因 ✓。
+     */
+    private final android.os.Handler homeSwitchHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    private final Runnable homeSwitchWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!hostSwitchPending) return; // 已经落地了 ✓（正常情形）
+            hostSwitchPending = false;
+            Log.w(TAG, "换源看门狗：到点了还没落地 ⇒ 放开那道闸（否则首页会整体变哑 ✗）");
+            if (nativeHome != null) nativeHome.setError(getString(R.string.home_switch_stuck));
+            showNativeHome();
+        }
+    };
 
     // ── ★★ C2：TOFU（第一次连某台电脑时确认它的 CA ✓）─────────────────────
     //
@@ -3832,6 +3862,9 @@ public class MainActivity extends android.app.Activity {
         // ★ 淡出与加载**并行** ✓（先等动画再加载就白白多花 160ms ✗）
         showWebView();
         applyHostUrl(target, "原生首页点了智能体");
+        // ★ 上表：到点还没落地就放开闸并回到首页 ✓（见 homeSwitchWatchdog ✓）
+        homeSwitchHandler.removeCallbacks(homeSwitchWatchdog);
+        homeSwitchHandler.postDelayed(homeSwitchWatchdog, HOME_SWITCH_TIMEOUT_MS);
     }
 
     /** insets（**dp** ✓，与写进网页 CSS 的那两个数同源 ✓）。 */
@@ -3931,6 +3964,8 @@ public class MainActivity extends android.app.Activity {
         autoSwitching = false;
         cancelSlotTimeout();
         slotHandler.removeCallbacksAndMessages(null);
+        // ★ 看门狗也撤掉 ✓（同一个理由：携着 Activity 引用的 postDelayed 活过 onDestroy 就是泄漏 ✗）
+        homeSwitchHandler.removeCallbacksAndMessages(null);
         /**
          * ★ 原生首页的加载回调同理 ✓：`HomeController` 里那份"在飞"的加载跑在后台线程上 ✓，
          *   它落地时会走 `Handler` 回到主线程 ✓ —— 不 dispose 就是"拿着已销毁的视图回调"✗

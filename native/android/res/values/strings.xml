@@ -99,4 +99,6 @@
     <string name="keepalive_state_connecting">正在连接电脑…</string>
     <string name="keepalive_state_reconnecting">正在重连（第 %1$d 次）</string>
     <string name="keepalive_exit">退出并断开</string>
+    <!-- 换源看门狗到点时首页要说的话 ✓（它比"什么都没发生"强得多 ✓） -->
+    <string name="home_switch_stuck">上次没能连上这台电脑（可能它不在线或换了地址）</string>
 </resources>
