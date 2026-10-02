@@ -1891,7 +1891,7 @@ public class MainActivity extends android.app.Activity {
                 advanceSlot("主文档加载失败：" + reason);
                 return;
             }
-            promptForAddress(getString(R.string.load_failed_hint) + "\n\n" + reason);
+            promptForAddressUnlessHomeShows(getString(R.string.load_failed_hint) + "\n\n" + reason);
         }
 
         /**
@@ -2903,7 +2903,7 @@ public class MainActivity extends android.app.Activity {
             currentUrl = prefs.getString(KEY_URL, null);
             if (currentUrl == null || currentUrl.isEmpty()) {
                 // 第一次运行：先问地址 ✓（比猜一个连不上的默认值强 ✓）—— **老行为，不改** ✓
-                promptForAddress(getString(R.string.first_run_hint));
+                promptForAddressUnlessHomeShows(getString(R.string.first_run_hint));
             } else {
                 webView.loadUrl(currentUrl);
             }
@@ -3021,7 +3021,7 @@ public class MainActivity extends android.app.Activity {
         slotGeneration++;
         cancelSlotTimeout();
         Log.w(TAG, "所有端点槽都没能打开，弹地址输入框");
-        promptForAddress(getString(R.string.load_failed_hint)
+        promptForAddressUnlessHomeShows(getString(R.string.load_failed_hint)
                 + "\n\n已经试过 " + slotUrls.length + " 个候选地址，都没能打开。");
     }
 
@@ -3425,6 +3425,26 @@ public class MainActivity extends android.app.Activity {
      *   ★ 三个按钮的**语义顺序**（用户看到的是 左→右）✓：
      *   「扫码配对」✓（neutral ✓）/「用默认地址试」✓（negative ✓）/「打开」✓（positive ✓）。
      */
+    /**
+     * ★★ **自动**弹地址框的入口：**原生首页可见时不弹** ✗（改为刷新首页 ✓）。
+     *
+     * 为什么 ✗：地址框是一个**独立窗口** ✓ ⇒ 它会**盖在首页上** ✓ ——
+     * 用户正看着首页上那句「还没有电脑。点右上角 ＋ 扫一次码就能加上。」✓，
+     * 突然又冒出一个问地址的框 ✓：两处说法打架 ✓，而且首页上那颗「添加电脑」本来就更清楚 ✓。
+     * （首页是后来才有的 ✓，这三个弹框入口都是它之前写的 ✗ ⇒ 没人替它们想过"上面还有一层" ✓。）
+     *
+     * ★ 用户**主动**点的入口（菜单里的"电脑地址"✓、「添加电脑」扫码被拒的说明 ✓）**不走这里** ✓ ——
+     *   那些是他自己要的 ✓，照弹 ✓。
+     */
+    private void promptForAddressUnlessHomeShows(String hint) {
+        if (nativeHome != null && nativeHome.getVisibility() == View.VISIBLE) {
+            // ★ 首页在 ⇒ 让它自己去说这件事（它本来就一直在探 ✓，刷新一次就是最新的实话 ✓）
+            refreshNativeHome();
+            return;
+        }
+        promptForAddress(hint);
+    }
+
     private void promptForAddress(String hint) {
         runOnUiThread(() -> {
             if (addressDialogOpen) {
