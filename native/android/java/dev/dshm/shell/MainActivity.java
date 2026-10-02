@@ -1433,6 +1433,25 @@ public class MainActivity extends android.app.Activity {
                 if (prefs.edit().putString(KEY_IDENTITY_VAULT, vault.toString()).commit()) {
                     Log.i(TAG, "身份库已合并（写入 " + written + " 个键、删除 " + removed
                             + " 个键，现在共 " + vault.length() + " 个键 ✓）");
+                    /**
+                     * ★★ 配对**真的完成**的信号就是这里 ✓（身份库刚写下东西 ✓）——
+                     *   更早的信号都不对 ✗：`onPageFinished` 只说明页面加载完 ✓，
+                     *   那时握手可能还没成功、身份还没落盘 ✓。
+                     *   ⇒ 此刻把原生首页抬回来 ✓（它会顺手刷新一次 ✓，新电脑就在上面 ✓）。
+                     *
+                     * ★★ 但这里**不是主线程** ✗ —— `@JavascriptInterface` 的方法跑在 WebView 的
+                     *   JavaBridge 线程上 ✓，直接动 View 会当场抛
+                     *   "Only the original thread that created a view hierarchy can touch its views" ✗。
+                     *   ⇒ 一律 `post` 回主线程 ✓（并且 `root` 可能还没建好 ⇒ 先判空 ✓）。
+                     */
+                    if (written > 0 && root != null) {
+                        root.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                showNativeHome();
+                            }
+                        });
+                    }
                 } else {
                     Log.w(TAG, "身份库落盘失败（commit 返回 false ✗）");
                 }
@@ -3213,6 +3232,20 @@ public class MainActivity extends android.app.Activity {
         slotLabels = labels.toArray(new String[0]);
         switchTimeoutMs = readSwitchTimeoutMs();
         Log.i(TAG, "扫码配对（" + how + "）：" + slotUrls.length + " 个候选，开始按顺序试 ✓");
+        /**
+         * ★★ 认下票据了 ⇒ **把原生首页收走** ✗ ——
+         *   不收的话，配对页**上面盖着的还是首页** ✓
+         *   ⇒ 用户看到的是"扫了码 / 点了链接、屏幕上什么都没变" ✗（第一次装包最容易撞上的坑 ✓）。
+         *
+         * ★ 为什么放在**这里**、而不是各个入口各写一遍 ✗：
+         *   这张票据有**三个**入口 ✓（壳内扫码 ✓ / 深链 `dshmobile://pair` ✓ / 粘贴链接 ✓）——
+         *   我第一版只加在扫码那条上 ✓ ⇒ 深链那条**照样盖着** ✗（同一个 bug，换个人口 ✓）。
+         *   这里是从"开始按顺序试"往前推的**唯一**成功出口 ✓，放这儿三个人口一起生效 ✓。
+         *
+         * ★ 首页什么时候回来 ✗：见 `vaultSet` —— **配对真的写进身份库**那一刻 ✓
+         *   （不是"页面加载完" ✗：那时可能还没配上 ✓）。
+         */
+        showWebView();
         beginSlot(0, "扫码配对（" + how + "）");
         return true;
     }
