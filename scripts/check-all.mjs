@@ -16,7 +16,8 @@
  * | 2 首页数据层 | 身份归一 / 探测 / 选路 / 动画策略（JVM ✓） | `check-home-model` ⇒ 8 份测试 |
  * | 3 TLS 探针 | 真握手：钉住的 CA + 链校验（起真证书、真服务 ✓） | `check-manifest-probe` ⇒ 29 条 |
  * | 4 APK | 全量构建 + 包内容/形状/机器无关 | `build-apk` + `check-apk` ⇒ 51 条 |
- * | 5 会话页端到端 | 假隧道 + 真浏览器 + DOM 断言 | `check-chat-page` ⇒ 16 条 |
+ * | 5 会话页端到端 | 假隧道 + 真浏览器 + DOM 断言 | `check-chat-page` ⇒ 24 条 |
+ * | 6 宿主真路由 | ★ 进程内起宿主 + **真 HTTP** 打 `/mobile/chat` 与 `/mobile/desktop/shot` | `check-host-routes` ⇒ 15 条 |
  *
  * ## 用法
  *
@@ -107,6 +108,7 @@ const steps = [
   ['④ APK 全量构建', 'node', ['scripts/build-apk.mjs']],
   ['④ APK 内容与形状', 'node', ['scripts/check-apk.mjs']],
   ['⑤ 会话页端到端', 'node', ['scripts/check-chat-page.mjs']],
+  ['⑥ 宿主真路由（真 HTTP）', 'node', ['scripts/check-host-routes.mjs']],
 ]
 
 const logDir = join(ROOT, 'dist', 'check-all')
