@@ -34,7 +34,7 @@ public final class HomeModelTest {
      * "删掉几条断言"在输出上表现为"更短的全绿"，与"全都验过了"长得一模一样。
      * 只认**实际跑过**的条数。**只许上调**。
      */
-    private static final int EXPECTED_MIN_CHECKS = 76;
+    private static final int EXPECTED_MIN_CHECKS = 82;
 
     public static void main(String[] args) {
         currentAgentAndSameMachineAgentsAreOneMachine();
@@ -47,6 +47,7 @@ public final class HomeModelTest {
         probedFingerprintBeatsStaleDirectoryFingerprint();
         unreachableUnrecordedAddressDoesNotJoinAKnownMachine();
         unknownAddressesOnTheSameHostnameGroupTogether();
+        userScreenshotOneMacIsOneCard();
         authorityParsing();
         tailscaleAndPrivateRanges();
         sortingCurrentFirstThenOnline();
@@ -270,13 +271,38 @@ public final class HomeModelTest {
                 probes);
 
         HomeModel.Snapshot snapshot = HomeModel.build(input);
-        check("身份未知的那条不并入已知机器（宁可单独一张卡，也不猜）", snapshot.machines.size() == 2);
-        HomeModel.Machine unknown = snapshot.machines.get(1);
-        check("未知那台 known=false", !unknown.known);
-        check("未知那台按主机名成键", "host:10.34.255.229".equals(unknown.key));
+        /**
+         * ★★★ 2026-10-04 改判（用户截图："一台电脑被拆分为多个"✗）：
+         *   原来钉的是"宁可**单独一张卡**，也不猜"✓ —— 但用户真机上攒了一堆早死的端口 ✓
+         *   ⇒ 每一条都自开一张卡 ⇒ 同一台 Mac 显示成**四张** ✗。
+         * ★ 精神**照旧**（不猜 ✓），只是**落法更硬** ✗：
+         *   这条地址**既没被并进**已知那台（下面直接查它的地址列表 ✓），
+         *   **也没被单独显示**出来 ✓ —— 它只是不存在于界面上 ✓。
+         */
+        check("★ 三无地址（没身份 + 不通 + 不是当前）⇒ **不显示**（不是单独一张卡 ✗）",
+                snapshot.machines.size() == 1);
+        /** ★ 只看**已知那台**的地址列表 ✗ —— "不许猜"说的正是这件事 ✓（不是"它不存在于任何地方"✓）。 */
+        boolean mergedIntoKnown = false;
+        for (int i = 0; i < snapshot.machines.size(); i += 1) {
+            HomeModel.Machine machine = snapshot.machines.get(i);
+            if (!machine.known) continue;
+            for (int j = 0; j < machine.instances.size(); j += 1) {
+                for (int k = 0; k < machine.instances.get(j).addresses.size(); k += 1) {
+                    if (machine.instances.get(j).addresses.get(k).authority.equals("10.34.255.229:3999")) mergedIntoKnown = true;
+                }
+            }
+        }
+        check("★★ 而它也**没有**被并进已知那台（不许猜 ✗ —— 这才是这条用例的本意 ✓）", !mergedIntoKnown);
+        check("★ 剩下那张就是已知那台（在线 ✓）", snapshot.machines.get(0).online && snapshot.machines.get(0).known);
     }
 
-    /** 两条都探不通、都不在目录里，但同主机名 ⇒ 合成一台未知机器（不裂成两张卡）。 */
+    /**
+     * 两条都探不通、都不在目录里（三无 ✓）但同主机名 ⇒ **一张都不显示** ✓。
+     *
+     * ★ 2026-10-04：这条用例**仍然成立** ✓，而且正好证明新判据**很窄** ✗ ——
+     *   其中一条是**当前那台**（`currentHost` = `10.0.0.7:3453` ✓）⇒ **当前那台永远显示** ✓
+     *   （它就在你眼前 ✓，哪怕没响应 ✓）⇒ 不受"三无卡不显示"那条影响 ✓。
+     */
     private static void unknownAddressesOnTheSameHostnameGroupTogether() {
         Map<String, HomeModel.Probe> probes = new LinkedHashMap<String, HomeModel.Probe>();
         probes.put("10.0.0.7:3453", HomeModel.Probe.down());
@@ -293,6 +319,55 @@ public final class HomeModelTest {
         check("同主机名的未知地址 ⇒ 1 台机器", snapshot.machines.size() == 1);
         check("两条地址都在（实例身份各自未知）", snapshot.machines.get(0).instances.size() == 2);
         check("这台未知机器标离线", snapshot.machines.get(0).offline);
+    }
+
+    /**
+     * ★★★ 2026-10-04 **照用户截图**搭的用例 ✓（他真机上的形状 ✓）：
+     *   同一台 Mac、**六条地址** —— 其中只有 Tailscale 那条通 ✓，
+     *   另外五条是他实验过程中攒下的旧端口（3082/3091/3444/3453 局域网 + mDNS 名的 3733/3743 ✓）。
+     *
+     * 修之前：同一台 Mac 显示成**四张卡** ✗（1 张有指纹的在线卡 + 3 张幽灵卡 ✓）。
+     * 修之后：**一张卡** ✓，五条旧地址作为这台机器的"没响应地址"待在它下面 ✓
+     *   （它们在目录里记着、指纹对得上 ✓ ⇒ 属于这台机器 ✓，只是现在不通 ✓）。
+     */
+    private static void userScreenshotOneMacIsOneCard() {
+        Map<String, HomeModel.Probe> probes = new LinkedHashMap<String, HomeModel.Probe>();
+        probes.put("100.123.136.82:3453", HomeModel.Probe.up("host-BCsQL", "FP-REAL", "Mac-mini-2024.local", "0.2.0-rc.2"));
+        probes.put("10.34.255.229:3453", HomeModel.Probe.down());
+
+        HomeModel.HostRecord record = new HomeModel.HostRecord("FP-REAL", "Mac mini 2024",
+                new ArrayList<String>(java.util.Arrays.asList(
+                        "https://10.34.255.229:3082/mobile/app",
+                        "https://10.34.255.229:3091/mobile/app",
+                        "https://10.34.255.229:3444/mobile/app",
+                        "https://10.34.255.229:3453/mobile/app",
+                        "https://Mac-mini-2024.local:3733/mobile/app",
+                        "https://Mac-mini-2024.local:3743/mobile/app")),
+                1L);
+        List<HomeModel.HostRecord> records = new ArrayList<HomeModel.HostRecord>();
+        records.add(record);
+        List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
+        endpoints.add(new HomeModel.Slot("https://100.123.136.82:3453/mobile/app", ""));
+
+        HomeModel.Input input = new HomeModel.Input(records, endpoints, "100.123.136.82:3453",
+                "https://100.123.136.82:3453/mobile/app", probes);
+        HomeModel.Snapshot snapshot = HomeModel.build(input);
+
+        check("★★★ 同一台 Mac ⇒ **一张卡**（用户截图里是四张 ✗）", snapshot.machines.size() == 1);
+        if (snapshot.machines.size() != 1) return;
+        HomeModel.Machine machine = snapshot.machines.get(0);
+        check("★ 那张卡在线 ✓、身份已知 ✓", machine.online && machine.known);
+        check("★ 名字用目录里那个（Mac mini 2024 ✓）", "Mac mini 2024".equals(machine.name));
+        check("★ 它是「当前」那台 ✓", machine.current);
+        /**
+         * ★ 7 = 目录里那 6 条 + 当前那条 Tailscale（端点槽给的 ✓）——
+         *   我第一版断言写的是 6 ✗（**自己算错了数** ✓；模型是对的 ✓，
+         *   靠一次临时调试打印才看清真实形状 ✓）。
+         */
+        check("★ 七条地址都在**同一个实例**下面（旧地址只是没响应 ✓，不是别的智能体 ✗）",
+                machine.instances.size() == 1 && machine.instances.get(0).addresses.size() == 7);
+        check("★ 计数：1 台在线、0 台离线/未知（幽灵卡不再计数 ✗）",
+                snapshot.onlineCount == 1 && snapshot.offlineCount == 0 && snapshot.unknownCount == 0);
     }
 
     // ───────────────────────── 小工具 ─────────────────────────

@@ -410,6 +410,29 @@ public final class HomeModel {
                 }
             }
             boolean known = machineFingerprint.containsKey(key);
+
+            /**
+             * ★★★ 2026-10-04（用户截图）：**不许给"不知道是哪台、又一条都不通"的地址单独开一张卡** ✗。
+             *
+             * 用户的原话："一台电脑被拆分为多个的问题"✓，截图里同一台 Mac 显示成**四张卡** ✗：
+             *   ① 有指纹的那张（在线 ✓ 端口 3453 · Tailscale ✓）；
+             *   ②③④ 三张**没有指纹**的卡（`未知（还没探到）` / `离线` / `没响应` ✓），
+             *        地址是他实验过程中攒下的旧端口（3082/3444/3091/3733/3743 ✓）。
+             *
+             * 为什么它们会各成一张卡 ✗：机器键是"**指纹优先、退化到主机名**"✓
+             * （见上面 ③ ✓）—— 那几条地址**探不通**（早就死了 ✓）⇒ 拿不到指纹 ✗，
+             * 主机名又各不一样（mDNS 名 / IPv4 / IPv6 混着 ✓）⇒ 于是各开一张 ✗。
+             *
+             * 判据（★ 故意取得**很窄** ✗，免得误伤真机器 ✓）：
+             *   **没有指纹** ∧ **一条都不通** ∧ **也不是当前那台** ⇒ 不显示 ✓。
+             * · 有指纹的机器**永远不隐藏** ✓（另一台真的关机的电脑照旧看得见 ✓）；
+             * · 通得上的照旧显示 ✓（那就是一台能用的电脑 ✓）；
+             * · 当前那台照旧显示 ✓（哪怕它现在没响应 —— 它就在你眼前 ✓）。
+             * ⇒ 代价：这类地址不能从首页点进去了 ✓ —— 它们本来点了也只会被弹回来 ✓，
+             *   真要连新地址走「＋ 添加电脑 / ⌨ 手输地址」✓。
+             */
+            if (!known && !anyReachable && !machineCurrent) continue;
+
             if (anyReachable) onlineCount += 1;
             else if (anyProbed) offlineCount += 1;
             else unknownCount += 1;
@@ -466,8 +489,25 @@ public final class HomeModel {
             Row row = bucket.get(i);
             Probe probe = row.probe;
             boolean up = probe != null && probe.reachable && !probe.hostId.trim().isEmpty();
-            boolean mergeCurrent = !up && onlyIdentified != null && probe == null && row.authority.equals(currentHost);
-            String key = up ? "hid:" + probe.hostId.trim() : (mergeCurrent ? onlyIdentified : "addr:" + row.authority);
+            /**
+             * ★★★ 2026-10-04（用户截图的第二层同一问题）：**带不来身份的行，并进那个已识别的实例** ✓。
+             *
+             * 截图里那张在线卡下面挂着四行"端口 … · 局域网 · 身份未知 · 没响应" ✓ ——
+             * 它们**不是别的智能体** ✗：它们带着**同一枚指纹**（目录记录里的 slots ✓）
+             * ⇒ 分组时早就归到这台机器了 ✓，只是**那几条地址现在不通** ✓、
+             * 拿不到 `hostId` ⇒ 于是各自成行 ✗（同一台电脑内部又"裂"了一次 ✓）。
+             *
+             * ★ 这不是"猜" ✗：指纹已经把话说死了 ✓（是同一台电脑 ✓）；
+             *   要决定的只是"显示成**一个智能体的几条地址** ✓，还是**几个智能体** ✗" ✓。
+             *   前者对 ✓ —— 因为"智能体"是按 `hostId` 算的 ✓，而它们**没有** `hostId` ✓。
+             *
+             * ★ 什么时候不并（保守 ✓）：桶里没有已识别的 ✗、或有**多个**已识别的 ✗
+             *   ⇒ 不敢说它是哪一个 ✓ ⇒ 照旧各成一行 ✓。
+             */
+            boolean noIdentity = !up;
+            boolean mergeIntoIdentified = noIdentity && onlyIdentified != null
+                    && (row.authority.equals(currentHost) || probe == null || !probe.reachable);
+            String key = up ? "hid:" + probe.hostId.trim() : (mergeIntoIdentified ? onlyIdentified : "addr:" + row.authority);
             List<Row> group = byInstance.get(key);
             if (group == null) {
                 group = new ArrayList<Row>();

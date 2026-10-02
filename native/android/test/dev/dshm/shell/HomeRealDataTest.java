@@ -45,7 +45,15 @@ public final class HomeRealDataTest {
         String vaultJson = "{\"" + HomeStore.HOSTS_KEY + "\":\"[{\\\"fingerprint\\\":\\\"" + fingerprint
                 + "\\\",\\\"label\\\":\\\"桌面版\\\",\\\"slots\\\":[\\\"" + slotUrl + "\\\"],\\\"updatedAt\\\":1}]\"}";
         // ② 端点槽：壳里那几条 ✓
-        String slotsJson = "[{\"url\":\"" + slotUrl + "\",\"label\":\"桌面版\"},{\"url\":\"" + otherUrl + "\",\"label\":\"局域网\"}]";
+        /**
+         * ★★★ 夹具**照用户手机上的形状**搭 ✓（2026-10-04 截图 ✓）：
+         *   他的端点槽里攒了一堆**早就死掉的端口**（3082/3091/3444 是历次实验留下的 ✓）——
+         *   修之前，**每一条没有身份的地址都会自开一张卡** ✗ ⇒ 同一台 Mac 显示成**四张** ✗。
+         */
+        String slotsJson = "[{\"url\":\"" + slotUrl + "\",\"label\":\"桌面版\"},{\"url\":\"" + otherUrl + "\",\"label\":\"局域网\"}"
+                + ",{\"url\":\"https://127.0.0.1:3082/mobile/app\",\"label\":\"旧\"}"
+                + ",{\"url\":\"https://127.0.0.1:3091/mobile/app\",\"label\":\"旧\"}"
+                + ",{\"url\":\"https://127.0.0.1:3444/mobile/app\",\"label\":\"旧\"}]";
 
         /**
          * ★★ 为什么夹具必须给**两条**地址 ✗：
@@ -77,8 +85,8 @@ public final class HomeRealDataTest {
         // ③ 断言：连着真数据一起看
         check("★ 身份库真的读进来了（不是空跑 —— 读到的记录数 ≥ 1 ✓）",
                 HomeStore.parseHosts(vaultJson).size() == 1);
-        check("★★ **只有一台电脑 / 一张卡**（这正是用户报的那个 bug ✓）", snapshot.machines.size() == 1,
-                "实际 " + snapshot.machines.size() + " 台");
+        check("★★ **只有一台电脑 / 一张卡**（这正是用户报的那个 bug ✓ —— 夹具里那三条旧端口不许各开一张 ✗）",
+                snapshot.machines.size() == 1, "实际 " + snapshot.machines.size() + " 台");
         if (snapshot.machines.isEmpty()) {
             finish();
             return;
@@ -119,8 +127,15 @@ public final class HomeRealDataTest {
          */
         check("★★★ 两条地址都探了（含当前那条 —— 不探它就会裂成两张卡 ✗）",
                 probed.size() >= 2, String.valueOf(probed));
-        check("★ 其中包含给探测用的那条 ✓", !probed.isEmpty() && probed.get(0).startsWith(otherBase),
-                String.valueOf(probed));
+        /**
+         * ★ 改成"**包含**"而不是"第一条是" ✗ —— 自从"当前那条也探"（见 `HomeLoader` ✓）之后，
+         *   探测列表的第一条就是**当前**那条 ✓；再钉"第一条是别的"就是过期的期望 ✗。
+         */
+        boolean probedTheOther = false;
+        for (int i = 0; i < probed.size(); i += 1) {
+            if (probed.get(i).startsWith(otherBase)) probedTheOther = true;
+        }
+        check("★ 给探测用的那条（第二条地址）也在探测列表里 ✓", probedTheOther, String.valueOf(probed));
 
         finish();
     }
