@@ -22,7 +22,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { tmpdir } from 'node:os'
@@ -51,6 +51,16 @@ const fail = (message) => {
   cleanup()
   process.exit(2)
 }
+
+/**
+ * 夹具那张 PNG ✓：八字节魔数 + 一段可辨认的内容 ✓。
+ * ★ 它会**同时**用于：服务端要回的东西 ✓、以及传给 Java 的"期望文件" ✓
+ *   ⇒ "取到的就是这张"才有意义 ✓（两处各写一份就会飘 ✓）。
+ */
+const SHOT_PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from('dsh-mobile-shot-fixture-v1', 'utf8'),
+])
 
 const servers = []
 const cleanup = () => {
@@ -105,6 +115,38 @@ const handler = (request, response) => {
       try {
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(MANIFEST)
+      } catch (error) {
+        void error
+      }
+    }, 2000)
+    return
+  }
+  if (url === '/mobile/desktop/shot') {
+    /**
+     * ★ 回**真 PNG** ✓（八字节魔数 + 一点内容 ✓）—— 夹具里不能图省事回 "PNG" 三个字母 ✗：
+     *   那样"逐字节比"与"认魔数"两条都会变得没有承重 ✓。
+     */
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(SHOT_PNG)
+    return
+  }
+  if (url === '/not-an-image') {
+    // ★ 200，但回的是 HTML —— 就是"错误页当成图"那种情形 ✓
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end('<html><body>这不是图</body></html>')
+    return
+  }
+  if (url === '/shot-too-big') {
+    // ★ 合法 PNG 头 + 超过 512KB 的填充 ✓（"读完再判断"与"读的过程中放弃"因此可分辨 ✓）
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(Buffer.concat([SHOT_PNG, Buffer.alloc(700 * 1024, 7)]))
+    return
+  }
+  if (url === '/shot-slow') {
+    setTimeout(() => {
+      try {
+        response.writeHead(200, { 'content-type': 'image/png' })
+        response.end(SHOT_PNG)
       } catch (error) {
         void error
       }
@@ -199,7 +241,9 @@ const run = async () => {
     join(sourceDir, 'dev', 'dshm', 'shell', 'HomeModel.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'HomeManifest.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'ManifestProbe.java'),
+    join(sourceDir, 'dev', 'dshm', 'shell', 'ShotFetch.java'),
     join(testDir, 'dev', 'dshm', 'shell', 'ManifestProbeTest.java'),
+    join(testDir, 'dev', 'dshm', 'shell', 'ShotFetchTest.java'),
   ]
   try {
     execFileSync('javac', ['--release', '11', '-d', classDir, ...sources], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -220,7 +264,21 @@ const run = async () => {
    *   只有"必须成功"那条红 ✓ —— 如果这组里没有正向断言，这次验收会 100% 全绿而**什么都没验** ✗。
    *   （本例的教训写进了 `10-交接文档` §4.1bg ✓：**正向断言是假绿的唯一解药** ✓。）
    */
-  const exitCode = await runJava([
+  /**
+   * ★ 把夹具那张 PNG 落成一个文件 ✓ —— 它是 Java 侧"逐字节比"的依据 ✓。
+   *   （**同一份字节**来自 `SHOT_PNG` ✓，不是另写一份 ✗。）
+   */
+  const shotExpected = join(workDir, 'expected-shot.png')
+  writeFileSync(shotExpected, SHOT_PNG)
+
+  /**
+   * ★★ 每个测试类**各起一次 java** ✗ ——
+   *   我第一版把两个类名一起写在命令末尾 ✓：`java` 只把**第一个**当主类 ✗，
+   *   第二个是**当参数**递进去的 ✓ ⇒ `ShotFetchTest` 的十几条断言**一条都没跑** ✓，
+   *   而脚本照样报"29 ✓"、退出码 0 ✓ —— 那次"绿"是假的 ✓。
+   *   ⇒ 一个类一次调用 ✓，并且**断言每个类的汇总真的出现过** ✓（否则不算跑过 ✓）。
+   */
+  const baseJavaArgs = [
     '-cp',
     classDir,
     `-Ddshm.probe.correct.base=https://127.0.0.1:${portGood}`,
@@ -231,8 +289,28 @@ const run = async () => {
     `-Ddshm.probe.plain.base=http://127.0.0.1:${portPlain}`,
     // 想看"为什么这条不可用"时加上这个 ✓（`ManifestProbe` 里那个排查开关 ✓）：
     // '-Ddshm.probe.debug=1',
-    'dev.dshm.shell.ManifestProbeTest',
-  ])
+    `-Ddshm.shot.base=https://127.0.0.1:${portGood}`,
+    `-Ddshm.shot.ca=${good.ca}`,
+    `-Ddshm.shot.wrongCa=${noSan.ca}`,
+    `-Ddshm.shot.plain=http://127.0.0.1:${portPlain}`,
+    `-Ddshm.shot.expected=${shotExpected}`,
+  ]
+
+  const classes = [
+    ['dev.dshm.shell.ManifestProbeTest', '── check-manifest-probe'],
+    ['dev.dshm.shell.ShotFetchTest', '── check-shot-fetch'],
+  ]
+  let allOutput = ''
+  let exitCode = 0
+  for (const [testClass, label] of classes) {
+    const result = await runJava([...baseJavaArgs, testClass])
+    allOutput += result.stdout
+    if (result.code !== 0) exitCode = result.code
+    if (!result.stdout.includes(label)) {
+      console.log(`✗ 没看到 ${label} 的汇总 —— 这个测试类根本没跑起来（那样"全绿"是假的 ✗）`)
+      exitCode = 1
+    }
+  }
   cleanup()
   process.exit(exitCode)
 }
@@ -252,7 +330,8 @@ const runJava = (args) =>
     child.on('close', (code) => {
       process.stdout.write(stdout)
       if (stderr.trim() !== '') process.stderr.write(stderr)
-      resolve(typeof code === 'number' ? code : 1)
+      // ★ 连输出一起交回去 ✓ —— 外面要**断言每个测试类的汇总真的出现过** ✓（见下 ✓）
+      resolve({ code: typeof code === 'number' ? code : 1, stdout })
     })
   })
 
