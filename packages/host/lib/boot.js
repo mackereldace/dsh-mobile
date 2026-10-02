@@ -15173,7 +15173,13 @@
       }
       var computer = byIp[host]
       if (row.active === true) computer.active = true
-      if (row.label !== '' && computer.label === '') computer.label = row.label
+      /**
+       * ★ round 213（用户："为什么目前生产实例会被认为是这台电脑？而不在 mac mini 2024 里？" ✗）：
+       *   同一个 IP 下所有实例归到一台电脑 ✓，而**第一行的 label 会当组名** ✗ ——
+       *   "这台电脑"是**占位名**（当前连接那条 ✓），它抢先 ⇒ 整台机器都叫"这台电脑" ✗。
+       *   ⇒ 组名**机器名优先** ✓（目录里的 label ✓）；"这台电脑"只当**兜底** ✓。
+       */
+      if (row.label !== '' && row.label !== '这台电脑' && computer.label === '') computer.label = row.label
       computer.agents.push({
         port: port,
         url: row.appUrl,
@@ -15275,9 +15281,15 @@
   /** hash 路由 ✓（刷新即生效 ✓ 不用重启 ✓）：`#dshm-home` ⇒ 打开面板 ✓。 */
   function installHomeRoute() {
     try {
-      if (globalThis.location !== undefined && globalThis.location.hash === '#dshm-home') homeOpen()
+      /**
+       * ★ round 213（用户："可以做成 app 原生首页了" ✓）：**打开应用就直接进这块面板** ✓
+       *   —— 没带 hash 也开 ✓（回会话走「会话」标签或设置里的「返回会话」✓）。
+       */
+      if (globalThis.location !== undefined && (globalThis.location.hash === '' || globalThis.location.hash === '#dshm-home')) {
+        homeOpen()
+      }
       globalThis.addEventListener('hashchange', function () {
-        if (globalThis.location.hash === '#dshm-home') homeOpen()
+        if (globalThis.location.hash === '#dshm-home' || globalThis.location.hash === '') homeOpen()
       })
     } catch (error) {
       void error
@@ -21963,7 +21975,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1002052801'
+    var BOOT_STAMP = 'BUILD-1002054044'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
