@@ -253,6 +253,59 @@ function toolCard(view) {
 }
 
 /**
+ * 这一页**现在该显示哪种状态** ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能断言 ✓）。
+ *
+ * ## ★ 一条压倒一切的规矩：**已经有内容时，错误与断线只进状态行，绝不覆盖画面** ✗
+ *
+ * "读取出错 ⇒ 白屏一下"是这一页最糟的表现 ✓：用户正在读的输出突然没了、
+ * 滚动位置也没了 ✓，而真正的原因（一次超时 / 一次重连 ✓）**根本不该动画面** ✓。
+ * ⇒ 只要 `eventCount > 0`，就永远是 `ready` ✓，错误与断线只体现在 `statusText` 里 ✓。
+ *
+ * @param {{ loading?: boolean, eventCount?: number, error?: string, connection?: 'online'|'offline'|'unknown' }} input
+ * @returns {{ kind: string, title: string, hint: string, showInList: boolean, statusText: string }}
+ */
+export function computePageState(input) {
+  const loading = input !== null && typeof input === 'object' && input.loading === true
+  const error = input !== null && typeof input === 'object' && typeof input.error === 'string' ? input.error : ''
+  const connection = input !== null && typeof input === 'object' ? input.connection : 'unknown'
+  const count = input !== null && typeof input === 'object' && typeof input.eventCount === 'number' ? input.eventCount : 0
+  const offline = connection === 'offline'
+
+  if (count > 0) {
+    // ★ 有内容 ⇒ 只更新状态行（错误优先于断线：它更具体 ✓）
+    const statusText = error.length > 0
+      ? '读取出错：' + error + '（已读到的都还在）'
+      : offline
+        ? '断线，正在重连…（已读到的都还在）'
+        : ''
+    return { kind: 'ready', title: '', hint: '', showInList: false, statusText }
+  }
+
+  if (loading) {
+    return { kind: 'loading', title: '正在读取…', hint: '第一次连这台电脑会慢一点', showInList: true, statusText: '' }
+  }
+  if (error.length > 0) {
+    return {
+      kind: 'error',
+      title: '读不出来',
+      hint: error + '（点右上角刷新重试）',
+      showInList: true,
+      statusText: '读取出错：' + error,
+    }
+  }
+  if (offline) {
+    return {
+      kind: 'offline',
+      title: '连不上这台电脑',
+      hint: '确认手机和它在同一个网络，或点右上角刷新重试',
+      showInList: true,
+      statusText: '断线，正在重连…',
+    }
+  }
+  return { kind: 'empty', title: '还没有内容', hint: '在下面发一条试试', showInList: true, statusText: '' }
+}
+
+/**
  * 把整页接起来 ✓（取数循环 + 渲染 + 输入框）。
  *
  * @param {{ root: HTMLElement, poller: any, send: (text: string) => Promise<any>, onStatus?: (text: string) => void }} options
@@ -263,20 +316,71 @@ export function mountChat(options) {
   const form = root.querySelector('#composer')
   const input = root.querySelector('#input')
   const status = root.querySelector('#status')
+  const stateBox = root.querySelector('#state')
+  const refresh = root.querySelector('#refresh')
 
-  const setStatus = (text) => {
-    if (status !== null && status !== undefined) status.textContent = text
-    if (typeof options.onStatus === 'function') options.onStatus(text)
+  // 这一页的**输入**（三样 ✓）—— 状态完全由它们算出来 ✓（不在渲染里各写一份判断 ✗）
+  let eventCount = 0
+  let loading = false
+  let error = ''
+  let connection = 'unknown'
+
+  const paint = () => {
+    const view = computePageState({ loading, eventCount, error, connection })
+    if (status !== null && status !== undefined) status.textContent = view.statusText
+    if (typeof options.onStatus === 'function') options.onStatus(view.statusText)
+    if (stateBox !== null && stateBox !== undefined) {
+      stateBox.hidden = view.showInList !== true
+      stateBox.innerHTML = ''
+      if (view.showInList === true) {
+        const card = document.createElement('div')
+        card.className = 'state state-' + view.kind
+        const title = document.createElement('div')
+        title.className = 'state-title'
+        title.textContent = view.title
+        const hint = document.createElement('div')
+        hint.className = 'state-hint'
+        hint.textContent = view.hint
+        card.appendChild(title)
+        card.appendChild(hint)
+        stateBox.appendChild(card)
+      }
+    }
   }
 
-  // ★ 新事件**只追加** ✓（不重画 ⇒ 滚动位置与正在输入的内容都不受影响 ✓）
-  options.onEvents = (events) => {
-    appendEvents(list, events)
+  /**
+   * ★ 新事件**只追加** ✓（不重画 ⇒ 滚动位置与正在输入的内容都不受影响 ✓）。
+   *
+   * ★★ 这两个处理器**由本函数返回** ✓，调用方再交给 `ChatPoller` ✗ ——
+   *   不再"偷偷往传进来的对象上装"（2026-10-03 为此踩了**两次**同一个坑：
+   *   `mountChat` 收到的是新字面量、而 poller 持有的是**另一个** options 对象 ⇒
+   *   处理器根本没接上 ⇒ 画面空白、**渲染脚本的体积从 258KB 掉到 72KB 才露馅** ✗）。
+   */
+  const handleEvents = (events) => {
+    if (Array.isArray(events) && events.length > 0) {
+      eventCount += events.length
+      error = ''
+      appendEvents(list, events)
+    }
+    loading = false
+    paint()
   }
-  options.onError = (message) => {
-    // ★ 出错**不清屏** ✗ —— 只在顶部那一行写清楚 ✓
-    setStatus('读取出错：' + message)
+  const handleError = (message) => {
+    // ★ 出错**不清屏** ✗ —— 有内容就走状态行 ✓，没内容才占屏 ✓（判据在 computePageState 里）
+    error = message
+    loading = false
+    paint()
   }
+
+  if (refresh !== null && refresh !== undefined) {
+    refresh.addEventListener('click', () => {
+      loading = true
+      error = ''
+      paint()
+      if (typeof options.onRefresh === 'function') options.onRefresh()
+    })
+  }
+
 
   if (form !== null && form !== undefined) {
     form.addEventListener('submit', async (submitEvent) => {
@@ -292,5 +396,19 @@ export function mountChat(options) {
       }
     })
   }
-  return { appendEvents: (events) => appendEvents(list, events), setStatus }
+  paint()
+  return {
+    /** ★ 交给 `new ChatPoller({ …page.handlers })` ✓ */
+    handlers: { onEvents: handleEvents, onError: handleError },
+    appendEvents: (events) => appendEvents(list, events),
+    setConnection: (next) => {
+      connection = next === 'offline' ? 'offline' : next === 'online' ? 'online' : 'unknown'
+      paint()
+    },
+    setLoading: (next) => {
+      loading = next === true
+      paint()
+    },
+    state: () => computePageState({ loading, eventCount, error, connection }),
+  }
 }

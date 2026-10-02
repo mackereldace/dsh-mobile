@@ -29,6 +29,12 @@ const outDir = (() => {
   const at = process.argv.indexOf('--out')
   return at >= 0 ? process.argv[at + 1] : HERE
 })()
+/** `--state=empty|loading|error|offline` ⇒ 渲染那个状态屏（文件名带上前缀 ✓）。 */
+const stateArg = (() => {
+  const at = process.argv.indexOf('--state')
+  return at >= 0 ? String(process.argv[at + 1] ?? '') : ''
+})()
+const prefix = stateArg.length > 0 ? `chat-state-${stateArg}` : 'chat-mock'
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png' }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -61,7 +67,7 @@ const sweep = () => {
 }
 try {
   for (const theme of ['light', 'dark']) {
-    const out = join(outDir, `chat-mock-${theme}.png`)
+    const out = join(outDir, `${prefix}-${theme}.png`)
     rmSync(out, { force: true })
     const chrome = spawn(
       CHROME,
@@ -69,7 +75,8 @@ try {
         '--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`,
         '--no-first-run', '--no-default-browser-check', '--hide-scrollbars',
         '--force-device-scale-factor=3', '--window-size=400,869', '--virtual-time-budget=3000',
-        `--screenshot=${out}`, `http://127.0.0.1:${port}/dev.html?theme=${theme}`,
+        `--screenshot=${out}`,
+        `http://127.0.0.1:${port}/dev.html?theme=${theme}${stateArg.length > 0 ? `&state=${stateArg}` : ''}`,
       ],
       { stdio: 'ignore' },
     )

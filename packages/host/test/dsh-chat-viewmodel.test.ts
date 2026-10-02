@@ -10,6 +10,7 @@ import { describe, it } from 'node:test'
 import {
   MAX_VISIBLE_LINES,
   classify,
+  computePageState,
   isFailure,
   textOf,
   titleFor,
@@ -163,5 +164,78 @@ describe('textOf：尽量掏出一段能读的文字，掏不出就不编', () =
     assert.equal(textOf(null), '')
     assert.equal(textOf({}), '')
     assert.equal(textOf({ data: null }), '')
+  })
+})
+
+
+describe('computePageState：三种"没内容"的屏 + 一条压倒一切的规矩', () => {
+  it('★ 空 + 正在读 ⇒ loading', () => {
+    const view = computePageState({ eventCount: 0, loading: true })
+    assert.equal(view.kind, 'loading')
+    assert.equal(view.showInList, true)
+    assert.equal(view.statusText, '')
+  })
+
+  it('★ 空 + 出错 ⇒ error（把原话写出来 + 一句下一步）', () => {
+    const view = computePageState({ eventCount: 0, error: '隧道断了' })
+    assert.equal(view.kind, 'error')
+    assert.equal(view.title, '读不出来')
+    assert.ok(view.hint.includes('隧道断了'))
+    assert.ok(view.hint.includes('刷新'))
+    assert.ok(view.statusText.includes('隧道断了'))
+  })
+
+  it('★ 空 + 断线 ⇒ offline（告诉用户先查网络）', () => {
+    const view = computePageState({ eventCount: 0, connection: 'offline' })
+    assert.equal(view.kind, 'offline')
+    assert.ok(view.hint.includes('同一个网络'))
+    assert.ok(view.statusText.includes('重连'))
+  })
+
+  it('★ 空 + 什么都没有 ⇒ empty（邀请他发一条）', () => {
+    const view = computePageState({ eventCount: 0 })
+    assert.equal(view.kind, 'empty')
+    assert.ok(view.hint.includes('发一条'))
+  })
+
+  it('★ 空 + 既断线又出错 ⇒ **错误优先**（它更具体）', () => {
+    const view = computePageState({ eventCount: 0, connection: 'offline', error: '具体原因' })
+    assert.equal(view.kind, 'error')
+  })
+
+  it('★★ 有内容 + 出错 ⇒ **仍然是 ready**（画面绝不被错误覆盖）', () => {
+    const view = computePageState({ eventCount: 12, error: '超时' })
+    assert.equal(view.kind, 'ready')
+    assert.equal(view.showInList, false)
+    assert.ok(view.statusText.includes('超时'))
+    assert.ok(view.statusText.includes('都还在'))
+  })
+
+  it('★★ 有内容 + 断线 ⇒ 同样 ready，只在状态行说"正在重连"', () => {
+    const view = computePageState({ eventCount: 3, connection: 'offline' })
+    assert.equal(view.kind, 'ready')
+    assert.equal(view.showInList, false)
+    assert.ok(view.statusText.includes('重连'))
+  })
+
+  it('★ 有内容 + 一切正常 ⇒ 状态行**是空的**（不写废话）', () => {
+    const view = computePageState({ eventCount: 3, connection: 'online' })
+    assert.equal(view.kind, 'ready')
+    assert.equal(view.statusText, '')
+  })
+
+  it('★ showInList 的真值表：**只有 ready 是 false**（有内容就绝不占屏）', () => {
+    assert.equal(computePageState({ eventCount: 1 }).showInList, false)
+    assert.equal(computePageState({ eventCount: 0, loading: true }).showInList, true)
+    assert.equal(computePageState({ eventCount: 0, error: 'x' }).showInList, true)
+    assert.equal(computePageState({ eventCount: 0, connection: 'offline' }).showInList, true)
+    assert.equal(computePageState({ eventCount: 0 }).showInList, true)
+  })
+
+  it('坏输入不抛（null / 缺字段 / 乱类型 ⇒ empty）', () => {
+    assert.equal(computePageState(null).kind, 'empty')
+    assert.equal(computePageState({}).kind, 'empty')
+    assert.equal(computePageState({ eventCount: '12' }).kind, 'empty')
+    assert.equal(computePageState({ error: 42 }).kind, 'empty')
   })
 })

@@ -53,7 +53,15 @@
   header .grow { flex: 1; }
   header button { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--ink2); font-size: 17px; }
   #status { padding: 0 20px 8px; font-size: 11px; color: var(--ink3); min-height: 22px; }
-  #messages { flex: 1; overflow: auto; padding: 4px 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+  main { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+  #state { padding: 28px 26px 0; }
+  #state[hidden] { display: none; }
+  .state { text-align: center; }
+  .state .state-title { font-size: 15px; font-weight: 650; color: var(--ink); }
+  .state .state-hint { margin-top: 7px; font-size: 12.5px; line-height: 1.6; color: var(--ink3); }
+  .state-error .state-title { color: var(--danger); }
+  .dev-line { padding: 0 20px 6px; font-size: 10.5px; color: var(--ink3); }
+  #messages { padding: 4px 14px 12px; display: flex; flex-direction: column; gap: 10px; }
   .ev-user { display: flex; justify-content: flex-end; }
   .ev-user .bubble {
     max-width: 84%; background: var(--tint); border: 1px solid var(--line);
@@ -100,10 +108,13 @@
       <p class="sub">端口 3453 · 局域网</p>
     </div>
     <span class="grow"></span>
-    <button title="刷新">⟳</button>
+    <button id="refresh" title="刷新">⟳</button>
   </header>
   <div id="status">已连上，正在读…</div>
-  <main id="messages"></main>
+  <main>
+    <div id="state" hidden></div>
+    <div id="messages"></div>
+  </main>
   <form class="composer" id="composer">
     <textarea id="input" placeholder="给 DSH 发一条消息…" rows="1"></textarea>
     <button type="submit">发送</button>
@@ -118,8 +129,12 @@
   })()
 </script>
 <script type="module">
-  import { appendEvents, mountChat, classify, textOf } from './ui.js'
+  import { mountChat } from './ui.js'
   import { ChatPoller } from './poller.js'
+
+  // 开发态（`?state=`）：**走真路径**，不是伪造画面 ✓
+  //   empty / loading / error ⇒ 从"取数"这一层制造 ✓；offline ⇒ 从"连接状态"这一层制造 ✓
+  const devState = new URLSearchParams(location.search).get('state') || ''
 
   // 假事件（形状按 37 号探针：{seq, time, type, data} ✓）—— 只为看观感
   const fake = [
@@ -133,44 +148,50 @@
         '  | tee /tmp/apk.log \\',
         '  | tail -40',
         '……（这里省略 26 行，用来验"长输出默认收起 + 说清还藏了几行"）',
-        'line 05','line 06','line 07','line 08','line 09','line 10',
-        'line 11','line 12','line 13','line 14','line 15','line 16',
-        'line 17','line 18','line 19','line 20','line 21','line 22',
-        'line 23','line 24','line 25','line 26',
+        'line 05', 'line 06', 'line 07', 'line 08', 'line 09', 'line 10',
+        'line 11', 'line 12', 'line 13', 'line 14', 'line 15', 'line 16',
+        'line 17', 'line 18', 'line 19', 'line 20', 'line 21', 'line 22',
+        'line 23', 'line 24', 'line 25', 'line 26',
       ].join('\n'), exitCode: 0 } },
     { seq: 7, time: 7, type: 'commandExecution', data: { command: 'adb install -r dist/dsh-mobile.apk', exitCode: 1, output: 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]' } },
     { seq: 8, time: 8, type: 'someUnknownEvent', data: { whatever: 1 } },
   ]
 
-  const state = { received: 0 }
-  window.__dev = { classify, textOf }
+  let received = 0
+  const page = mountChat({
+    root: document,
+    send: async (text) => {
+      page.appendEvents([{ seq: null, time: Date.now(), type: 'userMessage', data: { text } }])
+    },
+  })
+
   const poller = new ChatPoller({
     read: async () => {
-      // 一次给两条，模拟"分页/轮询"；给完就没有新的了
-      const slice = fake.slice(state.received, state.received + 2)
-      state.received += slice.length
+      if (devState === 'error') throw new Error('隧道断了：socket closed')
+      if (devState === 'loading') return new Promise(() => {})
+      if (devState === 'empty') return []
+      const slice = fake.slice(received, received + 2)
+      received += slice.length
       return slice
     },
-    onEvents: () => {},
+    ...page.handlers,   // ★ 显式接上（不再靠"偷偷装" ✓）
     intervalMs: 300,
   })
-  mountChat({
-    root: document,
-    poller,
-    send: async (text) => {
-      appendEvents(document.querySelector('#messages'), [
-        { seq: null, time: Date.now(), type: 'userMessage', data: { text } },
-      ])
-    },
-  })
-  const originalOnEvents = poller.options.onEvents
-  poller.options.onEvents = (events) => {
-    appendEvents(document.querySelector('#messages'), events)
-    document.querySelector('#status').textContent =
-      events.length > 0 ? `收到 ${events.length} 条（游标 ${poller.cursor}）` : `没有新的（游标 ${poller.cursor}）`
-  }
+
+  const refresh = document.querySelector('#refresh')
+  if (refresh !== null) refresh.addEventListener('click', () => { void poller.refreshNow() })
+
+  if (devState === 'offline') page.setConnection('offline')
   poller.start()
-  void originalOnEvents
+
+  // 开发壳专有：把游标显示出来（只在这一页有 ✓，产品页没有这行 ✓）
+  const dev = document.createElement('div')
+  dev.className = 'dev-line'
+  dev.textContent = 'dev：' + (devState || 'normal')
+  document.querySelector('.app').insertBefore(dev, document.querySelector('#messages').parentElement)
+  setInterval(() => {
+    dev.textContent = 'dev：' + (devState || 'normal') + '｜游标 ' + String(poller.cursor) + '｜状态 ' + page.state().kind
+  }, 250)
 </script>
 </body>
 </html>
