@@ -369,58 +369,86 @@ public final class HomeModel {
         }
 
         /**
-         * ★★★ ③' **机器级归并**（2026-10-04 用户纠正后的做法 ✓）。
+         * ★★★ ③' **按"电脑名字"归并**（2026-10-04 第三次改，用户真机连报三轮 ✓）。
          *
-         * 用户原话："我说的是你识别出来的那三个电脑啊，你把端口都合并了，
-         * 但实际上**它们确实是存在的**呀"✓ —— 两句话分别对应两件事 ✗：
-         *   · "那三个电脑" ⇒ 同一台 Mac 不该有**三张卡** ✓（要**一张** ✓）；
-         *   · "端口确实是存在的" ⇒ 那些端口**不许被合并掉** ✓（每个端口各自一行 ✓）。
+         * ## 覆盖三种形状 ✗（前两版各只覆盖一种 ✓）
          *
-         * 做法：**没身份**（没有指纹 ✓）的地址，只要**主机对得上**某台**已识别**的机器，
-         * 就**并进那台机器** ✓ —— 卡片合成一张 ✓，而桶里每一行**原样保留** ✓
-         * （于是每个端口仍是自己的一行 ✓，信息一点没少 ✓）。
+         * (a) **没指纹的幽灵**（端点槽 ✓ —— 比如没 pin 的 `Mac-mini-2024.local:3733` ✓）；
+         * (b) ★★ **指纹变了、但其实是同一台电脑** ✗ —— 重装 / 升级过 DSH 之后
+         *     `hostFingerprint` 会**换一个** ✓ ⇒ 手机身份库里同时留着新旧几条记录 ✓
+         *     ⇒ 每一条都自成一台 ✓（用户那句"同一台电脑被拆成多台"的另一半原因 ✓）。
+         *     这一条我前两版**完全没碰** ✗ —— 因为我当时只并"**没有**指纹"的桶 ✓，
+         *     而它们**带着旧指纹** ✓ ⇒ 连候选都没轮到 ✓。
+         * (c) **名字与主机形式不同**（mDNS 名 vs IP ✓）⇒ 只比"同一主机"会漏 ✓。
          *
-         * 判据（两条都很硬 ✓，不是猜 ✗）：
-         *   (a) 主机名去掉 `.local`、不分大小写之后，**等于那台机器的名字**
-         *       （探测到的 `machineName` ✓ —— `Mac-mini-2024.local:3733` 对上 `Mac-mini-2024` ✓）；
-         *   (b) 或者这个主机**本来就是那台机器的一个地址** ✓（同主机、不同端口 ✓）。
-         * ★ 对不上就**照旧自己一张卡** ✓（"不许猜"那条精神不变 ✓）。
+         * ## 判据（一条，硬 ✓，不是猜 ✗）
+         *
+         * **显示名（去掉 `.local`、不分大小写）相同 ⇒ 同一台电脑** ✓。
+         * · 显示名是"我们本来就会显示在卡上的那个名字"✓（目录 label ✓ > 探测到的 machineName ✓ > 主机名 ✓）
+         *   ⇒ 用户眼下**看到两张卡都叫 `Mac-mini-2024.local`** ✓，这正是他要我们认出来的 ✓；
+         * · mDNS 名在一张局域网里**本来就是唯一的** ✓ ⇒ 同名即同机 ✓；
+         * · 显示名取不到（空 / 占位名 ✓）⇒ **不并** ✗（照旧各成一台 ✓ —— "不许猜"）
+         * · ★ 每一行**原样保留** ✗（用户："端口确实是存在的"✓）—— 只是并进同一张卡 ✓。
+         *
+         * ## 主卡怎么选 ✓
+         *
+         * 同名的一组里：**能连上的** > **有指纹的** > 最先出现的 ✓ ——
+         * 于是合并后那张卡的身份/版本来自**活着的那条** ✓（而不是旧记录的壳 ✓）。
          */
-        LinkedHashMap<String, List<Row>> attributed = new LinkedHashMap<String, List<Row>>();
+        LinkedHashMap<String, List<Row>> groups = new LinkedHashMap<String, List<Row>>();
+        LinkedHashMap<String, String> keyOfGroup = new LinkedHashMap<String, String>();
+        LinkedHashMap<String, java.util.HashSet<String>> hostsOfGroup = new LinkedHashMap<String, java.util.HashSet<String>>();
         for (Map.Entry<String, List<Row>> entry : byMachine.entrySet()) {
-            if (machineFingerprint.containsKey(entry.getKey())) {
-                attributed.put(entry.getKey(), entry.getValue());
-                continue;
-            }
-            String host = stripLocalSuffix(hostnameOf(entry.getValue().get(0).authority)).toLowerCase();
+            String name = machineDisplayName(entry.getValue(), input.records).toLowerCase();
+            java.util.HashSet<String> hosts = hostsIn(entry.getValue());
             String target = null;
-            for (Map.Entry<String, List<Row>> candidate : attributed.entrySet()) {
-                if (!machineFingerprint.containsKey(candidate.getKey())) continue;
-                /**
-                 * ★★★ 2026-10-04 **第二条判据**（用户："机器还是没合并"✗ ⇒ 查出 3733/3743 的真相 ✓）：
-                 *   那张幽灵卡的地址是 **`Mac-mini-2024.local:3733`**（mDNS 名 ✓），
-                 *   而真卡的地址是 **`10.34.255.229:*`**（IP ✓）⇒ 只比"同一主机"**对不上** ✗。
-                 *   ⇒ 加上"**卡片名字一样 ⇒ 同一台电脑**" ✓：
-                 *     用**与 ④ 同一套命名规则**算出候选机器的名字 ✓，去掉 `.local` 后比对 ✓
-                 *     —— 用户眼下看到两张卡**都叫** `Mac-mini-2024.local` ✓，这正是他要我们认出来的 ✓。
-                 */
-                String candidateName = machineDisplayName(candidate.getValue(), input.records).toLowerCase();
-                String candidateHost = stripLocalSuffix(hostnameOf(candidate.getKey().substring("host:".length()))).toLowerCase();
-                boolean match = (!host.isEmpty() && host.equals(candidateName))
-                        || (!host.isEmpty() && host.equals(candidateHost));
-                for (int i = 0; i < candidate.getValue().size() && !match; i += 1) {
-                    String other = stripLocalSuffix(hostnameOf(candidate.getValue().get(i).authority)).toLowerCase();
-                    if (!host.isEmpty() && host.equals(other)) match = true;
-                }
-                if (match) {
-                    target = candidate.getKey();
+            for (String group : groups.keySet()) {
+                boolean sameName = !name.isEmpty() && name.equals(group);
+                boolean sameHost = intersects(hosts, hostsOfGroup.get(group));
+                if (sameName || sameHost) {
+                    target = group;
                     break;
                 }
             }
-            if (target == null) attributed.put(entry.getKey(), entry.getValue());
-            else attributed.get(target).addAll(entry.getValue());
+            if (target == null) {
+                String group = name.isEmpty() ? entry.getKey() : name;
+                groups.put(group, new ArrayList<Row>(entry.getValue()));
+                keyOfGroup.put(group, entry.getKey());
+                hostsOfGroup.put(group, hosts);
+                continue;
+            }
+            groups.get(target).addAll(entry.getValue());
+            hostsOfGroup.get(target).addAll(hosts);
+            /** ★ 主卡选择：能连上的 > 先来的 ✓（同名/同主机的一组里，身份该来自活着的那条 ✓）。 */
+            if (anyReachableIn(entry.getValue()) && !anyReachableIn(groups.get(target))) {
+                keyOfGroup.put(target, entry.getKey());
+            }
+        }
+
+        LinkedHashMap<String, List<Row>> attributed = new LinkedHashMap<String, List<Row>>();
+        LinkedHashMap<String, String> mergedFingerprint = new LinkedHashMap<String, String>();
+        for (Map.Entry<String, List<Row>> entry : groups.entrySet()) {
+            String chosen = keyOfGroup.get(entry.getKey());
+            attributed.put(chosen, entry.getValue());
+            /** ★ 主卡自己没有指纹、但同组里别的桶有 ⇒ 沿用那个 ✓（否则身份白丢 ✗）。 */
+            String fingerprint = machineFingerprint.get(chosen);
+            if (fingerprint == null) {
+                for (Map.Entry<String, List<Row>> candidate : byMachine.entrySet()) {
+                    String candidateName = machineDisplayName(candidate.getValue(), input.records).toLowerCase();
+                    boolean sameName = !candidateName.isEmpty() && candidateName.equals(entry.getKey());
+                    boolean sameHost = intersects(hostsIn(candidate.getValue()), hostsOfGroup.get(entry.getKey()));
+                    if (!sameName && !sameHost) continue;
+                    String candidateFingerprint = machineFingerprint.get(candidate.getKey());
+                    if (candidateFingerprint != null) {
+                        fingerprint = candidateFingerprint;
+                        break;
+                    }
+                }
+            }
+            if (fingerprint != null) mergedFingerprint.put(chosen, fingerprint);
         }
         byMachine = attributed;
+        machineFingerprint = mergedFingerprint;
 
         // ④ 机器名：目录里的人工 label（**非占位** ✓）> 探测到的 machineName（去掉 `.local` ✓）> 主机名 ✓。
         List<Machine> machines = new ArrayList<Machine>();
@@ -705,6 +733,36 @@ public final class HomeModel {
         String probed = probedMachineName(rows);
         if (!probed.isEmpty()) return probed;
         return stripLocalSuffix(hostnameOf(rows.get(0).authority));
+    }
+
+    /** 这一桶里出现的**主机**（去掉 `.local`、小写 ✓）。 */
+    private static java.util.HashSet<String> hostsIn(List<Row> rows) {
+        java.util.HashSet<String> hosts = new java.util.HashSet<String>();
+        for (int i = 0; i < rows.size(); i += 1) {
+            String host = stripLocalSuffix(hostnameOf(rows.get(i).authority)).toLowerCase();
+            if (!host.isEmpty()) hosts.add(host);
+        }
+        return hosts;
+    }
+
+    /** 两个主机集合有没有交集 ✓（同主机不同端口 = 同一台电脑 ✓）。 */
+    private static boolean intersects(java.util.HashSet<String> a, java.util.HashSet<String> b) {
+        if (a == null || b == null || a.isEmpty() || b.isEmpty()) return false;
+        java.util.HashSet<String> small = a.size() <= b.size() ? a : b;
+        java.util.HashSet<String> large = small == a ? b : a;
+        for (String host : small) {
+            if (large.contains(host)) return true;
+        }
+        return false;
+    }
+
+    /** 这一桶里有没有**通得上**的地址 ✓（主卡选择的判据之一 ✓）。 */
+    private static boolean anyReachableIn(List<Row> rows) {
+        for (int i = 0; i < rows.size(); i += 1) {
+            Probe probe = rows.get(i).probe;
+            if (probe != null && probe.reachable) return true;
+        }
+        return false;
     }
 
     /** 这个桶里**探测到的**机器名（去掉 `.local` ✓）；没有 ⇒ 空串 ✓。 */

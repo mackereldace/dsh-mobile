@@ -34,7 +34,7 @@ public final class HomeModelTest {
      * "删掉几条断言"在输出上表现为"更短的全绿"，与"全都验过了"长得一模一样。
      * 只认**实际跑过**的条数。**只许上调**。
      */
-    private static final int EXPECTED_MIN_CHECKS = 87;
+    private static final int EXPECTED_MIN_CHECKS = 92;
 
     public static void main(String[] args) {
         currentAgentAndSameMachineAgentsAreOneMachine();
@@ -48,6 +48,7 @@ public final class HomeModelTest {
         unreachableUnrecordedAddressDoesNotJoinAKnownMachine();
         unknownAddressesOnTheSameHostnameGroupTogether();
         userScreenshotOneMacIsOneCard();
+        sameMachineWithStaleFingerprintIsOneCard();
         authorityParsing();
         tailscaleAndPrivateRanges();
         sortingCurrentFirstThenOnline();
@@ -356,9 +357,18 @@ public final class HomeModelTest {
         records.add(record);
         List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
         endpoints.add(new HomeModel.Slot("https://100.123.136.82:3453/mobile/app", ""));
-        // ★ 两条幽灵卡（无指纹 ✓，mDNS 名 + IP 各一条 ✓）
+        /**
+         * ★★★ 夹具**照用户真机读数**搭 ✓（2026-10-04 截图里的那一行 ✓）：
+         *   `探了 5 条（通 1 / 不通 4）；跳过：当前 0、**非 https 2**、**没 pin 1**、超上限 0` ✓
+         *   ⇒ 三条幽灵都要有 ✓：**没 pin 的 mDNS**（端口 3733 ✓，压根没探过 ✓）、
+         *   **探不通的 IP**（端口 3743 ✓）、**非 https 的明文**（端口 3091 ✓）。
+         *   ★ 而且它们**全都是端点槽** ✓ ⇒ `rowsOf` 里排在**目录记录之前** ✓ ——
+         *     这正是"一遍过的归并**永远不生效**"的那个次序 ✗（我第一版就是这样 ✗，
+         *     而当时的夹具**碰巧**是记录先到 ✓ ⇒ 一直绿 ✗ ⇒ 没抓住真机上的问题 ✓）。
+         */
         endpoints.add(new HomeModel.Slot("https://Mac-mini-2024.local:3733/mobile/app", ""));
         endpoints.add(new HomeModel.Slot("https://10.34.255.229:3743/mobile/app", ""));
+        endpoints.add(new HomeModel.Slot("http://10.34.255.229:3091/mobile/app", ""));
 
         HomeModel.Input input = new HomeModel.Input(records, endpoints, "100.123.136.82:3453",
                 "https://100.123.136.82:3453/mobile/app", probes);
@@ -382,6 +392,8 @@ public final class HomeModelTest {
         check("★ 局域网那个端口也在（各自一行 ✓，没被合并掉 ✗）", ipPortCard >= 0);
         check("★★★ mDNS 形式的幽灵卡（端口 3733）**并进这张卡** ✓", mdnsGhostCard == tailscaleCard);
         check("★★★ IP 形式的幽灵卡（端口 3743）也并进这张卡 ✓", ipGhostCard == tailscaleCard);
+        check("★★★ 非 https 的幽灵（端口 3091 ✓ 真机读数里「非 https 2」那条）也并进这张卡 ✓",
+                cardIndexOf(snapshot, "10.34.255.229:3091") == tailscaleCard);
         check("★ 端口各自成行 ⇒ 实例行数 > 1 ✓（不是被压成「一个智能体」✗）", machine.instances.size() > 1);
         check("★ 计数：1 台在线、0 台离线/未知（幽灵卡不再各自计数 ✗）",
                 snapshot.onlineCount == 1 && snapshot.offlineCount == 0 && snapshot.unknownCount == 0);
@@ -398,6 +410,46 @@ public final class HomeModelTest {
             }
         }
         return -1;
+    }
+
+    /**
+     * ★★★ 2026-10-04（用户真机连报三轮之后我的主假设 ✓）：
+     *   **同一个 Mac 在手机身份库里留了两个指纹** ✗ —— 重装/升级 DSH 之后
+     *   `hostFingerprint` 会换一个 ✓ ⇒ 两条记录都留着 ⇒ 各自成一张卡 ✓
+     *   （用户那句"同一台电脑被拆成多台"的另一半原因 ✓）。
+     *
+     * ★ 这一条**前两版都碰不到** ✗：我只并"**没有**指纹"的桶 ✓，而它们**带着旧指纹** ✓。
+     * 判据：**显示名相同 ⇒ 同一台电脑** ✓（mDNS 名在一张局域网里本来唯一 ✓），
+     * 且**每一行原样保留** ✗（端口是真实存在的 ✓）。
+     */
+    private static void sameMachineWithStaleFingerprintIsOneCard() {
+        Map<String, HomeModel.Probe> probes = new LinkedHashMap<String, HomeModel.Probe>();
+        probes.put("100.123.136.82:3453", HomeModel.Probe.up("host-new", "FP-NEW", "Mac-mini-2024.local", "0.2.0-rc.2"));
+        probes.put("10.34.255.229:3733", HomeModel.Probe.down());
+
+        // 旧记录（重装之前那次配对 ✓）：名字一样、指纹不同 ⇒ 它现在是一条**旧指纹** ✓
+        HomeModel.HostRecord stale = new HomeModel.HostRecord("FP-OLD", "Mac-mini-2024.local",
+                new ArrayList<String>(java.util.Arrays.asList("https://10.34.255.229:3733/mobile/app")), 1L);
+        HomeModel.HostRecord fresh = new HomeModel.HostRecord("FP-NEW", "Mac-mini-2024.local",
+                new ArrayList<String>(java.util.Arrays.asList("https://100.123.136.82:3453/mobile/app")), 2L);
+        List<HomeModel.HostRecord> records = new ArrayList<HomeModel.HostRecord>();
+        records.add(stale);
+        records.add(fresh);
+        List<HomeModel.Slot> endpoints = new ArrayList<HomeModel.Slot>();
+        endpoints.add(new HomeModel.Slot("https://100.123.136.82:3453/mobile/app", ""));
+
+        HomeModel.Input input = new HomeModel.Input(records, endpoints, "100.123.136.82:3453",
+                "https://100.123.136.82:3453/mobile/app", probes);
+        HomeModel.Snapshot snapshot = HomeModel.build(input);
+
+        check("★★★ 同一台 Mac、两个指纹 ⇒ **一张卡**（重装 DSH 换过指纹 ✓）", snapshot.machines.size() == 1);
+        if (snapshot.machines.size() != 1) return;
+        HomeModel.Machine machine = snapshot.machines.get(0);
+        check("★ 合并后身份来自**活着的那条**（在线 ✓）", machine.online);
+        check("★ 两个指纹的记录都在这一张卡里（旧端口 3733 也没丢 ✓）",
+                cardIndexOf(snapshot, "10.34.255.229:3733") == 0
+                        && cardIndexOf(snapshot, "100.123.136.82:3453") == 0);
+        check("★ 实例行不止一条（端口各自成行 ✓）", machine.instances.size() > 1);
     }
 
     // ───────────────────────── 小工具 ─────────────────────────

@@ -499,6 +499,17 @@ final class HomeView extends FrameLayout {
         }
 
         final LinearLayout card = wrap;
+        /**
+         * ★★★ 长按挪到**这一行**上 ✗ —— 原来挂在外层 `wrap` 上 ✓，而真正吃触摸的是这一行 ✓
+         *   （它自己有点击监听 ✓）⇒ 长按**永远不触发** ✓（用户："长按没用"✗）。
+         */
+        row.setOnLongClickListener(new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                if (callbacks != null) callbacks.onInspectMachine(machine);
+                return true;
+            }
+        });
         row.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
