@@ -265,7 +265,7 @@ public class MainActivity extends android.app.Activity {
     //   · pinned-ca          旧键（**单值** ✗）—— 只在"该 authority 的证书确实认它"时被**认领** ✓
 
     /** 候选端点槽：JSON 数组 `[{"label":"学校","url":"https://…/mobile/app"},…]` ✓。 */
-    private static final String KEY_ENDPOINT_SLOTS = "endpoint-slots";
+    static final String KEY_ENDPOINT_SLOTS = "endpoint-slots";
     /** 单个槽的等待上限（毫秒 ✓）。 */
     private static final String KEY_SWITCH_TIMEOUT_MS = "switch-timeout-ms";
     /** 钉死的槽（可空的字符串 ✓ —— 本轮只存/只报，不做界面 ✗）。 */
@@ -301,7 +301,7 @@ public class MainActivity extends android.app.Activity {
      */
     private static final String KEY_PINNED_CA = PinStore.LEGACY_KEY;
     /** 网页侧身份键的哑存储（JSON 对象 ✓ —— 壳不解释语义 ✓）。 */
-    private static final String KEY_IDENTITY_VAULT = "identity-vault";
+    static final String KEY_IDENTITY_VAULT = "identity-vault";
 
     /** 计时器默认值（用户定的 2000ms ✓）。 */
     private static final int DEFAULT_SWITCH_TIMEOUT_MS = 2000;

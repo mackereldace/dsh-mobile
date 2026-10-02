@@ -79,7 +79,7 @@ let failed = 0
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
  * ★★ **现在的构成（保活轮之后 ✓）：包信息 13 + APK 内容 4 + 资源文案 3 + dex 符号 26 +
- *   TOFU/链 3 = 49** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
+ *   TOFU/链 3 = 49 ✓ + **原生首页那一套 1 = 50** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
  *   ⚠️ 这一行此前写的是"40 = …dex 符号 22…"✗ —— 那个数**与代码从来就对不上** ✓：
  *      round 174 时 dex 实际已经是 **23** 组 ✓（下面历史段落里的"22"是漏算了一组 ✓）。
  *      以本行为准 ✓（数错不会让任何断言变红 ✗，只会让下一个人以为"删几条也没事"✗ —— 正是防呆要防的东西 ✓）。
@@ -140,7 +140,7 @@ let failed = 0
  *        "实现完全正确也**永远红**"的假断言 ✗（比没有断言更糟 ✓）。
  *        ★ 类型的判据在**清单**那边 ✓（`foregroundServiceType=0x40000000` ✓）—— 那也正是安卓自己读的地方 ✓。
  */
-const EXPECTED_MIN_CHECKS = 49
+const EXPECTED_MIN_CHECKS = 50
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -981,6 +981,34 @@ if (existsSync(aapt2)) {
     hasAll(keepAliveClock),
     '★★ 原生时钟与状态桥在 dex 里（`KeepAlivePolicy` 纯逻辑 ✓ + 注入入口 `__DSH_MOBILE_BOOT__` ✓ + 状态回传 `setKeepAliveState` ✓ —— 少了入口，原生时钟**空转**、页面照旧被限流 ⇒ 假活 ✗；少了状态桥，常驻通知永远不反映"连没连上"✗；两种都不报错 ✓）',
     missing(keepAliveClock).length === 0 ? keepAliveClock.join('、') : `缺 ${missing(keepAliveClock).join('、')}`,
+  )
+
+  /**
+   * ★ 原生首页这一套（2026-10-03 起）✓ —— 它现在还**没有被 MainActivity 调用** ✓，
+   *   所以"文件在、但没进编译源集合"这种事故**不会有任何症状** ✗
+   *   （首页永远空 / 永远"未知"，而手机上一个字都不报 ✓）⇒ 用这条断言把它钉住 ✓。
+   *
+   * 为什么逐个点符号 ✗：这条链上每一格都对应一种"看着像没网"的故障 ✓ ——
+   * `HomeStore`（读壳身份库与端点槽 ✓ 少了它首页永远空 ✓）、
+   * `HomeLoader`（探哪些/用哪张 CA ✓ 少了它没有任何状态 ✓）、
+   * `ManifestProbe`（固定 CA 的那次探测 ✓）、
+   * `HomePinSource`（每条地址该信哪张 CA ✓ 少了它"没 pin"会被当成"连不上"✓）、
+   * `HomeEntry`（点智能体打开哪条地址 ✓ 少了它点了没反应 ✓）、
+   * `HomeController`（合并/线程 ✓ 少了它可能连点就发起好几趟、或回调跑到后台线程 ✓）。
+   */
+  const nativeHome = [
+    'HomeStore',
+    'HomeLoader',
+    'ManifestProbe',
+    'HomePinSource',
+    'HomeEntry',
+    'HomeController',
+    'dsh-mobile.hosts',
+  ]
+  check(
+    hasAll(nativeHome),
+    '★★ 原生首页那一套在 dex 里（`HomeStore` 读壳身份库/端点槽 ✓ + `HomeLoader` 探哪些与用哪张 CA ✓ + `ManifestProbe` ✓ + `HomePinSource` ✓ + `HomeEntry` 点进哪条地址 ✓ + `HomeController` 合并与线程 ✓ + 身份库键 `dsh-mobile.hosts` ✓ —— 少了任意一个，首页都会"永远空 / 永远未知 / 点了没反应"，而手机上**不报任何错** ✗；它们现在还没被 MainActivity 调用，所以这类事故连症状都没有 ✓）',
+    missing(nativeHome).length === 0 ? nativeHome.join('、') : `缺 ${missing(nativeHome).join('、')}`,
   )
 }
 
