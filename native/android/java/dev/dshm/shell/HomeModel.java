@@ -292,8 +292,39 @@ public final class HomeModel {
     }
 
     public static Snapshot build(Input input) {
-        // ① 攒地址：端点槽 + 目录槽 + 当前那一条（★ 当前这条**必须**进来，
-        //    它就是"当前智能体"能被归位的入口 ✓）。
+        return build(input, rowsOf(input));
+    }
+
+    /**
+     * 这次归一要考虑的**全部地址**（去重后的 `host:port` ✓，顺序 = 端点槽 → 目录槽 → 当前那条 ✓）。
+     *
+     * ★ 为什么要有它：探测层（`HomeLoader`）需要知道"该探哪些" ✓，
+     *   而地址集合的规则**只在 {@link #rowsOf} 一处** ✓ ——
+     *   两边各写一份的话，"探了却没归一"或"归一了却没探"这类错会长期潜伏 ✗
+     *   （`HomeLoaderTest` 里有一条断言专门钉这个一致性 ✓）。
+     */
+    public static List<String> authorities(Input input) {
+        return new ArrayList<String>(addressUrls(input).keySet());
+    }
+
+    /**
+     * 这次归一要考虑的**每条地址该用哪个 url**（`authority → url` ✓，顺序与 {@link #authorities} 一致 ✓）。
+     *
+     * 探测层要用它：探测得有一个**完整 url** ✓，而"哪个 authority 存在"的规则只在 {@link #rowsOf} 一处 ✓。
+     */
+    public static LinkedHashMap<String, String> addressUrls(Input input) {
+        LinkedHashMap<String, Row> rows = rowsOf(input);
+        LinkedHashMap<String, String> out = new LinkedHashMap<String, String>();
+        for (Map.Entry<String, Row> entry : rows.entrySet()) {
+            String url = entry.getValue().url;
+            if (url == null || url.isEmpty()) url = "https://" + entry.getKey() + "/";
+            out.put(entry.getKey(), url);
+        }
+        return out;
+    }
+
+    /** 内部：把三类来源攒成"地址 → 行" ✓（**唯一**一份规则 ✓）。 */
+    private static LinkedHashMap<String, Row> rowsOf(Input input) {
         LinkedHashMap<String, Row> rows = new LinkedHashMap<String, Row>();
         for (int i = 0; i < input.endpoints.size(); i += 1) {
             addRow(rows, input.endpoints.get(i).url, input.endpoints.get(i).label, "");
@@ -308,6 +339,10 @@ public final class HomeModel {
             String url = input.currentUrl.isEmpty() ? "https://" + input.currentHost + "/" : input.currentUrl;
             addRow(rows, url, "", "");
         }
+        return rows;
+    }
+
+    private static Snapshot build(Input input, LinkedHashMap<String, Row> rows) {
 
         // ② 每行定位探测结果 ✓（键是 authority ✓）。
         for (Row row : rows.values()) {
