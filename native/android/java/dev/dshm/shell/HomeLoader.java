@@ -108,7 +108,14 @@ public final class HomeLoader {
      */
     public static final class Report {
         public final List<String> probed = new ArrayList<String>();
+        /**
+         * ★ 恒为空 ✓（2026-10-04 起）—— 当前那条**也探**了 ✓。
+         *   留着它是因为报告的形状被断言钉着 ✓（不想为一个字段去动十几条断言 ✓）；
+         *   "当前那条也探了"这件事改记在 {@link #currentAlsoProbed} ✓。
+         */
         public final List<String> skippedCurrent = new ArrayList<String>();
+        /** ★ 当前那条（既探了、也在"当前"这个位置上 ✓）。 */
+        public final List<String> currentAlsoProbed = new ArrayList<String>();
         /** 非 `https://`（含明文 ✓）—— 记的是 authority ✓。 */
         public final List<String> skippedNotHttps = new ArrayList<String>();
         public final List<String> skippedNoPin = new ArrayList<String>();
@@ -163,9 +170,28 @@ public final class HomeLoader {
         for (Map.Entry<String, String> entry : urls.entrySet()) {
             String authority = entry.getKey();
             String url = entry.getValue();
+            /**
+             * ★★★ 2026-10-04 **反向修正**：当前那条**也要探** ✗ —— 不再跳过 ✓。
+             *
+             * 当初跳过它的理由是"省一次往返"✓，但代价是**错的** ✓：
+             * 当前那条于是**没有探测结果** ⇒ 拿不到指纹 ⇒ 在 `HomeModel` 里只能自成
+             * 一个"身份未知"的卡片 ✓ —— 而它偏偏是**我们最确定活着**的那一条 ✓
+             * （用户此刻正连着它 ✓）。
+             *
+             * 真机上的表现（用户 2026-10-04 报的 ✓）：不在局域网、走 Tailscale 时，
+             * 同一台 Mac 变成**两张卡** ✓ —— 一张是有指纹的局域网卡（显示"没响应"✓），
+             * 一张是没有指纹的 tailnet 卡 ✓；而"没响应"与"分成两张"其实是**同一个根因** ✓。
+             *
+             * ★ 一次往返换"同一台电脑不会分裂成两张卡" ✓ —— 这笔账不用算 ✓。
+             */
+            /**
+             * ★ 当前那条**不再跳过** ✓（见上面那段说明 ✓）——
+             *   所以它**不进** `skippedCurrent` ✗：它现在是"探过"那一类 ✓。
+             *   （"两边都记一笔"会让"五类之和 = 地址总数"这条会计断言重复计数 ✗ ——
+             *    测试当场抓到了 ✓，这正是那条断言存在的意义 ✓。）
+             */
             if (authority.equals(source.currentHost)) {
-                report.skippedCurrent.add(authority);
-                continue;
+                report.currentAlsoProbed.add(authority);
             }
             if (!isHttps(url)) {
                 report.skippedNotHttps.add(authority);

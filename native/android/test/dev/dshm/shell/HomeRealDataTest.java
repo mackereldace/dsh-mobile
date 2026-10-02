@@ -113,8 +113,14 @@ public final class HomeRealDataTest {
         }
         check("★ 探测地址是 `<地址>/mobile/manifest`（地址拼接对 ✓）",
                 !probed.isEmpty() && probed.get(0).endsWith("/mobile/manifest"), String.valueOf(probed));
-        check("★★ 探的是**另一条**地址（当前那条被跳过 ✓ —— 那是省一次往返，不是漏掉 ✓）",
-                !probed.isEmpty() && probed.get(0).startsWith(otherBase), String.valueOf(probed));
+        /**
+         * ★★★ 2026-10-04 **反向修正**：两条**都要探** ✓（原先钉的是"当前那条被跳过"✗）——
+         *   跳过当前那条 ⇒ 它没有指纹 ⇒ 同一台 Mac **裂成两张卡** ✓（用户真机报的 ✓）。
+         */
+        check("★★★ 两条地址都探了（含当前那条 —— 不探它就会裂成两张卡 ✗）",
+                probed.size() >= 2, String.valueOf(probed));
+        check("★ 其中包含给探测用的那条 ✓", !probed.isEmpty() && probed.get(0).startsWith(otherBase),
+                String.valueOf(probed));
 
         finish();
     }

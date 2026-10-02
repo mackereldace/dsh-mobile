@@ -94,8 +94,15 @@ public final class HomeLoaderTest {
                 1, 8);
 
         HomeLoader.Result result = HomeLoader.load(source);
-        check("当前那条**不重复探**", result.report.skippedCurrent.contains("10.0.0.5:3443"));
-        check("当前那条没进探测列表", !result.report.probed.contains("10.0.0.5:3443"));
+        /**
+         * ★★★ 2026-10-04 **反向修正**（用户真机报的"同一台 Mac 分成两张卡"✓）：
+         *   原先这里钉的是"当前那条**不探**" ✓ —— 而那条规矩恰恰是病根 ✗：
+         *   不探 ⇒ 没有指纹 ⇒ 它自成一个"身份未知"的卡片 ✓（而它是最确定活着的一条 ✓）。
+         *   ⇒ 现在钉的是反面：**当前那条也要探** ✓，于是它和别的地址归到**同一张卡** ✓。
+         */
+        check("★ 当前那条**照样探**（不探就会变成没有指纹的孤立卡片 ✗）",
+                result.report.probed.contains("10.0.0.5:3443"));
+        check("★ 夹具自检：这一趟真的探过（否则上面那条是空转 ✓）", !probe.calls.isEmpty());
         /**
          * ★★★ 但它**不许**因此变成"另一个智能体" ✗（2026-10-04 真数据跑出来的缺陷 B ✓）：
          *   同一台电脑上只应看到**一个**实例 ✓（它只是没被探而已 ✓）。
@@ -111,7 +118,7 @@ public final class HomeLoaderTest {
         check("★ 这个用例里它仍只带一条地址（因为一条都没探、没有可并的已识别实例 ✓）",
                 !result.snapshot.machines.isEmpty() && result.snapshot.machines.get(0).instances.size() == 1
                         && result.snapshot.machines.get(0).instances.get(0).addresses.size() == 1);
-        check("一次探测都没发生", probe.calls.isEmpty());
+        check("★ 探过（不再是「一次都不探」✗）", !probe.calls.isEmpty());
         check("但它照样在快照里（当前那台不能消失）", result.snapshot.machines.size() == 1 && result.snapshot.machines.get(0).current);
     }
 

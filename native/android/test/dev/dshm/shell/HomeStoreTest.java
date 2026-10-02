@@ -21,7 +21,7 @@ public final class HomeStoreTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓ —— 理由见 `HomeModelTest` 同名常量 ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 54;
+    private static final int EXPECTED_MIN_CHECKS = 57;
 
     /** 目录里那条记录的指纹 ✓ —— ★ 探测回来的 `hostFingerprint` **必须与它同一个值** ✓，
      *  否则（测试里我一开始就写错了 ✓）同一台机器会被拆成两台：目录记 `3e9f…`、探测说 `FP` ✗。 */
@@ -165,18 +165,44 @@ public final class HomeStoreTest {
         probe.byAuthority.put("100.123.136.82:3453", HomeModel.Probe.up("h-tail", FP, "Mac-mini-2024.local", "0.1.5-rc.2"));
         // 同一台机器的另一个监听（局域网那条 ✓）—— 探得到 ⇒ 才能证明"多地址归一台" ✓
         probe.byAuthority.put("10.34.255.229:3453", HomeModel.Probe.up("h-tail", FP, "Mac-mini-2024.local", "0.1.5-rc.2"));
+        /**
+         * ★★ **当前那条也要有 pin** ✗（真机上必然有：你此刻正连着它 ✓）——
+         *   我第一版夹具漏了它 ✓ ⇒ 那条被当成"没 pin"跳过 ✓ ⇒ 断言假失败 ✗
+         *   （又一个"夹具不真实"的形态 ✓）。
+         */
+        probe.byAuthority.put("10.34.255.229:3443", HomeModel.Probe.up("h-tail", FP, "Mac-mini-2024.local", "0.1.5-rc.2"));
 
         Map<String, String> pinMap = new LinkedHashMap<String, String>();
         pinMap.put("100.123.136.82:3443", "CA-甲");
         pinMap.put("100.123.136.82:3453", "CA-甲");
         pinMap.put("10.34.255.229:3453", "CA-甲");
+        pinMap.put("10.34.255.229:3443", "CA-甲");
 
         HomeLoader.Source source = HomeStore.source(VAULT, SLOTS, "https://10.34.255.229:3443/mobile/app", pinsOf(pinMap), probe, 1000);
         HomeLoader.Result result = HomeLoader.load(source);
 
-        check("★ 端到端：当前那条（10.34.255.229:3443）不探", result.report.skippedCurrent.contains("10.34.255.229:3443"));
+        /**
+         * ★★ 2026-10-04 **反向修正**：当前那条**也探** ✓（原先钉的是"不探"✗，而那正是病根 ✓）——
+         *   不探 ⇒ 没有指纹 ⇒ 同一台 Mac 裂成两张卡 ✓（用户真机报的 ✓）。
+         */
+        check("★ 端到端：当前那条（10.34.255.229:3443）**也探**", result.report.probed.contains("10.34.255.229:3443"));
+        check("★ 而它不再出现在「跳过」那一类里（否则会计重复计数 ✗）",
+                !result.report.skippedCurrent.contains("10.34.255.229:3443"));
+        /**
+         * ★★★ 用户 2026-10-04 报的场景，直接钉在这里 ✓：
+         *   同一个 Mac 的**四条地址**（tailnet 两条 + 局域网两条 ✓、其中一条还是"当前"✓）
+         *   ⇒ **一张卡、一个实例** ✓（修之前：当前那条没有指纹 ⇒ **裂成两张卡** ✗）。
+         */
+        check("★★★ 四条地址归**一张卡**（用户报的「同一台 Mac 分成两张」✗）",
+                result.snapshot.machines.size() == 1);
+        check("★★★ 而且只有一个实例（不是「当前那条另起一行」✗）",
+                result.snapshot.machines.size() == 1 && result.snapshot.machines.get(0).instances.size() == 1);
         check("★ 端到端：同一台机器的 Tailscale 地址被探到（用**它自己**那张 CA）", probe.calls.contains("100.123.136.82:3443|CA-甲"));
-        check("★ 端到端：该探的都探了（3 条：Tailscale 两个 + 局域网另一个监听）", result.report.probed.size() == 3);
+        /**
+         * ★★ 3 → **4**（2026-10-04 ✓）：当前那条也进探测列表了 ✓
+         *   —— 原先"不探当前"整整少一条 ✓，而那条恰恰是最确定活着的一条 ✓。
+         */
+        check("★ 端到端：该探的都探了（4 条：Tailscale 两个 + 局域网两个、含当前那条）", result.report.probed.size() == 4);
         check("★ 端到端：三台/一条地址合成**一台**机器（局域网当前 + Tailscale 两个 ✓）",
                 result.snapshot.machines.size() == 1);
         check("★ 端到端：这台机器在线", result.snapshot.machines.get(0).online);
