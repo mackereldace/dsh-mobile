@@ -25,9 +25,10 @@ public final class HomeLoaderTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓ —— 理由见 `HomeModelTest` 同名常量 ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 46;
+    private static final int EXPECTED_MIN_CHECKS = 48;
 
     public static void main(String[] args) {
+        throwingPinSourceIsJustNoPin();
         currentAddressIsNotProbedAgain();
         plaintextIsNotProbed();
         missingPinMeansNoProbe();
@@ -54,6 +55,31 @@ public final class HomeLoaderTest {
     }
 
     // ───────────────────────── 三条"不探"的规矩 ─────────────────────────
+
+    /** ★ pin 来源抛异常 ⇒ 那条当"没有 pin"（不探 ✓），**别的地址照探** ✓（不许把整屏带崩 ✗）。 */
+    private static void throwingPinSourceIsJustNoPin() {
+        HomeLoader.PinSource throwing = new HomeLoader.PinSource() {
+            @Override
+            public String caPemFor(String authority) {
+                if (authority.startsWith("10.0.0.5")) throw new IllegalStateException("假 pin 来源炸了");
+                return "CA";
+            }
+        };
+        FakeProbes probe = new FakeProbes();
+        HomeLoader.Result result = HomeLoader.load(new HomeLoader.Source(
+                new ArrayList<HomeModel.HostRecord>(),
+                slots("https://10.0.0.5:3443", "https://10.0.0.6:3443"),
+                "10.0.0.9:3443",
+                "",
+                throwing,
+                probe,
+                1000,
+                1,
+                8));
+        check("★ pin 来源抛异常 ⇒ 那条记进「没 pin」（不是崩、不是乱信一张）",
+                result.report.skippedNoPin.contains("10.0.0.5:3443"));
+        check("★ 别的地址照探（一处坏不影响全局）", result.report.probed.contains("10.0.0.6:3443"));
+    }
 
     /** 当前那条（隧道已经连着）不再探一遍 ✓ —— 探它纯属浪费，还会把"当前"标成"不通"（如果证书对不上 ✓）。 */
     private static void currentAddressIsNotProbedAgain() {

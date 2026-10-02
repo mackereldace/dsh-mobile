@@ -171,7 +171,17 @@ public final class HomeLoader {
                 report.skippedNotHttps.add(authority);
                 continue;
             }
-            String caPem = source.pins == null ? "" : source.pins.caPemFor(authority);
+            /**
+             * ★ pin 来源**抛异常 ⇒ 当作「没有 pin」** ✓（于是不探 ✓）——
+             *   与探测函数同一条纪律：首页不能因为**一条地址**把整屏带崩 ✗；
+             *   更不能因为读不到 pin 就"随便信一张" ✗（那正是 C3 修掉的那个后门 ✓）。
+             */
+            String caPem;
+            try {
+                caPem = source.pins == null ? "" : source.pins.caPemFor(authority);
+            } catch (Throwable error) {
+                caPem = "";
+            }
             if (caPem == null || caPem.trim().isEmpty()) {
                 report.skippedNoPin.add(authority);
                 continue;

@@ -195,6 +195,7 @@ const run = async () => {
 
   // ② 编译（用的是**仓库里那份**原文 ✓，与 build-apk 同一套参数 ✓）
   const sources = [
+    join(sourceDir, 'dev', 'dshm', 'shell', 'Json.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'HomeModel.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'HomeManifest.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'ManifestProbe.java'),
