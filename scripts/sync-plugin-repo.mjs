@@ -150,6 +150,23 @@ try {
   problems.push('读不到插件仓里的 APK（它应该在 lib/dsh-mobile.apk）')
 }
 
+/**
+ * ★★★ 第 76 轮：三条取证探针必须"**定义了、而且被挂上了**" ✗。
+ *
+ * 同一条教训（宿主编码那次）：只定义不调用 = 功能不存在，而所有本地检查都绿 ✓。
+ * 探针是用户唯一能自己取证的入口 ⇒ 它们悄悄没了，用户按手册做却什么都没发生，
+ * 表现就是"按了没反应"（本项目最忌讳的那种）。
+ */
+for (const probe of ['installCoverProbe', 'installInvisibleAskProbe']) {
+  const defined = boot.includes(`function ${probe}(`)
+  const wired = boot.includes(`${probe}()`)
+  if (!defined) problems.push(`lib/boot.js 里没有定义 ${probe}`)
+  if (defined && !wired) problems.push(`lib/boot.js 里定义了 ${probe} 但**没有调用**（等于没有）`)
+}
+for (const marker of ['[probe]', '[hidden-ask]']) {
+  if (!boot.includes(marker)) problems.push(`lib/boot.js 里没有 ${marker} 的输出（用户看不到读数）`)
+}
+
 const bootTag = boot.match(/var BYTES_TAG = '([^']+)'/)
 const hostTag = tunnel.match(/\$dshmBytes/)
 if (bootTag === null) problems.push('lib/boot.js 里没找到 BYTES_TAG 的值')
