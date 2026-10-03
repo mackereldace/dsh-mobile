@@ -126,6 +126,8 @@ final class HomeView extends FrameLayout {
      *   主题切换 ✓ …… ⇒ 用户正看着下面的电脑时，被弹回顶部的机会非常多 ✓）。
      */
     private int savedScrollY = 0;
+    /** 最近一次真正重建列表的时刻 ✓（给判据页用 ✓ —— 判断有没有被防抖闸延后 ✓）。 */
+    private long lastRebuildAt = 0L;
 
     /** 取缩略图的那一截 ✓（可能没有 ⇒ 就永远画示意屏 ✓）。 */
     private HomeShots shots;
@@ -233,10 +235,21 @@ final class HomeView extends FrameLayout {
      */
     private String currentAuthorityNow = null;
 
-    /** 立刻把"当前"指到这台 ✓（上网探测还没回来也不等它 ✓）。 */
+    /**
+     * 立刻把"当前"指到这台 ✓（上网探测还没回来也不等它 ✓）。
+     *
+     * ★★★ 2026-10-04 用户第二轮反馈："**不行，还是不行**"✗（且确认装的是新包 ✓）——
+     *   我查出的原因：上一版这里调的是 {@link #rebuild()} ✓，而它**受"滑动中不重建"
+     *   那道闸管辖**✗（那是我上上轮为治"抽搐"加的 ✓）⇒ 只要那一闸把它挡下
+     *   （触摸状态没收干净 ✓，或刚滚动过 ✓），**白条就重画不了** ✗
+     *   ⇒ 只能等 3 秒后那次联网探测 ✓ ⇒ 用户看到的还是老样子 ✓✓。
+     * ⇒ 这里改成**直接重画**（{@link #rebuildNow()} ✓，**不走那道闸** ✓）——
+     *   理由：设"当前"这件事发生在**点卡片**的时候 ✓，那一刻本来就没在滑动 ✓，
+     *   而"自动行为不许盖掉用户刚做的事"这条规矩**恰恰要求**它立刻生效 ✓✓。
+     */
     void setCurrentAuthorityNow(String authority) {
         currentAuthorityNow = authority == null || authority.length() == 0 ? null : authority;
-        rebuild();
+        rebuildNow();
     }
 
     /**
@@ -406,6 +419,17 @@ final class HomeView extends FrameLayout {
                     .append('\n');
         } catch (Throwable error) {
             text.append("层级：读不出来（").append(error.getClass().getSimpleName()).append("）").append('\n');
+            /**
+             * ★★★ 2026-10-04 加这两行 ✗ —— 起因是"改了没反应"连续两轮 ✓，
+             *   而我**看不见这台手机**✓ ⇒ 只能靠这一页把状态念出来 ✓（本项目的既定代替手段 ✓）。
+             *   · `当前(临时)=` ：点进某台机器那一刻设下的判据 ✓ —— 它为 null 说明**根本没设上**✗
+             *     （那就是"点进去时"那条路没走到 ✓）；非 null 则说明设上了 ✓，
+             *     此时白条若仍不对 ⇒ 问题在**画**那一层 ✓（`isCurrent` 的匹配 ✗）。
+             *   · `上次重画=` ：最近一次真正重建列表的时刻 ✓ —— 与"点进去"的时刻一比 ✓
+             *     就知道是不是被那道防抖闸延后了 ✓。
+             */
+            text.append("当前(临时)=").append(currentAuthorityNow == null ? "（没设 ✗）" : currentAuthorityNow).append('\n');
+            text.append("上次重画=").append(lastRebuildAt == 0 ? "（还没画过）" : (android.os.SystemClock.uptimeMillis() - lastRebuildAt) + "ms 前").append('\n');
         }
         if (tabsBar != null) {
             text.append("底栏：宽 ").append(tabsBar.getWidth()).append(" 高 ").append(tabsBar.getHeight()).append('\n');
@@ -504,8 +528,15 @@ final class HomeView extends FrameLayout {
     private void rebuild() {
         if (rebuildPosted) return;
         // ★ 用户手上有触摸 / 刚滚过 ⇒ 这一帧先不做（见 userTouching 那段注释 ✓）
+        /**
+         * ★ 判据只留"**刚滚动过**"这一条 ✓（`lastScrollAt` ✓ —— 它由真实的滚动变化更新 ✓，
+         *   不可能卡住 ✓）。原来还有一个 `userTouching` 布尔 ✓，已去掉 ✗：
+         *   它在"子控件吃掉了 UP"这类路径上收不干净 ✓ ⇒ 会让重建**永远延后**✗
+         *   （本轮"改了没反应"就是这么来的 ✓）。★ 宁可少挡一种极端手势 ✓，
+         *   也绝不能出现"**数据变了却永远不重画**"✗（那正是本项目最忌讳的"点了没反应"✓）。
+         */
         long now = SystemClock.uptimeMillis();
-        if (userTouching || now - lastScrollAt < SCROLL_SETTLE_MS) {
+        if (now - lastScrollAt < SCROLL_SETTLE_MS) {
             if (!rebuildRetryPosted) {
                 rebuildRetryPosted = true;
                 postDelayed(new Runnable() {
@@ -560,6 +591,7 @@ final class HomeView extends FrameLayout {
     }
 
     private void rebuildNow() {
+        lastRebuildAt = android.os.SystemClock.uptimeMillis();
         // ★ 先把用户滚到哪儿了记下来 ✓（下面整棵树都要换掉 ✗ —— 见 savedScrollY 的说明 ✓）
         if (scrollView != null) savedScrollY = scrollView.getScrollY();
         // ★ 这一轮的缩略图视图都跟着换新 ⇒ 表也要清 ✗（留着旧引用就是往已摘下的 View 上贴图 ✓）
