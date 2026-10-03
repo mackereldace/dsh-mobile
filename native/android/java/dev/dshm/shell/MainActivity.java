@@ -1483,29 +1483,24 @@ public class MainActivity extends android.app.Activity {
                  *     否则删过的那台电脑**再也配不回来**了 ✗（同一个指纹会被永远滤掉 ✓）。
                  */
                 try {
-                    String tomb = prefs.getString(KEY_FORGOTTEN_HOSTS, "[]");
-                    if (tomb != null && !tomb.trim().isEmpty() && !tomb.equals("[]")) {
-                        JSONArray forgotten = new JSONArray(tomb);
-                        Object hostsRaw = vault.opt(HomeStore.HOSTS_KEY);
-                        if (hostsRaw instanceof String && forgotten.length() > 0) {
-                            JSONArray records = new JSONArray((String) hostsRaw);
-                            JSONArray kept = new JSONArray();
-                            for (int i = 0; i < records.length(); i += 1) {
-                                JSONObject record = records.optJSONObject(i);
-                                if (record == null) continue;
-                                String fingerprint = record.optString("fingerprint", "");
-                                boolean blocked = false;
-                                for (int j = 0; j < forgotten.length(); j += 1) {
-                                    if (fingerprint.equals(forgotten.optString(j))) blocked = true;
-                                }
-                                if (!blocked) kept.put(record);
-                            }
-                            if (kept.length() != records.length()) {
-                                vault.put(HomeStore.HOSTS_KEY, kept.toString());
-                                Log.i(TAG, "身份库里滤掉了 " + (records.length() - kept.length())
-                                        + " 条已删除电脑的记录");
-                            }
+                    java.util.Set<String> tombFp = new java.util.HashSet<String>();
+                    java.util.Set<String> tombHosts = new java.util.HashSet<String>();
+                    readTombstone(tombFp, tombHosts);
+                    if (!tombFp.isEmpty() || !tombHosts.isEmpty()) {
+                        java.util.List<String> names = new java.util.ArrayList<String>();
+                        Iterator<String> it = vault.keys();
+                        while (it.hasNext()) names.add(it.next());
+                        int blocked = 0;
+                        for (String name : names) {
+                            Object value = vault.opt(name);
+                            if (!(value instanceof String)) continue;
+                            String cleaned = scrubReferences((String) value, tombFp, tombHosts);
+                            if (cleaned == null) continue;
+                            if (cleaned.isEmpty()) vault.remove(name);
+                            else vault.put(name, cleaned);
+                            blocked += 1;
                         }
+                        if (blocked > 0) Log.i(TAG, "身份库里挡下 " + blocked + " 个已删除电脑的引用");
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "墓碑过滤失败（不挡路）", t);
@@ -2470,6 +2465,97 @@ public class MainActivity extends android.app.Activity {
      *     否则页面（身份库的正主）一推，刚删掉的又回来了。
      *     页面自己也删掉之后（推来的库里已经没有它），墓碑自动撤掉。
      */
+    /** 读墓碑：`{"fp":[指纹…],"hosts":[host…]}`（兼容老格式：纯数组 = 指纹）。 */
+    private void readTombstone(java.util.Set<String> fps, java.util.Set<String> hosts) {
+        try {
+            String raw = prefs.getString(KEY_FORGOTTEN_HOSTS, null);
+            if (raw == null || raw.trim().isEmpty()) return;
+            String text = raw.trim();
+            if (text.startsWith("[")) {
+                JSONArray array = new JSONArray(text);
+                for (int i = 0; i < array.length(); i += 1) fps.add(array.optString(i));
+                return;
+            }
+            JSONObject object = new JSONObject(text);
+            JSONArray f = object.optJSONArray("fp");
+            if (f != null) for (int i = 0; i < f.length(); i += 1) fps.add(f.optString(i));
+            JSONArray h = object.optJSONArray("hosts");
+            if (h != null) for (int i = 0; i < h.length(); i += 1) hosts.add(h.optString(i));
+        } catch (Throwable ignored) {
+            // 读不出来就当没有墓碑（宁可这次没挡住，也不能因此崩）
+        }
+    }
+
+    private void writeTombstone(java.util.Set<String> fps, java.util.Set<String> hosts) {
+        try {
+            JSONObject object = new JSONObject();
+            JSONArray f = new JSONArray();
+            for (String value : fps) if (value != null && !value.isEmpty()) f.put(value);
+            JSONArray h = new JSONArray();
+            for (String value : hosts) if (value != null && !value.isEmpty()) h.put(value);
+            object.put("fp", f);
+            object.put("hosts", h);
+            prefs.edit().putString(KEY_FORGOTTEN_HOSTS, object.toString()).commit();
+        } catch (Throwable t) {
+            Log.w(TAG, "写删除墓碑失败", t);
+        }
+    }
+
+    /**
+     * ★★★ 通用清扫：一个字符串里凡是指着"已删除的那几台"的东西，清掉。
+     *
+     * 用户报"删除了，它显示成未知了"、"还是未知，未探查到" —— 根因是我原先只清了
+     * **原生那两个顶层键**，而身份库（页面推上来的那个对象）里还有好几处记着它：
+     * `dsh-mobile.hosts`（记录数组）、`dsh-mobile.hosts.active`（指纹）、
+     * `dsh-mobile.lastGoodEndpoint`（地址）…… 少清一处，首页就照那处拼出一行
+     * "身份未知 / 未探查到"。
+     *
+     * 所以这里不看键名，只看**内容**：
+     *   · JSON 数组：元素是对象 ⇒ 按 `fingerprint` 或 `url` 的 host 命中就丢；
+     *     元素是字符串 ⇒ 命中就丢；
+     *   · 普通字符串：命中就**清空**（返回 ""，由调用方删键）；
+     *   · 其它形状一律原样返回（不猜、不乱改）。
+     *
+     * @return 清过之后的字符串；没变化时返回 null（调用方据此跳过写盘）。
+     */
+    private static String scrubReferences(String text, java.util.Set<String> fps, java.util.Set<String> hosts) {
+        if (text == null) return null;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) return null;
+        boolean changed = false;
+        if (trimmed.startsWith("[")) {
+            try {
+                JSONArray array = new JSONArray(trimmed);
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < array.length(); i += 1) {
+                    Object item = array.opt(i);
+                    if (item instanceof JSONObject) {
+                        JSONObject object = (JSONObject) item;
+                        String fingerprint = object.optString("fingerprint", "");
+                        if (!fingerprint.isEmpty() && fps.contains(fingerprint)) { changed = true; continue; }
+                        String url = object.optString("url", "");
+                        if (!url.isEmpty()) {
+                            String host = hostOf(PinStore.authorityOf(url) == null ? url : PinStore.authorityOf(url));
+                            if (host != null && hosts.contains(host)) { changed = true; continue; }
+                        }
+                        kept.put(object);
+                        continue;
+                    }
+                    String value = String.valueOf(item);
+                    String host = hostOf(value);
+                    if (fps.contains(value) || (host != null && hosts.contains(host))) { changed = true; continue; }
+                    kept.put(item);
+                }
+                return changed ? kept.toString() : null;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+        String host = hostOf(trimmed);
+        if (fps.contains(trimmed) || (host != null && hosts.contains(host))) return "";
+        return null;
+    }
+
     private void forgetMachine(HomeModel.Machine machine) {
         if (machine == null) return;
         java.util.List<String> authorities = new java.util.ArrayList<String>();
@@ -2559,21 +2645,46 @@ public class MainActivity extends android.app.Activity {
         } catch (Throwable t) {
             Log.w(TAG, "清理地址槽失败", t);
         }
-        // ④ 墓碑
+        // ④ 墓碑（指纹 + 主机名都记下来，供"通用清扫"用）
+        java.util.Set<String> tombFp = new java.util.HashSet<String>();
+        java.util.Set<String> tombHosts = new java.util.HashSet<String>();
+        readTombstone(tombFp, tombHosts);
+        tombFp.addAll(fingerprints);
+        tombHosts.addAll(hosts);
+        writeTombstone(tombFp, tombHosts);
+        // ⑤ 通用清扫：偏好里 + 身份库里所有提到它的字符串
         try {
-            if (!fingerprints.isEmpty()) {
-                JSONArray forgotten = new JSONArray(prefs.getString(KEY_FORGOTTEN_HOSTS, "[]"));
-                for (String fingerprint : fingerprints) {
-                    boolean exists = false;
-                    for (int i = 0; i < forgotten.length(); i += 1) {
-                        if (fingerprint.equals(forgotten.optString(i))) exists = true;
-                    }
-                    if (!exists) forgotten.put(fingerprint);
-                }
-                prefs.edit().putString(KEY_FORGOTTEN_HOSTS, forgotten.toString()).commit();
+            for (java.util.Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+                String key = entry.getKey();
+                if (key == null || key.equals(KEY_IDENTITY_VAULT) || key.equals(KEY_FORGOTTEN_HOSTS)) continue;
+                Object value = entry.getValue();
+                if (!(value instanceof String)) continue;
+                String cleaned = scrubReferences((String) value, tombFp, tombHosts);
+                if (cleaned == null) continue;
+                if (cleaned.isEmpty()) prefs.edit().remove(key).commit();
+                else prefs.edit().putString(key, cleaned).commit();
+                Log.i(TAG, "清扫偏好键：" + key);
+            }
+            JSONObject vault = new JSONObject(prefs.getString(KEY_IDENTITY_VAULT, "{}"));
+            java.util.List<String> names = new java.util.ArrayList<String>();
+            Iterator<String> it = vault.keys();
+            while (it.hasNext()) names.add(it.next());
+            int scrubbed = 0;
+            for (String name : names) {
+                Object value = vault.opt(name);
+                if (!(value instanceof String)) continue;
+                String cleaned = scrubReferences((String) value, tombFp, tombHosts);
+                if (cleaned == null) continue;
+                if (cleaned.isEmpty()) vault.remove(name);
+                else vault.put(name, cleaned);
+                scrubbed += 1;
+            }
+            if (scrubbed > 0) {
+                prefs.edit().putString(KEY_IDENTITY_VAULT, vault.toString()).commit();
+                Log.i(TAG, "清扫身份库键：" + scrubbed + " 个");
             }
         } catch (Throwable t) {
-            Log.w(TAG, "写删除墓碑失败", t);
+            Log.w(TAG, "通用清扫失败", t);
         }
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");
