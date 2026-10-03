@@ -23056,6 +23056,24 @@
           buzz()
           ok = true
           detail = 'displayed'
+        } else if (callInfo.capability === 'notify') {
+          /**
+           * ★★★ 第二阶段（第 45 轮）：宿主推的 `notify` 原先**没有任何分支** ✗ ——
+           *   于是 runCall 落到 unsupported ✓，而宿主那边看到 `deviceCall` 返回 ok ✓
+           *   就**不会**退成 `show` ✗ ⇒ 审批通知被**静默丢掉** ✓
+           *   （这就是"切到后台收不到通知"的直接原因 ✓，而且前台也一样收不到 ✓）。
+           * ⇒ 走壳的桥发**系统通知** ✓（`shellNotify` 早就有了 ✓，只是没人调它 ✗）；
+           *   桥不在（例如用手机浏览器打开，而不是 App）⇒ 退回**页面横幅** ✓，绝不静默 ✗。
+           */
+          var posted = shellNotify('需要你确认', text)
+          if (posted === null) {
+            drawBar('info', text, [], false)
+            detail = 'banner-no-bridge'
+          } else {
+            detail = 'notified:' + posted
+          }
+          buzz()
+          ok = true
         } else if (callInfo.capability === 'clipboard') {
           // 三条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
           // 复制成功就完事；失败就把文本摆到横幅上让用户长按复制 —— **绝不静默失败**。
