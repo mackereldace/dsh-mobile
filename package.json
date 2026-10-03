@@ -9,6 +9,8 @@
   },
   "scripts": {
     "test": "node --test --experimental-strip-types \"packages/*/test/**/*.test.ts\"",
+    "codex-host": "node scripts/codex-host.mjs",
+    "check:codex-host": "node --experimental-strip-types scripts/check-codex-host.ts",
     "test:vectors": "node --experimental-strip-types packages/protocol/test/emit-vectors.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "node scripts/build-lib.mjs",

@@ -95,10 +95,6 @@ export interface MobileHostConfig {
     trustLocalNames: boolean;
 }
 export declare const DEFAULT_CONFIG: MobileHostConfig;
-/**
- * 宿主身份签名密钥的结构面。
- * 只声明本插件真正用到的字段，避免绑死具体实现（Node KeyObject 结构上满足它）。
- */
 export interface SigningKeyLike {
     readonly publicKey: string;
     /**
@@ -179,6 +175,22 @@ export interface MobileSelfcheck {
     /** 总判据：证书可用 且 DSH 前端探针没有"全不命中"。`unknown` 不算失败（不编也不误报）。 */
     readonly ok: boolean;
     readonly checkedAt: string;
+    /**
+     * ★ 第 50 轮（第二阶段取证通道）：最近几条宿主诊断（标签 + 摘要，已截断限量）。
+     *   为什么需要它 ✗：选择卡的事件类型名只能靠真机取证 ✓，
+     *   而诊断原先只进审计（`/mobile/audit` 是 **LOCAL_ONLY** ⇒ 手机读不到 ✗），
+     *   桌面端又没有可看的日志 ✗ ⇒ 手机上**没有任何出口** ✓。
+     *   这里复用**现成的**自检页 ✓（用户已经能从手机/局域网打开过它 ✓）。
+     * ★ 纪律：诊断里**不许出现票据/密钥原文**（沿用 PairLink.redact 那条规矩）。
+     */
+    readonly diagnostics?: ReadonlyArray<{
+        readonly tag: string;
+        readonly detail: string;
+    }>;
+    /** 端侧队列积压（只读计数）：一直涨 ⇒ 手机没在取（见自检页里的说明）。 */
+    readonly deviceQueue?: {
+        readonly pending: number;
+    };
     readonly host: {
         readonly hostId: string;
         readonly hostName: string;
@@ -272,7 +284,9 @@ export interface MobileHostService {
      * **唯一入口**：HTTP 路由 `/mobile/device/call` 与（将来的）agent 工具都走它，
      * 于是"发给谁、能力是否已启用"的判定只有一处，两边不会走偏。
      */
-    deviceCall(capability: string, text: string, deviceId?: string): {
+    deviceCall(capability: string, text: string, deviceId?: string, 
+    /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
+    sessionId?: string): {
         ok: true;
         id: string;
     } | {
@@ -343,6 +357,8 @@ export interface MobileHost extends MobileHostService {
     stopRelayDialer(): void;
     /** 停止中继回源通道。 */
     stopRelayHttpBackhaul(): void;
+    /** 停止 Codex 宿主桥（懒启动过才需要）。 */
+    stopCodexBridge(): void;
 }
 /**
  * 创建宿主插件主体。
@@ -388,6 +404,23 @@ export declare function createMobileHost(options: {
      * 由适配器从配置透传；配对页据此显示手机地址，避免页面自己猜端口。
      */
     readonly phoneBaseUrl?: string;
+    /**
+     * 手机配对成功后应该落到的**入口路径**（默认 `/mobile/app` = DSH 外壳）。
+     *
+     * 独立服务（standalone.ts）把它设成 `/mobile/codex` —— 那里没有 DSH 前端，
+     * 手机必须直接落到 Codex 页面；否则配对完成后会打开一个 503 的外壳路径。
+     */
+    readonly entryPath?: string;
+    /**
+     * 是否把入口页面**同时**发在 `/mobile/app` 上（默认 false = 只有 DSH 插件会用那条路径）。
+     *
+     * ★ 为什么独立服务需要它（2026-09-30 用户实测）：原版配对页的二维码是
+     *   `dshmobile://pair?d=…`，**APK 扫完固定落到 `<基地址>/mobile/app?pair=…`**
+     *   （见 native/android 的 `PairLink.APP_PATH` ✓）；配对页自己的"手机侧"提交后
+     *   也是跳到 `/mobile/app?pair=…` ✓。独立服务没有 DSH 外壳 ⇒ 那条路原本 404 ⇒
+     *   整个"原版配对体验"都用不了 ✗。开了这个别名之后，两条路发的是**同一个页面** ✓。
+     */
+    readonly appShellAlias?: boolean;
     /**
      * DSH 前端 index.html 的绝对路径（由适配器提供，宿主不猜路径）。
      * 用于给手机端提供应用外壳。

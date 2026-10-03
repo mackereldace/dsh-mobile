@@ -32,6 +32,12 @@ export interface DeviceCall {
     /** 给用户看的文字（长度由调用方限制）。 */
     readonly text: string;
     readonly createdAt: number;
+    /**
+     * ★ 第二阶段（缺口二）：这条请求该落到**哪个会话** ✓ —— 通知点击时用它
+     * （手机知道自己在哪台机器上 ✓，所以只要会话 id 就够 ✓，不需要整条 URL ✓）。
+     * ★ 可选字段：旧调用不传 ⇒ 行为同今天（点通知只打开 App ✓）。
+     */
+    readonly sessionId?: string;
     /** 已投递给手机的时间；undefined 表示尚未投递。 */
     readonly deliveredAt?: number;
 }
@@ -74,7 +80,7 @@ export declare class DeviceCallQueue {
      * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，
      *         让它知道"请求没发出去"，而不是以为发出去在等手机。
      */
-    enqueue(deviceId: string, capability: DeviceCapability, text: string): DeviceCall;
+    enqueue(deviceId: string, capability: DeviceCapability, text: string, sessionId?: string): DeviceCall;
     /**
      * 取走该设备**尚未投递**的请求（取走即标记为已投递，保证只执行一次）。
      */

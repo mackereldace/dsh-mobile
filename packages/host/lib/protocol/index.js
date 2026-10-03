@@ -8,4 +8,5 @@ export * from "./wire.js";
 export * from "./crypto.js";
 export * from "./handshake.js";
 export * from "./mux.js";
+export * from "./binvalue.js";
 //# sourceMappingURL=index.js.map

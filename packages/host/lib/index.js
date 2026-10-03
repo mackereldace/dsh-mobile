@@ -14,12 +14,17 @@
  *  - 设备管理与配对确认端点只接受 loopback 请求（必须站在电脑前操作）。
  *  - 能力位"请求 ∩ 已授予 ∩ 宿主上限"三重收窄，写操作与 shell 默认关闭。
  */
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
+import { imageMimeOf, resolveWallpaper, wallpaperSize } from "./wallpaper.js";
 import { DeviceCallQueue, DEVICE_CAPABILITIES } from "./device-calls.js";
+import { CodexBridge, handleCodexEndpoint } from "./codex/codex-bridge.js";
+import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from "./codex/codex-page.js";
 import { deriveLanTrust, isIpLiteralHostname, localMachineName, matchesDerivedTrust, } from "./lan-trust.js";
 import { probeDshFrontend } from "./dsh-probe.js";
 import { unavailableLanListenerStatus } from "./lan-listener.js";
@@ -127,6 +132,20 @@ export const DEFAULT_CONFIG = {
     allowPersistentAuthorization: true,
     trustLocalNames: true,
 };
+/**
+ * 宿主身份签名密钥的结构面。
+ * 只声明本插件真正用到的字段，避免绑死具体实现（Node KeyObject 结构上满足它）。
+ */
+/**
+ * ★★ 缩略图那两个函数**在这里 import** ✗ —— 而不是文件顶部 ✓。
+ *   理由与 `mobile/dsh/*` 当初用动态 import 完全一样 ✓：
+ *   **顶部那一段正被别的单改着** ✓，插进去就会把两单搅进同一次提交 ✓。
+ *   `import` 出现在模块顶层**任何位置**语义都一样（会被提升 ✓）——
+ *   放在这个"两面都是已提交代码"的空档里 ✓，它就是一个能单独提交的 hunk ✓。
+ */
+import { captureShot, createNodeShotRunner, explainCaptureFailure } from "./desktop-shot.js";
+/** 截屏用的 runner ✓（无状态 ✓，建一次就够 ✓）。 */
+const shotRunner = createNodeShotRunner();
 /** 端点解析：'session/create' → {namespace:'session', method:'create'}。 */
 function parseEndpoint(endpoint) {
     const segments = endpoint.split('/');
@@ -866,7 +885,7 @@ export function createMobileHost(options) {
      * 发起一次端侧请求。成功返回请求 id；失败返回**原因字符串**而不是抛错——
      * 调用方（HTTP 路由 / agent 工具）都要把原因讲给用户或 agent 听。
      */
-    function deviceCall(capability, text, deviceId) {
+    function deviceCall(capability, text, deviceId, sessionId) {
         const online = [...sessions.keys()];
         const target = deviceId ?? (online.length === 1 ? online[0] : undefined);
         if (target === undefined) {
@@ -876,7 +895,7 @@ export function createMobileHost(options) {
             return { ok: false, reason: `未知的端侧能力：${capability}` };
         }
         try {
-            const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500));
+            const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500), sessionId);
             store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true });
             return { ok: true, id: call.id };
         }
@@ -977,7 +996,21 @@ export function createMobileHost(options) {
                 hostFingerprint: fingerprint(options.identity.signingKey.publicKey),
                 code,
                 ticket: ticketKey,
-                endpoints: [...options.endpoints()],
+                /**
+                 * ★★★ 2026-10-04 真机逼出来的（用户："首页扫码连不上，体验会差"✗ + "它会收集配对页 3081 这个端口"✗）：
+                 *   票据的端点原先 = `publicBaseUrl`（**明文 http** ✗，它是给电脑浏览器用的 ✓）+ `extraEndpoints` ✓。
+                 *   而**手机 App 是 https-only** ✓（禁明文 ✓）⇒ 手机拿到的**第一条候选连 TLS 都开始不了** ✗
+                 *   ⇒ 不弹"信任这台电脑"框 ✓ ⇒ 退回旧候选 ⇒ 用户看到"配对失败 / 重连"、也不出新卡片 ✓✓
+                 *   （三件事同一个原因 ✓，用户实测：手动输入 `https://…:3443/mobile` 就会弹框 ✓）。
+                 * ⇒ 票据（**只给手机看** ✓）里**只放 https** ✓，明文那条不再下发 ✓。
+                 * ★ 兜底：万一这台机器**没开 TLS**（一台 https 端点都没有 ✓）⇒ 保持原样 ✓，
+                 *   绝不把列表清空 ✗（那会让手机一条候选都没有 ✓）。
+                 */
+                endpoints: (() => {
+                    const all = [...options.endpoints()];
+                    const https = all.filter((url) => url.startsWith('https://'));
+                    return https.length > 0 ? https : all;
+                })(),
                 protocolVersion: PROTOCOL_VERSION,
                 expiresAt,
                 ...(caFingerprint === undefined ? {} : { caFingerprint }),
@@ -1217,6 +1250,43 @@ export function createMobileHost(options) {
                 // （unknown 不算失败——不编，也不误报；监听未启用更不算失败，那是老部署的常态）
                 ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing' && listener.ok,
                 checkedAt: new Date().toISOString(),
+                /**
+                 * ★ 第 53 轮：把**端侧队列的积压**也挂出来 ✓ —— 它是"通知到底有没有送到手机"
+                 *   最直接的一条信号 ✓：
+                 *   · `pending` 一直是 0 ⇒ 手机在取、也在回报 ✓（链是通的 ✓）；
+                 *   · `pending` 一直涨 ⇒ 手机**根本没取**（后台受限 / 页面没跑 / 隧道断 ✓）
+                 *     —— 这一步把"没推"与"推了没人取"当场分开 ✓，而这两种在外部看起来一样 ✗。
+                 * ★ 只读计数，不带任何内容 ✓（内容会含工具名与原因，不必出现在这一页 ✓）。
+                 */
+                ...(() => {
+                    try {
+                        return { deviceQueue: { pending: deviceCalls.pendingCount() } };
+                    }
+                    catch (error) {
+                        void error;
+                        return {};
+                    }
+                })(),
+                ...(() => {
+                    try {
+                        const entries = store.listAudit({ limit: 40 });
+                        const list = Array.isArray(entries) ? entries : [];
+                        const diagnostics = list
+                            .map((entry) => {
+                            const record = (entry ?? {});
+                            return {
+                                tag: String(record.target ?? '').slice(0, 60),
+                                detail: String(record.detail ?? '').slice(0, 160),
+                            };
+                        })
+                            .filter((item) => item.tag.length > 0);
+                        return diagnostics.length === 0 ? {} : { diagnostics };
+                    }
+                    catch (error) {
+                        void error;
+                        return {};
+                    }
+                })(),
                 host: {
                     hostId: options.identity.hostId,
                     hostName: options.identity.hostName,
@@ -1512,6 +1582,48 @@ export function createMobileHost(options) {
         return args !== null && typeof args === 'object' ? args : {};
     }
     /**
+     * Codex 宿主桥（懒启动）。
+     *
+     * ★ 为什么懒启动：Codex CLI 不是每台机器都有、也不是每个人都在用 ✓。
+     *   第一次真正收到 `mobile/codex/*` 调用时才 spawn `codex app-server`
+     *   （stdio，见 codex-bridge.ts 的模块说明）；没人用就一个进程都不多 ✓。
+     *
+     * ★ 环境变量（都可选，默认值见 codex-bridge.ts）：
+     *   `DSH_MOBILE_CODEX_CLI`  —— CLI 路径（默认 macOS 官方包位置，再退回 PATH 里的 `codex`）
+     *   `DSH_MOBILE_CODEX_HOME` —— CODEX_HOME（默认沿用本进程的 `CODEX_HOME`，再退回 `~/.codex`）
+     *   `DSH_MOBILE_CODEX_ARGS` —— JSON 字符串数组，作为 CLI 参数（默认 `["app-server"]`）。
+     *   `DSH_MOBILE_CODEX_CWD`  —— 手机新建会话时的默认工作目录（缺省交给 app-server 自己决定）
+     *   最后一条是**测试钩子**：e2e（scripts/e2e-pairing.mjs --codex-page）用它把"CLI"指向
+     *   假 app-server（test/fixtures/fake-codex-app-server.mjs），从而不依赖真 Codex ✓。
+     */
+    let codexBridge;
+    function getCodexBridge() {
+        if (codexBridge === undefined) {
+            const cliPath = process.env['DSH_MOBILE_CODEX_CLI'];
+            const codexHome = process.env['DSH_MOBILE_CODEX_HOME'];
+            const rawArgs = process.env['DSH_MOBILE_CODEX_ARGS'];
+            const defaultCwd = process.env['DSH_MOBILE_CODEX_CWD'];
+            let cliArgs;
+            if (rawArgs !== undefined && rawArgs.length > 0) {
+                try {
+                    const parsed = JSON.parse(rawArgs);
+                    if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string'))
+                        cliArgs = parsed;
+                }
+                catch {
+                    // 解析失败就按默认走（[app-server]），不因为一个测试钩子把插件搞挂 ✗
+                }
+            }
+            codexBridge = new CodexBridge({
+                ...(cliPath === undefined || cliPath.length === 0 ? {} : { cliPath }),
+                ...(codexHome === undefined || codexHome.length === 0 ? {} : { codexHome }),
+                ...(cliArgs === undefined ? {} : { cliArgs }),
+                ...(defaultCwd === undefined || defaultCwd.length === 0 ? {} : { defaultCwd }),
+            });
+        }
+        return codexBridge;
+    }
+    /**
      * 处理**插件自有**的隧道内端点（`mobile/` 前缀）。
      *
      * 为什么放在隧道委派而不是 HTTP 路由：这些都是"在电脑上做事"的动作，
@@ -1523,6 +1635,18 @@ export function createMobileHost(options) {
     async function invokeLocalEndpoint(endpoint, payload, signal, device) {
         if (!endpoint.startsWith('mobile/'))
             return undefined;
+        // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
+        // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
+        // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
+        if (endpoint.startsWith('mobile/dsh/')) {
+            // ★ 这里用**动态 import** ✗ 而不是文件顶部的静态 import ✓ ——
+            //   顶部那一段是**别的单正在改的地方** ✗，插进去就会把两单搅在同一次提交里 ✓。
+            //   动态 import 只加载一次（模块系统自己缓存 ✓），代价可以忽略 ✓。
+            const { handleDshChatEndpoint } = await import("./dsh-chat-bridge.js");
+            return handleDshChatEndpoint({
+                call: (target, payload, bridgeSignal) => invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
+            }, endpoint, payload, signal);
+        }
         if (endpoint === 'mobile/openInApp/apps') {
             return listOpenInAppTargets();
         }
@@ -1535,6 +1659,14 @@ export function createMobileHost(options) {
                 });
             }
             return openInApp(typeof args['app'] === 'string' ? args['app'] : '', typeof args['path'] === 'string' ? args['path'] : '', args['action'] === 'reveal' ? 'reveal' : 'open', roots);
+        }
+        // ── Codex 宿主桥 ──────────────────────────────────────────────────
+        // 与 DSH 无关的一组端点：宿主直接连 Codex app-server（stdio），手机用它们
+        // 列会话 / 发消息 / 收增量 / 裁决审批（协议与安全默认见 codex-bridge.ts）。
+        // 放在能力门禁之前：与其它 `mobile/*` 一样，它不属于 DSH 命名空间，
+        // 设备身份已由隧道握手保证；Codex 自己的审批则由桥逐条展示给手机 ✓。
+        if (endpoint.startsWith('mobile/codex/')) {
+            return handleCodexEndpoint(getCodexBridge(), endpoint, payload);
         }
         // ── 工作区文件管理 ───────────────────────────────────────────────
         // 全部要求路径落在工作区根之内（见 workspace-files.ts 的安全说明）。
@@ -1802,6 +1934,11 @@ export function createMobileHost(options) {
         stopRelayDialer,
         /** 停止中继回源通道。 */
         stopRelayHttpBackhaul,
+        /** 停止 Codex 宿主桥（懒启动过才需要；进程退出/插件卸载时调用）。 */
+        stopCodexBridge() {
+            codexBridge?.dispose();
+            codexBridge = undefined;
+        },
         handleUpgrade(req, socket) {
             /**
              * ★ base 用**常量**，不拿 `Host` 头去拼 —— 这里只需要 `pathname`。
@@ -2161,6 +2298,14 @@ export function createMobileHost(options) {
              */
             if (req.method === 'GET' && (url.pathname === '/mobile/boot.js' || url.pathname === '/mobile/boot.js.map')) {
                 const file = url.pathname.endsWith('.map') ? 'boot.js.map' : 'boot.js';
+                /**
+                 * ★ 2026-09-30 修：这一段**读不到文件时也必须往下走** ✗。
+                 *   原先 catch 里只 `console.warn`，然后**照样 `return true`** ⇒ 响应永远不写 ⇒
+                 *   请求挂到浏览器超时（`curl` 里就是 `000`）✗，而页面表现是"界面能开、boot.js 像没装"——
+                 *   排查方向被彻底带偏（独立服务从源码跑时必现：`packages/host/src/boot.js` 并不存在）。
+                 *   现在只有**真的写成功**才 return true；否则交给下面那段 `options.bootScript` 兜底 ✓。
+                 */
+                let served = false;
                 try {
                     const bytes = readFileSync(new URL(`./${file}`, import.meta.url));
                     res.writeHead(200, {
@@ -2170,12 +2315,14 @@ export function createMobileHost(options) {
                         pragma: 'no-cache',
                     });
                     res.end(bytes);
+                    served = true;
                 }
                 catch (error) {
                     // 读不到就交给后面的静态管线（不要因为一个脚本把整页弄挂）
                     console.warn('[dsh-mobile] 无法读取 boot.js，交回静态管线：', error);
                 }
-                return true;
+                if (served)
+                    return true;
             }
             /**
              * Service Worker（用于**系统通知**）。
@@ -2489,6 +2636,200 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                 respondJson(res, 200, diagnosis);
                 return true;
             }
+            /**
+             * 会话页：我们自己的页面（承载 DSH 输出的那一层 ✓）。
+             * 与 Codex 页同样是"工具界面"⇒ 彻底不缓存 ✓；CSP 放开内联样式与同源脚本 ✓，
+             * 隧道是 wss: 同源升级，因此 connect-src 里显式带上 wss: ✓。
+             */
+            // 会话页（我们自己的页面 ✓）：HTML 与 css/js 都是 **assets/dsh-chat/ 下的真文件** ✓
+            //（HTML 也放文件里，是 codex 页那条教训的延伸：模板字符串转义会把脚本截断 ✗）
+            const chatAssets = {
+                'page.html': 'page.html',
+                'theme.css': 'theme.css',
+                'app.js': 'app.js',
+                'ui.js': 'ui.js',
+                'poller.js': 'poller.js',
+            };
+            /**
+             * ★★ 这里必须显式标类型 ✗ —— `npm test` 是**擦类型**跑的 ✓、从不做类型检查 ✓，
+             *   所以"单测全绿"**从来不等于**类型对 ✓（2026-10-04：第一次真正跑 `npm run build`，
+             *   它当场在本文件报出三处我写的错 ✓ —— 见下面 `ErrorCode.NotFound` 那处 ✓）。
+             */
+            const chatAsset = (name) => {
+                const relative = Object.prototype.hasOwnProperty.call(chatAssets, name)
+                    ? chatAssets[name]
+                    : undefined;
+                if (relative === undefined)
+                    return undefined;
+                const candidates = [
+                    join(dirname(fileURLToPath(import.meta.url)), 'assets', 'dsh-chat', relative),
+                    join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'dsh-chat', relative),
+                ];
+                const found = candidates.find((candidate) => existsSync(candidate));
+                return found === undefined ? undefined : readFileSync(found);
+            };
+            if (req.method === 'GET' && (url.pathname === '/mobile/chat' || url.pathname === '/mobile/chat/')) {
+                const page = chatAsset('page.html');
+                if (page === undefined) {
+                    respondJson(res, 404, wireError(ErrorCode.Internal, '会话页 HTML 未找到（assets/dsh-chat/page.html）'));
+                    return true;
+                }
+                const body = page;
+                res.writeHead(200, {
+                    'content-type': 'text/html; charset=utf-8',
+                    'content-length': String(body.length),
+                    'cache-control': 'no-store, must-revalidate',
+                    pragma: 'no-cache',
+                    'content-security-policy': "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
+                    'referrer-policy': 'no-referrer',
+                    'x-content-type-options': 'nosniff',
+                    'x-dsh-mobile': 'dsh-chat-page',
+                });
+                res.end(body);
+                return true;
+            }
+            /**
+             * ★★ 桌面缩略图：手机首页那张小图 ✓（用户 2026-10-03 选的是"真截图"✓）。
+             *
+             * ★ 这个处理函数**不是 async** ✗（同一个处理链里的路由都不是 ✓）——
+             *   而截屏是异步的 ✓ ⇒ 这里**不 await** ✗：**先认领请求**（`return true` ✓），
+             *   等 Promise 落地时**再写响应** ✓。认领后必须保证一定写回去 ✗，
+             *   否则手机会一直等到自己的超时 ✓（`ShotFetch` 那边 6 秒 ✓）。
+             *
+             * ★ 失败时回 502 + **人话** ✓（`explainCaptureFailure` ✓ 把
+             *   "could not create image from display" 翻成"去哪儿开权限"✓）——
+             *   手机上那张卡就会如实说"截不到图"✓，而不是白着 ✓。
+             */
+            /**
+             * ★★★ 第一阶段第 6 项（用户："首页那个缩略图，你要用桌面，而不是实际的截图"）：
+             *   返回这台电脑的**桌面壁纸** ✓ —— 不是截屏 ✓。
+             *   读不到就 502 + **人话** ✓（手机上那张卡会如实说为什么 ✓），
+             *   **绝不退回截屏** ✗（否则等于把用户否掉的东西又漏出去 ✓）。
+             * ★ 上限 8 MB：壁纸通常是几 MB 的图 ✓，超过就当读不出来 ✓（不把内存吃光 ✗）。
+             */
+            if (req.method === 'GET' && url.pathname === '/mobile/desktop/wallpaper') {
+                const found = resolveWallpaper(process.platform, (command, args, timeoutMs) => {
+                    try {
+                        const stdout = execFileSync(command, args, { timeout: timeoutMs, encoding: 'utf8' });
+                        return { ok: true, stdout: String(stdout) };
+                    }
+                    catch (error) {
+                        return { ok: false, stdout: '', reason: error instanceof Error ? error.message : String(error) };
+                    }
+                });
+                const mime = found.ok && found.path !== undefined ? imageMimeOf(found.path) : undefined;
+                const size = found.ok && found.path !== undefined ? wallpaperSize(found.path) : undefined;
+                if (!found.ok || found.path === undefined || mime === undefined
+                    || size === undefined || size > 8 * 1024 * 1024) {
+                    const why = !found.ok
+                        ? (found.reason ?? '读不到这台电脑的桌面壁纸')
+                        : (mime === undefined ? '这个壁纸的格式认不出来' : '这个壁纸太大或读不出来');
+                    console.warn('[dsh-mobile] 壁纸不可用：' + why);
+                    respondJson(res, 502, wireError(ErrorCode.Internal, why));
+                    return true;
+                }
+                res.writeHead(200, {
+                    'content-type': mime,
+                    'content-length': String(size),
+                    'cache-control': 'no-store, must-revalidate',
+                    pragma: 'no-cache',
+                    'x-dsh-mobile': 'desktop-wallpaper',
+                });
+                res.end(readFileSync(found.path));
+                return true;
+            }
+            if (req.method === 'GET' && url.pathname === '/mobile/desktop/shot') {
+                captureShot({ runner: shotRunner, now: () => Date.now() })
+                    .then((shot) => {
+                    res.writeHead(200, {
+                        'content-type': 'image/png',
+                        'content-length': String(shot.bytes.length),
+                        'cache-control': 'no-store, must-revalidate',
+                        pragma: 'no-cache',
+                        'x-dsh-mobile': 'desktop-shot',
+                    });
+                    res.end(shot.bytes);
+                })
+                    .catch((error) => {
+                    const message = error instanceof Error ? error.message : explainCaptureFailure(String(error), 1);
+                    // ★ 日志走 `console.warn` ✓（这个文件里没有 `Log` 这个符号 ✗ ——
+                    //   我第一版凭空写了 `Log.warn` ✓，而 TS 的类型擦除**不会**替我抓它 ✓，
+                    //   它会变成一个运行时 ReferenceError ✓：截图失败时反而把处理链炸掉 ✗）
+                    console.warn('[dsh-mobile] 截图失败：' + message);
+                    respondJson(res, 502, wireError(ErrorCode.Internal, message));
+                });
+                return true;
+            }
+            /**
+             * 会话页的样式与脚本：**从磁盘的真文件发出去** ✓
+             * （理由见 dsh-chat-page.ts：模板字符串转义把脚本截断过一次又一次 ✗）。
+             */
+            /**
+             * ★★★ **会话清单**（只读 JSON ✓）—— 给**原生「会话」标签**用 ✓（2026-10-04 用户选 (a) ✓）。
+             *
+             * ## 为什么需要它 ✗（原生侧说不了隧道 RPC ✓）
+             *
+             * 会话清单原本只有一条路：网页层 `rpc('mobile/dsh/sessions')` ✓ ——
+             * 那是**隧道 RPC** ✓（要做设备握手 + 加密帧 ✓），Java 侧说不了 ✗。
+             * ⇒ 在这边开一条**只读**的 HTTP 路由 ✓，内部调**同一个桥** ✓
+             *   （`dsh-chat-bridge.ts` ✓ —— "认 DSH 的形状"仍然只在那一个文件里 ✓）。
+             *
+             * ★ **只读** ✗：只列清单 ✓，不发消息、不建会话 ✓（写操作继续走网页层那条路 ✓）。
+             * ★ 必须放在下面 `/mobile/chat/` **之前** ✗ —— 否则会被那条静态路由先截走 ✓。
+             */
+            if (req.method === 'GET' && url.pathname === '/mobile/chat/sessions') {
+                /**
+                 * ★★ 这里**不能** `await` / 不能 `import(...)` 直接取 ✗ ——
+                 *   这个 HTTP handler **不是 async** ✓（2026-10-04 我又在这堵墙上撞了一次 ✓，
+                 *   上一次是截图路由 ✓，写法就照那次 ✓：**先领下请求、异步把响应写回去** ✓）。
+                 *   ★ 也**不写内联类型注解** ✗（`.then` 的参数由推断给出 ✓ ——
+                 *     strip-types 的加载器对内联注解挑得很 ✓）。
+                 */
+                void import("./dsh-chat-bridge.js")
+                    .then((bridge) => bridge.handleDshChatEndpoint({
+                    call: (target, payload) => 
+                    /**
+                     * ★ 这个 `call` 是**桥**要的形状 ✓（第三个参数是可选的中止信号 ✓）；
+                     *   而 `invokeGatewayEndpoint` 的第 4 个参数**不是可选**的 ✗
+                     *   ⇒ 给它一个**永不自作主张中止**的 controller.signal ✓
+                     *   （这条路由是一次性只读请求 ✓，本来就没人会中途取消它 ✓）。
+                     */
+                    invokeGatewayEndpoint(options.gateway, target, payload, new AbortController().signal),
+                }, 'mobile/dsh/sessions', {}, undefined))
+                    .then((body) => {
+                    respondJson(res, 200, body);
+                })
+                    .catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.warn('[dsh-mobile] 会话清单拿不到：' + message);
+                    respondJson(res, 502, wireError(ErrorCode.Internal, '拿不到会话清单：' + message));
+                });
+                return true;
+            }
+            if (req.method === 'GET' && url.pathname.startsWith('/mobile/chat/')) {
+                const name = url.pathname.slice('/mobile/chat/'.length);
+                const asset = name === 'page.html' ? undefined : chatAsset(name);
+                if (asset === undefined) {
+                    /**
+                     * ★★ `ErrorCode.NotFound` **不存在** ✗ —— 我凭想象写的 ✓（协议里只有下面这些 ✓）。
+                     *   它不只是类型错：运行时会拿到 `undefined` ✓ ⇒ `wireError(undefined, …)` ✓
+                     *   ⇒ 手机上收到的错误码是个空洞 ✓（**又一个"看不出来"的静默错** ✓）。
+                     *   ⇒ 用真实存在的 `Internal` ✓（HTTP 层已经用 404 表达了"没有这个资源"✓）。
+                     */
+                    respondJson(res, 404, wireError(ErrorCode.Internal, `会话页没有这个资源：${name}`));
+                    return true;
+                }
+                const body = asset;
+                const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
+                res.writeHead(200, {
+                    'content-type': type,
+                    'content-length': String(body.length),
+                    'cache-control': 'no-store, must-revalidate',
+                    pragma: 'no-cache',
+                });
+                res.end(body);
+                return true;
+            }
             if (req.method === 'GET' && url.pathname === '/mobile/manifest') {
                 respondJson(res, 200, service.manifest());
                 return true;
@@ -2496,7 +2837,15 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
             // 配对页：电脑打开是配对控制台，手机打开是配对入口。
             // 它自身通过 /mobile/pair/* 等端点工作，因此同样受上面的信任栅栏保护。
             if (req.method === 'GET' && (url.pathname === '/mobile' || url.pathname === '/mobile/')) {
-                const body = Buffer.from(PAIRING_PAGE_HTML, 'utf8');
+                /**
+                 * 入口路径可配置（默认 `/mobile/app`）：
+                 * 独立服务没有 DSH 外壳，配对完必须落到 `/mobile/codex` ✓。
+                 * 页面里那两处 `/mobile/app` 就是"配对完成后去哪"（自动跳转 + 手动链接），
+                 * 其余出现只是注释；因此做一次整体替换即可，且**只在非默认值时才做** ✓。
+                 */
+                const entryPath = options.entryPath !== undefined && options.entryPath.length > 0 ? options.entryPath : '/mobile/app';
+                const pairingHtml = entryPath === '/mobile/app' ? PAIRING_PAGE_HTML : PAIRING_PAGE_HTML.split('/mobile/app').join(entryPath);
+                const body = Buffer.from(pairingHtml, 'utf8');
                 res.writeHead(200, {
                     'content-type': 'text/html; charset=utf-8',
                     'content-length': String(body.length),
@@ -2509,6 +2858,55 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:",
                     'referrer-policy': 'no-referrer',
                     'x-content-type-options': 'nosniff',
+                });
+                res.end(body);
+                return true;
+            }
+            // Codex 独立页面：不经 DSH 前端，直接用同一条隧道（见 codex-page.ts 的模块说明）。
+            // 与配对页同样是"工具界面"⇒ 彻底不缓存；CSP 放开内联脚本与同源 boot.js，
+            // 隧道是 wss: 同源升级，因此 connect-src 里显式带上 wss:（'self' 在部分浏览器上
+            // 不覆盖 ws/wss 的 scheme 升级，宁可写全 ✓）。
+            const codexPagePaths = new Set([CODEX_PAGE_PATH, `${CODEX_PAGE_PATH}/`]);
+            if (options.appShellAlias === true) {
+                // 原版配对链路（APK 扫码 / 配对页跳转）都落在 /mobile/app 上 ⇒ 这里发同一份页面。
+                codexPagePaths.add('/mobile/app');
+                codexPagePaths.add('/mobile/app/');
+            }
+            if (req.method === 'GET' && codexPagePaths.has(url.pathname)) {
+                const body = Buffer.from(CODEX_PAGE_HTML, 'utf8');
+                res.writeHead(200, {
+                    'content-type': 'text/html; charset=utf-8',
+                    'content-length': String(body.length),
+                    'cache-control': 'no-store, must-revalidate',
+                    pragma: 'no-cache',
+                    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
+                    'referrer-policy': 'no-referrer',
+                    'x-content-type-options': 'nosniff',
+                    'x-dsh-mobile': 'codex-page',
+                });
+                res.end(body);
+                return true;
+            }
+            /**
+             * Codex 页面的客户端脚本：**从磁盘的真文件发出去**（assets/codex/ui.js）。
+             * 为什么是文件而不是内联字符串：模板字符串转义把脚本截断过一次又一次 ✗（见 codex-page.ts 的说明）。
+             */
+            if (req.method === 'GET' && url.pathname === CODEX_PAGE_SCRIPT_PATH) {
+                const candidates = [
+                    join(dirname(fileURLToPath(import.meta.url)), 'assets', 'codex', 'ui.js'),
+                    join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'codex', 'ui.js'),
+                ];
+                const found = candidates.find((candidate) => existsSync(candidate));
+                if (found === undefined) {
+                    respondJson(res, 404, wireError(ErrorCode.Internal, `codex ui.js 未找到（试过 ${candidates.join(' / ')}）`));
+                    return true;
+                }
+                const body = readFileSync(found);
+                res.writeHead(200, {
+                    'content-type': 'text/javascript; charset=utf-8',
+                    'content-length': String(body.length),
+                    'cache-control': 'no-store, must-revalidate',
+                    pragma: 'no-cache',
                 });
                 res.end(body);
                 return true;
@@ -2617,7 +3015,8 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                     return true;
                 }
                 notePairingGuessSuccess(req);
-                res.writeHead(302, { location: '/mobile/app?pair=' + encodeURIComponent(payload), 'cache-control': 'no-store' });
+                const entryPath = options.entryPath !== undefined && options.entryPath.length > 0 ? options.entryPath : '/mobile/app';
+                res.writeHead(302, { location: entryPath + '?pair=' + encodeURIComponent(payload), 'cache-control': 'no-store' });
                 res.end();
                 return true;
             }

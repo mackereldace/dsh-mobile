@@ -452,6 +452,116 @@
     return writeIdentityKey(HOSTS_KEY, JSON.stringify(records))
   }
 
+  /**
+   * ★★★ 2026-10-04 用户交办（"你把无论是证书啊，还是说配对记录啊，全都删掉"）：
+   *   **真的删掉**某一台宿主在本机与壳里的全部痕迹 —— 不是挡着不显示。
+   *
+   * 为什么要网页层也参与：宿主目录是**跨源**的 ——
+   *   · 壳那边有一份全局镜像（原生首页读的就是它，`dsh-mobile.hosts` ✓）；
+   *   · 每台电脑的页面各自还有一份"它那个源"的副本 ✓，
+   *     保存目录时会把两份合并后再写回壳 ✓。
+   * ⇒ 只删壳那一份，某台电脑的页面下次一合并就又带回来了 ✓。
+   *
+   * 删法（都用既有的唯一写入口 ✓，不另造通道）：
+   *   ① 目录里那条记录；
+   *   ② 本机存储里**所有**提到它的身份键（值里含它的指纹或其地址 ⇒ 删）；
+   *   ③ 当前宿主标记（正好是它才清）。
+   * 值传 `null` 就是"删除该键"（本仓既有的约定 ✓），本机与壳两边一起删 ✓。
+   *
+   * @param {string} fingerprint 要删掉的那台宿主的指纹
+   * @returns {boolean} 有没有删到东西
+   */
+  /**
+   * ★★★ 2026-10-04 用户交办："壳把清理过后的目录整个交给页面，让页面**以壳为准覆盖**
+   *   自己那份本地副本（而不是合并）。"
+   *
+   * 为什么需要 ✗：页面保存目录时写的是**整个数组**（本机与壳合并后的全量 ✓）——
+   *   所以每台电脑的页面本地都留着一份"当时所有电脑"的副本 ✓。
+   *   删掉某台之后，任意一台**现在连着**的电脑下次一保存，就把那份旧全量写回来 ✓
+   *   （用户："很久没碰过它的电脑，为什么现在的两台知道它存在"✓ —— 就是这么知道的 ✓）。
+   * ⇒ 删除之后由壳调用这里：**以壳那份为准**覆盖本机副本 ✓，合并语义在这里故意不用 ✗。
+   */
+  globalThis.__dshmSetHosts = function () {
+    try {
+      var fromVault = vaultValue(HOSTS_KEY)
+      var text = fromVault === null || fromVault === undefined ? '[]' : String(fromVault)
+      return writeIdentityKey(HOSTS_KEY, text) !== false
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
+  globalThis.__dshmForgetHost = function (fingerprint) {
+    try {
+      if (typeof fingerprint !== 'string' || fingerprint.length === 0) return false
+      var records = hostsRead()
+      var hosts = []
+      var kept = []
+      var hit = false
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i]
+        if (record !== null && typeof record === 'object' && record.fingerprint === fingerprint) {
+          hit = true
+          var slots = record.slots
+          if (Object.prototype.toString.call(slots) === '[object Array]') {
+            for (var j = 0; j < slots.length; j++) {
+              var slot = slots[j]
+              var url = slot !== null && typeof slot === 'object' ? String(slot.url || '') : String(slot || '')
+              if (url.length > 0) hosts.push(url)
+            }
+          }
+          continue
+        }
+        kept.push(record)
+      }
+      if (!hit) return false
+      // ① 目录里那条记录
+      hostsWrite(kept)
+      // ② 本机存储里所有提到它的身份键（键名不猜：看值里有没有它）
+      try {
+        var storage = globalThis.localStorage
+        if (storage !== undefined && storage !== null) {
+          var doomed = []
+          for (var k = 0; k < storage.length; k++) {
+            var key = storage.key(k)
+            if (typeof key !== 'string' || key.indexOf('dsh-mobile.') !== 0) continue
+            if (key === HOSTS_KEY) continue
+            /**
+             * ★ 只看"**这个键的值就是它**"，不做包含匹配 ✗ ——
+             *   包含匹配会把"值里顺带提到它"的键也删掉 ✓，而别的电脑的配置常常和它
+             *   写在同一个键里（例如端点列表 ✓）⇒ 那就会连带删掉别人 ✓（用户已经踩过 ✓）。
+             */
+            var value = String(storage.getItem(key) || '').trim()
+            if (value.length === 0) continue
+            if (value === fingerprint) { doomed.push(key); continue }
+            for (var h = 0; h < hosts.length; h++) {
+              if (value === hosts[h]) { doomed.push(key); break }
+            }
+          }
+          for (var d = 0; d < doomed.length; d++) {
+            try { writeIdentityKey(doomed[d], null) } catch (error) { void error }
+          }
+        }
+      } catch (error) {
+        void error
+      }
+      // ③ 当前宿主标记
+      try {
+        if (String(localValue(HOSTS_ACTIVE_KEY) || '') === fingerprint
+            || String(vaultValue(HOSTS_ACTIVE_KEY) || '') === fingerprint) {
+          writeIdentityKey(HOSTS_ACTIVE_KEY, null)
+        }
+      } catch (error) {
+        void error
+      }
+      return true
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
   /** 当前宿主的**标记** ✓（`dsh-mobile.hosts.active` ✓）。 */
   function setActiveHost(fingerprint) {
     if (!validHostFingerprint(fingerprint)) return false
@@ -2004,11 +2114,11 @@
    * @returns `ok` / `default` / `denied` / `untrusted` / `error`；**没有壳 → null** ✓
    *          （调用方据此决定要不要退回 Web Notification / 页面横幅 ✓）。
    */
-  function shellNotify(title, body) {
+  function shellNotify(title, body, link) {
     var bridge = shellBridge()
     if (bridge === undefined || typeof bridge.notify !== 'function') return null
     try {
-      return String(bridge.notify(String(title === undefined ? '' : title), String(body === undefined ? '' : body)))
+      return String(bridge.notify(String(title === undefined ? '' : title), String(body === undefined ? '' : body), String(link === undefined || link === null ? '' : link)))
     } catch (error) {
       return 'error'
     }
@@ -2368,6 +2478,196 @@
       void error
       return null
     }
+  }
+
+  /**
+   * ★★★ 第 54 轮（第三阶段第二条）：**长按探针** —— "谁盖了谁"当场量给你看。
+   *
+   * 起因：用户报"**文件交付栏被 DSH 控件覆盖**"。这种问题的判据只有一条、而且很硬 ✗：
+   *   在**那一点**做 `document.elementFromPoint(x, y)` ✓ ——
+   *   它返回**真正在最上面的那个节点** ✓。
+   * 为什么不能靠猜 ✗：本仓在"选择器写太宽 / 哈希改名"上栽过多次（注释里写着第四次）✓，
+   *   而"被我们藏了"与"我们没认出它"外部表现完全一样 ✗。
+   *
+   * 用法（**不用控制台** ✓，手机上就能做）：
+   *   **在会话页里对着看不清的地方长按 0.6 秒** ✓ ⇒
+   *   它会量出那一点最上面的节点是谁 ✓，把**稳定特征**（tag / role / aria-label /
+   *   data-* / 我们自己的 id ✓ —— **不打印哈希类名** ✗）与前几层祖先打进调试框 ✓。
+   *
+   * ★ 只读、不动 DOM ✗；拿不到坐标就静默跳过 ✓。
+   */
+    var stableFeatures = function (node) {
+    var parts = []
+    try {
+      var role = node.getAttribute ? node.getAttribute('role') : null
+      if (role) parts.push('role=' + role)
+      var label = node.getAttribute ? node.getAttribute('aria-label') : null
+      if (label) parts.push('aria-label=' + String(label).slice(0, 40))
+      var panel = node.getAttribute ? node.getAttribute('data-dshm-panel') : null
+      if (panel !== null && panel !== undefined) parts.push('data-dshm-panel=' + panel)
+    } catch (error) {
+      void error
+    }
+    return parts.join(' ')
+  }
+
+  var probeDescribe = function (node) {
+    var stable = stableFeatures(node)
+    return describeNode(node) + (stable.length > 0 ? ' ' + stable : '')
+  }
+
+  /**
+   * ★ 第 58 轮（第三阶段第一条："选择卡无法显示"）：**看不见的"要你注意"节点自动报一行**。
+   *
+   * 为什么这样定判据 ✗：本仓在选择器/哈希上栽过多次 ⇒ 这里**不猜类名**，
+   * 只认**稳定语义**：节点自称要被注意（有 `role` / `aria-label` / `aria-modal` ✓）
+   * **却看不见**（无尺寸 / `offsetParent === null` 且尺寸为 0 ✓）⇒ 报一行。
+   * 这条判据把两种可能**当场分开** ✗：
+   *   · 报了 ⇒ 节点**在**、只是不可见 ⇒ 是"**被藏了/被盖了**"（改我们这边 ✓）；
+   *   · 不报 ⇒ 节点**压根没来** ⇒ 是"**没认出 / 没渲染**"（改识别 ✓）。
+   * 两者的外部表现一模一样（都是"看不见那张卡"）✓，而改法相反 ✓。
+   *
+   * 纪律：只读、不动 DOM；同一签名只报一次（防刷屏 ✓）；每批最多扫 300 个节点 ✓；
+   * 250ms 去抖（DOM 抖动时不至于每帧都扫 ✓）。
+   */
+  function installInvisibleAskProbe() {
+    if (typeof MutationObserver !== 'function') return
+    var reported = {}
+    var pendingRoots = []
+    var scheduled = false
+
+    var looksVisible = function (node) {
+      try {
+        var rect = node.getBoundingClientRect()
+        return rect.width > 4 && rect.height > 4
+      } catch (error) {
+        return true
+      }
+    }
+
+    var claimsAttention = function (node) {
+      try {
+        if (!node.getAttribute) return false
+        return Boolean(node.getAttribute('role'))
+          || Boolean(node.getAttribute('aria-label'))
+          || Boolean(node.getAttribute('aria-modal'))
+      } catch (error) {
+        return false
+      }
+    }
+
+    var scan = function (root) {
+      try {
+        var walk = [root]
+        var budget = 300
+        while (walk.length > 0 && budget > 0) {
+          budget -= 1
+          var node = walk.pop()
+          if (node === null || node === undefined || node.nodeType !== 1) continue
+          if (claimsAttention(node) && !looksVisible(node)) {
+            var signature = probeDescribe(node)
+            if (reported[signature] === undefined) {
+              reported[signature] = 1
+              debugBoxLine('[hidden-ask] 刚出现但看不见：' + signature)
+            }
+          }
+          var children = node.children
+          if (children) {
+            for (var i = 0; i < children.length; i++) pushRoot(walk, children[i])
+          }
+        }
+      } catch (error) {
+        void error
+      }
+    }
+
+    var pushRoot = function (walk, node) {
+      walk.push(node)
+    }
+
+    try {
+      var observer = new MutationObserver(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var added = records[i].addedNodes
+          if (added === null || added === undefined) continue
+          for (var j = 0; j < added.length; j++) pendingRoots.push(added[j])
+        }
+        if (scheduled || pendingRoots.length === 0) return
+        scheduled = true
+        setTimeout(function () {
+          scheduled = false
+          var roots = pendingRoots
+          pendingRoots = []
+          for (var k = 0; k < roots.length; k++) scan(roots[k])
+        }, 250)
+      })
+      observer.observe(document.documentElement, { childList: true, subtree: true })
+    } catch (error) {
+      void error
+    }
+  }
+
+  function installCoverProbe() {
+    var timer = null
+    var startX = 0
+    var startY = 0
+    var moving = false
+
+    /**
+     * ★ 复用仓库里**现成**的 `describeNode`（模块级函数声明，同作用域会提升 ✓），
+     *   再补一句**稳定特征** —— 现成那个会打哈希类名（对判据没用 ✗），
+     *   而这里要的恰恰是 role / aria-label / data-* 这些**改名也不变**的东西 ✓。
+     * ★ 不重复实现：同一件事写两份，早晚只改一处 ✗（本仓老毛病）。
+     */
+    var measureAt = function (x, y) {
+      try {
+        var top = document.elementFromPoint(x, y)
+        if (top === null || top === undefined) {
+          debugBoxLine('[probe] 那一点量不到任何节点（坐标 ' + Math.round(x) + ',' + Math.round(y) + '）')
+          return
+        }
+        debugBoxLine('[probe] 最上面的是：' + probeDescribe(top))
+        var node = top
+        for (var up = 0; up < 4 && node !== null && node !== undefined; up++) {
+          node = node.parentElement
+          if (node === null || node === undefined) break
+          debugBoxLine('[probe]   上' + (up + 1) + '层：' + probeDescribe(node))
+        }
+      } catch (error) {
+        debugBoxLine('[probe] 量的时候出错了：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    document.addEventListener('pointerdown', function (event) {
+      startX = event.clientX
+      startY = event.clientY
+      moving = false
+      if (timer !== null) clearTimeout(timer)
+      timer = setTimeout(function () {
+        timer = null
+        if (moving) return
+        debugBoxLine('[probe] 长按定位 ' + Math.round(startX) + ',' + Math.round(startY))
+        measureAt(startX, startY)
+      }, 600)
+    }, true)
+
+    document.addEventListener('pointermove', function (event) {
+      if (timer === null) return
+      if (Math.abs(event.clientX - startX) > 8 || Math.abs(event.clientY - startY) > 8) {
+        moving = true
+        clearTimeout(timer)
+        timer = null
+      }
+    }, true)
+
+    var cancel = function () {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+    }
+    document.addEventListener('pointerup', cancel, true)
+    document.addEventListener('pointercancel', cancel, true)
   }
 
   function debugBoxLine(text) {
@@ -4937,6 +5237,46 @@
       replay: inboundReplay,
     })
 
+    /**
+     * ★★★ 第一阶段第 3 项：把宿主打标的二进制还原成字节数组。
+     *
+     * 宿主侧发送前会把 Uint8Array 编成 `{$dshmBytes: base64}`（见 protocol 的 binvalue），
+     * 这里还原。**boot.js 是独立产物、不能 import** ⇒ 规则只能内联一份 ✓
+     * （改 protocol 那套时，这里要一起改 —— 两处必须逐字一致）。
+     * ★ 解码**不猜**：只有"恰好一个键、键名就是这个、值是字符串"才算标记。
+     */
+    var BYTES_TAG = '$dshmBytes'
+    function decodeBinaryValue(value) {
+      if (Object.prototype.toString.call(value) === '[object Array]') {
+        var listChanged = false
+        var list = []
+        for (var i = 0; i < value.length; i++) {
+          var next = decodeBinaryValue(value[i])
+          if (next !== value[i]) listChanged = true
+          list.push(next)
+        }
+        return listChanged ? list : value
+      }
+      if (value !== null && typeof value === 'object') {
+        var keys = Object.keys(value)
+        if (keys.length === 1 && keys[0] === BYTES_TAG && typeof value[BYTES_TAG] === 'string') {
+          var raw = atob(value[BYTES_TAG])
+          var bytes = new Uint8Array(raw.length)
+          for (var j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j)
+          return bytes
+        }
+        var changed = false
+        var out = {}
+        for (var k = 0; k < keys.length; k++) {
+          var decoded = decodeBinaryValue(value[keys[k]])
+          if (decoded !== value[keys[k]]) changed = true
+          out[keys[k]] = decoded
+        }
+        return changed ? out : value
+      }
+      return value
+    }
+
     switch (header.type) {
       case FrameType.Ping:
         await this.sendFrame(FrameType.Pong, FrameFlags.None, new Uint8Array(0))
@@ -4948,7 +5288,7 @@
         // 成了排查连接问题时的红鲱鱼。
         return
       case FrameType.RpcResponse: {
-        var response = JSON.parse(fromUtf8(body))
+        var response = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
@@ -4957,7 +5297,7 @@
         return
       }
       case FrameType.StreamItem: {
-        var item = JSON.parse(fromUtf8(body))
+        var item = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         var stream = this.streams.get(item.streamId)
         if (stream !== undefined) stream.push(item.value)
         return
@@ -5661,11 +6001,28 @@
       var bucket = isTailscaleHost(parsedCandidate.hostname) ? tailscale : school
       if (bucket.indexOf(candidates[k]) < 0) bucket.push(candidates[k])
     }
+    /**
+     * ★★★ 2026-10-04（用户："它切到局域网的情况还是会发生"✗）：
+     *   **刚刚把这份页面加载出来的那条地址，必须排第一** ✗ ——
+     *   它是候选里**唯一"已经证明可达"**的那条 ✓（上面 ② 的注释自己都写着「必然可达」✓）。
+     *   ★ 而 "学校优先" 只是**另一条先验** ✓：当用户走的是 Tailscale 时，
+     *     学校桶（局域网 ✓）排第一 ⇒ 壳就会**从一条能用的地址切到一条不可达的地址** ✗✗
+     *     —— 他真机上正是如此（一切到局域网那条 ⇒ 那条没固定过证书 ⇒ 证书对不上 ⇒ 页面连不上 ✓）。
+     *   ★ 其余候选**保持学校优先** ✓（校园网里那条仍是快路径 ✓），
+     *     只是让**已证明可达**的排到最前 ✓（它排第一还省一次失败尝试 ✓）。
+     */
     var ordered = school.concat(tailscale).slice(0, 2)
+    var currentSlot = location.origin + location.pathname
+    var preferred = []
+    if (ordered.indexOf(currentSlot) >= 0) preferred.push(currentSlot)
+    for (var m = 0; m < ordered.length; m += 1) {
+      if (ordered[m] !== currentSlot) preferred.push(ordered[m])
+    }
+    var orderedFinal = preferred.slice(0, 2)
     var slots = []
-    for (var n = 0; n < ordered.length; n++) {
-      var parsedOrdered = new URL(ordered[n])
-      slots.push({ label: isTailscaleHost(parsedOrdered.hostname) ? 'Tailscale' : '学校', url: ordered[n] })
+    for (var n = 0; n < orderedFinal.length; n++) {
+      var parsedOrdered = new URL(orderedFinal[n])
+      slots.push({ label: isTailscaleHost(parsedOrdered.hostname) ? 'Tailscale' : '学校', url: orderedFinal[n] })
     }
     return slots
   }
@@ -14115,7 +14472,7 @@
     for (var i = 0; i < homeState.sessions.length; i++) {
       var item = homeState.sessions[i]
       if (item === null || typeof item !== 'object') continue
-      if (item.current === true || item.running === true) return String(item.id)
+      if (item.current === true || item.isCurrent === true || item.active === true || item.running === true) return String(item.id)
     }
     if (homeState.sessions.length > 0 && homeState.sessions[0] !== null && typeof homeState.sessions[0] === 'object') {
       var first = homeState.sessions[0]
@@ -14661,7 +15018,8 @@
        *   （不是 `request` ✗ —— 每个方法的参数名以它自己的 descriptor 为准 ✓，
        *   `session/selectModel` 才是 `request` ✓、`session/modelCatalog` 无参数 ✓）。
        */
-      var response = await link.rpc('session/list', { args: { _request: { limit: 30 } } }, undefined)
+      // ★ round 214b：**空请求** ✓ —— `limit` 未必是合法字段 ✗（描述符会整个拒 ⇒ 认不出当前会话 ✗）
+      var response = await link.rpc('session/list', { args: { _request: {} } }, undefined)
       var result = response === undefined || response === null ? undefined : response.result
       if (result === undefined || result === null || result.ok !== true) {
         var err = result === undefined || result === null ? {} : result.error || {}
@@ -15073,7 +15431,7 @@
       else lan.push(candidates[c])
     }
     var ordered = preference === 'tail' ? tails.concat(lan) : lan.concat(tails)
-    if (ordered.length === 0) {
+    if (orderedFinal.length === 0) {
       homeToast('这台智能体没有可用地址')
       return
     }
@@ -22050,7 +22408,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1002080945'
+    var BOOT_STAMP = 'BUILD-1003174122'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -22888,6 +23246,25 @@
           buzz()
           ok = true
           detail = 'displayed'
+        } else if (callInfo.capability === 'notify') {
+          /**
+           * ★★★ 第二阶段（第 45 轮）：宿主推的 `notify` 原先**没有任何分支** ✗ ——
+           *   于是 runCall 落到 unsupported ✓，而宿主那边看到 `deviceCall` 返回 ok ✓
+           *   就**不会**退成 `show` ✗ ⇒ 审批通知被**静默丢掉** ✓
+           *   （这就是"切到后台收不到通知"的直接原因 ✓，而且前台也一样收不到 ✓）。
+           * ⇒ 走壳的桥发**系统通知** ✓（`shellNotify` 早就有了 ✓，只是没人调它 ✗）；
+           *   桥不在（例如用手机浏览器打开，而不是 App）⇒ 退回**页面横幅** ✓，绝不静默 ✗。
+           */
+          // ★ 会话 id 一起透传（老页面/老壳都没有它 ⇒ 退回"只打开 App" ✓）
+          var posted = shellNotify('需要你确认', text, callInfo.sessionId)
+          if (posted === null) {
+            drawBar('info', text, [], false)
+            detail = 'banner-no-bridge'
+          } else {
+            detail = 'notified:' + posted
+          }
+          buzz()
+          ok = true
         } else if (callInfo.capability === 'clipboard') {
           // 三条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
           // 复制成功就完事；失败就把文本摆到横幅上让用户长按复制 —— **绝不静默失败**。
@@ -23513,6 +23890,15 @@
    */
   function isShellSurface() {
     try {
+      /**
+       * ★★★ 2026-10-04 用户报："我们自己的会话页上**顶栏意外存在**"✗ ——
+       *   我们那张页（`/mobile/chat` ✓）与 Codex 页**都明确声明了**
+       *   `globalThis.__DSH_MOBILE_NO_SHELL__ = true` ✓（注释写着"只装隧道、不装 DSH 的外壳 UI"✓），
+       *   而这里**从来没有认过这个标记** ✗ ⇒ 手机宽度 < 1024 时照样套上顶栏与抽屉 ✓（他截图为证 ✓）。
+       * ⇒ 把这条**显式退出**放在最前 ✗：页面说"不要外壳"，就**绝不装** ✓ ——
+       *   这比"按宽度猜"权威得多 ✓（那是**页面的明确意图** ✓）。
+       */
+      if (globalThis.__DSH_MOBILE_NO_SHELL__ === true) return false
       if (location.pathname === '/mobile/app' || location.pathname === '/mobile/app/') return true
       if (new URLSearchParams(location.search).get('mobile') === '1') return true
     } catch (error) {
@@ -23558,6 +23944,10 @@
     installForegroundSelfHeal()
     // 端侧通道（电脑 → 手机）：轮询式，晚一点启动没关系
     installDeviceChannel()
+    // 「谁盖了谁」的长按探针（第三阶段：文件交付栏被覆盖）—— 只读、不碰 DOM
+    installCoverProbe()
+    // 「刚出现却看不见」的自动探针（第三阶段：选择卡不显示）—— 只读、不碰 DOM
+    installInvisibleAskProbe()
   }
   } catch (error) {
     debugBoxLine('[boot] 启动期异常：' + String(error && error.stack ? error.stack : error).slice(0, 400))

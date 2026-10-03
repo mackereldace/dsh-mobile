@@ -26,9 +26,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateP256KeyPair } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
+import { notifyTextFor, shouldNotifyEvent } from "./notify-text.js";
 import { resolveDshRuntimeVersion } from "./dsh-version.js";
 import { detectLanIp, isAddressPresent, listLanCandidates } from "./lan.js";
-import { createLanListener } from "./lan-listener.js";
+import { createLanListener, DEFAULT_PLAIN_LISTEN, DEFAULT_TLS_LISTEN } from "./lan-listener.js";
+import { resolveMachineConfig } from "./machine-config.js";
 import { handleSetupRequest, readCurrentConfig, resolveProfilePatchPath, SETUP_PAGE_PATH, SETUP_PATH, } from "./setup-config.js";
 import { createTlsManager } from "./tls-cert.js";
 import { createMobileHost, DEFAULT_CONFIG, isLoopbackRequest, } from "./index.js";
@@ -448,6 +450,24 @@ export function apply(ctx, config = {}) {
     const dshHome = resolveDshHome(config.dshHome);
     const dataDirectory = join(dshHome, 'storages', 'dsh-mobile');
     /**
+     * ★★★ 2026-10-04：**机器专属配置的推导** ✓ —— 为的是让"从 GitHub 装完就能用"成立 ✓。
+     *
+     * 起因：我们的包是 bundle ✓ ⇒ 装完那一行会自动并进配置 ✓，但那一行**只有 id 与 name** ✗
+     * ⇒ `trustedHosts` / `publicBaseUrl` / `phoneBaseUrl` 得由部署方手填 ✓
+     * ⇒ 少填的现象是"**插件在跑、手机连不上**"✗（像插件坏了 ✓，很难猜到原因 ✓）。
+     * ⇒ 这里按**这台机器的实际地址**把缺的补上 ✓，并且**每一处补了什么都说出来** ✓
+     *   （出问题时用户能念出那一行 ✓）。
+     * ★ 三条纪律见 `machine-config.ts`：**只补缺** ✓ / **探测不到就不补、绝不编** ✗ / **说出来** ✓。
+     */
+    const machine = resolveMachineConfig(config, {
+        candidates: listLanCandidates(),
+        defaultPlain: DEFAULT_PLAIN_LISTEN,
+        defaultTls: DEFAULT_TLS_LISTEN,
+    });
+    for (const line of machine.derived) {
+        console.log(`[dsh-mobile] ${line}（如果这不是你要的，就在插件 config 里显式写好它）`);
+    }
+    /**
      * 局域网监听器（C1）：**默认关闭**，只有 `config.listener.enabled === true` 才起监听。
      *
      * 用 `let` 而不是 `const`：证书管理器的 `onResult` 回调需要引用它，而回调是在
@@ -509,7 +529,7 @@ export function apply(ctx, config = {}) {
     });
     // 端口来自 webServer 的实际监听值（支持 --port 0 由系统分配）
     const port = ctx.webServer.port ?? 3080;
-    const endpoints = createEndpointResolver(ctx.logger, port, config.publicBaseUrl !== undefined && config.publicBaseUrl.length > 0 ? config.publicBaseUrl : undefined, Array.isArray(config.extraEndpoints) ? config.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0) : []);
+    const endpoints = createEndpointResolver(ctx.logger, port, machine.publicBaseUrl, machine.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0));
     const gateway = ctx.typertGateway;
     /**
      * ── 局域网监听（C1）：按配置起明文 / TLS 监听 ──────────────────────────
@@ -520,9 +540,9 @@ export function apply(ctx, config = {}) {
      * ★ 监听失败只警告不抛错：手机入口不可用 ≠ DSH 挂掉。
      */
     listener = createLanListener({
-        enabled: config.listener?.enabled === true,
-        ...(config.listener?.plain === undefined ? {} : { plain: config.listener.plain }),
-        ...(config.listener?.tls === undefined ? {} : { tls: config.listener.tls }),
+        enabled: machine.listener.enabled,
+        plain: machine.listener.plain,
+        tls: machine.listener.tls,
         target: { host: '127.0.0.1', port },
         tlsPaths: tls.paths,
         logger: { info: (message) => console.log(message), warn: (message) => console.warn(message) },
@@ -530,7 +550,7 @@ export function apply(ctx, config = {}) {
     listener.start();
     // 复用 DSH 自己的 trustedHosts 配置：插件无法读取 Connection 的私有配置，
     // 因此让部署方在插件配置里显式声明（install 脚本会打印出该加什么）。
-    const trustedHosts = config.trustedHosts ?? [];
+    const trustedHosts = machine.trustedHosts;
     // 注入脚本：内容来自客户端插件包的构建产物；缺失时插件仍可用（只是手机浏览器页不会被注入）
     // 必须用 fileURLToPath：仓库/安装路径可能含非 ASCII 字符，URL.pathname 会返回
     // 百分号编码后的路径，existsSync 会失败——表现为 boot.js 静默消失、手机端无 shim。
@@ -592,9 +612,7 @@ export function apply(ctx, config = {}) {
         }),
         ...(bootScript === undefined ? {} : { bootScript }),
         trustedHosts,
-        ...(config.phoneBaseUrl === undefined || config.phoneBaseUrl.length === 0
-            ? {}
-            : { phoneBaseUrl: config.phoneBaseUrl }),
+        ...(machine.phoneBaseUrl === undefined ? {} : { phoneBaseUrl: machine.phoneBaseUrl }),
         // 传**函数**而不是路径：前端升级 / 安装位置变化不必重启插件（与原先一致 ✓）
         distIndex: () => distResolver.resolve(),
         renderIndex: (html) => ctx.webServer.renderIndex(html),
@@ -659,12 +677,15 @@ export function apply(ctx, config = {}) {
      *    用户没启用就退 `show`（页面可见时也能看到 ✓）；两个都没开就安静地不做 ✗。
      */
     function installApprovalPush() {
-        const notify = (payload) => {
+        /**
+         * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓ ——
+         *   选择卡的事件类型名还没取证到 ✓（取证办法见 40 号文档，诊断已经能在手机上读到 ✓），
+         *   拿到之后**只改那个清单一行** ✓，通道与"点击落到会话"都已共用 ✓。
+         */
+        const notify = (type, payload) => {
             try {
                 const record = (payload ?? {});
-                const tool = String(record.toolName ?? record.title ?? '').trim();
-                const reason = String(record.reason ?? record.summary ?? '').trim();
-                const text = '电脑上的 agent 需要你确认' + (tool.length > 0 ? '：' + tool : '') + (reason.length > 0 ? '（' + reason.slice(0, 120) + '）' : '');
+                const text = notifyTextFor(type, record).body;
                 // ★ 先**落审计**再推送：这样"钩子到底有没有被触发"有据可查 ✓
                 //   （原先只打 console —— 而 DSH 可能跑在后台终端里，用户看不到 ✗；
                 //    于是"审批没通知"到底是"钩子没响"还是"通知发不出"完全分不清 ✗）
@@ -675,9 +696,13 @@ export function apply(ctx, config = {}) {
                     void error;
                 }
                 // 先通知（后台也能提醒），没启用就退成页面横幅
-                const first = mobileHost.deviceCall('notify', text);
+                // ★ 会话 id 一起带上（取不到就是 undefined ⇒ 手机退回"只打开 App"✓）
+                const sessionId = typeof record.sessionId === 'string'
+                    ? String(record.sessionId)
+                    : undefined;
+                const first = mobileHost.deviceCall('notify', text, undefined, sessionId);
                 if (!first.ok)
-                    mobileHost.deviceCall('show', text);
+                    mobileHost.deviceCall('show', text, undefined, sessionId);
             }
             catch (error) {
                 console.warn('[dsh-mobile] 审批推送失败（不影响审批本身）：', error);
@@ -692,6 +717,26 @@ export function apply(ctx, config = {}) {
                 //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
                 //   所以"注册成功"却永不触发（真实现象：手机上永远收不到审批通知 ✗）。
                 //   审批在会话日志里是 `approval/asked` ✓，于是这里按事件类型过滤 ✓。
+                /**
+                 * ★ 第二阶段（缺口二）：从事件里取**会话 id** ✓，随 notify 一起下发，
+                 *   手机点通知时据此落到那个会话 ✓。
+                 * ★ 事件形状跨版本可能不同 ✗ ⇒ 按几处**可能的位置**取第一个非空字符串 ✓；
+                 *   都取不到就**不带**（行为退回"点通知只打开 App"✓）——**不猜语义** ✗。
+                 */
+                const sessionIdOf = (session, event) => {
+                    const candidates = [
+                        session?.id,
+                        session?.sessionId,
+                        event?.sessionId,
+                        event?.data?.sessionId,
+                        event?.session?.id,
+                    ];
+                    for (const candidate of candidates) {
+                        if (typeof candidate === 'string' && candidate.trim().length > 0)
+                            return candidate.trim();
+                    }
+                    return undefined;
+                };
                 const onSessionEvent = (_session, event) => {
                     const record = (event ?? {});
                     const kind = String(record.type ?? '');
@@ -704,9 +749,9 @@ export function apply(ctx, config = {}) {
                     catch (error) {
                         void error;
                     }
-                    if (kind !== 'approval/asked')
+                    if (!shouldNotifyEvent(kind))
                         return;
-                    notify(record.data ?? {});
+                    notify(kind, { ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) });
                 };
                 anyCtx.on('session/event', onSessionEvent);
                 channels.push(['ctx.on(session/event)', undefined]);
@@ -714,8 +759,8 @@ export function apply(ctx, config = {}) {
             // 兼容另外两个可能的事件名（不同 DSH 版本暴露的名字不一样；
             // 多订一个的代价只是"可能多推一条"，而漏订的代价是"功能完全不工作" ✗）
             if (typeof anyCtx.on === 'function') {
-                anyCtx.on('approval/asked', notify);
-                anyCtx.on('approval/request', notify);
+                anyCtx.on('approval/asked', (payload) => notify('approval/asked', payload));
+                anyCtx.on('approval/request', (payload) => notify('approval/asked', payload));
             }
         }
         catch (error) {
@@ -1021,6 +1066,9 @@ export function apply(ctx, config = {}) {
          * 挂进的是**现有那个** `ctx.effect`（不是新加一个）——多一个 effect 就多一处漏清理。
          */
         listener?.dispose();
+        // Codex 宿主桥：懒启动过才需要收；内部会先把待裁决的审批按"取消"应答掉，
+        // 不留一个悬着的 app-server 子进程，也不留一个永远等不到的审批 ✓。
+        mobileHost.stopCodexBridge();
     });
     ctx.logger?.info?.(`[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
         `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ` +

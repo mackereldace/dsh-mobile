@@ -125,7 +125,7 @@ export class DeviceCallQueue {
      * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，
      *         让它知道"请求没发出去"，而不是以为发出去在等手机。
      */
-    enqueue(deviceId, capability, text) {
+    enqueue(deviceId, capability, text, sessionId) {
         // ★ 先校验能力名本身。少这一步时，未知能力会走到下面的 `isEnabled` 分支，
         //   报出来的是"device capability not enabled: xxx（需要先在手机上允许）"——
         //   而真因是"根本没有这个能力"，用户会去手机上找一个不存在的开关（误导）。
@@ -137,7 +137,13 @@ export class DeviceCallQueue {
         }
         this.sweep();
         const id = `dc-${(this.counter += 1)}-${Date.now().toString(36)}`;
-        const call = { id, capability, text, createdAt: Date.now() };
+        const call = {
+            id,
+            capability,
+            text,
+            ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
+            createdAt: Date.now(),
+        };
         this.calls.set(id, call);
         return call;
     }
