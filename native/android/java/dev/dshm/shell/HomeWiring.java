@@ -149,7 +149,11 @@ final class HomeWiring implements HomeController.Loader {
                             boolean hit = false;
                             if (recordSlots != null) {
                                 for (int j = 0; j < recordSlots.length(); j += 1) {
-                                    if (pointsAt(recordSlots.optString(j, ""), fps, hosts)) hit = true;
+                                    // 两种形状都认：字符串地址，或 `{url:…}` 对象
+                                    Object raw = recordSlots.opt(j);
+                                    String candidate = raw instanceof org.json.JSONObject
+                                            ? ((org.json.JSONObject) raw).optString("url", "") : String.valueOf(raw);
+                                    if (pointsAt(candidate, fps, hosts)) hit = true;
                                 }
                             }
                             if (hit) continue;

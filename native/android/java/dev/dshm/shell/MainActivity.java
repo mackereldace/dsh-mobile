@@ -2538,6 +2538,16 @@ public class MainActivity extends android.app.Activity {
                             String host = hostOf(PinStore.authorityOf(url) == null ? url : PinStore.authorityOf(url));
                             if (host != null && hosts.contains(host)) { changed = true; continue; }
                         }
+                        // ★ 记录是靠 `slots` 记住自己有哪些地址的 ⇒ 那里也要看（两种形状都认）
+                        org.json.JSONArray recordSlots = object.optJSONArray("slots");
+                        boolean hitSlot = false;
+                        if (recordSlots != null) {
+                            for (int j = 0; j < recordSlots.length(); j += 1) {
+                                String candidate = slotUrl(recordSlots.opt(j));
+                                if (!candidate.isEmpty() && pointsAtHost(candidate, hosts)) hitSlot = true;
+                            }
+                        }
+                        if (hitSlot) { changed = true; continue; }
                         kept.put(object);
                         continue;
                     }
@@ -2556,12 +2566,43 @@ public class MainActivity extends android.app.Activity {
         return null;
     }
 
+    /** 机器键可能是 `fp:<指纹>` 这种形状 ⇒ 剥出裸指纹（剥不出返回 null，绝不猜）。 */
+    private static String bareFingerprint(String key) {
+        if (key == null) return null;
+        String value = key.trim();
+        int at = value.indexOf(':');
+        if (at >= 0) value = value.substring(at + 1).trim();
+        return HomeStore.validFingerprint(value) ? value : null;
+    }
+
+    /** 一个 slots 元素的地址（字符串就是它本身；对象取 `url`）。 */
+    private static String slotUrl(Object item) {
+        if (item == null) return "";
+        if (item instanceof org.json.JSONObject) return ((org.json.JSONObject) item).optString("url", "");
+        return String.valueOf(item);
+    }
+
+    /** 这个地址的主机是不是在墓碑里。 */
+    private static boolean pointsAtHost(String url, java.util.Set<String> hosts) {
+        String authority = PinStore.authorityOf(url);
+        String host = hostOf(authority == null ? url : authority);
+        return host != null && hosts.contains(host);
+    }
+
     private void forgetMachine(HomeModel.Machine machine) {
         if (machine == null) return;
         java.util.List<String> authorities = new java.util.ArrayList<String>();
         java.util.Set<String> hosts = new java.util.HashSet<String>();
         java.util.Set<String> fingerprints = new java.util.HashSet<String>();
-        if (machine.key != null && HomeStore.validFingerprint(machine.key)) fingerprints.add(machine.key);
+        /**
+         * ★★★ 判据里那句"分卡依据（键）：fp:139c3088…"是关键 ✗ —— 机器键**带 `fp:` 前缀**，
+         *   不是裸指纹 ✓。我原来那句 `validFingerprint(machine.key)` 因此不成立 ✓
+         *   ⇒ **指纹根本没进墓碑** ✗ ⇒ 记录只靠地址匹配，而地址槽若是对象形状又读不出主机名 ✗
+         *   ⇒ 记录留了下来 ✓（判据里"身份：已知（有指纹）"正说明记录还在 ✓）。
+         * ⇒ 这里把前缀剥掉再收 ✓。
+         */
+        String fromKey = bareFingerprint(machine.key);
+        if (fromKey != null) fingerprints.add(fromKey);
         for (int i = 0; i < machine.instances.size(); i += 1) {
             HomeModel.Instance instance = machine.instances.get(i);
             for (int j = 0; j < instance.addresses.size(); j += 1) {
@@ -2583,7 +2624,7 @@ public class MainActivity extends android.app.Activity {
                 for (int i = 0; i < records.length(); i += 1) {
                     JSONObject record = records.optJSONObject(i);
                     if (record == null) continue;
-                    if (recordMatchesMachine(record, authorities, fingerprints)) {
+                    if (recordMatchesMachine(record, authorities, fingerprints, hosts)) {
                         String fingerprint = record.optString("fingerprint", "");
                         if (HomeStore.validFingerprint(fingerprint)) fingerprints.add(fingerprint);
                         removedRecords += 1;
@@ -2722,14 +2763,17 @@ public class MainActivity extends android.app.Activity {
 
     /** 这条记录是不是属于那台机器：指纹命中，或它记的地址里有那台机器的地址。 */
     private static boolean recordMatchesMachine(JSONObject record, java.util.List<String> authorities,
-                                                java.util.Set<String> fingerprints) {
+                                                java.util.Set<String> fingerprints,
+                                                java.util.Set<String> hosts) {
         String fingerprint = record.optString("fingerprint", "");
         if (!fingerprint.isEmpty() && fingerprints.contains(fingerprint)) return true;
         JSONArray slots = record.optJSONArray("slots");
         if (slots == null) return false;
         for (int i = 0; i < slots.length(); i += 1) {
-            String url = slots.optString(i, "");
+            String url = slotUrl(slots.opt(i));
+            if (url.isEmpty()) continue;
             if (authorities.contains(PinStore.authorityOf(url))) return true;
+            if (pointsAtHost(url, hosts)) return true;
         }
         return false;
     }
