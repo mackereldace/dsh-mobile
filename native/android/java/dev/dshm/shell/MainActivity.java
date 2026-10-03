@@ -3675,10 +3675,32 @@ public class MainActivity extends android.app.Activity {
          * ★ 用户重新扫码配对 ⇒ **清空删除墓碑** ✓ —— 他可能正是在把删掉的那台配回来 ✓，
          *   不清的话同一个指纹会被永远滤掉 ✗（见 vaultSet 里那段 ✓）。
          */
+        /**
+         * ★★★ 2026-10-04 用户："删除电脑确实消失了 ✓，但我在 Windows 上配对新电脑时，
+         *   **原来删掉的那两台都冒出来了**"✗。
+         *
+         * 根因就是我这里：原先一扫码就把**整个墓碑清空** ✓（当时的想法是"你重新配对，
+         * 可能是想把删掉的那台配回来"✗）—— 可你这次配的是**新电脑** ✓，
+         * 于是别的已删除电脑（页面那份记录还在 ✓）一起被放了出来 ✓。
+         *
+         * ⇒ 改成**只清这次票据里那一台**的墓碑：票据里带着 `hostFingerprint` ✓，
+         *   只能放行它自己 ✓；其它已删除的电脑继续挡着 ✓。
+         *   ★ 认不出指纹时**什么都不清** ✗（宁可这次配对要你重试一次 ✓，
+         *     也不能把别的已删除电脑放回来 ✗ —— 后者才是用户看到的那一幕 ✓）。
+         */
         try {
-            prefs.edit().remove(KEY_FORGOTTEN_HOSTS).commit();
+            java.util.Set<String> tombFp = new java.util.HashSet<String>();
+            java.util.Set<String> tombHosts = new java.util.HashSet<String>();
+            readTombstone(tombFp, tombHosts);
+            String ticketJson = PairLink.ticketJsonOf(token);
+            String fingerprint = ticketJson == null ? ""
+                    : new JSONObject(ticketJson).optString("hostFingerprint", "");
+            if (!fingerprint.isEmpty() && tombFp.remove(fingerprint)) {
+                writeTombstone(tombFp, tombHosts);
+                Log.i(TAG, "这次配对的电脑在删除墓碑里 ⇒ 只放行它自己");
+            }
         } catch (Throwable ignored) {
-            // 清不掉也不挡这次配对
+            // 认不出就不清（见上面那段说明）
         }
         homeStepsAsideForPairing = true;
         showWebView();
