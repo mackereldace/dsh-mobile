@@ -1,34 +1,52 @@
 /**
- * 端侧通知的**文案与触发类型**（第二阶段）—— 抽出来是为了两件事：
+ * 端侧通知的**触发规则与文案**（第二阶段）。
  *
- * 1. **一处可配置** ✗：选择卡（0.20）的事件类型名还没取证到 ✓
- *    （取证办法见 `40-通知推送现状与缺口-20261004.md`：宿主已把每个 `session/event`
- *    的类型记进诊断 ✓，而诊断现在已经能在手机上的自检页读到 ✓）。
- *    拿到名字之后**只改这里一行** ✓ —— 通道（`deviceCall('notify', …)` ✓）
- *    与"点击落到会话"（`sessionId` ✓）都已共用 ✓，不需要再动别处 ✓。
- * 2. **可以被断言** ✓：文案是纯函数 ⇒ 电脑上就能钉住 ✓，
- *    不必等到真机上"看起来不对"才发现 ✓（本仓在选择器/类型名上栽过多次 ✗）。
+ * ## 为什么要抽出来
  *
- * ★ 纪律：**不猜** ✗ —— 没在清单里的类型**不通知** ✓（宁可少推一条 ✓，
- *   也不要凭"看起来像"就推 ✓，那会让用户收到莫名其妙的通知 ✗）。
+ * 1. **一处可配置**：选择卡（0.20）的事件类型名一直没取证到。
+ *    规则收在这里之后，将来要收紧或放宽**只改这一个文件**——
+ *    通道（deviceCall('notify', …)）与"点击落到会话"（sessionId）都已共用。
+ * 2. **可以被断言**：文案是纯函数，电脑上就能钉住，
+ *    不必等真机上"看起来不对"才发现（本仓在选择器/类型名上栽过多次）。
+ *
+ * ## 触发规则：明写清单 + 一条结构规律
+ *
+ * 唯一已知的类型是 `approval/asked`——"agent 在问你"这类事件的形状就是
+ * "某动作 + 斜杠 + asked"（选择卡也属于"在问你"）。
+ * 所以除了明写清单，还按这条**结构规律**认一类。
+ *
+ * ★ 为什么敢这么放宽：宿主**把每一个** session/event 的类型都记进了诊断，
+ *   而诊断现在能在手机的自检页读到 ⇒ 万一多推了一条，
+ *   回头**看得到是哪个类型**，再把清单收紧即可——不是"猜了就完事"。
+ * ★ 反之不做的代价：选择卡一直收不到通知（用户报的就是它）。
+ *
+ * ★ 纪律：不合规律的类型**不通知**（宁可少推一条，也不要凭"看起来像"就推）。
  */
 
-/** 会触发端侧通知的会话事件类型（拿到新类型名 ⇒ 往这里加一项即可）。 */
-export const NOTIFY_EVENT_TYPES: readonly string[] = [
-  'approval/asked',
-]
+/** 明写会通知的会话事件类型。 */
+export const NOTIFY_EVENT_TYPES: readonly string[] = ['approval/asked']
+
+/**
+ * 结构规律：以它结尾的类型都算"agent 在问你"。
+ * （写成变量而不是把斜杠和星号连排，免得注释提前闭合——这个坑我踩过一次。）
+ */
+export const NOTIFY_EVENT_SUFFIXES: readonly string[] = ['/asked']
 
 /** 这条事件类型要不要通知。 */
 export function shouldNotifyEvent(type: string | undefined | null): boolean {
-  if (typeof type !== 'string') return false
-  return NOTIFY_EVENT_TYPES.includes(type)
+  if (typeof type !== 'string' || type.length === 0) return false
+  if (NOTIFY_EVENT_TYPES.includes(type)) return true
+  for (const suffix of NOTIFY_EVENT_SUFFIXES) {
+    if (type.endsWith(suffix)) return true
+  }
+  return false
 }
 
 /**
- * 通知文案（标题 + 正文）✓ —— 纯函数，给断言用 ✓。
+ * 通知文案（标题 + 正文）。纯函数，给断言用。
  *
- * @param type 事件类型（清单内的 ✓）
- * @param data 事件负载里能拿到的几个字段（都可能是 undefined ✓）
+ * @param type 事件类型
+ * @param data 事件负载里能拿到的几个字段（都可能是 undefined）
  */
 export function notifyTextFor(
   type: string,
@@ -43,7 +61,11 @@ export function notifyTextFor(
       + (reason.length > 0 ? '（' + reason.slice(0, 120) + '）' : '')
     return { title: '需要你确认', body }
   }
-  // ★ 清单外的类型不该走到这里（调用方先问 shouldNotifyEvent ✓）⇒ 兜一句中性的 ✓，
-  //   绝不编造"需要确认"这种会让人误判的话 ✗。
-  return { title: '电脑上的消息', body: (tool.length > 0 ? tool : reason).slice(0, 160) || '电脑上有一条消息' }
+  /**
+   * 走到这里的是"按结构规律认出来、清单里没明写"的类型（例如选择卡）⇒
+   * 文案**中性但明确**：说"在等你回应"，绝不编造"需要你确认"这种会让人
+   * 误判成审批的话（用户看到"确认"却找不到审批，会更慌）。
+   */
+  const body = (tool.length > 0 ? tool : reason).slice(0, 160) || '电脑上的 agent 在等你回应'
+  return { title: '电脑上的 agent 在等你回应', body }
 }
