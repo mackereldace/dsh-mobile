@@ -1931,6 +1931,36 @@ public class MainActivity extends android.app.Activity {
                  * 方向永远是**收紧** ✓，而不是"认不出就随便找一份 pin 来用"✗。
                  */
                 String authority = authorityOfRequest(error == null ? null : error.getUrl());
+                /**
+                 * ★★★ 2026-10-04 用户："它一直在拉起那些我删掉的电脑"（每次拉起、没 pin ⇒ 弹信任框）。
+                 *
+                 * 上面那几处清理（候选地址 / 偏好 / 页面覆写）都做了，但仍然有**别的路**把它拉起来
+                 * —— 我不再去逐个找那条路 ✗，改在这里**兜底**：
+                 *   只要这次要连的地址属于"被删掉过的那台电脑" ⇒ **直接放弃这次连接、不弹框** ✓，
+                 *   并留一行日志 ✓（调试模式的判据页也能看到"挡下 … 已删除电脑的引用"）。
+                 * ★ 判据是**主机名**在删除标记里 ✓（同一台机器的多个端口/写法都能覆盖 ✓）。
+                 * ★ 用户重新扫码配那台时，标记里对应指纹会被解除 ✓（见 handlePairText ✓）——
+                 *   但主机名仍在 ⇒ 这里要放行它，见下面那句"配对中被放行"的判断 ✓。
+                 */
+                try {
+                    java.util.Set<String> deadFp = new java.util.HashSet<String>();
+                    java.util.Set<String> deadHosts = new java.util.HashSet<String>();
+                    readTombstone(deadFp, deadHosts);
+                    String deadHost = hostOf(authority);
+                    if (deadHost != null && deadHosts.contains(deadHost)) {
+                        Log.i(TAG, "这次连接指向已删除的电脑（" + deadHost + "）⇒ 放弃，不弹信任框");
+                        try {
+                            prefs.edit().putString(KEY_BLOCKED_PUSH,
+                                    "放弃连接已删除的电脑 " + deadHost + " @ " + System.currentTimeMillis()).commit();
+                        } catch (Throwable ignored) {
+                            // 标注写不进不挡路
+                        }
+                        handler.cancel();
+                        return;
+                    }
+                } catch (Throwable ignored) {
+                    // 标记读不出来就照常走（宁可多问一次，也不能把正常连接挡掉）
+                }
                 if (served != null && pinCaForAuthority(served, authority)) {
                     /**
                      * ★ C3：日志里**带上 authority** ✓ —— 多宿主之后"验证通过"这句话必须能回答
@@ -2715,6 +2745,7 @@ public class MainActivity extends android.app.Activity {
         java.util.Set<String> tombHosts = new java.util.HashSet<String>();
         readTombstone(tombFp, tombHosts);
         tombFp.addAll(fingerprints);
+        tombHosts.addAll(hosts);
         writeTombstone(tombFp, tombHosts);
         /**
          * ★★★ 2026-10-04 **撤掉"按内容连带删键"** ✗ —— 用户报"我本来不想删的东西被删掉了，
@@ -3744,9 +3775,26 @@ public class MainActivity extends android.app.Activity {
             String ticketJson = PairLink.ticketJsonOf(token);
             String fingerprint = ticketJson == null ? ""
                     : new JSONObject(ticketJson).optString("hostFingerprint", "");
-            if (!fingerprint.isEmpty() && tombFp.remove(fingerprint)) {
+            boolean released = !fingerprint.isEmpty() && tombFp.remove(fingerprint);
+            /**
+             * ★★★ 必须连**主机名**一起解除 ✗ —— 上面 `onReceivedSslError` 那道兜底是按主机名挡的 ✓，
+             *   只解指纹的话，这台电脑**重新配对之后也永远连不上**✗（连一次被放弃一次 ✓，
+             *   而且看起来像"配对成功但用不了"✓ —— 那种症状最难查 ✓）。
+             *   票据里带着它的 endpoints ✓ ⇒ 从那里取主机名一起放行 ✓。
+             */
+            try {
+                java.util.List<String> endpoints = PairLink.endpointsOf(token);
+                for (int i = 0; i < endpoints.size(); i += 1) {
+                    String authority = PinStore.authorityOf(endpoints.get(i));
+                    String host = hostOf(authority == null ? endpoints.get(i) : authority);
+                    if (host != null && tombHosts.remove(host)) released = true;
+                }
+            } catch (Throwable ignored) {
+                // 取不到就只解指纹（下次连它会被放弃一次，但不会永久挡）
+            }
+            if (released) {
                 writeTombstone(tombFp, tombHosts);
-                Log.i(TAG, "这次配对的电脑在删除墓碑里 ⇒ 只放行它自己");
+                Log.i(TAG, "这次配对的电脑在删除标记里 ⇒ 放行它自己（指纹与主机名都放）");
             }
         } catch (Throwable ignored) {
             // 认不出就不清（见上面那段说明）
