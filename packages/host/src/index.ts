@@ -400,6 +400,8 @@ export interface MobileHostService {
     capability: string,
     text: string,
     deviceId?: string,
+    /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
+    sessionId?: string,
   ): { ok: true; id: string } | { ok: false; reason: string }
 
   readonly store: DeviceStore
