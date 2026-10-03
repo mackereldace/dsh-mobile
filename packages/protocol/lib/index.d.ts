@@ -8,4 +8,5 @@ export * from './wire.ts';
 export * from './crypto.ts';
 export * from './handshake.ts';
 export * from './mux.ts';
+export * from './binvalue.ts';
 //# sourceMappingURL=index.d.ts.map
