@@ -634,6 +634,20 @@ final class HomeView extends FrameLayout {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(13), dp(12), dp(12), dp(12));
+        /**
+         * ★★★ 2026-10-04 用户拍板："**白条可以留下** ✓，底色确实要改一致 ✓" ——
+         *   于是这条**左侧强调条**恢复 ✓（它只标记"当前"这一台 ✓，不改变任何底色 ✓）。
+         * ★ 而我上一轮同时拿掉的另一样**不恢复** ✗：给"当前"整块换底色 ✓ ——
+         *   那才是让"同一张卡里几行颜色不一致"的原因 ✓（用户要的是"底色一致" ✓）。
+         *   ⇒ 状态：**留条 ✓，不留底色 ✓**。
+         */
+        if (machine.current) {
+            View rail = new View(getContext());
+            rail.setBackgroundColor(theme.rail);
+            LinearLayout.LayoutParams railParams = new LinearLayout.LayoutParams(dp(3), LayoutParams.MATCH_PARENT);
+            railParams.rightMargin = dp(10);
+            row.addView(rail, railParams);
+        }
 
         ThumbView thumb = new ThumbView(getContext(), theme, machine.online);
         /**
