@@ -1144,12 +1144,22 @@ final class HomeView extends FrameLayout {
             canvas.drawRoundRect(box, radius, radius, paint);
 
             if (shot != null) {
-                canvas.save();
-                android.graphics.Path clip = new android.graphics.Path();
-                clip.addRoundRect(box, radius, radius, android.graphics.Path.Direction.CW);
-                canvas.clipPath(clip);
-                canvas.drawBitmap(shot, null, box, paint);
-                canvas.restore();
+                /**
+                 * ★★★ 2026-10-04 用户："打开 UI 是正常的圆角矩形，过一会加载出一个**方形**的矩形"✗。
+                 *
+                 * ★ 病根：这里原来用 `canvas.clipPath(圆角路径)` ✓ —— 而 **`clipPath` 在硬件加速
+                 *   画布上并不可靠** ✗（历史上对非矩形路径会被忽略 ✓）⇒ 于是真截图是**方角**的 ✓，
+                 *   而占位图（直接 `drawRoundRect` ✓）是圆角 ✓ —— 正好对上他看到的先后顺序 ✓。
+                 * ⇒ 换成**位图着色器 + `drawRoundRect`** ✓：圆角由绘制本身保证 ✗，
+                 *   **不依赖裁剪** ✓（这是画圆角图片的标准做法 ✓）。
+                 */
+                paint.setShader(new android.graphics.BitmapShader(shot,
+                        android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP));
+                android.graphics.Matrix matrix = new android.graphics.Matrix();
+                matrix.setScale(width / Math.max(1f, shot.getWidth()), height / Math.max(1f, shot.getHeight()));
+                ((android.graphics.BitmapShader) paint.getShader()).setLocalMatrix(matrix);
+                canvas.drawRoundRect(box, radius, radius, paint);
+                paint.setShader(null);
                 if (!online) {
                     paint.setColor(theme.bg);
                     paint.setAlpha(140);
