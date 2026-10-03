@@ -26,7 +26,7 @@
  *   node scripts/sync-plugin-repo.mjs --check    # 只看有没有差异，不推送
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, cpSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -125,6 +125,30 @@ if (!index.includes('/mobile/desktop/wallpaper')) problems.push('lib/index.js �
 if (!index.includes('desktop-wallpaper')) problems.push('lib/index.js 里没有壁纸标记（desktop-wallpaper）')
 if (!boot.includes("callInfo.capability === 'notify'")) problems.push('lib/boot.js 里没有 notify 分支')
 if (!boot.includes('shellNotify(')) problems.push('lib/boot.js 里没有 shellNotify（桥调用）')
+
+/**
+ * ★★★ 第 73 轮：**插件仓里的 APK 必须与本地最新构建一致** ✗。
+ *
+ * 为什么必须单独验 ✗：这份 APK 在**主仓被 gitignore** ✓，只活在插件仓里 ✓
+ * ⇒ 它完全可以在没人注意的情况下**一直是旧的** ✗，而用户从 GitHub 装完插件、
+ * 点一下下载拿到的就是旧包 ✓（"我明明改了，怎么还是老样子"——最难查的一种 ✗）。
+ * 这条核对把它钉死在发布环节 ✓。
+ */
+try {
+  const apkBlob = git(['rev-parse', 'FETCH_HEAD:lib/dsh-mobile.apk']).trim()
+  const remoteApkSize = Number(git(['cat-file', '-s', apkBlob]).trim())
+  const localApk = join(hostLib, 'dsh-mobile.apk')
+  if (!existsSync(localApk)) {
+    problems.push('本地没有 packages/host/lib/dsh-mobile.apk（先跑 node scripts/build-apk.mjs）')
+  } else {
+    const localApkSize = statSync(localApk).size
+    if (remoteApkSize !== localApkSize) {
+      problems.push(`插件仓里的 APK（${remoteApkSize} 字节）与本地最新构建（${localApkSize} 字节）不一致 ⇒ 用户会下到旧包`)
+    }
+  }
+} catch (error) {
+  problems.push('读不到插件仓里的 APK（它应该在 lib/dsh-mobile.apk）')
+}
 
 const bootTag = boot.match(/var BYTES_TAG = '([^']+)'/)
 const hostTag = tunnel.match(/\$dshmBytes/)
