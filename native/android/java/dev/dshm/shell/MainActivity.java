@@ -3464,6 +3464,20 @@ public class MainActivity extends android.app.Activity {
      *  **都不读 `KEY_URL`** ✓ ⇒ 存的形状变了也不会让显示变形 ✓，见交单报告 ✓）。
      */
     private void applyHostUrl(String url, String why) {
+        /**
+         * ★★★ 2026-10-04（用户原话："比如我刚点进去，你后台直接判它为当前 ✓，
+         *   这样退出来的时候就不需要再手动判断刚才进的是哪一个 ✓"）：
+         *   **点进去的这一刻就把它记成当前** ✓ —— 不等退出来再联网判一次 ✓。
+         *   ★ 只动"当前是谁"这一笔 ✓（不联网、不清状态、不抢用户正在做的事 ✓）。
+         */
+        if (url != null && url.length() > 0) {
+            currentUrl = url;
+            try {
+                if (homeWiring != null) homeWiring.setCurrentUrl(url);
+            } catch (Throwable ignored) {
+                // 首页还没建好也无所谓 ✓ —— 它建好时会自己读 currentUrl ✓
+            }
+        }
         // 用户**明确指定**了地址 ⇒ 自动换槽到此为止 ✓（否则计时器还会再切走 ✗）
         stopAutoConnect(why);
         hostSwitchPending = true;
@@ -3977,7 +3991,20 @@ public class MainActivity extends android.app.Activity {
         } catch (Throwable ignored) {
             homeWiring.setCurrentUrl(currentUrl);
         }
-        nativeHome.setBusy(true);
+        /**
+         * ★★★ 2026-10-04 用户："我点进一个智能体的会话、再退出来，它把刚才用的电脑切成当前，
+         *   **至少 3 秒**，非常突兀 ✗ …… 我希望的是：刚点进去你后台直接判它为当前 ✓，
+         *   这样退出来的时候就不需要再手动判断刚才进的是哪一个 ✓。"
+         *
+         * 两处一起改（都照用户这句话 ✓）：
+         *  ① {@link #applyHostUrl} 里**点进去那一刻就把它记成当前** ✓
+         *     ⇒ 退出来时**不用再判**✓（判据早就在手上了 ✓）；
+         *  ② 这里：**已经有数据可画就别转圈** ✗ —— 那 3 秒是**联网探测**
+         *     （去连那台机器取清单 ✓），转圈会先把屏幕清空 3 秒 ✓ ⇒ 突兀 ✓。
+         *     现在改成"**先画旧数据（含新的当前 ✓），探测结果回来再悄悄换上**"✓。
+         *  ★ 只在**真的没有数据**（首次进来 ✓）时才转圈 ✓ —— 那时用户本来也没东西可看 ✓。
+         */
+        nativeHome.setBusy(!nativeHome.hasSnapshot());
         homeController.refresh();
     }
 

@@ -213,7 +213,20 @@ final class HomeView extends FrameLayout {
         }
     }
 
+    /**
+     * ★★★ 2026-10-04 用户报"从会话退出来，切当前要 3 秒、很突兀"✗ ——
+     *   那 3 秒是**联网探测**（去连那台机器取清单 ✓），而返回首页时我们**先转圈**✗
+     *   ⇒ 屏幕先空掉 3 秒 ✓。有了这一位，就能判"**已经有东西可画**"✓ ⇒ 先画再说 ✓。
+     */
+    private boolean everHadSnapshot = false;
+
+    /** 已经有数据可画了吗 ✓（调用方据此决定"要不要转圈"✓）。 */
+    boolean hasSnapshot() {
+        return everHadSnapshot;
+    }
+
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {
+        everHadSnapshot = true;
         snapshot = next;
         report = nextReport;
         error = "";
