@@ -3262,8 +3262,14 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           .then((bridge) =>
             bridge.handleDshChatEndpoint(
               {
-                call: (target, payload, bridgeSignal) =>
-                  invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal),
+                call: (target, payload) =>
+                  /**
+                   * ★ 这个 `call` 是**桥**要的形状 ✓（第三个参数是可选的中止信号 ✓）；
+                   *   而 `invokeGatewayEndpoint` 的第 4 个参数**不是可选**的 ✗
+                   *   ⇒ 给它一个**永不自作主张中止**的 controller.signal ✓
+                   *   （这条路由是一次性只读请求 ✓，本来就没人会中途取消它 ✓）。
+                   */
+                  invokeGatewayEndpoint(options.gateway, target, payload, new AbortController().signal),
               },
               'mobile/dsh/sessions',
               {},
