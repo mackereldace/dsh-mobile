@@ -44,6 +44,16 @@ const freePort = () =>
 
 let checks = 0
 let failed = 0
+/**
+ * ★ 按**字节**读一个响应 ✓ —— 图片这类二进制不能用 `text()` 读 ✗
+ *   （我第一版就是拿 UTF-8 文本判 PNG 魔数 ✓ ⇒ 恒假 ✓，白红一次 ✓）。
+ */
+const getBytes = async (path) => {
+  const response = await fetch(base + path)
+  const buffer = Buffer.from(await response.arrayBuffer())
+  return { status: response.status, headers: response.headers, bytes: buffer }
+}
+
 const post = async (path) => {
   const response = await fetch(base + path, { method: 'POST', body: '{}' })
   return { status: response.status, headers: response.headers, body: await response.text() }
@@ -122,9 +132,25 @@ try {
    * ★★ 这一条**本机必然是失败**（没给屏幕录制权限 ✓）——而这正是要验的 ✓：
    *   失败要回 502 + **人话** ✓，而不是 200 加一张空图 ✓，也不是把系统原文扔出来 ✓。
    */
-  check('没权限时回 502（不是 200 加一张空图 ✗）', shot.status === 502, String(shot.status))
-  check('★★ 失败说明是**人话**（提到去哪儿开权限 ✓）', shot.body.includes('屏幕录制') && shot.body.includes('隐私与安全性'), shot.body.slice(0, 120))
-  check('★ 不是把系统原文直接扔出来', !shot.body.includes('could not create image'))
+  /**
+   * ★★★ 2026-10-04：这条检查**有两态** ✗ —— 我原先只写了「没权限」那一态 ✓，
+   *   而用户**把屏幕录制权限给了** ✓ ⇒ 同一条检查立刻红 ✗（它红得对 ✓：环境变了 ✓）。
+   *   ⇒ 两态**都要认**，而且两态都要**硬** ✓（这是写检查时最容易漏的一条 ✗）。
+   */
+  const shotBytes = await getBytes('/mobile/desktop/shot')
+  if (shot.status === 200) {
+    check('★ 有权限时：真是一张 PNG（按**魔数**判 ✓，不是看后缀 ✗）',
+          shotBytes.bytes.length > 4096 && shotBytes.bytes[0] === 0x89
+            && shotBytes.bytes.subarray(1, 4).toString('latin1') === 'PNG',
+          `bytes=${shotBytes.bytes.length} head=${shotBytes.bytes.subarray(0, 4).toString('hex')}`)
+    check('★ 而且 Content-Type 也是图（不是 text/html ✗）',
+          (shot.headers.get('content-type') ?? '').includes('image/png'))
+  } else {
+    check('没权限时回 502（不是 200 加一张空图 ✗）', shot.status === 502, String(shot.status))
+    check('★★ 失败说明是**人话**（提到去哪儿开权限 ✓）',
+          shot.body.includes('屏幕录制') && shot.body.includes('隐私与安全性'), shot.body.slice(0, 120))
+  }
+  check('★ 不是把系统原文直接扔出来（两态都不许 ✗）', !shot.body.includes('could not create image'))
 } finally {
   await host.close()
   rmSync(dataDir, { recursive: true, force: true })
