@@ -1349,6 +1349,7 @@ export function createMobileHost(options: {
     capability: string,
     text: string,
     deviceId?: string,
+    sessionId?: string,
   ): { ok: true; id: string } | { ok: false; reason: string } {
     const online = [...sessions.keys()]
     const target = deviceId ?? (online.length === 1 ? online[0]! : undefined)
@@ -1359,7 +1360,12 @@ export function createMobileHost(options: {
       return { ok: false, reason: `未知的端侧能力：${capability}` }
     }
     try {
-      const call = deviceCalls.enqueue(target, capability as DeviceCapability, String(text ?? '').slice(0, 500))
+      const call = deviceCalls.enqueue(
+        target,
+        capability as DeviceCapability,
+        String(text ?? '').slice(0, 500),
+        sessionId,
+      )
       store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true })
       return { ok: true, id: call.id }
     } catch (error) {

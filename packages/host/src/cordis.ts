@@ -854,8 +854,12 @@ export function apply(ctx: Context, config: Config = {}): void {
           void error
         }
         // 先通知（后台也能提醒），没启用就退成页面横幅
-        const first = mobileHost.deviceCall('notify', text)
-        if (!first.ok) mobileHost.deviceCall('show', text)
+        // ★ 会话 id 一起带上（取不到就是 undefined ⇒ 手机退回"只打开 App"✓）
+        const sessionId = typeof (record as { sessionId?: unknown }).sessionId === 'string'
+          ? String((record as { sessionId?: unknown }).sessionId)
+          : undefined
+        const first = mobileHost.deviceCall('notify', text, undefined, sessionId)
+        if (!first.ok) mobileHost.deviceCall('show', text, undefined, sessionId)
       } catch (error) {
         console.warn('[dsh-mobile] 审批推送失败（不影响审批本身）：', error)
       }
@@ -873,6 +877,26 @@ export function apply(ctx: Context, config: Config = {}): void {
         //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
         //   所以"注册成功"却永不触发（真实现象：手机上永远收不到审批通知 ✗）。
         //   审批在会话日志里是 `approval/asked` ✓，于是这里按事件类型过滤 ✓。
+        /**
+         * ★ 第二阶段（缺口二）：从事件里取**会话 id** ✓，随 notify 一起下发，
+         *   手机点通知时据此落到那个会话 ✓。
+         * ★ 事件形状跨版本可能不同 ✗ ⇒ 按几处**可能的位置**取第一个非空字符串 ✓；
+         *   都取不到就**不带**（行为退回"点通知只打开 App"✓）——**不猜语义** ✗。
+         */
+        const sessionIdOf = (session: unknown, event: unknown): string | undefined => {
+          const candidates: unknown[] = [
+            (session as { id?: unknown } | undefined)?.id,
+            (session as { sessionId?: unknown } | undefined)?.sessionId,
+            (event as { sessionId?: unknown } | undefined)?.sessionId,
+            (event as { data?: { sessionId?: unknown } } | undefined)?.data?.sessionId,
+            (event as { session?: { id?: unknown } } | undefined)?.session?.id,
+          ]
+          for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate.trim()
+          }
+          return undefined
+        }
+
         const onSessionEvent = (_session: unknown, event: unknown): void => {
           const record = (event ?? {}) as { type?: unknown; data?: { toolName?: unknown; reason?: unknown } }
           const kind = String(record.type ?? '')
@@ -885,7 +909,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             void error
           }
           if (kind !== 'approval/asked') return
-          notify(record.data ?? {})
+          notify({ ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) })
         }
         anyCtx.on('session/event', onSessionEvent)
         channels.push(['ctx.on(session/event)', undefined])

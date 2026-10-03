@@ -79,6 +79,12 @@ export interface DeviceCall {
   /** 给用户看的文字（长度由调用方限制）。 */
   readonly text: string
   readonly createdAt: number
+  /**
+   * ★ 第二阶段（缺口二）：这条请求该落到**哪个会话** ✓ —— 通知点击时用它
+   * （手机知道自己在哪台机器上 ✓，所以只要会话 id 就够 ✓，不需要整条 URL ✓）。
+   * ★ 可选字段：旧调用不传 ⇒ 行为同今天（点通知只打开 App ✓）。
+   */
+  readonly sessionId?: string
   /** 已投递给手机的时间；undefined 表示尚未投递。 */
   readonly deliveredAt?: number
 }
@@ -151,7 +157,7 @@ export class DeviceCallQueue {
    * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，
    *         让它知道"请求没发出去"，而不是以为发出去在等手机。
    */
-  enqueue(deviceId: string, capability: DeviceCapability, text: string): DeviceCall {
+  enqueue(deviceId: string, capability: DeviceCapability, text: string, sessionId?: string): DeviceCall {
     // ★ 先校验能力名本身。少这一步时，未知能力会走到下面的 `isEnabled` 分支，
     //   报出来的是"device capability not enabled: xxx（需要先在手机上允许）"——
     //   而真因是"根本没有这个能力"，用户会去手机上找一个不存在的开关（误导）。
@@ -163,7 +169,13 @@ export class DeviceCallQueue {
     }
     this.sweep()
     const id = `dc-${(this.counter += 1)}-${Date.now().toString(36)}`
-    const call: DeviceCall = { id, capability, text, createdAt: Date.now() }
+    const call: DeviceCall = {
+      id,
+      capability,
+      text,
+      ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
+      createdAt: Date.now(),
+    }
     this.calls.set(id, call)
     return call
   }
