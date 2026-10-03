@@ -2695,51 +2695,15 @@ public class MainActivity extends android.app.Activity {
          */
         java.util.Set<String> tombFp = new java.util.HashSet<String>();
         java.util.Set<String> tombHosts = new java.util.HashSet<String>();
-        // ⑤ 通用清扫：偏好里 + 身份库里所有提到它的字符串
-        try {
-            for (java.util.Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
-                String key = entry.getKey();
-                if (key == null || key.equals(KEY_IDENTITY_VAULT) || key.equals(KEY_FORGOTTEN_HOSTS)) continue;
-                Object value = entry.getValue();
-                if (!(value instanceof String)) continue;
-                String cleaned = scrubReferences((String) value, tombFp, tombHosts);
-                if (cleaned == null) continue;
-                if (cleaned.isEmpty()) prefs.edit().remove(key).commit();
-                else prefs.edit().putString(key, cleaned).commit();
-                Log.i(TAG, "清扫偏好键：" + key);
-            }
-            JSONObject vault = new JSONObject(prefs.getString(KEY_IDENTITY_VAULT, "{}"));
-            java.util.List<String> names = new java.util.ArrayList<String>();
-            Iterator<String> it = vault.keys();
-            while (it.hasNext()) names.add(it.next());
-            int scrubbed = 0;
-            for (String name : names) {
-                Object value = vault.opt(name);
-                if (!(value instanceof String)) continue;
-                String cleaned = scrubReferences((String) value, tombFp, tombHosts);
-                if (cleaned == null) continue;
-                if (cleaned.isEmpty()) vault.remove(name);
-                else vault.put(name, cleaned);
-                scrubbed += 1;
-            }
-            if (scrubbed > 0) {
-                prefs.edit().putString(KEY_IDENTITY_VAULT, vault.toString()).commit();
-                Log.i(TAG, "清扫身份库键：" + scrubbed + " 个");
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "通用清扫失败", t);
-        }
-        // 让网页层也真删（它那份副本不删，下次合并又会带回来）
-        try {
-            if (webView != null) {
-                final String wanted = fingerprints.isEmpty() ? "" : fingerprints.iterator().next();
-                webView.evaluateJavascript(
-                        "try{if(window.__dshmForgetHost&&'" + wanted + "'.length)window.__dshmForgetHost('"
-                                + wanted + "')}catch(e){}", null);
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "让网页层删除失败（壳这边已删）", t);
-        }
+        /**
+         * ★★★ 2026-10-04 **撤掉"按内容连带删键"** ✗ —— 用户报"我本来不想删的东西被删掉了，
+         *   还要重新配对" ✓：那一段只要某个键的**值里提到**这台电脑，就可能把整个键删掉 ✓，
+         *   而别的电脑的配置很可能和它写在同一个键里（例如端点列表 ✓）⇒ 一删就是一片 ✗。
+         * ⇒ 删除一律**只删该删的那几样**（见本方法上半段 ✓）：
+         *   目录里那条记录 ✓、它每个地址的证书 pin ✓、指向它的地址槽条目 ✓、
+         *   以及"当前地址 / 上次成功地址 / 地址偏好"这三个指针 ✓ —— 都是点对点删，绝不连带 ✗。
+         * ★ 页面那一份由 `__dshmForgetHost` 自己删 ✓（同样是点对点 ✓）。
+         */
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");
         Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();

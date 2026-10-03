@@ -506,10 +506,16 @@
             var key = storage.key(k)
             if (typeof key !== 'string' || key.indexOf('dsh-mobile.') !== 0) continue
             if (key === HOSTS_KEY) continue
-            var value = String(storage.getItem(key) || '')
-            if (value.indexOf(fingerprint) >= 0) { doomed.push(key); continue }
+            /**
+             * ★ 只看"**这个键的值就是它**"，不做包含匹配 ✗ ——
+             *   包含匹配会把"值里顺带提到它"的键也删掉 ✓，而别的电脑的配置常常和它
+             *   写在同一个键里（例如端点列表 ✓）⇒ 那就会连带删掉别人 ✓（用户已经踩过 ✓）。
+             */
+            var value = String(storage.getItem(key) || '').trim()
+            if (value.length === 0) continue
+            if (value === fingerprint) { doomed.push(key); continue }
             for (var h = 0; h < hosts.length; h++) {
-              if (value.indexOf(hosts[h]) >= 0) { doomed.push(key); break }
+              if (value === hosts[h]) { doomed.push(key); break }
             }
           }
           for (var d = 0; d < doomed.length; d++) {
