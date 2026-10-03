@@ -94,10 +94,33 @@ if (bare.includes("'@dsh-mobile/protocol'")) problems.push('产物里还有裸�
 for (const entry of ['__dshmSetHosts', '__dshmForgetHost']) {
   if (!boot.includes(entry)) problems.push(`lib/boot.js 里缺 ${entry}`)
 }
+/**
+ * ★★★ 第 66 轮：二进制通道的**两端都要在产物里** ✗。
+ *
+ * 起因（同一天刚栽过）：宿主侧那次"改了源码但调用点根本没写进去"，
+ * 而所有本地检查都绿 ✓ ⇒ 发出去的包里，宿主从没编码 ✗、
+ * 客户端却在解码 ✓，通道**实际是断的** ✗。
+ * ⇒ 远端核对这里同时验三样：
+ *   · 宿主的编码函数在 `lib/tunnel.js` 里**有调用**（不是只有 import）；
+ *   · 客户端的解码函数与标记键名在 `lib/boot.js` 里；
+ *   · 两处的标记键名**逐字一致**（两份实现必须同步 ✓）。
+ */
+const tunnel = readRemote('lib/tunnel.js')
+const hostEncodes = (tunnel.match(/encodeBinary\(/g) ?? []).length
+if (hostEncodes < 2) {
+  problems.push(`lib/tunnel.js 里 encodeBinary 调用只有 ${hostEncodes} 处（应 ≥ 2：一元响应 + 流式）`)
+}
+for (const entry of ['decodeBinaryValue', 'BYTES_TAG']) {
+  if (!boot.includes(entry)) problems.push(`lib/boot.js 里缺 ${entry}`)
+}
+const bootTag = boot.match(/var BYTES_TAG = '([^']+)'/)
+const hostTag = tunnel.match(/\$dshmBytes/)
+if (bootTag === null) problems.push('lib/boot.js 里没找到 BYTES_TAG 的值')
+else if (hostTag === null) problems.push('lib/tunnel.js 里看不到 $dshmBytes（标记键名从 protocol 来，检查内联是否跟上）')
 console.log(`[sync] 远端 = ${remoteTip.slice(0, 8)}`)
 if (problems.length > 0) {
   console.error('[sync] ✗ 核对不通过：')
   for (const problem of problems) console.error('  · ' + problem)
   process.exit(1)
 }
-console.log('[sync] ✓ 核对通过（无裸引用；boot.js 两个入口都在）')
+console.log('[sync] ✓ 核对通过（无裸引用；boot.js 两个入口都在；二进制通道两端都在产物里）')
