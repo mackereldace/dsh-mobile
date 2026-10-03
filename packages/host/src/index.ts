@@ -317,6 +317,8 @@ export interface MobileSelfcheck {
    * ★ 纪律：诊断里**不许出现票据/密钥原文**（沿用 PairLink.redact 那条规矩）。
    */
   readonly diagnostics?: ReadonlyArray<{ readonly tag: string; readonly detail: string }>
+  /** 端侧队列积压（只读计数）：一直涨 ⇒ 手机没在取（见自检页里的说明）。 */
+  readonly deviceQueue?: { readonly pending: number }
   readonly host: { readonly hostId: string; readonly hostName: string; readonly hostFingerprint: string }
   readonly tls: {
     /** 本部署有没有注入证书管理器（`cordis.ts` 注入；纯协议测试里没有）。 */
@@ -1741,6 +1743,22 @@ export function createMobileHost(options: {
         // （unknown 不算失败——不编，也不误报；监听未启用更不算失败，那是老部署的常态）
         ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing' && listener.ok,
         checkedAt: new Date().toISOString(),
+        /**
+         * ★ 第 53 轮：把**端侧队列的积压**也挂出来 ✓ —— 它是"通知到底有没有送到手机"
+         *   最直接的一条信号 ✓：
+         *   · `pending` 一直是 0 ⇒ 手机在取、也在回报 ✓（链是通的 ✓）；
+         *   · `pending` 一直涨 ⇒ 手机**根本没取**（后台受限 / 页面没跑 / 隧道断 ✓）
+         *     —— 这一步把"没推"与"推了没人取"当场分开 ✓，而这两种在外部看起来一样 ✗。
+         * ★ 只读计数，不带任何内容 ✓（内容会含工具名与原因，不必出现在这一页 ✓）。
+         */
+        ...(() => {
+          try {
+            return { deviceQueue: { pending: deviceCalls.pendingCount() } }
+          } catch (error) {
+            void error
+            return {}
+          }
+        })(),
         ...(() => {
           try {
             const entries = store.listAudit({ limit: 40 })
