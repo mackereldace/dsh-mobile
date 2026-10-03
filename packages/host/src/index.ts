@@ -15,6 +15,7 @@
  *  - 能力位"请求 ∩ 已授予 ∩ 宿主上限"三重收窄，写操作与 shell 默认关闭。
  */
 
+import { execFileSync } from 'node:child_process'
 import type { KeyObject } from 'node:crypto'
 import { randomBytes, randomInt } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -42,6 +43,7 @@ import {
 } from '@dsh-mobile/protocol'
 
 import { DeviceStore, type AuditEntry } from './devices.ts'
+import { imageMimeOf, resolveWallpaper, wallpaperSize } from './wallpaper.ts'
 import { DeviceCallQueue, DEVICE_CAPABILITIES, type DeviceCapability } from './device-calls.ts'
 import { CodexBridge, handleCodexEndpoint } from './codex/codex-bridge.ts'
 import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from './codex/codex-page.ts'
@@ -3224,6 +3226,44 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
        *   "could not create image from display" 翻成"去哪儿开权限"✓）——
        *   手机上那张卡就会如实说"截不到图"✓，而不是白着 ✓。
        */
+      /**
+       * ★★★ 第一阶段第 6 项（用户："首页那个缩略图，你要用桌面，而不是实际的截图"）：
+       *   返回这台电脑的**桌面壁纸** ✓ —— 不是截屏 ✓。
+       *   读不到就 502 + **人话** ✓（手机上那张卡会如实说为什么 ✓），
+       *   **绝不退回截屏** ✗（否则等于把用户否掉的东西又漏出去 ✓）。
+       * ★ 上限 8 MB：壁纸通常是几 MB 的图 ✓，超过就当读不出来 ✓（不把内存吃光 ✗）。
+       */
+      if (req.method === 'GET' && url.pathname === '/mobile/desktop/wallpaper') {
+        const found = resolveWallpaper(process.platform, (command, args, timeoutMs) => {
+          try {
+            const stdout = execFileSync(command, args, { timeout: timeoutMs, encoding: 'utf8' })
+            return { ok: true, stdout: String(stdout) }
+          } catch (error) {
+            return { ok: false, stdout: '', reason: error instanceof Error ? error.message : String(error) }
+          }
+        })
+        const mime = found.ok && found.path !== undefined ? imageMimeOf(found.path) : undefined
+        const size = found.ok && found.path !== undefined ? wallpaperSize(found.path) : undefined
+        if (!found.ok || found.path === undefined || mime === undefined
+            || size === undefined || size > 8 * 1024 * 1024) {
+          const why = !found.ok
+            ? (found.reason ?? '读不到这台电脑的桌面壁纸')
+            : (mime === undefined ? '这个壁纸的格式认不出来' : '这个壁纸太大或读不出来')
+          console.warn('[dsh-mobile] 壁纸不可用：' + why)
+          respondJson(res, 502, wireError(ErrorCode.Internal, why))
+          return true
+        }
+        res.writeHead(200, {
+          'content-type': mime,
+          'content-length': String(size),
+          'cache-control': 'no-store, must-revalidate',
+          pragma: 'no-cache',
+          'x-dsh-mobile': 'desktop-wallpaper',
+        })
+        res.end(readFileSync(found.path))
+        return true
+      }
+
       if (req.method === 'GET' && url.pathname === '/mobile/desktop/shot') {
         captureShot({ runner: shotRunner, now: () => Date.now() })
           .then((shot) => {

@@ -106,7 +106,7 @@ final class HomeShots {
         }
         if (!inFlight.add(key)) return;
         lastAttemptAt.put(key, Long.valueOf(now));
-        final String url = "https://" + authority + "/mobile/desktop/shot";
+        final String url = "https://" + authority + "/mobile/desktop/wallpaper";
         Thread worker = new Thread(new Runnable() {
             @Override
             public void run() {
