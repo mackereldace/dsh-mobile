@@ -471,6 +471,27 @@
    * @param {string} fingerprint 要删掉的那台宿主的指纹
    * @returns {boolean} 有没有删到东西
    */
+  /**
+   * ★★★ 2026-10-04 用户交办："壳把清理过后的目录整个交给页面，让页面**以壳为准覆盖**
+   *   自己那份本地副本（而不是合并）。"
+   *
+   * 为什么需要 ✗：页面保存目录时写的是**整个数组**（本机与壳合并后的全量 ✓）——
+   *   所以每台电脑的页面本地都留着一份"当时所有电脑"的副本 ✓。
+   *   删掉某台之后，任意一台**现在连着**的电脑下次一保存，就把那份旧全量写回来 ✓
+   *   （用户："很久没碰过它的电脑，为什么现在的两台知道它存在"✓ —— 就是这么知道的 ✓）。
+   * ⇒ 删除之后由壳调用这里：**以壳那份为准**覆盖本机副本 ✓，合并语义在这里故意不用 ✗。
+   */
+  globalThis.__dshmSetHosts = function () {
+    try {
+      var fromVault = vaultValue(HOSTS_KEY)
+      var text = fromVault === null || fromVault === undefined ? '[]' : String(fromVault)
+      return writeIdentityKey(HOSTS_KEY, text) !== false
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
   globalThis.__dshmForgetHost = function (fingerprint) {
     try {
       if (typeof fingerprint !== 'string' || fingerprint.length === 0) return false

@@ -338,8 +338,11 @@ public class MainActivity extends android.app.Activity {
      */
     private static final String VAULT_LAST_GOOD_ENDPOINT = "dsh-mobile.lastGoodEndpoint";
 
-    /** 已删除电脑的指纹墓碑（见 forgetMachine）。 */
+    /** 已删除电脑的指纹墓碑（见 forgetMachine；只记指纹，不含任何配置）。 */
     private static final String KEY_FORGOTTEN_HOSTS = "dsh-mobile.forgottenHosts";
+
+    /** 最近一次"页面硬要把已删除电脑推回来"的标注（调试模式判据页会念出来）。 */
+    private static final String KEY_BLOCKED_PUSH = "dsh-mobile.blockedPush";
 
     /** 通知渠道与申请码（固定值 ✓ —— 重复创建渠道是幂等的 ✓）。 */
     private static final String CHANNEL_ID = "dshm-device";
@@ -1500,7 +1503,16 @@ public class MainActivity extends android.app.Activity {
                             else vault.put(name, cleaned);
                             blocked += 1;
                         }
-                        if (blocked > 0) Log.i(TAG, "身份库里挡下 " + blocked + " 个已删除电脑的引用");
+                        if (blocked > 0) {
+                            Log.i(TAG, "身份库里挡下 " + blocked + " 个已删除电脑的引用");
+                            /** ★ 用户要求：**挡住就要标注出来**（谁、什么时候）✓ */
+                            try {
+                                prefs.edit().putString(KEY_BLOCKED_PUSH,
+                                        "挡下 " + blocked + " 处已删除电脑的引用 @ " + System.currentTimeMillis()).commit();
+                            } catch (Throwable ignored) {
+                                // 标注写不进去不挡路
+                            }
+                        }
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "墓碑过滤失败（不挡路）", t);
@@ -2693,8 +2705,17 @@ public class MainActivity extends android.app.Activity {
          *   它在自己那份存储里删记录、删提到这台电脑的身份键、清当前标记 ✓，
          *   并通过既有写入口把壳这边也一起删掉 ✓。
          */
+        /**
+         * ★★★ 最小删除标记（只记指纹，不记任何配置 ✓）：
+         *   用途**只有一个** —— 页面把这条记录再推回来时丢掉它 ✓（页面写回全量数组 ✓，
+         *   不挡就会复活 ✓）。★ 用户要求：**挡住的时候要标注出来** ✓ ⇒ 见下面写
+         *   `KEY_BLOCKED_PUSH` 那一段与判据页 ✓。
+         */
         java.util.Set<String> tombFp = new java.util.HashSet<String>();
         java.util.Set<String> tombHosts = new java.util.HashSet<String>();
+        readTombstone(tombFp, tombHosts);
+        tombFp.addAll(fingerprints);
+        writeTombstone(tombFp, tombHosts);
         /**
          * ★★★ 2026-10-04 **撤掉"按内容连带删键"** ✗ —— 用户报"我本来不想删的东西被删掉了，
          *   还要重新配对" ✓：那一段只要某个键的**值里提到**这台电脑，就可能把整个键删掉 ✓，
@@ -2704,6 +2725,28 @@ public class MainActivity extends android.app.Activity {
          *   以及"当前地址 / 上次成功地址 / 地址偏好"这三个指针 ✓ —— 都是点对点删，绝不连带 ✗。
          * ★ 页面那一份由 `__dshmForgetHost` 自己删 ✓（同样是点对点 ✓）。
          */
+        /**
+         * ★★★ 两件事都要叫上页面（用户的方案 ✓）：
+         *   ① `__dshmForgetHost(指纹)` ⇒ 让页面在**它自己那份**存储里也删掉这台；
+         *   ② `__dshmSetHosts()` ⇒ 删完让页面**以壳为准覆写**本地那份目录 ✗（不合并）——
+         *      因为页面保存时写的是整个数组，不覆写的话它下次一保存就把刚删的又写回来。
+         * ★ 上一版我把①连同"连带删键"那段一起删掉了（它们正好相邻）⇒ 页面侧其实**没被调用** ✓，
+         *   这也是"删了又回来"一直没好的原因之一 ✓。
+         */
+        try {
+            if (webView != null) {
+                final String wanted = fingerprints.isEmpty() ? "" : fingerprints.iterator().next();
+                if (!wanted.isEmpty()) {
+                    webView.evaluateJavascript(
+                            "try{if(window.__dshmForgetHost)window.__dshmForgetHost('" + wanted + "')}catch(e){}", null);
+                }
+                webView.evaluateJavascript(
+                        "try{if(window.__dshmSetHosts)window.__dshmSetHosts()}catch(e){}", null);
+                Log.i(TAG, "已叫页面删除并覆写（指纹 " + (wanted.isEmpty() ? "未识别" : wanted) + "）");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "叫页面删除失败（壳这边已删）", t);
+        }
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");
         Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();
