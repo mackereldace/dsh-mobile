@@ -308,6 +308,15 @@ export interface MobileSelfcheck {
   /** 总判据：证书可用 且 DSH 前端探针没有"全不命中"。`unknown` 不算失败（不编也不误报）。 */
   readonly ok: boolean
   readonly checkedAt: string
+  /**
+   * ★ 第 50 轮（第二阶段取证通道）：最近几条宿主诊断（标签 + 摘要，已截断限量）。
+   *   为什么需要它 ✗：选择卡的事件类型名只能靠真机取证 ✓，
+   *   而诊断原先只进审计（`/mobile/audit` 是 **LOCAL_ONLY** ⇒ 手机读不到 ✗），
+   *   桌面端又没有可看的日志 ✗ ⇒ 手机上**没有任何出口** ✓。
+   *   这里复用**现成的**自检页 ✓（用户已经能从手机/局域网打开过它 ✓）。
+   * ★ 纪律：诊断里**不许出现票据/密钥原文**（沿用 PairLink.redact 那条规矩）。
+   */
+  readonly diagnostics?: ReadonlyArray<{ readonly tag: string; readonly detail: string }>
   readonly host: { readonly hostId: string; readonly hostName: string; readonly hostFingerprint: string }
   readonly tls: {
     /** 本部署有没有注入证书管理器（`cordis.ts` 注入；纯协议测试里没有）。 */
@@ -1732,6 +1741,25 @@ export function createMobileHost(options: {
         // （unknown 不算失败——不编，也不误报；监听未启用更不算失败，那是老部署的常态）
         ok: (tlsStatus?.ok ?? false) && probe.status !== 'missing' && listener.ok,
         checkedAt: new Date().toISOString(),
+        ...(() => {
+          try {
+            const entries = store.listAudit({ limit: 40 })
+            const list = Array.isArray(entries) ? entries : []
+            const diagnostics = list
+              .map((entry: unknown) => {
+                const record = (entry ?? {}) as { target?: unknown; detail?: unknown }
+                return {
+                  tag: String(record.target ?? '').slice(0, 60),
+                  detail: String(record.detail ?? '').slice(0, 160),
+                }
+              })
+              .filter((item) => item.tag.length > 0)
+            return diagnostics.length === 0 ? {} : { diagnostics }
+          } catch (error) {
+            void error
+            return {}
+          }
+        })(),
         host: {
           hostId: options.identity.hostId,
           hostName: options.identity.hostName,
