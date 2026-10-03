@@ -5047,6 +5047,46 @@
       replay: inboundReplay,
     })
 
+    /**
+     * ★★★ 第一阶段第 3 项：把宿主打标的二进制还原成字节数组。
+     *
+     * 宿主侧发送前会把 Uint8Array 编成 `{$dshmBytes: base64}`（见 protocol 的 binvalue），
+     * 这里还原。**boot.js 是独立产物、不能 import** ⇒ 规则只能内联一份 ✓
+     * （改 protocol 那套时，这里要一起改 —— 两处必须逐字一致）。
+     * ★ 解码**不猜**：只有"恰好一个键、键名就是这个、值是字符串"才算标记。
+     */
+    var BYTES_TAG = '$dshmBytes'
+    function decodeBinaryValue(value) {
+      if (Object.prototype.toString.call(value) === '[object Array]') {
+        var listChanged = false
+        var list = []
+        for (var i = 0; i < value.length; i++) {
+          var next = decodeBinaryValue(value[i])
+          if (next !== value[i]) listChanged = true
+          list.push(next)
+        }
+        return listChanged ? list : value
+      }
+      if (value !== null && typeof value === 'object') {
+        var keys = Object.keys(value)
+        if (keys.length === 1 && keys[0] === BYTES_TAG && typeof value[BYTES_TAG] === 'string') {
+          var raw = atob(value[BYTES_TAG])
+          var bytes = new Uint8Array(raw.length)
+          for (var j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j)
+          return bytes
+        }
+        var changed = false
+        var out = {}
+        for (var k = 0; k < keys.length; k++) {
+          var decoded = decodeBinaryValue(value[keys[k]])
+          if (decoded !== value[keys[k]]) changed = true
+          out[keys[k]] = decoded
+        }
+        return changed ? out : value
+      }
+      return value
+    }
+
     switch (header.type) {
       case FrameType.Ping:
         await this.sendFrame(FrameType.Pong, FrameFlags.None, new Uint8Array(0))
@@ -5058,7 +5098,7 @@
         // 成了排查连接问题时的红鲱鱼。
         return
       case FrameType.RpcResponse: {
-        var response = JSON.parse(fromUtf8(body))
+        var response = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
@@ -5067,7 +5107,7 @@
         return
       }
       case FrameType.StreamItem: {
-        var item = JSON.parse(fromUtf8(body))
+        var item = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         var stream = this.streams.get(item.streamId)
         if (stream !== undefined) stream.push(item.value)
         return

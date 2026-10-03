@@ -36,7 +36,7 @@ import {
   type EstablishedSession,
   type HostDeviceCredentials,
 } from '@dsh-mobile/protocol'
-import { HostHandshake } from '@dsh-mobile/protocol'
+import { encodeBinary, HostHandshake } from '@dsh-mobile/protocol'
 import type { RawKeyPair } from '@dsh-mobile/protocol'
 
 /** 握手帧的固定 nonce 前缀（与协议文档一致）。 */
