@@ -2480,6 +2480,100 @@
     }
   }
 
+  /**
+   * ★★★ 第 54 轮（第三阶段第二条）：**长按探针** —— "谁盖了谁"当场量给你看。
+   *
+   * 起因：用户报"**文件交付栏被 DSH 控件覆盖**"。这种问题的判据只有一条、而且很硬 ✗：
+   *   在**那一点**做 `document.elementFromPoint(x, y)` ✓ ——
+   *   它返回**真正在最上面的那个节点** ✓。
+   * 为什么不能靠猜 ✗：本仓在"选择器写太宽 / 哈希改名"上栽过多次（注释里写着第四次）✓，
+   *   而"被我们藏了"与"我们没认出它"外部表现完全一样 ✗。
+   *
+   * 用法（**不用控制台** ✓，手机上就能做）：
+   *   **在会话页里对着看不清的地方长按 0.6 秒** ✓ ⇒
+   *   它会量出那一点最上面的节点是谁 ✓，把**稳定特征**（tag / role / aria-label /
+   *   data-* / 我们自己的 id ✓ —— **不打印哈希类名** ✗）与前几层祖先打进调试框 ✓。
+   *
+   * ★ 只读、不动 DOM ✗；拿不到坐标就静默跳过 ✓。
+   */
+  function installCoverProbe() {
+    var timer = null
+    var startX = 0
+    var startY = 0
+    var moving = false
+
+    var describeNode = function (node) {
+      if (node === null || node === undefined) return '(空)'
+      var parts = []
+      var tag = String(node.tagName || '').toLowerCase()
+      if (tag.length > 0) parts.push(tag)
+      if (node.id) parts.push('#' + String(node.id))
+      // ★ 只打**稳定**特征：role / aria-label / data-* / 我们自己的标记 ✓
+      try {
+        var role = node.getAttribute ? node.getAttribute('role') : null
+        if (role) parts.push('role=' + role)
+        var label = node.getAttribute ? node.getAttribute('aria-label') : null
+        if (label) parts.push('aria-label=' + String(label).slice(0, 40))
+        var panel = node.getAttribute ? node.getAttribute('data-dshm-panel') : null
+        if (panel !== null && panel !== undefined) parts.push('data-dshm-panel=' + panel)
+        if (node.dataset && node.dataset.dshmPanel !== undefined) parts.push('dataset.dshmPanel')
+      } catch (error) {
+        void error
+      }
+      return parts.join(' ')
+    }
+
+    var measureAt = function (x, y) {
+      try {
+        var top = document.elementFromPoint(x, y)
+        if (top === null || top === undefined) {
+          debugBoxLine('[probe] 那一点量不到任何节点（坐标 ' + Math.round(x) + ',' + Math.round(y) + '）')
+          return
+        }
+        debugBoxLine('[probe] 最上面的是：' + describeNode(top))
+        var node = top
+        for (var up = 0; up < 4 && node !== null && node !== undefined; up++) {
+          node = node.parentElement
+          if (node === null || node === undefined) break
+          debugBoxLine('[probe]   上' + (up + 1) + '层：' + describeNode(node))
+        }
+      } catch (error) {
+        debugBoxLine('[probe] 量的时候出错了：' + String(error && error.message ? error.message : error))
+      }
+    }
+
+    document.addEventListener('pointerdown', function (event) {
+      startX = event.clientX
+      startY = event.clientY
+      moving = false
+      if (timer !== null) clearTimeout(timer)
+      timer = setTimeout(function () {
+        timer = null
+        if (moving) return
+        debugBoxLine('[probe] 长按定位 ' + Math.round(startX) + ',' + Math.round(startY))
+        measureAt(startX, startY)
+      }, 600)
+    }, true)
+
+    document.addEventListener('pointermove', function (event) {
+      if (timer === null) return
+      if (Math.abs(event.clientX - startX) > 8 || Math.abs(event.clientY - startY) > 8) {
+        moving = true
+        clearTimeout(timer)
+        timer = null
+      }
+    }, true)
+
+    var cancel = function () {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+    }
+    document.addEventListener('pointerup', cancel, true)
+    document.addEventListener('pointercancel', cancel, true)
+  }
+
   function debugBoxLine(text) {
     if (!DEBUG_BOX_ON) return
     if (typeof document === 'undefined') return
@@ -23754,6 +23848,8 @@
     installForegroundSelfHeal()
     // 端侧通道（电脑 → 手机）：轮询式，晚一点启动没关系
     installDeviceChannel()
+    // 「谁盖了谁」的长按探针（第三阶段：文件交付栏被覆盖）—— 只读、不碰 DOM
+    installCoverProbe()
   }
   } catch (error) {
     debugBoxLine('[boot] 启动期异常：' + String(error && error.stack ? error.stack : error).slice(0, 400))
