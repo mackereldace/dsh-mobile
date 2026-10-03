@@ -2861,6 +2861,9 @@ public class MainActivity extends android.app.Activity {
          */
         try {
             String showing = webView == null ? null : webView.getUrl();
+            if (showing != null && !showing.startsWith("https://") && !showing.startsWith("http://")) {
+                showing = null;   // about:blank 之类不参与判断
+            }
             boolean showingDeleted = (showing != null && urlPointsAtMachine(showing, authorities, hosts))
                     || (currentUrl != null && urlPointsAtMachine(currentUrl, authorities, hosts));
             if (showingDeleted) {
@@ -4587,7 +4590,17 @@ public class MainActivity extends android.app.Activity {
             }
         }
         try {
-            homeWiring.setCurrentUrl(webView == null || webView.getUrl() == null ? currentUrl : webView.getUrl());
+            /**
+             * ★★★ 2026-10-04 用户报："删除过程中首页多了一张卡，主机 about、端口 blank"✗。
+             *   根因是我在删除时把页面**导航去了 `about:blank`** ✓，而这里是拿"当前地址"
+             *   去拼卡的 ✓ ⇒ 它把 `about:blank` 当成了一个地址 ✓。
+             *   ⇒ 这里只认 `http://` / `https://` ✓；别的形状（about: / data: / 空 ✓）
+             *     一律**不当作一台电脑** ✓（宁可没有当前，也不要一张假卡 ✓）。
+             */
+            String pageUrl = webView == null ? null : webView.getUrl();
+            boolean usable = pageUrl != null
+                    && (pageUrl.startsWith("https://") || pageUrl.startsWith("http://"));
+            homeWiring.setCurrentUrl(usable ? pageUrl : currentUrl);
         } catch (Throwable ignored) {
             homeWiring.setCurrentUrl(currentUrl);
         }
