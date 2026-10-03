@@ -26,5 +26,9 @@
       "platform": "web"
     }
   },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
   "license": "MIT"
 }
