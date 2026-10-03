@@ -70,6 +70,9 @@ final class HomeView extends FrameLayout {
         /** 调试模式的开关：日志栏与快捷判据只在调试模式下出现（面向用户的界面不该带这些）。 */
         void onSetDebugMode(boolean on);
 
+        /** 删掉某一台电脑在本机的全部配置（身份 / 地址 / 证书信任）。 */
+        void onForgetMachine(HomeModel.Machine machine);
+
         /** ★ 「手输地址」✓ —— 不在同一网络（例如走 Tailscale）时，这是唯一能自救的入口 ✓。 */
         void onAddComputerByAddress();
 
@@ -774,8 +777,65 @@ final class HomeView extends FrameLayout {
         card.addView(text(HomeLabels.SETTINGS_DEBUG_HINT, 12, theme.ink3, false));
 
         list.addView(card);
+
+        /**
+         * 「电脑」那一节：列出本机知道的每一台，各自一个「删除」。
+         * 数据就是首页那份快照（同一个来源，不另起一份）。
+         */
+        TextView head = text(HomeLabels.SETTINGS_MACHINES, 12, theme.ink3, true);
+        head.setPadding(dp(8), dp(22), dp(8), dp(8));
+        list.addView(head);
+        TextView hint = text(HomeLabels.SETTINGS_MACHINES_HINT, 12, theme.ink3, false);
+        hint.setPadding(dp(8), 0, dp(8), dp(10));
+        list.addView(hint);
+
+        List<HomeModel.Machine> machines = snapshot == null
+                ? new ArrayList<HomeModel.Machine>() : snapshot.machines;
+        if (machines.isEmpty()) {
+            TextView none = text(HomeLabels.SETTINGS_NO_MACHINES, 13, theme.ink3, false);
+            none.setPadding(dp(8), dp(4), dp(8), dp(8));
+            list.addView(none);
+        } else {
+            LinearLayout sheet = new LinearLayout(getContext());
+            sheet.setOrientation(LinearLayout.VERTICAL);
+            sheet.setBackground(roundRect(theme.surface, theme.line, 14));
+            for (int i = 0; i < machines.size(); i += 1) {
+                if (i > 0) sheet.addView(divider());
+                sheet.addView(buildSettableMachine(machines.get(i)));
+            }
+            list.addView(sheet);
+        }
         scroll.addView(list, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         return scroll;
+    }
+
+    /** 设置页里的一台电脑：名字 + 已知地址条数 + 「删除」。 */
+    private View buildSettableMachine(final HomeModel.Machine machine) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(12), dp(12), dp(12));
+
+        LinearLayout texts = new LinearLayout(getContext());
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(text(machine.name, 15, theme.ink, true));
+        int addresses = 0;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            addresses += machine.instances.get(i).addresses.size();
+        }
+        texts.addView(text(addresses + " 个已知地址", 12, theme.ink3, false));
+        row.addView(texts, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView delete = text(HomeLabels.SETTINGS_DELETE, 13.5f, theme.ink, true);
+        delete.setPadding(dp(10), dp(6), dp(10), dp(6));
+        delete.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onForgetMachine(machine);
+            }
+        });
+        row.addView(delete);
+        return row;
     }
 
     private View buildHeader() {

@@ -194,6 +194,27 @@ public final class HomeLabels {
         builder.append(part);
     }
 
+    /** 设置页：电脑那一节（删除某一台电脑的配置）。 */
+    public static final String SETTINGS_MACHINES = "电脑";
+
+    public static final String SETTINGS_MACHINES_HINT =
+            "删除某一台电脑在本机的配置（身份、地址、证书信任）。删除后要重新配对才能再连。";
+
+    public static final String SETTINGS_NO_MACHINES = "还没有配对过电脑。";
+
+    public static final String SETTINGS_DELETE = "删除";
+
+    public static final String SETTINGS_DELETE_TITLE = "删除这台电脑的配置？";
+
+    public static final String SETTINGS_DELETE_BODY =
+            "会清掉本机为它保存的身份、地址与证书信任。下次要连它需要重新配对。";
+
+    public static final String SETTINGS_DELETE_OK = "删除";
+
+    public static final String SETTINGS_DELETE_CANCEL = "取消";
+
+    public static final String SETTINGS_DELETED = "已删除这台电脑的配置。";
+
     /** 设置页：调试模式。 */
     public static final String SETTINGS_DEBUG = "调试模式";
 

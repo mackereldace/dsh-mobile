@@ -338,6 +338,9 @@ public class MainActivity extends android.app.Activity {
      */
     private static final String VAULT_LAST_GOOD_ENDPOINT = "dsh-mobile.lastGoodEndpoint";
 
+    /** 已删除电脑的指纹墓碑（见 forgetMachine）。 */
+    private static final String KEY_FORGOTTEN_HOSTS = "dsh-mobile.forgottenHosts";
+
     /** 通知渠道与申请码（固定值 ✓ —— 重复创建渠道是幂等的 ✓）。 */
     private static final String CHANNEL_ID = "dshm-device";
     private static final int REQUEST_NOTIFICATIONS = 4711;
@@ -1473,6 +1476,40 @@ public class MainActivity extends android.app.Activity {
                     vault.put(key, payload.get(key));   // 字符串/数字/布尔/嵌套对象都**原样**存 ✓
                     written++;
                 }
+                /**
+                 * ★★ 删除墓碑：用户在设置里删掉的那几台，**页面再推身份库时要把它们的记录滤掉** ✗
+                 *   —— 身份库的正主是页面（boot.js）✓，它一推就把刚删的带回来了 ✓。
+                 *   ★ 墓碑什么时候撤 ✗：**用户重新扫码配对时清空** ✓（见 handlePairText ✓）——
+                 *     否则删过的那台电脑**再也配不回来**了 ✗（同一个指纹会被永远滤掉 ✓）。
+                 */
+                try {
+                    String tomb = prefs.getString(KEY_FORGOTTEN_HOSTS, "[]");
+                    if (tomb != null && !tomb.trim().isEmpty() && !tomb.equals("[]")) {
+                        JSONArray forgotten = new JSONArray(tomb);
+                        Object hostsRaw = vault.opt(HomeStore.HOSTS_KEY);
+                        if (hostsRaw instanceof String && forgotten.length() > 0) {
+                            JSONArray records = new JSONArray((String) hostsRaw);
+                            JSONArray kept = new JSONArray();
+                            for (int i = 0; i < records.length(); i += 1) {
+                                JSONObject record = records.optJSONObject(i);
+                                if (record == null) continue;
+                                String fingerprint = record.optString("fingerprint", "");
+                                boolean blocked = false;
+                                for (int j = 0; j < forgotten.length(); j += 1) {
+                                    if (fingerprint.equals(forgotten.optString(j))) blocked = true;
+                                }
+                                if (!blocked) kept.put(record);
+                            }
+                            if (kept.length() != records.length()) {
+                                vault.put(HomeStore.HOSTS_KEY, kept.toString());
+                                Log.i(TAG, "身份库里滤掉了 " + (records.length() - kept.length())
+                                        + " 条已删除电脑的记录");
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "墓碑过滤失败（不挡路）", t);
+                }
                 if (prefs.edit().putString(KEY_IDENTITY_VAULT, vault.toString()).commit()) {
                     Log.i(TAG, "身份库已合并（写入 " + written + " 个键、删除 " + removed
                             + " 个键，现在共 " + vault.length() + " 个键 ✓）");
@@ -2419,6 +2456,121 @@ public class MainActivity extends android.app.Activity {
      *   只是"先试哪个地址"的顺序偏好 ✓；本轮它**没有界面**（只存 / 只报 ✓），
      *   要按 authority 存得先有写它的界面与协议 ✓ —— 留作后续 ✓（不是本单的范围 ✗）。
      */
+    /**
+     * 删掉某一台电脑在本机的全部配置。
+     *
+     * 2026-10-04 用户交办："在手机端这边增加一个删除电脑的设置，就是清掉某一台电脑对应的配置。"
+     *
+     * 清这四样（都属于"这台电脑在手机上的痕迹"）：
+     *  ① 身份库镜像里属于它的记录（按指纹，或按它那些地址去匹配记录里的 slots）；
+     *  ② 它每个地址的证书 pin（`PinStore.forget` 只按确定的键逐个删，绝不扫前缀）；
+     *  ③ 指向它的地址槽与"上次成功的地址"；
+     *  ④ ★ **墓碑**：把它的指纹记进 `KEY_FORGOTTEN_HOSTS`，
+     *     以后页面再推身份库时把带这个指纹的记录**滤掉** ——
+     *     否则页面（身份库的正主）一推，刚删掉的又回来了。
+     *     页面自己也删掉之后（推来的库里已经没有它），墓碑自动撤掉。
+     */
+    private void forgetMachine(HomeModel.Machine machine) {
+        if (machine == null) return;
+        java.util.List<String> authorities = new java.util.ArrayList<String>();
+        java.util.Set<String> fingerprints = new java.util.HashSet<String>();
+        if (machine.key != null && HomeStore.validFingerprint(machine.key)) fingerprints.add(machine.key);
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                String authority = instance.addresses.get(j).authority;
+                if (authority != null && !authority.isEmpty()) authorities.add(authority);
+            }
+        }
+        int removedRecords = 0;
+        try {
+            JSONObject vault = new JSONObject(prefs.getString(KEY_IDENTITY_VAULT, "{}"));
+            Object raw = vault.opt(HomeStore.HOSTS_KEY);
+            if (raw instanceof String) {
+                JSONArray records = new JSONArray((String) raw);
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < records.length(); i += 1) {
+                    JSONObject record = records.optJSONObject(i);
+                    if (record == null) continue;
+                    if (recordMatchesMachine(record, authorities, fingerprints)) {
+                        String fingerprint = record.optString("fingerprint", "");
+                        if (HomeStore.validFingerprint(fingerprint)) fingerprints.add(fingerprint);
+                        removedRecords += 1;
+                        continue;
+                    }
+                    kept.put(record);
+                }
+                vault.put(HomeStore.HOSTS_KEY, kept.toString());
+            }
+            prefs.edit().putString(KEY_IDENTITY_VAULT, vault.toString()).commit();
+        } catch (Throwable t) {
+            Log.w(TAG, "删身份库记录失败", t);
+        }
+        // ② 证书 pin（逐个地址删）
+        for (String authority : authorities) {
+            try {
+                PinStore.forget(prefsKv, authority);
+            } catch (Throwable ignored) {
+                // 单个删不掉不挡路
+            }
+        }
+        // ③ 地址槽 + 上次成功的地址
+        try {
+            String slots = prefs.getString(KEY_ENDPOINT_SLOTS, null);
+            if (slots != null && !slots.trim().isEmpty()) {
+                JSONArray array = new JSONArray(slots);
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < array.length(); i += 1) {
+                    JSONObject slot = array.optJSONObject(i);
+                    if (slot == null) continue;
+                    if (authorities.contains(PinStore.authorityOf(slot.optString("url", "")))) continue;
+                    kept.put(slot);
+                }
+                prefs.edit().putString(KEY_ENDPOINT_SLOTS, kept.toString()).commit();
+            }
+            String lastGood = prefs.getString(VAULT_LAST_GOOD_ENDPOINT, null);
+            if (lastGood != null && authorities.contains(PinStore.authorityOf(lastGood))) {
+                prefs.edit().remove(VAULT_LAST_GOOD_ENDPOINT).commit();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "清理地址槽失败", t);
+        }
+        // ④ 墓碑
+        try {
+            if (!fingerprints.isEmpty()) {
+                JSONArray forgotten = new JSONArray(prefs.getString(KEY_FORGOTTEN_HOSTS, "[]"));
+                for (String fingerprint : fingerprints) {
+                    boolean exists = false;
+                    for (int i = 0; i < forgotten.length(); i += 1) {
+                        if (fingerprint.equals(forgotten.optString(i))) exists = true;
+                    }
+                    if (!exists) forgotten.put(fingerprint);
+                }
+                prefs.edit().putString(KEY_FORGOTTEN_HOSTS, forgotten.toString()).commit();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "写删除墓碑失败", t);
+        }
+        Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
+                + " 个、指纹 " + fingerprints.size() + " 个");
+        Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();
+        refreshNativeHome();
+    }
+
+    /** 这条记录是不是属于那台机器：指纹命中，或它记的地址里有那台机器的地址。 */
+    private static boolean recordMatchesMachine(JSONObject record, java.util.List<String> authorities,
+                                                java.util.Set<String> fingerprints) {
+        String fingerprint = record.optString("fingerprint", "");
+        if (!fingerprint.isEmpty() && fingerprints.contains(fingerprint)) return true;
+        JSONArray slots = record.optJSONArray("slots");
+        if (slots == null) return false;
+        for (int i = 0; i < slots.length(); i += 1) {
+            String url = slots.optString(i, "");
+            if (authorities.contains(PinStore.authorityOf(url))) return true;
+        }
+        return false;
+    }
+
     private void forgetThisComputer() {
         boolean hadAny = false;
         String authority = currentAuthority();
@@ -3312,6 +3464,15 @@ public class MainActivity extends android.app.Activity {
          *   （不是"页面加载完" ✗：那时可能还没配上 ✓）。
          */
         // ★ 记下"这次让位是为了配对" ✓ —— 只有它才会在配对完成后把首页叫回来 ✓
+        /**
+         * ★ 用户重新扫码配对 ⇒ **清空删除墓碑** ✓ —— 他可能正是在把删掉的那台配回来 ✓，
+         *   不清的话同一个指纹会被永远滤掉 ✗（见 vaultSet 里那段 ✓）。
+         */
+        try {
+            prefs.edit().remove(KEY_FORGOTTEN_HOSTS).commit();
+        } catch (Throwable ignored) {
+            // 清不掉也不挡这次配对
+        }
         homeStepsAsideForPairing = true;
         showWebView();
         beginSlot(0, "扫码配对（" + how + "）");
@@ -3858,6 +4019,16 @@ public class MainActivity extends android.app.Activity {
                 @Override
                 public void onRefresh() {
                     refreshNativeHome();
+                }
+
+                @Override
+                public void onForgetMachine(HomeModel.Machine machine) {
+                    new android.app.AlertDialog.Builder(MainActivity.this)
+                            .setTitle(HomeLabels.SETTINGS_DELETE_TITLE)
+                            .setMessage(HomeLabels.SETTINGS_DELETE_BODY)
+                            .setNegativeButton(HomeLabels.SETTINGS_DELETE_CANCEL, null)
+                            .setPositiveButton(HomeLabels.SETTINGS_DELETE_OK, (d, which) -> forgetMachine(machine))
+                            .show();
                 }
 
                 @Override
