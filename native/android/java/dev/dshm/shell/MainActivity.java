@@ -3786,6 +3786,12 @@ public class MainActivity extends android.app.Activity {
              *   2026-10-04 用户连报两轮"没修好"✓，而我和他都**无法确认手机上跑的是哪一版** ✗
              *   ⇒ 读数那一行带上它 ✓（和宿主 manifest 里那个戳对得上，才说明装的是新包 ✓）。
              */
+            /** ★ 打个 tag ✓：界面判据要靠它找到"网页那一层"（验"首页有没有真盖住它"✓）。 */
+            try {
+                webView.setTag("dshm-webview");
+            } catch (Throwable ignored) {
+                // 打不上只是判据少一项 ✓，不挡路 ✓
+            }
             nativeHome = new HomeView(this, theme, new HomeView.Callbacks() {
                 @Override
                 public void onRefresh() {
@@ -3793,6 +3799,30 @@ public class MainActivity extends android.app.Activity {
                 }
 
                 @Override
+                /** ★ 「会话」标签 ⇒ 切到那一面并去取清单 ✓。 */
+                public void onShowSessions() {
+                    if (nativeHome != null) nativeHome.showSessions();
+                    refreshSessions();
+                }
+
+                /** ★ 回「电脑」那一面 ✓。 */
+                public void onShowComputers() {
+                    if (nativeHome != null) nativeHome.showComputers();
+                }
+
+                /** ★★ 点某个会话 ⇒ 进**我们自己的会话页** ✓（`?session=<id>` 深链 ✓）。 */
+                public void onEnterSession(String sessionId) {
+                    String authority = currentAuthority();
+                    if (authority == null || authority.isEmpty()) {
+                        Log.w(TAG, "还没有可用的电脑地址，进不了会话");
+                        return;
+                    }
+                    String url = "https://" + authority + "/mobile/chat?session="
+                            + android.net.Uri.encode(sessionId == null ? "" : sessionId);
+                    showWebView();
+                    applyHostUrl(url, "进入会话");
+                }
+
                 public void onAddComputer() {
                     startScan();
                 }
@@ -3914,10 +3944,58 @@ public class MainActivity extends android.app.Activity {
         homeController.refresh();
     }
 
+    /**
+     * ★★★ 取一次**会话清单** ✓（2026-10-04 用户选 (a) ✓）。
+     *
+     * · 走我们自己的**只读路由** `/mobile/chat/sessions` ✓（宿主内部调同一个桥 ✓）；
+     * · 证书用**这台电脑的 pin** ✓（`homeWiring.pins().caPemFor(authority)` ✓ —— 与探测同一套 ✓）；
+     * · 在**后台线程**取 ✓、回主线程落地 ✓（`ChatSessions.fetch` **永不抛** ✓ ⇒ 失败也是一句话 ✓）；
+     * · 还没有电脑地址时**如实说** ✓，不去猜一台 ✗。
+     */
+    private void refreshSessions() {
+        if (nativeHome == null || homeWiring == null) return;
+        final String authority = currentAuthority();
+        if (authority == null || authority.isEmpty()) {
+            nativeHome.setSessions(new java.util.ArrayList<ChatSessions.Session>(),
+                    HomeLabels.SESSIONS_NEED_MACHINE);
+            return;
+        }
+        nativeHome.setSessionsBusy(true);
+        final String caPem = homeWiring.pins().caPemFor(authority);
+        final String url = "https://" + authority + ChatSessions.SESSIONS_PATH;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final ChatSessions.Result result = ChatSessions.fetch(url, caPem, ChatSessions.DEFAULT_TIMEOUT_MS);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (nativeHome != null) nativeHome.setSessions(result.sessions, result.error);
+                    }
+                });
+            }
+        }, "dshm-sessions").start();
+    }
+
     /** 把原生首页抬到最上面 ✓（并顺手刷新一次 ✓）—— **淡入** ✓。 */
     private void showNativeHome() {
         if (nativeHome == null) return;
         nativeHome.setVisibility(View.VISIBLE);
+        /**
+         * ★★ 回到首页 = 把网页那一层**交出去** ✓ ⇒ 清焦点 + 收键盘 + 层级提到最前 ✓
+         *   （与 `showWebView()` 里那四件事同一套 ✓ —— 两边都要做 ✗，少一边就漏 ✓）。
+         */
+        try {
+            webView.clearFocus();
+            webView.setFocusable(false);
+            webView.setFocusableInTouchMode(false);
+            webView.setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        } catch (Throwable ignored) {
+            // 同上 ✓
+        }
+        hideSoftKeyboard();
+        nativeHome.setClickable(true);
+        nativeHome.bringToFront();
         nativeHome.animateIn();
         refreshNativeHome();
         Log.i(TAG, "回到原生首页");
@@ -3928,12 +4006,66 @@ public class MainActivity extends android.app.Activity {
         if (nativeHome == null) {
             return;
         }
+        /**
+         * ★★★ 2026-10-04 用户报的 bug①："在首页居然是可以操纵到会话页的 —— 我点击会话页原本输入框
+         *   在的位置能跳出输入法、输入文字"✗。
+         *
+         * ★ 病根：切到首页时**什么都没做** ✗ —— 网页那一层（WebView）**还握着焦点** ✓、
+         *   输入法还开着 ✓、而且它**照样能收到触摸** ✓。
+         *   ⇒ 用户看到的"首页"只是盖在上面的一张皮 ✓，底下的输入框既没失焦、也没被挡住 ✗。
+         * ★ 修法（四件事一起做，缺一不可 ✗）：
+         *   1. `clearFocus()` ✓ —— 让网页里的输入框**失焦**（否则光标还在里面闪 ✓）；
+         *   2. **收输入法** ✓ —— 否则键盘留在屏幕上 ✓；
+         *   3. `setFocusable(false)` + `BLOCK_DESCENDANTS` ✓ —— **不许再拿到焦点** ✗
+         *      （只清一次不够 ✓：点一下它就又聚焦了 ✓）；
+         *   4. `bringToFront()` ✓ —— 层级也钉死 ✓（不依赖"谁先 addView"这种隐含前提 ✗）。
+         */
+        try {
+            webView.clearFocus();
+            webView.setFocusable(false);
+            webView.setFocusableInTouchMode(false);
+            webView.setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        } catch (Throwable ignored) {
+            // 拿不到 WebView 也不该挡路 ✓（下面照样把首页提上来 ✓）
+        }
+        hideSoftKeyboard();
+        if (nativeHome != null) {
+            /**
+             * ★★ 首页必须**自己吃掉触摸** ✗ —— 一个不可点的 ViewGroup 在空白处**不消费**事件 ✓，
+             *   于是空白处会钻到下面那层去 ✓（用户报的正是"点输入框的位置能弹键盘"✓）。
+             */
+            nativeHome.setClickable(true);
+            nativeHome.setFocusable(true);
+            nativeHome.bringToFront();
+        }
         nativeHome.animateOut(new Runnable() {
             @Override
             public void run() {
                 if (nativeHome != null) nativeHome.setVisibility(View.GONE);
+                /** ★ 进会话页 ⇒ 把焦点能力**还回去** ✗（否则用户点输入框也弹不出键盘 ✓）。 */
+                try {
+                    webView.setFocusable(true);
+                    webView.setFocusableInTouchMode(true);
+                    webView.setDescendantFocusability(android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS);
+                } catch (Throwable ignored) {
+                    // 同上 ✓
+                }
             }
         });
+    }
+
+    /** 收起输入法 ✓（真机排障最容易漏的一步 ✗：键盘留在屏幕上会让人以为"首页能打字"✓）。 */
+    private void hideSoftKeyboard() {
+        try {
+            android.view.inputmethod.InputMethodManager manager =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            android.view.View focus = getCurrentFocus();
+            if (manager != null && focus != null) {
+                manager.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) {
+            // 收不掉也不该挡路 ✓
+        }
     }
 
     /**

@@ -181,6 +181,10 @@ public final class ChatSessions {
             connection.setRequestProperty("accept", "application/json");
             connection.setInstanceFollowRedirects(false);
             int status = connection.getResponseCode();
+            if (status == 404) {
+                /** ★ 说清"是什么还没到"✗ —— 只写"404"用户没法判断该做什么 ✓。 */
+                return failed("这台电脑还没有「会话清单」这条路（电脑端要更新一次）");
+            }
             if (status != 200) return failed("电脑回了个 " + status);
             stream = connection.getInputStream();
             String body = ManifestProbe.readCapped(stream, MAX_BODY_BYTES);

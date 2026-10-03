@@ -95,6 +95,12 @@ public final class HomeLabels {
      */
     public static final String ADD_BY_ADDRESS = "⌨  手输地址（换了网络、不在一个局域网时用）";
     public static final String TAB_COMPUTER = "电脑";
+    /** ★ 「会话」标签 ✓（2026-10-04 用户选 (a) ⇒ 这一面开始通电 ✓）。 */
+    public static final String TAB_SESSIONS = "会话";
+    public static final String TAB_SETTINGS = "设置";
+    public static final String SESSIONS_BUSY = "正在看这台电脑上有哪些会话…";
+    public static final String SESSIONS_EMPTY = "这台电脑上还没有会话。";
+    public static final String SESSIONS_NEED_MACHINE = "先在「电脑」里选一台，再回来看会话。";
     public static final String GROUP_ONLINE = "在线";
     public static final String GROUP_OTHER = "离线 / 未知";
     public static final String CURRENT = "正在用";

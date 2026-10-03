@@ -50,6 +50,14 @@ final class HomeView extends FrameLayout {
 
         void onAddComputer();
 
+        /** ★ 「会话」标签 ✓ / 回「电脑」标签 ✓。 */
+        void onShowSessions();
+
+        void onShowComputers();
+
+        /** ★ 点了某个会话 ⇒ 进我们自己的会话页（`?session=<id>` 深链 ✓）。 */
+        void onEnterSession(String sessionId);
+
         /** ★ 长按一台电脑 ⇒ 弹出"这张卡的全部判据" ✓（真机排障只有屏幕上的字 ✓）。 */
         void onInspectMachine(HomeModel.Machine machine);
 
@@ -70,6 +78,11 @@ final class HomeView extends FrameLayout {
     private android.widget.LinearLayout tabsBar;
     /** 已经排了一帧待重建吗 ✓（一帧里只重建一次 ✓）。 */
     private boolean rebuildPosted = false;
+    /** ★ 现在哪一面通电 ✓（computers = 电脑 ✓ / sessions = 会话 ✓）。 */
+    private String face = "computers";
+    private List<ChatSessions.Session> sessions = new ArrayList<ChatSessions.Session>();
+    private String sessionsError = "";
+    private boolean sessionsBusy = false;
     /** ★ 本 APK 的构建戳 ✓（显示在读数里 —— 一眼看出"装的到底是哪一版"✗）。 */
     private String buildStamp = "";
     private String error = "";
@@ -206,6 +219,31 @@ final class HomeView extends FrameLayout {
         buildStamp = stamp == null ? "" : stamp;
     }
 
+    /** 切到「会话」那一面 ✓。 */
+    void showSessions() {
+        face = "sessions";
+        rebuild();
+    }
+
+    /** 切回「电脑」那一面 ✓。 */
+    void showComputers() {
+        face = "computers";
+        rebuild();
+    }
+
+    void setSessionsBusy(boolean next) {
+        sessionsBusy = next;
+        rebuild();
+    }
+
+    /** 会话清单到手（或拿到一句人话的失败 ✓）。 */
+    void setSessions(List<ChatSessions.Session> list, String error) {
+        sessions = list == null ? new ArrayList<ChatSessions.Session>() : list;
+        sessionsError = error == null ? "" : error;
+        sessionsBusy = false;
+        rebuild();
+    }
+
     void setBusy(boolean next) {
         busy = next;
         rebuild();
@@ -280,6 +318,21 @@ final class HomeView extends FrameLayout {
                     .append(" / 文字大小 ").append(titleView.getTextSize())
                     .append(titleView.getWidth() > 0 && titleView.getWidth() < needed ? " ⇒ ★ 被裁了" : " ⇒ 够宽")
                     .append('\n');
+        }
+        /**
+         * ★★ 层级判据（2026-10-04 用户报的 bug①："在首页居然能操纵到会话页"✗）——
+         *   这几项一出来，"首页到底有没有真的盖住网页那一层"就不用猜了 ✓。
+         */
+        try {
+            android.view.View web = getRootView().findViewWithTag("dshm-webview");
+            text.append("层级：首页 可见=").append(getVisibility() == VISIBLE)
+                    .append(" z=").append(getZ()).append(" 可点=").append(isClickable()).append('\n');
+            text.append("      网页 可见=").append(web == null ? "（找不到）" : (web.getVisibility() == VISIBLE))
+                    .append(" 能拿焦点=").append(web == null ? "?" : web.isFocusable())
+                    .append(" 有焦点=").append(web == null ? "?" : web.hasFocus())
+                    .append('\n');
+        } catch (Throwable error) {
+            text.append("层级：读不出来（").append(error.getClass().getSimpleName()).append("）").append('\n');
         }
         if (tabsBar != null) {
             text.append("底栏：宽 ").append(tabsBar.getWidth()).append(" 高 ").append(tabsBar.getHeight()).append('\n');
@@ -400,6 +453,17 @@ final class HomeView extends FrameLayout {
         addView(column, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         column.addView(buildHeader());
+
+        /**
+         * ★★★ 「会话」那一面（2026-10-04 用户选 (a) ✓）：与「电脑」共用表头与底栏 ✓，
+         *   中间那块换成会话清单 ✓ —— 点某条 ⇒ 深链我们自己的会话页 ✓。
+         */
+        if ("sessions".equals(face)) {
+            column.addView(buildSessionsList(), new LinearLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, 0, 1f));
+            column.addView(buildTabs());
+            return;
+        }
 
         ScrollView scroll = new ScrollView(getContext());
         scroll.setFillViewport(true);
@@ -870,7 +934,61 @@ final class HomeView extends FrameLayout {
         return wrap;
     }
 
-    /** 底部标签栏（本轮**只有「电脑」那一面通电** ✓ —— 另外两个如实置灰 ✓，不假装能用 ✗）。 */
+    /** 「会话」那一面：一段话（忙/空/错 ✓）或一串会话行 ✓。 */
+    private View buildSessionsList() {
+        ScrollView scroll = new ScrollView(getContext());
+        scroll.setFillViewport(true);
+        LinearLayout list = new LinearLayout(getContext());
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(14), dp(6), dp(14), dp(14));
+
+        if (sessionsBusy) {
+            list.addView(note(HomeLabels.SESSIONS_BUSY));
+        } else if (!sessionsError.isEmpty()) {
+            list.addView(note("拿不到会话清单：" + sessionsError));
+        } else if (sessions.isEmpty()) {
+            list.addView(note(HomeLabels.SESSIONS_EMPTY));
+        } else {
+            for (int i = 0; i < sessions.size(); i += 1) {
+                list.addView(buildSessionRow(sessions.get(i)));
+            }
+        }
+        scroll.addView(list);
+        return scroll;
+    }
+
+    /** 一句如实的话 ✓（不假装有数据 ✗）。 */
+    private View note(String text) {
+        TextView view = text(text, 13, theme.ink2, false);
+        view.setPadding(dp(6), dp(18), dp(6), dp(18));
+        return view;
+    }
+
+    /** 一条会话 ✓：标题 + 状态 ✓，点 ⇒ 进去 ✓（深链 ✓）。 */
+    private View buildSessionRow(final ChatSessions.Session session) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(14), dp(12), dp(14), dp(12));
+        row.setBackground(pressedState(theme.surface));
+
+        TextView title = text(HomeLabels.sessionTitle(session.title), 15, theme.ink, session.running);
+        row.addView(title);
+        TextView state = text(HomeLabels.sessionState(session.running, session.awaiting, session.current), 12, theme.ink3, false);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(5);
+        row.addView(state, params);
+
+        row.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onEnterSession(session.id);
+            }
+        });
+        return row;
+    }
+
+    /** 底部标签栏（★ 2026-10-04：**电脑 / 会话两面都通电了** ✓ —— 「设置」仍如实置灰 ✓）。 */
     private View buildTabs() {
         LinearLayout bar = new LinearLayout(getContext());
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -878,9 +996,21 @@ final class HomeView extends FrameLayout {
         bar.setPadding(0, dp(9), 0, dp(9) + dp(insetBottomDp));
 
         tabsBar = bar;
-        bar.addView(tab(HomeLabels.TAB_COMPUTER, R.drawable.ic_tab_computer, true, null));
-        bar.addView(tab("会话", R.drawable.ic_tab_sessions, false, null));
-        bar.addView(tab("设置", R.drawable.ic_tab_settings, false, null));
+        final boolean onComputers = !"sessions".equals(face);
+        final View self = bar;
+        bar.addView(tab(HomeLabels.TAB_COMPUTER, R.drawable.ic_tab_computer, onComputers, new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onShowComputers();
+            }
+        }));
+        bar.addView(tab(HomeLabels.TAB_SESSIONS, R.drawable.ic_tab_sessions, !onComputers, new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onShowSessions();
+            }
+        }));
+        bar.addView(tab(HomeLabels.TAB_SETTINGS, R.drawable.ic_tab_settings, false, null));
         return bar;
     }
 
@@ -900,7 +1030,7 @@ final class HomeView extends FrameLayout {
         view.setCompoundDrawablesWithIntrinsicBounds(null, icon, null, null);
         view.setCompoundDrawablePadding(dp(5));
         view.setAlpha(active ? 1f : 0.4f);
-        if (active && listener != null) view.setOnClickListener(listener);
+        if (listener != null) view.setOnClickListener(listener);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
         view.setLayoutParams(params);
         return view;
