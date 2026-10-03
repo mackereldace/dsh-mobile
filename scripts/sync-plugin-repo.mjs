@@ -31,6 +31,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { verifyPublishedArtifacts } from './lib/publish-checks.mjs'
+
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const REMOTE = 'https://github.com/mackereldace/dsh-mobile-plugin.git'
 const PROXY = 'http://127.0.0.1:7892'
@@ -87,95 +89,34 @@ try {
 git(['fetch', '--quiet', REMOTE, 'main'])
 const remoteTip = git(['rev-parse', 'FETCH_HEAD']).trim()
 const readRemote = (file) => git(['show', `FETCH_HEAD:${file}`])
-const bare = readRemote('lib/codex/codex-bridge.js')
-const boot = readRemote('lib/boot.js')
-const problems = []
-if (bare.includes("'@dsh-mobile/protocol'")) problems.push('产物里还有裸引用 @dsh-mobile/protocol')
-for (const entry of ['__dshmSetHosts', '__dshmForgetHost']) {
-  if (!boot.includes(entry)) problems.push(`lib/boot.js 里缺 ${entry}`)
-}
 /**
- * ★★★ 第 66 轮：二进制通道的**两端都要在产物里** ✗。
- *
- * 起因（同一天刚栽过）：宿主侧那次"改了源码但调用点根本没写进去"，
- * 而所有本地检查都绿 ✓ ⇒ 发出去的包里，宿主从没编码 ✗、
- * 客户端却在解码 ✓，通道**实际是断的** ✗。
- * ⇒ 远端核对这里同时验三样：
- *   · 宿主的编码函数在 `lib/tunnel.js` 里**有调用**（不是只有 import）；
- *   · 客户端的解码函数与标记键名在 `lib/boot.js` 里；
- *   · 两处的标记键名**逐字一致**（两份实现必须同步 ✓）。
+ * ★★★ 七道判据**只有一份实现** ✗ —— 在 `lib/publish-checks.mjs` 里 ✓，
+ *   由 `packages/host/test/publish-checks.test.ts` 用"好样本 + 坏样本"逐条验过 ✓。
+ *   原先它们是内联在这里的 ⇒ 只有被想起来的那条验过、其余可能是假的 ✓
+ *   （第 76 轮就出现过一道假闸）✓ —— 靠运气守的门不算守门 ✗。
  */
-const tunnel = readRemote('lib/tunnel.js')
-const hostEncodes = (tunnel.match(/encodeBinary\(/g) ?? []).length
-if (hostEncodes < 2) {
-  problems.push(`lib/tunnel.js 里 encodeBinary 调用只有 ${hostEncodes} 处（应 ≥ 2：一元响应 + 流式）`)
-}
-for (const entry of ['decodeBinaryValue', 'BYTES_TAG']) {
-  if (!boot.includes(entry)) problems.push(`lib/boot.js 里缺 ${entry}`)
-}
-/**
- * ★ 第 67 轮：同一条道理，另两处也必须是"产物里真的有" ✗：
- *   · 壁纸路由（第一阶段第 6 项）：手机要取的那条路由与它的标记；
- *   · 通知的 notify 分支（第二阶段）：页面得**认得并执行** notify，
- *     否则宿主推了、页面落到 unsupported，而宿主看到 deviceCall 返回 ok 又不退成 show
- *     ⇒ 通知被静默丢掉（这正是用户报的那条 ✗）。
- */
-const index = readRemote('lib/index.js')
-if (!index.includes('/mobile/desktop/wallpaper')) problems.push('lib/index.js 里没有壁纸路由')
-if (!index.includes('desktop-wallpaper')) problems.push('lib/index.js 里没有壁纸标记（desktop-wallpaper）')
-if (!boot.includes("callInfo.capability === 'notify'")) problems.push('lib/boot.js 里没有 notify 分支')
-if (!boot.includes('shellNotify(')) problems.push('lib/boot.js 里没有 shellNotify（桥调用）')
-
-/**
- * ★★★ 第 73 轮：**插件仓里的 APK 必须与本地最新构建一致** ✗。
- *
- * 为什么必须单独验 ✗：这份 APK 在**主仓被 gitignore** ✓，只活在插件仓里 ✓
- * ⇒ 它完全可以在没人注意的情况下**一直是旧的** ✗，而用户从 GitHub 装完插件、
- * 点一下下载拿到的就是旧包 ✓（"我明明改了，怎么还是老样子"——最难查的一种 ✗）。
- * 这条核对把它钉死在发布环节 ✓。
- */
+const hostApkPath = join(hostLib, 'dsh-mobile.apk')
+let remoteApkSize = Number.NaN
+let localApkSize = Number.NaN
 try {
   const apkBlob = git(['rev-parse', 'FETCH_HEAD:lib/dsh-mobile.apk']).trim()
-  const remoteApkSize = Number(git(['cat-file', '-s', apkBlob]).trim())
-  const localApk = join(hostLib, 'dsh-mobile.apk')
-  if (!existsSync(localApk)) {
-    problems.push('本地没有 packages/host/lib/dsh-mobile.apk（先跑 node scripts/build-apk.mjs）')
-  } else {
-    const localApkSize = statSync(localApk).size
-    if (remoteApkSize !== localApkSize) {
-      problems.push(`插件仓里的 APK（${remoteApkSize} 字节）与本地最新构建（${localApkSize} 字节）不一致 ⇒ 用户会下到旧包`)
-    }
-  }
+  remoteApkSize = Number(git(['cat-file', '-s', apkBlob]).trim())
 } catch (error) {
-  problems.push('读不到插件仓里的 APK（它应该在 lib/dsh-mobile.apk）')
+  void error
 }
+if (existsSync(hostApkPath)) localApkSize = statSync(hostApkPath).size
 
-/**
- * ★★★ 第 76 轮：三条取证探针必须"**定义了、而且被挂上了**" ✗。
- *
- * 同一条教训（宿主编码那次）：只定义不调用 = 功能不存在，而所有本地检查都绿 ✓。
- * 探针是用户唯一能自己取证的入口 ⇒ 它们悄悄没了，用户按手册做却什么都没发生，
- * 表现就是"按了没反应"（本项目最忌讳的那种）。
- */
-for (const probe of ['installCoverProbe', 'installInvisibleAskProbe']) {
-  /**
-   * ★★ 判据要**数出现次数** ✗ —— 我第一版写的是 `boot.includes('<名>()')`，
-   *   而**定义那一行本身就含 `<名>()`**（`function <名>() {`）⇒ 那条判据**永远为真** ✗，
-   *   探针真被删掉调用它也照样绿 ✓（★ 是我自己那次变异验证抓到的 ✓）。
-   * ⇒ 定义 + 调用 ⇒ 至少 2 次；只有 1 次就说明"定义了却没挂上" ✓。
-   */
-  const occurrences = boot.split(`${probe}()`).length - 1
-  if (!boot.includes(`function ${probe}(`)) problems.push(`lib/boot.js 里没有定义 ${probe}`)
-  else if (occurrences < 2) problems.push(`lib/boot.js 里定义了 ${probe} 但**没有调用**（出现 ${occurrences} 次，应 ≥ 2）`)
-}
-for (const marker of ['[probe]', '[hidden-ask]']) {
-  if (!boot.includes(marker)) problems.push(`lib/boot.js 里没有 ${marker} 的输出（用户看不到读数）`)
-}
+const problems = verifyPublishedArtifacts({
+  // ★ 上一版我把 `const boot = readRemote(...)` 一起删掉了 ⇒ ReferenceError: boot is not defined
+  //   （替换整段时最容易漏的就是"这段里其实还定义了别的东西"✗）⇒ 这里显式读。
+  boot: readRemote('lib/boot.js'),
+  tunnel: readRemote('lib/tunnel.js'),
+  index: readRemote('lib/index.js'),
+  codexBridge: readRemote('lib/codex/codex-bridge.js'),
+  remoteApkSize,
+  localApkSize,
+})
 
-const bootTag = boot.match(/var BYTES_TAG = '([^']+)'/)
-const hostTag = tunnel.match(/\$dshmBytes/)
-if (bootTag === null) problems.push('lib/boot.js 里没找到 BYTES_TAG 的值')
-else if (hostTag === null) problems.push('lib/tunnel.js 里看不到 $dshmBytes（标记键名从 protocol 来，检查内联是否跟上）')
 console.log(`[sync] 远端 = ${remoteTip.slice(0, 8)}`)
 if (problems.length > 0) {
   console.error('[sync] ✗ 核对不通过：')
