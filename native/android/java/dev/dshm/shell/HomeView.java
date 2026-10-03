@@ -610,7 +610,20 @@ final class HomeView extends FrameLayout {
     private View buildMachine(final HomeModel.Machine machine) {
         LinearLayout wrap = new LinearLayout(getContext());
         wrap.setOrientation(LinearLayout.VERTICAL);
-        if (machine.current) wrap.setBackgroundColor(theme.tint);
+        if (machine.current) {
+            /**
+             * ★★★ 2026-10-04 用户："**整个控件（电脑）**从圆角矩形变成方角矩形"✗
+             *   （★ 我第一版还以为是缩略图 ✗ —— 看错了 ✓，他说的就是**这张卡** ✓）。
+             *
+             * ★ 病根就是这一行：原来是 `setBackgroundColor(theme.tint)` ✓ ⇒ **一把方形底色** ✓，
+             *   把这张卡（以及它所在的圆角卡片组 ✓）的外观整个顶掉 ✗。
+             * ★ 而"当前"是**会变**的：地址一切换 ✓，探测把另一台标成 current ✓
+             *   ⇒ 用户看到的规律正是"过一会就变方角 ✓ + 同时多出一条局域网地址、
+             *     当前被切过去 ✓"（三件事同一个原因 ✓）。
+             * ⇒ 换成**同半径的圆角底色** ✓：保留"当前"的高亮 ✗，但不破坏圆角 ✓。
+             */
+            wrap.setBackground(roundRect(theme.tint, 0, 14));
+        }
         /**
          * ★★ 长按 ⇒ 弹出这张卡的全部判据 ✓（键 / 身份 / 每条地址 ✓）——
          *   真机排障只有屏幕上的字 ✓，而前两轮我都在看截图猜 ✗。
