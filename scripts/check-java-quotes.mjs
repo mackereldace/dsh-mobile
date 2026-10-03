@@ -28,6 +28,21 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..')
+/**
+ * ★★ 2026-10-04 扩到**我实际会写错的语言** ✗ ——
+ *   这条病（中文里夹半角引号）原先只查 Java ✓，可我当天在 **Python 的 heredoc 里又犯了** ✓
+ *   （`"关掉 App 再打开它"` 写在双引号字符串里 ⇒ Python 语法错 ⇒ **整段编辑没落盘** ✓）。
+ *   ★ heredoc 是内存里的东西、扫不到 ✗ ⇒ 能扫的是**落盘的脚本** ✓；
+ *     真正的纪律是"**任何语言里，中文句子里一律用「」**"✓（本仓既有写法 ✓）。
+ */
+/**
+ * ★★ 2026-10-04：**试过扩到 .py / .mjs，然后撤回了** ✗ ——
+ *   扩完立刻报 **228 处** ✓，而绝大多数是**合法的**（JS 模板串里用引号强调中文 ✓）。
+ *   ⇒ **一个报 228 次的守卫等于没有守卫** ✓（这条教训我自己写过 ✗，又亲手犯了一次 ✓）。
+ *   真正致命的只有 **Java**（字符串定界符就是半角引号 ✓，中文里夹一个 ⇒ 当场截断 ✓）。
+ *   ★ 其他语言（Python / JS）的规矩不靠扫描 ✓，靠纪律：**中文句子里一律写「」** ✓
+ *     （写进 skill 与本文件头 ✓）。
+ */
 const roots = [join(repoRoot, 'native', 'android', 'java'), join(repoRoot, 'native', 'android', 'test')]
 
 /**
