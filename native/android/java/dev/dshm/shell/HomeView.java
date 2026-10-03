@@ -64,6 +64,12 @@ final class HomeView extends FrameLayout {
         /** ★ 长按一台电脑 ⇒ 弹出"这张卡的全部判据" ✓（真机排障只有屏幕上的字 ✓）。 */
         void onInspectMachine(HomeModel.Machine machine);
 
+        /** 「设置」标签（2026-10-04 通电；目前只有"调试模式"一项）。 */
+        void onShowSettings();
+
+        /** 调试模式的开关：日志栏与快捷判据只在调试模式下出现（面向用户的界面不该带这些）。 */
+        void onSetDebugMode(boolean on);
+
         /** ★ 「手输地址」✓ —— 不在同一网络（例如走 Tailscale）时，这是唯一能自救的入口 ✓。 */
         void onAddComputerByAddress();
 
@@ -343,6 +349,28 @@ final class HomeView extends FrameLayout {
     /** 切回「电脑」那一面 ✓。 */
     void showComputers() {
         face = "computers";
+        rebuild();
+    }
+
+    void showSettings() {
+        face = "settings";
+        rebuild();
+    }
+
+    /**
+     * 调试模式（持久化在壳的偏好里，由设置页那一个开关控制）。
+     *
+     * 起因（用户原话）："它这个位置吧，你底下显示的那个报告栏确实不符合一个面向用户的软件。
+     * 你可以单做成一个调试模式，放在设置里。当我们打开调试模式的时候，首页显示这个日志栏，
+     * 并且快捷地可以显示一些判据。"
+     * ⇒ 关着（默认）：底部那行 `[home] 0.1.0+BUILD-…` 一个字都不显示；
+     *   开着：显示日志栏，长按取判据照旧可用。
+     */
+    private boolean debugMode = false;
+
+    void setDebugMode(boolean on) {
+        if (debugMode == on) return;
+        debugMode = on;
         rebuild();
     }
 
@@ -639,6 +667,13 @@ final class HomeView extends FrameLayout {
          * ★★★ 「会话」那一面（2026-10-04 用户选 (a) ✓）：与「电脑」共用表头与底栏 ✓，
          *   中间那块换成会话清单 ✓ —— 点某条 ⇒ 深链我们自己的会话页 ✓。
          */
+        if ("settings".equals(face)) {
+            column.addView(buildSettings(), new LinearLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, 0, 1f));
+            column.addView(buildTabs());
+            return;
+        }
+
         if ("sessions".equals(face)) {
             column.addView(buildSessionsList(), new LinearLayout.LayoutParams(
                     LayoutParams.MATCH_PARENT, 0, 1f));
@@ -679,6 +714,10 @@ final class HomeView extends FrameLayout {
          * 而且原生首页显示时它被盖住了 ✓ —— 报障的人根本看不到 ✓。
          * 这一行就是"**可念的现场**" ✓（本项目纪律：真机才现形的问题必须留一行可念的日志 ✓）。
          */
+        if (!debugMode) {
+            column.addView(buildTabs());
+            return;
+        }
         TextView status = text(statusLine(), 10.5f, theme.ink3, false);
         status.setPadding(dp(20), dp(2), dp(20), dp(6));
         /**
@@ -698,6 +737,45 @@ final class HomeView extends FrameLayout {
         strip.setOnLongClickListener(inspect);
         column.addView(strip, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(22)));
         column.addView(buildTabs());
+    }
+
+    /**
+     * 设置页。目前**只有一项**：调试模式。
+     * 面向用户的界面不该带日志和判据，所以它们的开关放在这里，默认关闭。
+     */
+    private View buildSettings() {
+        ScrollView scroll = new ScrollView(getContext());
+        scroll.setFillViewport(true);
+        observeUserScroll(scroll);
+        LinearLayout list = new LinearLayout(getContext());
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(18), dp(6), dp(18), dp(16));
+
+        LinearLayout card = new LinearLayout(getContext());
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(roundRect(theme.surface, theme.line, 14));
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(text(HomeLabels.SETTINGS_DEBUG, 15, theme.ink, true),
+                new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+        final android.widget.Switch toggle = new android.widget.Switch(getContext());
+        toggle.setChecked(debugMode);
+        toggle.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton button, boolean checked) {
+                if (callbacks != null) callbacks.onSetDebugMode(checked);
+            }
+        });
+        row.addView(toggle);
+        card.addView(row);
+        card.addView(text(HomeLabels.SETTINGS_DEBUG_HINT, 12, theme.ink3, false));
+
+        list.addView(card);
+        scroll.addView(list, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        return scroll;
     }
 
     private View buildHeader() {
@@ -1223,7 +1301,8 @@ final class HomeView extends FrameLayout {
         bar.setPadding(0, dp(9), 0, dp(9) + dp(insetBottomDp));
 
         tabsBar = bar;
-        final boolean onComputers = !"sessions".equals(face);
+        final boolean onSettings = "settings".equals(face);
+        final boolean onComputers = !"sessions".equals(face) && !onSettings;
         final View self = bar;
         bar.addView(tab(HomeLabels.TAB_COMPUTER, R.drawable.ic_tab_computer, onComputers, new OnClickListener() {
             @Override
@@ -1237,7 +1316,12 @@ final class HomeView extends FrameLayout {
                 if (callbacks != null) callbacks.onShowSessions();
             }
         }));
-        bar.addView(tab(HomeLabels.TAB_SETTINGS, R.drawable.ic_tab_settings, false, null));
+        bar.addView(tab(HomeLabels.TAB_SETTINGS, R.drawable.ic_tab_settings, onSettings, new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (callbacks != null) callbacks.onShowSettings();
+            }
+        }));
         return bar;
     }
 

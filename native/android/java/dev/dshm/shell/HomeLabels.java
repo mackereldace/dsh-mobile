@@ -193,4 +193,11 @@ public final class HomeLabels {
         if (builder.length() > 0) builder.append(" · ");
         builder.append(part);
     }
+
+    /** 设置页：调试模式。 */
+    public static final String SETTINGS_DEBUG = "调试模式";
+
+    /** 调试模式下面那句解释。 */
+    public static final String SETTINGS_DEBUG_HINT =
+            "打开后，首页底部会显示一行运行状态（版本戳、在线台数），长按首页任意空白处可以看到界面判据。给排障用，平时关着。";
 }

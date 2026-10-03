@@ -3861,6 +3861,21 @@ public class MainActivity extends android.app.Activity {
                 }
 
                 @Override
+                public void onShowSettings() {
+                    if (nativeHome != null) nativeHome.showSettings();
+                }
+
+                @Override
+                public void onSetDebugMode(boolean on) {
+                    try {
+                        prefs.edit().putBoolean(KEY_DEBUG_MODE, on).commit();
+                    } catch (Throwable ignored) {
+                        // 存不下也不影响本次会话内的表现，下次启动回到默认（关）
+                    }
+                    if (nativeHome != null) nativeHome.setDebugMode(on);
+                }
+
+                @Override
                 /** ★ 「会话」标签 ⇒ 切到那一面并去取清单 ✓。 */
                 public void onShowSessions() {
                     if (nativeHome != null) nativeHome.showSessions();
@@ -3995,8 +4010,21 @@ public class MainActivity extends android.app.Activity {
     }
 
     /** 请求一次加载 ✓（在飞时由控制器合并 ✓ —— 连点不会开好几趟探测 ✓）。 */
+    /** 调试模式的偏好键（设置页那个开关；默认关）。 */
+    private static final String KEY_DEBUG_MODE = "debug_mode";
+    /** 首次进首页时把偏好里的调试模式灌进视图，只做一次。 */
+    private boolean debugModeApplied = false;
+
     private void refreshNativeHome() {
         if (nativeHome == null || homeController == null || homeWiring == null) return;
+        if (!debugModeApplied) {
+            debugModeApplied = true;
+            try {
+                nativeHome.setDebugMode(prefs.getBoolean(KEY_DEBUG_MODE, false));
+            } catch (Throwable ignored) {
+                // 读不到就当关着
+            }
+        }
         try {
             homeWiring.setCurrentUrl(webView == null || webView.getUrl() == null ? currentUrl : webView.getUrl());
         } catch (Throwable ignored) {
