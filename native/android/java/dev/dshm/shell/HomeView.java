@@ -681,7 +681,22 @@ final class HomeView extends FrameLayout {
          */
         TextView status = text(statusLine(), 10.5f, theme.ink3, false);
         status.setPadding(dp(20), dp(2), dp(20), dp(6));
+        /**
+         * 长按取判据挪到底部。原先挂在列表和根视图上，设备多了以后列表被卡片占满，
+         * 那些位置按不到。这一行小字和它下面那条空白带没有别的控件，稳定可按。
+         */
+        final OnLongClickListener inspect = new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                if (callbacks != null) callbacks.onInspectMachine(null);
+                return true;
+            }
+        };
+        status.setOnLongClickListener(inspect);
         column.addView(status);
+        View strip = new View(getContext());
+        strip.setOnLongClickListener(inspect);
+        column.addView(strip, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(22)));
         column.addView(buildTabs());
     }
 
@@ -761,10 +776,24 @@ final class HomeView extends FrameLayout {
             return;
         }
 
+        /**
+         * 顺序也在生成快照时定好了（当前那台排第一），所以用户退出来时位置还得等那次
+         * 联网探测。这里在画之前先把"刚点的那台"提到最前：顺序立即正确，不用等刷新。
+         */
+        List<HomeModel.Machine> ordered = new ArrayList<HomeModel.Machine>(snapshot.machines);
+        if (currentMachineKeyNow != null) {
+            for (int i = 0; i < ordered.size(); i += 1) {
+                if (currentMachineKeyNow.equals(ordered.get(i).key)) {
+                    HomeModel.Machine picked = ordered.remove(i);
+                    ordered.add(0, picked);
+                    break;
+                }
+            }
+        }
         List<HomeModel.Machine> online = new ArrayList<HomeModel.Machine>();
         List<HomeModel.Machine> others = new ArrayList<HomeModel.Machine>();
-        for (int i = 0; i < snapshot.machines.size(); i += 1) {
-            HomeModel.Machine machine = snapshot.machines.get(i);
+        for (int i = 0; i < ordered.size(); i += 1) {
+            HomeModel.Machine machine = ordered.get(i);
             if (machine.online) online.add(machine);
             else others.add(machine);
         }
