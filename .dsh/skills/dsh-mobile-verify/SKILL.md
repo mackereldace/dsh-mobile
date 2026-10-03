@@ -18,7 +18,7 @@ whenToUse: 在 工程设计/dsh-mobile 下开发、验收、或记录改动
 | 改动 | 生效方式 |
 |---|---|
 | `packages/client/src/boot.js` | **手机刷新页面**即可（每次请求都从磁盘读，且 `no-store`） |
-| `packages/host/src/*`（新路由、改 HTML…） | **重启一次 DSH**：`bash scripts/restart-lan.sh` —— **必须由人在终端里跑**（从 agent 会话里跑会把 DSH 连同对话一起停掉） |
+| `packages/host/src/*`（新路由、改 HTML…） | ★ **退出并重开 DeepSeek Harness**（2026-10-04 更正 ✓：桌面端**已完全插件化** ✓ —— 重启就是「关掉 App 再打开」✓。**不要**再跑 `bash scripts/restart-lan.sh` ✗：那是插件化**之前**的「前台 CLI 形态」启动器 ✓，今天跑它会**又起一个 DSH** 并撞端口 ✗。★ 我（agent）就因为这条旧命令误导过用户一次 ✓）|
 | `native/android/*` | `build-apk.mjs` → **手机覆盖安装 APK** |
 
 ## 命令：只记入口，细节看文档 §三
@@ -33,7 +33,8 @@ node scripts/check-device-channel.mjs  # 端侧通道端到端
 
 node scripts/install-host-plugin.mjs --dsh-home ~/.dsh --profile web \
   --trusted-host … --phone-base-url …  # ← 完整参数照抄文档 §3.1
-bash scripts/restart-lan.sh            # ← 只能人在终端跑
+# 重启 = 退出并重开 DeepSeek Harness（见上表那条更正 ✓）
+# bash scripts/restart-lan.sh --status  # 只读体检仍可用；**别**用它重启 ✗
 ```
 
 > ⚠️ 本 skill 的旧版本这里写的是 `pnpm typecheck` / `pnpm check:prod` 那一套。
@@ -168,6 +169,18 @@ scripts/                       ← 验收脚本矩阵
 
 `dist/` 下有 `dshm-debug.keystore`，且 `dist/` 已在 `.gitignore` 中。**不要把它加进版本控制。**
 
+## ★★ 写代码时的一条铁律：**中文句子里一律用「」** ✗
+
+2026-10-04 一天之内，我因为"在中文里夹了半角引号"栽了 **六次** ✓：
+Java 里 ⇒ 字符串当场截断（`javac` 报一串"需要 ')'"✓）；
+**Python 里 ⇒ 我自己那段编辑脚本语法错 ⇒ 整段改动根本没落盘** ✓（最难发现的一种 ✓）。
+
+· Java 有机器守卫 ✓：`node scripts/check-java-quotes.mjs`（判据：**一个双引号两侧都是中文/全角标点** ✓，
+  带 5 条自检样例 ✓；★ 试过扩到 `.py`/`.mjs` 又撤回了 ✗ —— 扩完报 228 处、绝大多数合法 ✓
+  ⇒ **会误报的守卫等于没有守卫** ✓）。
+· **其他语言没有守卫** ✗（Python 的 heredoc 更是内存里的东西、扫不到 ✓）⇒ 只能靠这条铁律 ✓：
+  **凡是我写的中文句子，里面一律用「」** ✓。
+
 ## ★ 五条硬纪律（每条都是血换的）
 
 1. **`boot.js` 只允许精确字符串替换**（禁下标切片 / 按注释整段替换——已两次造成 685/754 行死区）。
@@ -177,10 +190,10 @@ scripts/                       ← 验收脚本矩阵
    新行为必须做**变异验证**（把实现临时回退 ⇒ **恰好**新增那几条红、其余全绿 ⇒ 恢复后全绿）。
 3. **构建 ≠ 部署**：`npm run build` 只写 `packages/*/lib`；**只有 `install-host-plugin.mjs` 才把
    `boot.js` / APK 装进 profile**（"验收全绿、手机上还是旧的"就是这么来的）。
-   `scripts/restart-lan.sh` **只能人在终端跑**——从 agent 会话里跑会把 DSH 连同对话一起停掉。
+   重启 DSH = **退出并重开 DeepSeek Harness**（★ 2026-10-04 更正：旧文档写的 `scripts/restart-lan.sh` 是插件化之前的 CLI 启动器 ✗，别再用它）。
 4. **两单不许同时改同一个文件**（`boot.js` / `packages/host/src/index.ts` 这类必须一个 agent 独占）；
    成规模的实现/排查**派子智能体**，主线只做分派、复核与文档汇整。
-   ⚠️ 但**子智能体禁止跑 `npm run build` / `install-host-plugin.mjs` / `restart-lan.sh`**（见流程 v2 第 4 条）。
+   ⚠️ 但**子智能体禁止跑 `npm run build` / `install-host-plugin.mjs`**，也**禁止自己重启 DSH**（见流程 v2 第 4 条）。
 5. **`devices.json` 改完必须立刻重启**（`DeviceStore` 只在构造时 `load()` 一次、之后整张内存表覆盖写文件），
    否则删掉的条目会被下一次 `touch()` 原样写回；用 `scripts/clean-devices.mjs` + 立刻重启。
 
