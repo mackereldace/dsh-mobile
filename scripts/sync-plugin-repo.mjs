@@ -158,10 +158,15 @@ try {
  * 表现就是"按了没反应"（本项目最忌讳的那种）。
  */
 for (const probe of ['installCoverProbe', 'installInvisibleAskProbe']) {
-  const defined = boot.includes(`function ${probe}(`)
-  const wired = boot.includes(`${probe}()`)
-  if (!defined) problems.push(`lib/boot.js 里没有定义 ${probe}`)
-  if (defined && !wired) problems.push(`lib/boot.js 里定义了 ${probe} 但**没有调用**（等于没有）`)
+  /**
+   * ★★ 判据要**数出现次数** ✗ —— 我第一版写的是 `boot.includes('<名>()')`，
+   *   而**定义那一行本身就含 `<名>()`**（`function <名>() {`）⇒ 那条判据**永远为真** ✗，
+   *   探针真被删掉调用它也照样绿 ✓（★ 是我自己那次变异验证抓到的 ✓）。
+   * ⇒ 定义 + 调用 ⇒ 至少 2 次；只有 1 次就说明"定义了却没挂上" ✓。
+   */
+  const occurrences = boot.split(`${probe}()`).length - 1
+  if (!boot.includes(`function ${probe}(`)) problems.push(`lib/boot.js 里没有定义 ${probe}`)
+  else if (occurrences < 2) problems.push(`lib/boot.js 里定义了 ${probe} 但**没有调用**（出现 ${occurrences} 次，应 ≥ 2）`)
 }
 for (const marker of ['[probe]', '[hidden-ask]']) {
   if (!boot.includes(marker)) problems.push(`lib/boot.js 里没有 ${marker} 的输出（用户看不到读数）`)
