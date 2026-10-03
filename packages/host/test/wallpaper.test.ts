@@ -55,6 +55,31 @@ describe('壁纸解析', () => {
     assert.match(result.reason ?? '', /注册表/)
   })
 
+  it('★★ 中文 Windows：先走 PowerShell（UTF-8），拿到的非 ASCII 路径要原样可用', () => {
+    const calls: string[] = []
+    const run = (command: string, args: string[]) => {
+      calls.push(command)
+      if (command === 'powershell') return ok('C:\\Users\\我\\图片\\壁纸.jpg\n')
+      return fail('不该走到 reg')
+    }
+    const result = resolveWallpaper('win32', run, () => true)
+    assert.deepEqual(calls, ['powershell']) // ★ 一次就够，别再去问 reg
+    assert.equal(result.ok, true)
+    assert.equal(result.path, 'C:\\Users\\我\\图片\\壁纸.jpg')
+  })
+
+  it('★ PowerShell 不可用 ⇒ 回退 reg query（纯 ASCII 路径仍能work）', () => {
+    const calls: string[] = []
+    const run = (command: string) => {
+      calls.push(command)
+      if (command === 'powershell') return fail('blocked')
+      return ok('    WallPaper    REG_SZ    C:\\w\\a.png')
+    }
+    const result = resolveWallpaper('win32', run, () => true)
+    assert.deepEqual(calls, ['powershell', 'reg'])
+    assert.equal(result.path, 'C:\\w\\a.png')
+  })
+
   it('★ 文件不在了 / 不是图片 ⇒ 都如实说，且**不退回截屏**', () => {
     const missing = resolveWallpaper('win32', () => ok('    WallPaper    REG_SZ    C:\\w\\a.png'), () => false)
     assert.equal(missing.ok, false)

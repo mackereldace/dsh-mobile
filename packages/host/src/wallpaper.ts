@@ -102,6 +102,35 @@ export function resolveWallpaper(
   }
 
   if (platform === 'win32') {
+    /**
+     * ★★★ 第 87 轮：**中文 Windows 上 `reg query` 的输出是 GBK** ✗ ——
+     *   而 `execFileSync` 这里按 UTF-8 解 ✓ ⇒ 壁纸路径里的非 ASCII 字符会变乱码 ✓
+     *   ⇒ 文件"不在了"（其实是路径解析错了 ✓）⇒ 手机上只看到占位 ✓。
+     *   这正是"我在电脑上断言全绿、用户那台却不行"的那类坑 ✗（夹具是纯 ASCII ✓）。
+     * ⇒ 先走 **PowerShell 并把输出显式设为 UTF-8** ✓（与系统语言无关 ✓）；
+     *   它不可用（被策略禁掉等 ✓）再回退 `reg query` ✓（纯 ASCII 路径仍然能work ✓）。
+     */
+    const viaPowerShell = run('powershell', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "[Console]::OutputEncoding=[Text.Encoding]::UTF8; (Get-ItemProperty 'HKCU:\Control Panel\Desktop').WallPaper",
+    ], 6000)
+    if (viaPowerShell.ok) {
+      const raw = viaPowerShell.stdout.trim().replace(/^"|"$/g, '')
+      /**
+       * ★★ 必须先排除"这根本不是一条路径" ✗ —— 我第一版直接把输出当路径，
+       *   而 `reg query` 那种整行（`    WallPaper    REG_SZ    C:\w\a.png`）
+       *   **以 .png 结尾** ⇒ 会被当成"有效的图片路径"⇒ **假成功** ✓，
+       *   于是再也走不到回退那条路 ✓（是既有的那条"全链路"断言当场把它抓出来的 ✓）。
+       * ⇒ 出现 `REG_SZ` 或换行 ⇒ 判定为"不是路径" ✓，继续回退 ✓。
+       */
+      const looksLikePath = raw.length > 0 && !raw.includes('REG_SZ') && !raw.includes('\n') && !raw.includes('\r')
+      if (looksLikePath) {
+        const found = check(raw, '注册表')
+        if (found.ok) return found
+      }
+    }
     const result = run('reg', ['query', 'HKCU\\Control Panel\\Desktop', '/v', 'WallPaper'], 4000)
     if (!result.ok) return { ok: false, reason: '读注册表失败（也许系统不允许）' }
     return check(parseWindowsWallpaper(result.stdout), '注册表')
