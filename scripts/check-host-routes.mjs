@@ -151,6 +151,26 @@ try {
           shot.body.includes('屏幕录制') && shot.body.includes('隐私与安全性'), shot.body.slice(0, 120))
   }
   check('★ 不是把系统原文直接扔出来（两态都不许 ✗）', !shot.body.includes('could not create image'))
+
+  console.log('\n── 壁纸（/mobile/desktop/wallpaper）──')
+  /**
+   * ★★★ 第一阶段第 6 项（用户："首页那个缩略图，你要用桌面，而不是实际的截图"）：
+   *   这条检查钉的就是那句要求的**反面** —— 读不到壁纸时**绝不退回截屏** ✗。
+   *   两态都要认（与上面截图那条同一课）：读得到 ⇒ 真图；读不到 ⇒ 502 + 人话 ✓。
+   */
+  const paper = await get('/mobile/desktop/wallpaper')
+  const paperMark = paper.headers.get('x-dsh-mobile') ?? ''
+  if (paper.status === 200) {
+    check('★ 读到壁纸时是图片（Content-Type 是 image/* ✓）',
+      (paper.headers.get('content-type') ?? '').startsWith('image/'),
+      String(paper.headers.get('content-type')))
+    check('★ 而且标记是壁纸（不是截屏那条路 ✗）', paperMark === 'desktop-wallpaper', paperMark)
+  } else {
+    check('读不到壁纸时回 502（不是 200 加一张空图 ✗）', paper.status === 502, String(paper.status))
+    check('★★ 失败说明是**人话**（讲清为什么读不到 ✓）',
+      /壁纸|注册表|系统|不支持/.test(paper.body), paper.body.slice(0, 120))
+  }
+  check('★★★ 绝不退回截屏（读不到也不许给 desktop-shot）', paperMark !== 'desktop-shot', paperMark)
 } finally {
   await host.close()
   rmSync(dataDir, { recursive: true, force: true })
