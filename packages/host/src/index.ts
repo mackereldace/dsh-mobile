@@ -43,8 +43,8 @@ import {
 
 import { DeviceStore, type AuditEntry } from './devices.ts'
 import { DeviceCallQueue, DEVICE_CAPABILITIES, type DeviceCapability } from './device-calls.ts'
-import { CodexBridge, handleCodexEndpoint } from './codex-bridge.ts'
-import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from './codex-page.ts'
+import { CodexBridge, handleCodexEndpoint } from './codex/codex-bridge.ts'
+import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from './codex/codex-page.ts'
 import {
   deriveLanTrust,
   isIpLiteralHostname,

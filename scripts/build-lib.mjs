@@ -49,7 +49,21 @@ try {
     const built = join(out, pkg, 'src')
     if (!existsSync(built)) throw new Error(`构建产物缺失：${built}`)
     const target = join(repo, 'packages', pkg, 'lib')
-    const files = readdirSync(built).filter((f) => f.endsWith('.js') || f.endsWith('.d.ts') || f.endsWith('.map'))
+    /**
+     * 递归列出产物（**相对路径**）。
+     * 原来只 `readdirSync` 顶层，于是源码里一旦有子目录（例如 src/codex/），
+     * 它编译出来的子目录**永远不会被复制进 lib/**，最后表现为"加载校验时找不到模块"。
+     */
+    const listBuilt = (dir, prefix) => {
+      const out = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix === '' ? entry.name : prefix + '/' + entry.name
+        if (entry.isDirectory()) out.push(...listBuilt(join(dir, entry.name), rel))
+        else if (rel.endsWith('.js') || rel.endsWith('.d.ts') || rel.endsWith('.map')) out.push(rel)
+      }
+      return out
+    }
+    const files = listBuilt(built, '')
     if (files.length === 0) throw new Error(`构建产物为空：${built}`)
     if (checkOnly) {
       console.log(`[build-lib] ${pkg}: 可生成 ${files.length} 个文件（--check 不写盘）`)
@@ -57,6 +71,7 @@ try {
     }
     for (const file of files) {
       const to = join(target, file)
+      mkdirSync(dirname(to), { recursive: true })
       if (existsSync(to)) backups.push({ to, data: readFileSync(to) })
       copyFileSync(join(built, file), to)
     }

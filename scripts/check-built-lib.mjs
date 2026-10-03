@@ -14,7 +14,7 @@
  * 用法：`node scripts/check-built-lib.mjs`
  */
 import { createServer } from 'node:net'
-import { startStandaloneHost } from '/Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/lib/standalone.js'
+import { startStandaloneHost } from '/Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/lib/codex/standalone.js'
 const free = () => new Promise((r) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)) }) })
 const plain = await free(), tls = await free()
 const host = await startStandaloneHost({ dataDir: '/tmp/dshm-lib-routes', plain: `127.0.0.1:${plain}`, tls: `127.0.0.1:${tls}`, logger: { log() {}, warn() {} } })

@@ -24,7 +24,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { startStandaloneHost } from '../packages/host/src/standalone.ts'
+import { startStandaloneHost } from '../packages/host/src/codex/standalone.ts'
 
 /**
  * ★ 先探一个**空闲端口** ✗ —— 我第一版写 `plain: '127.0.0.1:0'`（让系统挑 ✓），
