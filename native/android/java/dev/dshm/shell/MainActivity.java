@@ -2105,6 +2105,14 @@ public class MainActivity extends android.app.Activity {
              *   早于它定义入口时调用就只是个 no-op ✓（有 try/catch ✓，不会报错 ✓）。
              */
             try {
+                /**
+                 * ★ 让页面的调试框跟着壳的调试模式 ✓（见 debugModeOn 的注释）。
+                 *   ★ 页面**启动时读一次**这个键 ⇒ 本次加载已来不及 ✓，
+                 *     所以这里写下去是给**下一次加载**用的 ✓（用户刷新一次就能看到框 ✓）。
+                 */
+                view.evaluateJavascript(debugModeOn
+                        ? "try{localStorage.setItem('dsh-mobile.debug','1')}catch(e){}"
+                        : "try{localStorage.removeItem('dsh-mobile.debug')}catch(e){}", null);
                 view.evaluateJavascript("try{if(window.__dshmSetHosts)window.__dshmSetHosts()}catch(e){}", null);
                 view.postDelayed(new Runnable() {
                     @Override
@@ -4491,6 +4499,7 @@ public class MainActivity extends android.app.Activity {
 
                 @Override
                 public void onSetDebugMode(boolean on) {
+                    debugModeOn = on;
                     try {
                         prefs.edit().putBoolean(KEY_DEBUG_MODE, on).commit();
                     } catch (Throwable ignored) {
@@ -4630,6 +4639,16 @@ public class MainActivity extends android.app.Activity {
     private static final String KEY_DEBUG_MODE = "debug_mode";
     /** 首次进首页时把偏好里的调试模式灌进视图，只做一次。 */
     private boolean debugModeApplied = false;
+
+    /**
+     * ★ 第 59 轮：调试模式是否开着 —— 它决定**页面的调试框**要不要也打开 ✓。
+     *   为什么必须一起开 ✗：三条取证探针（长按"谁盖了谁" ✓ / 看不见的 ask 节点 ✓ /
+     *   端侧调用日志 ✓）的输出都进**页面自己的调试框** ✓，
+     *   而那个框由 localStorage 的 `dsh-mobile.debug` 在**页面启动时读一次** ✓
+     *   ⇒ 壳这边的开关不管它的话，用户在会话页里**什么都看不到** ✗
+     *   （探针白写 ✓，而且表现是"按了没反应"✗ —— 本项目最忌讳的那种）。
+     */
+    private boolean debugModeOn = false;
 
     private void refreshNativeHome() {
         if (nativeHome == null || homeController == null || homeWiring == null) return;
