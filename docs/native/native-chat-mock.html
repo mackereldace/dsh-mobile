@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>原生会话页 · 稿</title>
+<!--
+  ═══════════════════════════════════════════════════════════════════════════
+  原生会话页（APK 端那一层）—— **设计稿**，不是网页。
+  ═══════════════════════════════════════════════════════════════════════════
+
+  ★ 为什么先出 HTML 稿 ✗（沿用首页那条已验证的路 ✓）：
+    原生界面是 Java 画的 ✓，电脑上没法预览 ✓ ⇒ 先用 HTML 把**形状**定下来、
+    而且**自己看得见**（本项目的纪律：改界面之前先让自己能看见 ✓），
+    用户过目之后再照搬进 `native/android` ✓。
+
+  ★★ 与"我们那张网页会话页"（`/mobile/chat`）的分工 ✗ —— 别混：
+    · **壳（本稿）**：承载、排版、动画、输入区、滚动。
+    · **网页**：只负责"把 DSH 的输出喂进来"（数据面）✓，**不做外观、不做动画** ✗。
+    ⇒ 这就是"把动画落在 APK 端、让 DSH 在我们的架子上输出内容"那句话 ✓。
+
+  ───────────────────────────────────────────────────────────────────────────
+  设计方向（先定计划，再写代码 ✓）
+  ───────────────────────────────────────────────────────────────────────────
+  主题：手机上**看一台桌面智能体干活**。它不是聊天 ⇒ 是**执行流**。
+        所以：不搞气泡 ✗、不搞居中 ✗；一条消息 = 一个**区块**，
+        一次工具调用 = 一条**细导轨**。
+
+  颜色（暗色为主，与首页同一族 ✓ —— 同一个 App 不该有两套气质）
+        --bg        #0E1014   底
+        --surface   #16181D   卡/区块
+        --line      #24272E   分隔
+        --ink       #E7E9EE   正文
+        --ink-2     #9AA1AC   次要
+        --ink-3     #6C737E   更弱（时间、耗时）
+        ★ 语义色**只两个** ✗（其余一律不上色 —— 用户明确要过"状态用字说"）：
+        --wait      #E0A33E   等你动手（审批）
+        --live      #4C9BE8   正在进行
+  浅色一套（跟随系统 ✓）：bg #EEF0F4 / surface #FFFFFF / line #E2E5EA / ink #14161A …
+
+  字体：界面用系统无衬线（PingFang SC ✓）；★ **等宽只给"工具输出/代码/耗时"** ✓
+        —— 这个对比就是"这是执行流"的性格来源 ✓，不靠装饰 ✗。
+
+  版面：单列、左对齐、内容宽度 ≤ 44 字 ✓（手机上本来就窄）。
+        顶: 一行壳内标题（机器名 + 状态 + 「当前」）
+        中: 时间线（区块之间靠留白与一条 1px 线分层 ✓）
+        底: 输入区（贴 safe-area ✓，形状与首页一致 ✓）
+
+  ★ 只花一次大胆 ✗：贯穿的那条**工具导轨**（细竖线 + 节点 + 等宽小字）。
+    其余全部安静（不要阴影、不要渐变、不要圆角滥用 ✓）。
+
+  ★ 动画（**都在壳里做** ✓，稿子只标注）：
+    ① 进场：整屏淡入，时间线最后一条自下 8px 上浮 ✓
+    ② 新输出：**最后一条自身展开**（整屏不跳 ✓ —— 滚动位置是用户的 ✗）
+    ③ 审批出现：先亮左边琥珀线，再淡入内容 ✓（"要人动手"必须看得见 ✓）
+    ④ 发送：输入区上方一条细进度线 ✓（不是全屏遮罩 ✗）
+  ───────────────────────────────────────────────────────────────────────────
+-->
+<style>
+  :root {
+    --bg: #0E1014; --surface: #16181D; --surface-2: #1B1E24;
+    --line: #24272E; --line-soft: #1E2128;
+    --ink: #E7E9EE; --ink-2: #9AA1AC; --ink-3: #6C737E;
+    --wait: #E0A33E; --live: #4C9BE8;
+    --ok: #37A066;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg: #EEF0F4; --surface: #FFFFFF; --surface-2: #F6F8FA;
+    --line: #E2E5EA; --line-soft: #EDEFF3;
+    --ink: #14161A; --ink-2: #5B6270; --ink-3: #8D95A3;
+    --wait: #B7791F; --live: #2C7BC4;
+    --ok: #2F8A57;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #EEF0F4; --surface: #FFFFFF; --surface-2: #F6F8FA;
+      --line: #E2E5EA; --line-soft: #EDEFF3;
+      --ink: #14161A; --ink-2: #5B6270; --ink-3: #8D95A3;
+      --wait: #B7791F; --live: #2C7BC4;
+      --ok: #2F8A57;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  /* ★ 画布（这一层不属于界面本身 ✓，只是给评审看的一块底 ✓） */
+  body {
+    background: #08090B; display: flex; align-items: center; justify-content: center;
+    font-family: var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  :root[data-theme="light"] body, :root[data-theme="light"] { background: #08090B; }
+  /* ★★ 手机框：**宽高钉死 390×844** ✗ ——
+     我前几轮一直在跟"渲染窗口多宽"较劲 ✓（结果右侧裁字、发送按钮跑出屏幕 ✓），
+     钉死之后**与窗口宽度无关** ✓，任何截图都不会裁 ✓。 */
+  .phone {
+    width: 390px; height: 844px; flex: none;
+    background: var(--bg); color: var(--ink);
+    border-radius: 40px; overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+    border: 1px solid #26282E;
+  }
+
+  /* ── 顶部：一行壳内标题（壳已经不装 DSH 外壳了 ✓，这是我们自己的那一行）── */
+  header {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 14px 18px 12px; border-bottom: 1px solid var(--line-soft);
+  }
+  .machine { font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+  .sub { font-size: 12px; color: var(--ink-3); }
+  .grow { flex: 1; }
+  .pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    background: var(--ink); color: var(--bg); font-weight: 600;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--ok); display: inline-block; }
+
+  /* ── 时间线 ── */
+  main { flex: 1; overflow: auto; overflow-x: hidden; padding: 4px 0 12px; }
+  .turn { padding: 14px 18px 4px; max-width: 100%; }
+  .who { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .who .name { font-size: 12px; font-weight: 600; color: var(--ink-2); letter-spacing: .02em; }
+  .who .ago { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+  /* ★ 别用 44ch ✗：15px 下它约 370px，加上两侧 36px 内边距就超过 400px 视口 ⇒
+     整页被撑宽 ⇒ 右侧裁字、**发送按钮被推到屏幕外** ✓（一个根因两处症状 ✓）。 */
+  .say { font-size: 15px; line-height: 1.62; max-width: 100%; }
+  .say code {
+    font-family: var(--mono); font-size: 13px; background: var(--surface);
+    padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere;
+  }
+
+  /* ★ 只花一次大胆：工具导轨 —— 细竖线 + 节点 + 等宽小字 ✓ */
+  .rail { margin: 10px 0 2px 3px; border-left: 1px solid var(--line); max-width: 100%; }
+  .tool { position: relative; padding: 9px 0 9px 16px; max-width: 100%; }
+  .tool::before {
+    content: ""; position: absolute; left: -4.5px; top: 14px;
+    width: 8px; height: 8px; border-radius: 999px;
+    background: var(--bg); border: 1.5px solid var(--ink-3);
+  }
+  .tool[data-state="live"]::before { border-color: var(--live); background: var(--live); }
+  .tool[data-state="done"]::before { border-color: var(--ok); background: var(--ok); }
+  .tool-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .tool-name {
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+    /* ★ 长命令必须能断行 ✗ —— 我第一版漏了它，渲染出来右边把字裁掉了 ✓ */
+    overflow-wrap: anywhere; min-width: 0;
+  }
+  .tool-name .arg { color: var(--ink-2); }
+  .tool-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-left: auto; flex: none; }
+  .tool[data-state="live"] .tool-meta { color: var(--live); }
+  .tool-out {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--ink-2);
+    margin-top: 6px; padding: 8px 10px; background: var(--surface);
+    border-radius: 6px; white-space: pre-wrap;
+    /* ★ `break-word` 挡不住 `wrap.setBackgroundColor(...)` 这种长 token ✗ ⇒ 要 anywhere ✓ */
+    overflow-wrap: anywhere; word-break: break-word; max-width: 100%;
+  }
+  .tool-out .add { color: var(--ok); }
+  .tool-out .del { color: #D8756A; }
+
+  /* ── 审批：要人动手 ⇒ 一整块，左边琥珀 ✓（稿里只上这一个色块 ✓）── */
+  .approval {
+    margin: 12px 18px 4px; max-width: calc(100% - 36px); padding: 13px 14px;
+    background: var(--surface); border-radius: 10px;
+    border-left: 3px solid var(--wait);
+  }
+  .approval .tag { font-size: 11.5px; font-weight: 700; color: var(--wait); letter-spacing: .02em; }
+  .approval .cmd {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65; margin: 8px 0 10px;
+    color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  }
+  .approval .why { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .btn {
+    font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+  }
+  .btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+  /* ── 底部输入区：贴 safe-area，形状与首页一致 ✓ ── */
+  footer {
+    border-top: 1px solid var(--line-soft); background: var(--surface);
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .sending { height: 2px; background: var(--line-soft); border-radius: 2px; overflow: hidden; margin: 0 0 9px; }
+  .sending i { display: block; width: 38%; height: 100%; background: var(--live); border-radius: 2px; }
+  .composer { display: flex; gap: 9px; align-items: flex-end; max-width: 100%; }
+  .field {
+    flex: 1; min-width: 0; min-height: 40px; padding: 10px 13px; border-radius: 10px;
+    background: var(--bg); border: 1px solid var(--line);
+    font-size: 14px; color: var(--ink-3);
+  }
+  .send {
+    padding: 11px 18px; border-radius: 10px; background: var(--ink); color: var(--bg);
+    font-size: 14px; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<div class="phone">
+
+<!-- 顶：壳内一行（标题 / 状态 / 当前） -->
+<header>
+  <span class="dot"></span>
+  <span class="machine">Mac-mini-2024.local</span>
+  <span class="sub">正在跑 · 端口 3453</span>
+  <span class="grow"></span>
+  <span class="pill">当前</span>
+</header>
+
+<main>
+  <!-- 你说的话（区块，不是气泡 ✓） -->
+  <section class="turn">
+    <div class="who"><span class="name">你</span><span class="ago">14:41</span></div>
+    <p class="say">把首页那张卡的圆角修一下，顺便看看为什么过一会儿会变成方角。</p>
+  </section>
+
+  <!-- 它说的话 + 它做的事（工具导轨 ✓） -->
+  <section class="turn">
+    <div class="who"><span class="name">DSH</span><span class="ago">14:41</span></div>
+    <p class="say">先找一下是谁在改这张卡的背景——<code>HomeView.buildMachine</code> 里有一句给「当前」那台换底色的。</p>
+
+    <div class="rail">
+      <div class="tool" data-state="done">
+        <div class="tool-head">
+          <span class="tool-name">rg <span class="arg">"setBackgroundColor|theme.tint" native/android</span></span>
+          <span class="tool-meta">0.4s</span>
+        </div>
+        <div class="tool-out">HomeView.java:613:  if (machine.current) wrap.setBackgroundColor(theme.tint);</div>
+      </div>
+
+      <div class="tool" data-state="live">
+        <div class="tool-head">
+          <span class="tool-name">edit <span class="arg">HomeView.java</span></span>
+          <span class="tool-meta">正在写…</span>
+        </div>
+        <div class="tool-out"><span class="del">-  wrap.setBackgroundColor(theme.tint);</span>
+<span class="add">+  wrap.setBackground(roundRect(theme.tint, 0, 14));</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 审批：要人动手 ⇒ 琥珀左边线（且**不靠颜色暗示**，文字直说 ✓） -->
+  <section class="approval">
+    <div class="tag">需要你确认</div>
+    <div class="cmd">npm run build &amp;&amp; node scripts/build-apk.mjs</div>
+    <div class="why">会重写 <code>packages/host/lib</code> 并重新打 APK。你点确认之前它不会动。</div>
+    <div class="actions">
+      <span class="btn primary">允许这一次</span>
+      <span class="btn">拒绝</span>
+    </div>
+  </section>
+</main>
+
+<!-- 底：输入区（发送中只有一条细进度线 ✓） -->
+<footer>
+  <div class="sending"><i></i></div>
+  <div class="composer">
+    <div class="field">给 DSH 发一条消息…</div>
+    <div class="send">发送</div>
+  </div>
+</footer>
+
+<script>
+  // ★ 渲染脚本靠这个开关出明/暗两张图 ✓（本机手写 CDP 是坏的 ✗，见 shot-mock.mjs 的说明 ✓）
+  const theme = new URLSearchParams(location.search).get('theme')
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+</script>
+</div>
+</body>
+</html>

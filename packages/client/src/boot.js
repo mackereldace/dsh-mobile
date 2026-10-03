@@ -23531,6 +23531,15 @@
    */
   function isShellSurface() {
     try {
+      /**
+       * ★★★ 2026-10-04 用户报："我们自己的会话页上**顶栏意外存在**"✗ ——
+       *   我们那张页（`/mobile/chat` ✓）与 Codex 页**都明确声明了**
+       *   `globalThis.__DSH_MOBILE_NO_SHELL__ = true` ✓（注释写着"只装隧道、不装 DSH 的外壳 UI"✓），
+       *   而这里**从来没有认过这个标记** ✗ ⇒ 手机宽度 < 1024 时照样套上顶栏与抽屉 ✓（他截图为证 ✓）。
+       * ⇒ 把这条**显式退出**放在最前 ✗：页面说"不要外壳"，就**绝不装** ✓ ——
+       *   这比"按宽度猜"权威得多 ✓（那是**页面的明确意图** ✓）。
+       */
+      if (globalThis.__DSH_MOBILE_NO_SHELL__ === true) return false
       if (location.pathname === '/mobile/app' || location.pathname === '/mobile/app/') return true
       if (new URLSearchParams(location.search).get('mobile') === '1') return true
     } catch (error) {
