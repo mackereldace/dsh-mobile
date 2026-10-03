@@ -2807,6 +2807,23 @@ public class MainActivity extends android.app.Activity {
         } catch (Throwable t) {
             Log.w(TAG, "清理候选地址失败", t);
         }
+        /**
+         * ★★★ 第二条路：**WebView 里还开着那台电脑的页面** —— 它会自己重连自己的源 ✓，
+         *   我只把它压到首页下面是不够的 ✗（它还在后台连 ⇒ 又弹信任框 ✓）。
+         *   ⇒ 正在显示的就是那台时，把它**导航走**（`about:blank`）并清掉当前地址 ✓。
+         */
+        try {
+            String showing = webView == null ? null : webView.getUrl();
+            boolean showingDeleted = (showing != null && urlPointsAtMachine(showing, authorities, hosts))
+                    || (currentUrl != null && urlPointsAtMachine(currentUrl, authorities, hosts));
+            if (showingDeleted) {
+                currentUrl = "";
+                if (webView != null) webView.loadUrl("about:blank");
+                Log.i(TAG, "把那台电脑的页面导航走（否则它的页面会自己重连）");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "导航离开已删除电脑失败", t);
+        }
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");
         Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();
