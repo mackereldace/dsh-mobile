@@ -440,7 +440,20 @@ export class TunnelSession {
         FrameType.RpcResponse,
         FrameFlags.Json | FrameFlags.Final,
         Buffer.from(
-          JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value } }),
+          /**
+           * ★ 第一阶段第 3 项：值里若有二进制（例如 workspaceFiles/readBytes 的字节），
+           *   发出前先打标成 `{$dshmBytes: base64}` ✓，客户端解码后还原成 Uint8Array ✓。
+           * ★ 只影响我们这条隧道（桌面端不走它）✓；对不认识标记的一端，
+           *   行为与今天一样（本来就是 JSON 化）⇒ 不会更糟 ✓。
+           * ★★ 2026-10-04 补记：这一个调用点**曾经漏掉过**（只有 import、没有调用 ✓），
+           *   而"两端齐"是在契约断言（client-binary-sync.test.ts）加进来之后才被证伪的 ✗
+           *   —— 那是"我说了但没做"，机器比人可靠 ✓。
+           */
+          JSON.stringify({
+            type: 'server-response',
+            rpcId: request.rpcId,
+            result: { ok: true, value: encodeBinary(value) },
+          }),
           'utf8',
         ),
       )
@@ -485,7 +498,7 @@ export class TunnelSession {
         await this.sendFrame(
           FrameType.StreamItem,
           FrameFlags.Json,
-          Buffer.from(JSON.stringify({ streamId: request.streamId, value }), 'utf8'),
+          Buffer.from(JSON.stringify({ streamId: request.streamId, value: encodeBinary(value) }), 'utf8'),
         )
       }
       if (!controller.signal.aborted) {
