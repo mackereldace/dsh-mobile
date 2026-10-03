@@ -221,4 +221,10 @@ public final class HomeLabels {
     /** 调试模式下面那句解释。 */
     public static final String SETTINGS_DEBUG_HINT =
             "打开后，首页底部会显示一行运行状态（版本戳、在线台数），长按首页任意空白处可以看到界面判据。给排障用，平时关着。";
+
+    /** 点了连不上的那台时那一句（只讲事实与下一步）。 */
+    public static String offlineTap(String title) {
+        return "连不上" + (title == null || title.isEmpty() ? "这台电脑" : " " + title)
+                + "：可能没开机，或不在此刻的网络里。";
+    }
 }

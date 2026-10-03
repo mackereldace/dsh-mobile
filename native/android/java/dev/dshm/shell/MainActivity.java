@@ -4415,6 +4415,11 @@ public class MainActivity extends android.app.Activity {
                 }
 
                 @Override
+                public void onOfflineTap(String title) {
+                    Toast.makeText(MainActivity.this, HomeLabels.offlineTap(title), Toast.LENGTH_SHORT).show();
+                }
+
+                @Override
                 public void onForgetMachine(HomeModel.Machine machine) {
                     new android.app.AlertDialog.Builder(MainActivity.this)
                             .setTitle(HomeLabels.SETTINGS_DELETE_TITLE)

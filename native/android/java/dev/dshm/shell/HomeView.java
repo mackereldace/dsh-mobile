@@ -73,6 +73,9 @@ final class HomeView extends FrameLayout {
         /** 删掉某一台电脑在本机的全部配置（身份 / 地址 / 证书信任）。 */
         void onForgetMachine(HomeModel.Machine machine);
 
+        /** 点了连不上的那台 ⇒ 当场给一句人话（不许静默：本仓最忌讳"点了没反应"）。 */
+        void onOfflineTap(String title);
+
         /** ★ 「手输地址」✓ —— 不在同一网络（例如走 Tailscale）时，这是唯一能自救的入口 ✓。 */
         void onAddComputerByAddress();
 
@@ -1196,6 +1199,20 @@ final class HomeView extends FrameLayout {
                 }
             });
         } else {
+            /**
+             * ★★★ 2026-10-04 用户："离线的时候，首页点下去什么表现？就是点不下去，没有反馈。"
+             *
+             * ⇒ 点得下去，而且**当场说清为什么** ✓ —— 本仓最忌讳的就是"点了没反应"✓。
+             * ★ 表现按用户要求（"就提示，连不上呗"+"美术表现不要太丑"）：
+             *   一句短提示，**不用图标、不用红色** ✓，走与其它提示同一套口径 ✓；
+             *   文案只讲事实与下一步 ✓，不猜原因、不吓人 ✓。
+             */
+            row.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    if (callbacks != null) callbacks.onOfflineTap(instanceTitle(instance));
+                }
+            });
             row.setAlpha(0.55f);
         }
         return row;
