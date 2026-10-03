@@ -1459,7 +1459,21 @@ export function createMobileHost(options: {
         hostFingerprint: fingerprint(options.identity.signingKey.publicKey),
         code,
         ticket: ticketKey,
-        endpoints: [...options.endpoints()],
+        /**
+         * ★★★ 2026-10-04 真机逼出来的（用户："首页扫码连不上，体验会差"✗ + "它会收集配对页 3081 这个端口"✗）：
+         *   票据的端点原先 = `publicBaseUrl`（**明文 http** ✗，它是给电脑浏览器用的 ✓）+ `extraEndpoints` ✓。
+         *   而**手机 App 是 https-only** ✓（禁明文 ✓）⇒ 手机拿到的**第一条候选连 TLS 都开始不了** ✗
+         *   ⇒ 不弹"信任这台电脑"框 ✓ ⇒ 退回旧候选 ⇒ 用户看到"配对失败 / 重连"、也不出新卡片 ✓✓
+         *   （三件事同一个原因 ✓，用户实测：手动输入 `https://…:3443/mobile` 就会弹框 ✓）。
+         * ⇒ 票据（**只给手机看** ✓）里**只放 https** ✓，明文那条不再下发 ✓。
+         * ★ 兜底：万一这台机器**没开 TLS**（一台 https 端点都没有 ✓）⇒ 保持原样 ✓，
+         *   绝不把列表清空 ✗（那会让手机一条候选都没有 ✓）。
+         */
+        endpoints: (() => {
+          const all = [...options.endpoints()]
+          const https = all.filter((url) => url.startsWith('https://'))
+          return https.length > 0 ? https : all
+        })(),
         protocolVersion: PROTOCOL_VERSION,
         expiresAt,
         ...(caFingerprint === undefined ? {} : { caFingerprint }),

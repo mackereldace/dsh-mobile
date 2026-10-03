@@ -21,6 +21,7 @@ describe('机器配置推导', () => {
         trustedHosts: ['192.168.1.9:1234'],
         publicBaseUrl: 'http://192.168.1.9:1234',
         phoneBaseUrl: 'https://192.168.1.9:5678',
+        extraEndpoints: ['https://192.168.1.9:5678'],
         listener: { enabled: true, plain: '0.0.0.0:1234', tls: '0.0.0.0:5678' },
       },
       DEFAULTS,
@@ -28,6 +29,7 @@ describe('机器配置推导', () => {
     assert.deepEqual(result.trustedHosts, ['192.168.1.9:1234'])
     assert.equal(result.publicBaseUrl, 'http://192.168.1.9:1234')
     assert.equal(result.phoneBaseUrl, 'https://192.168.1.9:5678')
+    assert.deepEqual(result.extraEndpoints, ['https://192.168.1.9:5678'])
     assert.deepEqual(result.derived, [])
   })
 
@@ -48,15 +50,45 @@ describe('机器配置推导', () => {
     ])
     assert.equal(result.listener.plain, '0.0.0.0:3081')
     assert.equal(result.listener.tls, '0.0.0.0:3443')
-    assert.equal(result.listener.enabled, false)
+    // ★ 2026-10-04 翻转：**缺省 = 开**（用户："不能安装的时候直接弄好吗"✓），并会打一行日志 ✓
+    assert.equal(result.listener.enabled, true)
+    assert.ok(result.derived.some((line) => line.includes('默认开启局域网监听')))
   })
 
-  it('★★ 探测不到地址 ⇒ 什么都不补，也不编（不猜 ✗）', () => {
+  it('★★★ 没配 extraEndpoints ⇒ 补上 https 那条（手机只走 https ✗）', () => {
+    const result = resolveMachineConfig({}, DEFAULTS)
+    // phoneBaseUrl 那条 + 每个地址的 https 形式（去重后共 2 条 ✓）
+    assert.deepEqual(result.extraEndpoints, ['https://10.0.0.5:3443', 'https://100.64.0.9:3443'])
+    assert.ok(result.derived.some((line) => line.includes('extraEndpoints') && line.includes('https')))
+  })
+
+  it('★ 用户写了 extraEndpoints 就一个字不动（只补缺 ✗）', () => {
+    const result = resolveMachineConfig({ extraEndpoints: ['https://example.test:9'] }, DEFAULTS)
+    assert.deepEqual(result.extraEndpoints, ['https://example.test:9'])
+    assert.ok(!result.derived.some((line) => line.includes('extraEndpoints')))
+  })
+
+  it('★ 没有地址 ⇒ extraEndpoints 也不编（不猜 ✗）', () => {
+    const result = resolveMachineConfig({}, { ...DEFAULTS, candidates: [] })
+    assert.deepEqual(result.extraEndpoints, [])
+  })
+
+  it('★★ 探测不到地址 ⇒ 地址类什么都不补，也不编（不猜 ✗）', () => {
     const result = resolveMachineConfig({}, { ...DEFAULTS, candidates: [] })
     assert.deepEqual(result.trustedHosts, [])
     assert.equal(result.publicBaseUrl, undefined)
     assert.equal(result.phoneBaseUrl, undefined)
-    assert.deepEqual(result.derived, [])
+    // ★ 监听那条与地址无关 ⇒ 它仍然会说 ✓（而且**必须**说：开端口不许悄悄做 ✗）
+    assert.deepEqual(result.derived, [
+      '没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；'
+      + '不想要就在你的 config 里写 listener: { enabled: false }',
+    ])
+  })
+
+  it('★★ 显式 enabled: false 一律尊重（默认翻转不许盖掉用户 ✗）', () => {
+    const result = resolveMachineConfig({ listener: { enabled: false } }, DEFAULTS)
+    assert.equal(result.listener.enabled, false)
+    assert.ok(!result.derived.some((line) => line.includes('默认开启局域网监听')))
   })
 
   it('★ 端口跟着用户配的 listener 走（不另立一套 ✗）', () => {
@@ -73,7 +105,7 @@ describe('机器配置推导', () => {
 
   it('★ 每一处推导都说得出人话（含地址与端口 ✓）', () => {
     const result = resolveMachineConfig({}, DEFAULTS)
-    assert.equal(result.derived.length, 3)
+    assert.equal(result.derived.length, 5)
     assert.ok(result.derived.some((line) => line.includes('trustedHosts') && line.includes('10.0.0.5')))
     assert.ok(result.derived.some((line) => line.includes('publicBaseUrl') && line.includes(':3081')))
     assert.ok(result.derived.some((line) => line.includes('phoneBaseUrl') && line.includes(':3443')))

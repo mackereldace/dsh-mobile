@@ -1487,6 +1487,27 @@ public class MainActivity extends android.app.Activity {
                      *   "Only the original thread that created a view hierarchy can touch its views" ✗。
                      *   ⇒ 一律 `post` 回主线程 ✓（并且 `root` 可能还没建好 ⇒ 先判空 ✓）。
                      */
+                    /**
+                     * ★★★ 2026-10-04 用户报的两个 bug（在新电脑上配对之后 ✓）：
+                     *   ① 首页把它**归并到了"当前正在用的那台"**上 ✓ —— **刷新页面**之后
+                     *      才真正出现第二台电脑 ✓；
+                     *   ② 进了新电脑的会话、真的连上了 ✓，可首页那条"当前"白条**不跟着切** ✓。
+                     * ★ 同一个根 ✗：**身份库是"后来才写全"的**（配对那一刻写的可能还没有新电脑的记录 ✓），
+                     *   而首页**只在"回到首页那一刻"读了一次** ✓ ⇒ 之后写进来的一律没人看 ✓。
+                     * ⇒ 补上：**每次身份库真的写了东西，就让首页原地重读一次** ✓
+                     *   （原地刷新 ✓，**不导航** ✓ —— 绝不抢用户正在做的事 ✓，本仓那条老规矩 ✓）。
+                     */
+                    if (written > 0 && root != null) {
+                        final boolean homeVisible =
+                                nativeHome != null && nativeHome.getVisibility() == View.VISIBLE;
+                        root.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (nativeHome != null && homeVisible) refreshNativeHome();
+                            }
+                        });
+                    }
+
                     if (written > 0 && homeStepsAsideForPairing && root != null) {
                         // ★ 只叫一次 ✓（配对这件事已经落地了 ✓）
                         homeStepsAsideForPairing = false;

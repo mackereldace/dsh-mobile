@@ -681,7 +681,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger as unknown as { info?: (message: string) => void } | undefined,
     port,
     machine.publicBaseUrl,
-    Array.isArray(config.extraEndpoints) ? config.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0) : [],
+    machine.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0),
   )
 
   const gateway = ctx.typertGateway as unknown as RemoteGateway
