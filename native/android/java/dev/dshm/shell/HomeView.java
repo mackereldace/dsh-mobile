@@ -152,6 +152,17 @@ final class HomeView extends FrameLayout {
         super(context);
         this.theme = theme == null ? HomeTheme.forContext(context) : theme;
         this.callbacks = callbacks;
+        /**
+         * 长按整块首页就能看判据。原来只挂在列表容器上，按卡片之间、页头、页脚那块
+         * 空白都到不了它，用户按了没反应。挂在根上，凡是没被卡片吃掉的地方都能按出来。
+         */
+        setOnLongClickListener(new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                if (HomeView.this.callbacks != null) HomeView.this.callbacks.onInspectMachine(null);
+                return true;
+            }
+        });
         try {
             this.density = context.getResources().getDisplayMetrics().density;
         } catch (Throwable ignored) {
@@ -236,6 +247,19 @@ final class HomeView extends FrameLayout {
     private String currentAuthorityNow = null;
 
     /**
+     * 用户刚点进去的那台机器（机器键）。比按地址去猜可靠得多：地址匹配依赖
+     * 那次联网探测的结果，探测回来之前可能压根对不上；而机器键在点的那一刻就在手上。
+     */
+    private String currentMachineKeyNow = null;
+
+    /** 记住"刚进的是这台"，并立刻重画（不走防抖那道闸）。 */
+    private void markCurrentMachine(HomeModel.Machine machine) {
+        if (machine == null || machine.key == null || machine.key.length() == 0) return;
+        currentMachineKeyNow = machine.key;
+        rebuildNow();
+    }
+
+    /**
      * 立刻把"当前"指到这台 ✓（上网探测还没回来也不等它 ✓）。
      *
      * ★★★ 2026-10-04 用户第二轮反馈："**不行，还是不行**"✗（且确认装的是新包 ✓）——
@@ -258,6 +282,7 @@ final class HomeView extends FrameLayout {
      *   它由 instances → addresses 组成 ✓）—— 这也顺带把"同一台机器的多个地址"一起认了 ✓。
      */
     private boolean isCurrent(HomeModel.Machine machine) {
+        if (currentMachineKeyNow != null) return currentMachineKeyNow.equals(machine.key);
         if (currentAuthorityNow == null) return machine.current;
         for (int i = 0; i < machine.instances.size(); i += 1) {
             HomeModel.Instance instance = machine.instances.get(i);
@@ -276,8 +301,12 @@ final class HomeView extends FrameLayout {
 
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {
         everHadSnapshot = true;
-        // ★ 数据回来了 ⇒ 把"当前"交还给数据 ✓（见 currentAuthorityNow 那段注释 ✓）
-        currentAuthorityNow = null;
+        // 数据回来且与用户刚点的那台一致，就把判断交还给数据；不一致则以用户刚做的为准。
+        HomeModel.Machine fromData = next == null ? null : next.currentMachine();
+        if (fromData != null && currentMachineKeyNow != null && currentMachineKeyNow.equals(fromData.key)) {
+            currentMachineKeyNow = null;
+        }
+        if (fromData != null) currentAuthorityNow = null;
         snapshot = next;
         report = nextReport;
         error = "";
@@ -428,7 +457,8 @@ final class HomeView extends FrameLayout {
              *   · `上次重画=` ：最近一次真正重建列表的时刻 ✓ —— 与"点进去"的时刻一比 ✓
              *     就知道是不是被那道防抖闸延后了 ✓。
              */
-            text.append("当前(临时)=").append(currentAuthorityNow == null ? "（没设 ✗）" : currentAuthorityNow).append('\n');
+            text.append("当前(机器键)=").append(currentMachineKeyNow == null ? "（没设）" : currentMachineKeyNow).append('\n');
+            text.append("当前(地址)=").append(currentAuthorityNow == null ? "（没设）" : currentAuthorityNow).append('\n');
             text.append("上次重画=").append(lastRebuildAt == 0 ? "（还没画过）" : (android.os.SystemClock.uptimeMillis() - lastRebuildAt) + "ms 前").append('\n');
         }
         if (tabsBar != null) {
@@ -870,7 +900,7 @@ final class HomeView extends FrameLayout {
         agents.setPadding(dp(18), 0, dp(12), dp(6));
         for (int i = 0; i < machine.instances.size(); i += 1) {
             if (i > 0) agents.addView(divider());
-            agents.addView(buildAgent(machine.instances.get(i)));
+            agents.addView(buildAgent(machine, machine.instances.get(i)));
         }
         boolean open = machineExpanded(machine);
         chevron.setText(open ? "▴" : "▾");
@@ -960,7 +990,7 @@ final class HomeView extends FrameLayout {
         return;
     }
 
-    private View buildAgent(final HomeModel.Instance instance) {
+    private View buildAgent(final HomeModel.Machine owner, final HomeModel.Instance instance) {
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -994,6 +1024,7 @@ final class HomeView extends FrameLayout {
             row.setOnClickListener(new OnClickListener() {
                 @Override
                 public void onClick(View view) {
+                    markCurrentMachine(owner);
                     if (callbacks != null) callbacks.onEnter(url, instance.addresses.isEmpty() ? "" : instance.addresses.get(0).authority);
                 }
             });
