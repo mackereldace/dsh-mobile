@@ -2473,13 +2473,18 @@ public class MainActivity extends android.app.Activity {
     private void forgetMachine(HomeModel.Machine machine) {
         if (machine == null) return;
         java.util.List<String> authorities = new java.util.ArrayList<String>();
+        java.util.Set<String> hosts = new java.util.HashSet<String>();
         java.util.Set<String> fingerprints = new java.util.HashSet<String>();
         if (machine.key != null && HomeStore.validFingerprint(machine.key)) fingerprints.add(machine.key);
         for (int i = 0; i < machine.instances.size(); i += 1) {
             HomeModel.Instance instance = machine.instances.get(i);
             for (int j = 0; j < instance.addresses.size(); j += 1) {
                 String authority = instance.addresses.get(j).authority;
-                if (authority != null && !authority.isEmpty()) authorities.add(authority);
+                if (authority != null && !authority.isEmpty()) {
+                    authorities.add(authority);
+                    String host = hostOf(authority);
+                    if (host != null) hosts.add(host);
+                }
             }
         }
         int removedRecords = 0;
@@ -2523,14 +2528,33 @@ public class MainActivity extends android.app.Activity {
                 for (int i = 0; i < array.length(); i += 1) {
                     JSONObject slot = array.optJSONObject(i);
                     if (slot == null) continue;
-                    if (authorities.contains(PinStore.authorityOf(slot.optString("url", "")))) continue;
+                    if (urlPointsAtMachine(slot.optString("url", ""), authorities, hosts)) continue;
                     kept.put(slot);
                 }
                 prefs.edit().putString(KEY_ENDPOINT_SLOTS, kept.toString()).commit();
             }
+            /**
+             * ★★★ 用户报"删除了，它显示成未知了"✗ —— 根因就在这里：
+             *   记录删掉了 ✓，但**"当前地址"还指着那台**✗ ⇒ 首页会把当前地址也拼成一行 ✓
+             *   ⇒ 那台机器换了个面孔留在列表上（身份未知 ✓）。
+             * ⇒ 一起清掉：上次成功的地址 ✓、"当前地址"（`KEY_URL` ✓）与内存里的 `currentUrl` ✓，
+             *   并在删的正好是当前那台时**断开**（否则它还会被当成"当前"✓）。
+             */
             String lastGood = prefs.getString(VAULT_LAST_GOOD_ENDPOINT, null);
-            if (lastGood != null && authorities.contains(PinStore.authorityOf(lastGood))) {
+            if (lastGood != null && urlPointsAtMachine(lastGood, authorities, hosts)) {
                 prefs.edit().remove(VAULT_LAST_GOOD_ENDPOINT).commit();
+            }
+            String lastUrl = prefs.getString(KEY_URL, null);
+            boolean wasCurrent = lastUrl != null && urlPointsAtMachine(lastUrl, authorities, hosts);
+            if (currentUrl != null && urlPointsAtMachine(currentUrl, authorities, hosts)) wasCurrent = true;
+            if (wasCurrent) {
+                prefs.edit().remove(KEY_URL).commit();
+                currentUrl = "";
+                stopAutoConnect("删除了这台电脑");
+            }
+            String pinned = prefs.getString(KEY_PINNED_SLOT, null);
+            if (pinned != null && urlPointsAtMachine(pinned, authorities, hosts)) {
+                prefs.edit().remove(KEY_PINNED_SLOT).commit();
             }
         } catch (Throwable t) {
             Log.w(TAG, "清理地址槽失败", t);
@@ -2555,6 +2579,34 @@ public class MainActivity extends android.app.Activity {
                 + " 个、指纹 " + fingerprints.size() + " 个");
         Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();
         refreshNativeHome();
+    }
+
+    /** 这条 URL 是不是指着那台机器：authority 相同，或 host 相同（端口/写法差异也认得出）。 */
+    private static boolean urlPointsAtMachine(String url, java.util.List<String> authorities,
+                                              java.util.Set<String> hosts) {
+        String authority = PinStore.authorityOf(url);
+        if (authority != null && authorities.contains(authority)) return true;
+        String host = hostOf(authority == null ? url : authority);
+        return host != null && hosts.contains(host);
+    }
+
+    /** 从一个 `host[:port]` 或 URL 里取 host（小写；取不到返回 null）。 */
+    private static String hostOf(String text) {
+        if (text == null) return null;
+        String value = text.trim();
+        int scheme = value.indexOf("://");
+        if (scheme >= 0) value = value.substring(scheme + 3);
+        int cut = value.length();
+        for (int i = 0; i < value.length(); i += 1) {
+            char c = value.charAt(i);
+            if (c == '/' || c == '?' || c == '#' || c == ':') { cut = i; break; }
+        }
+        String host = value.substring(0, cut);
+        if (host.startsWith("[")) {
+            int end = host.indexOf(']');
+            if (end > 0) host = host.substring(1, end);
+        }
+        return host.isEmpty() ? null : host.toLowerCase(java.util.Locale.ROOT);
     }
 
     /** 这条记录是不是属于那台机器：指纹命中，或它记的地址里有那台机器的地址。 */
