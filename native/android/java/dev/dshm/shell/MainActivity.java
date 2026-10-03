@@ -2086,6 +2086,38 @@ public class MainActivity extends android.app.Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             /**
+             * ★★★ 2026-10-04 根因（用户："一直没有点信任 —— 一点信任，死去的电脑又回来了"）：
+             *   点"信任"会触发一次**页面重新加载** ✓，而页面一加载就会把**它本地那份全量目录**
+             *   写回壳 ✓ —— 那里面还躺着被删掉的电脑 ✓ ⇒ 它们就回来了 ✓。
+             *
+             *   为什么页面本地会有旧全量 ✗：boot.js 保存目录时写的是**整个数组** ✓，
+             *   而每台电脑的页面各自有一份存储 ✓ ⇒ 只要某个来源曾经保存过一次，
+             *   它那份副本里就存着**当时所有电脑** ✓（第 7/8 条 ✓）。
+             *
+             * ⇒ 底层改法：**每次页面加载完成，壳都说了算** ✓ —— 把壳那份（已清理的）目录
+             *   交给页面，让它**覆盖**本地副本 ✗（不是合并 ✓）。
+             *   这样页面的目录副本从此只是壳的缓存 ✓，唯一真相在壳这边 ✓；
+             *   它之后再写回，写回去的也是干净的那份 ✓。
+             * ★ 调用时机两次（立即 + 一秒后）：boot.js 是异步加载的 ✓，
+             *   早于它定义入口时调用就只是个 no-op ✓（有 try/catch ✓，不会报错 ✓）。
+             */
+            try {
+                view.evaluateJavascript("try{if(window.__dshmSetHosts)window.__dshmSetHosts()}catch(e){}", null);
+                view.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            view.evaluateJavascript(
+                                    "try{if(window.__dshmSetHosts)window.__dshmSetHosts()}catch(e){}", null);
+                        } catch (Throwable ignored) {
+                            // 页面没了就算了
+                        }
+                    }
+                }, 1000L);
+            } catch (Throwable ignored) {
+                // 调用不了不挡路（老页面没有这个入口）
+            }
+            /**
              * ★★ P1b：这一次加载**落地了**（不管成没成 ✓）⇒ 放开"切换中"那道闸 ✓。
              *   少了这一行，切过一次之后网页那颗「切过去」**永远**收到 `busy` ✗
              *   （而手机上只表现为"再点没反应"✗ —— 见 {@link #hostSwitchPending} ✓）。
@@ -2787,6 +2819,21 @@ public class MainActivity extends android.app.Activity {
          * ⇒ 删除时把候选地址里属于它的一并清掉 ✓、停掉自动尝试 ✓、回原生首页 ✓
          *   （没东西再去连它，就不会再弹 ✓）。
          */
+        /**
+         * ★ 第 8 条：那台电脑**自己那个来源**的页面存储（localStorage/IndexedDB）也要清 ✓ ——
+         *   它里面同样存着一份旧全量目录 ✓，哪天那个来源再被加载就会写回来 ✓。
+         *   用系统的 WebView 存储接口按来源删 ✓（不碰别的来源 ✓）。
+         */
+        try {
+            for (String authority : authorities) {
+                if (authority == null || authority.isEmpty()) continue;
+                android.webkit.WebStorage.getInstance().deleteOrigin("https://" + authority);
+                android.webkit.WebStorage.getInstance().deleteOrigin("http://" + authority);
+            }
+            Log.i(TAG, "清掉了这台电脑自己的页面存储（" + authorities.size() + " 个来源）");
+        } catch (Throwable t) {
+            Log.w(TAG, "清页面来源存储失败", t);
+        }
         try {
             if (slotUrls != null && slotUrls.length > 0) {
                 java.util.List<String> keepUrls = new java.util.ArrayList<String>();
