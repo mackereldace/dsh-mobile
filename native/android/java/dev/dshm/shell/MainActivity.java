@@ -2747,6 +2747,35 @@ public class MainActivity extends android.app.Activity {
         } catch (Throwable t) {
             Log.w(TAG, "叫页面删除失败（壳这边已删）", t);
         }
+        /**
+         * ★★★ 2026-10-04 用户："删除了那些不想要的电脑，它会一直提示我要不要信任 2CFC 开头的电脑"。
+         *
+         * 根因：删除把它的**证书 pin 清掉了** ✓，可手机**还在不停尝试连它** ✗ ——
+         * 内存里那串候选地址（配对时拼好的 slotUrls ✓）与自动换槽状态机还带着它 ✓，
+         * 而没有 pin 的第一次连接**必然**弹一次"信任这台电脑"✓ ⇒ 就变成反复问 ✓。
+         * ⇒ 删除时把候选地址里属于它的一并清掉 ✓、停掉自动尝试 ✓、回原生首页 ✓
+         *   （没东西再去连它，就不会再弹 ✓）。
+         */
+        try {
+            if (slotUrls != null && slotUrls.length > 0) {
+                java.util.List<String> keepUrls = new java.util.ArrayList<String>();
+                java.util.List<String> keepLabels = new java.util.ArrayList<String>();
+                for (int i = 0; i < slotUrls.length; i += 1) {
+                    if (urlPointsAtMachine(slotUrls[i], authorities, hosts)) continue;
+                    keepUrls.add(slotUrls[i]);
+                    if (slotLabels != null && i < slotLabels.length) keepLabels.add(slotLabels[i]);
+                }
+                if (keepUrls.size() != slotUrls.length) {
+                    slotUrls = keepUrls.toArray(new String[0]);
+                    slotLabels = keepLabels.toArray(new String[0]);
+                    Log.i(TAG, "候选地址里清掉了这台电脑（剩 " + slotUrls.length + " 个）");
+                }
+            }
+            stopAutoConnect("删除了这台电脑");
+            showNativeHome();
+        } catch (Throwable t) {
+            Log.w(TAG, "清理候选地址失败", t);
+        }
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");
         Toast.makeText(this, HomeLabels.SETTINGS_DELETED, Toast.LENGTH_SHORT).show();
