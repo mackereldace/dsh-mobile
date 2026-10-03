@@ -319,6 +319,17 @@ export interface MobileSelfcheck {
   readonly diagnostics?: ReadonlyArray<{ readonly tag: string; readonly detail: string }>
   /** 端侧队列积压（只读计数）：一直涨 ⇒ 手机没在取（见自检页里的说明）。 */
   readonly deviceQueue?: { readonly pending: number }
+  /**
+   * ★ 第 74 轮：**这台电脑上的插件与 APK 是哪一版** ✓ ——
+   *   专门用来消灭"验了旧的"这种白费：用户验之前先看一眼这里，
+   *   就知道电脑端有没有更新到最新（而不是等验完发现不对再回头查 ✓）。
+   *   · `boot`：注入脚本里的构建戳（形如 BUILD-… ✓，与手机上看到的一致 ✓）；
+   *   · `apk`：插件旁边那份 APK 的字节数与修改时间 ✓（没有就如实说没有 ✓）。
+   */
+  readonly assets?: {
+    readonly boot: string
+    readonly apk: { readonly bytes: number; readonly modifiedAt: string } | null
+  }
   readonly host: { readonly hostId: string; readonly hostName: string; readonly hostFingerprint: string }
   readonly tls: {
     /** 本部署有没有注入证书管理器（`cordis.ts` 注入；纯协议测试里没有）。 */
@@ -1754,6 +1765,36 @@ export function createMobileHost(options: {
         ...(() => {
           try {
             return { deviceQueue: { pending: deviceCalls.pendingCount() } }
+          } catch (error) {
+            void error
+            return {}
+          }
+        })(),
+        ...(() => {
+          /**
+           * ★ 第 74 轮：把"这台电脑装的插件与 APK 是哪一版"念出来 ✓ ——
+           *   用户验之前先看这里一眼，就知道电脑端是不是新的 ✓（消灭"验了旧的"那种白费 ✓）。
+           */
+          try {
+            let boot = ''
+            try {
+              // boot.js 就在产物旁边（构建时拷进 lib/）⇒ 直接按模块位置取，不依赖配置类型
+              const bootPath = join(dirname(fileURLToPath(import.meta.url)), 'boot.js')
+              const text = readFileSync(bootPath, 'utf8')
+              const stamp = text.match(/BUILD-[0-9]+/)
+              boot = stamp === null ? '' : stamp[0]
+            } catch (error) {
+              void error
+            }
+            let apk: { bytes: number; modifiedAt: string } | null = null
+            try {
+              const apkPath = join(dirname(fileURLToPath(import.meta.url)), 'dsh-mobile.apk')
+              const stat = statSync(apkPath)
+              apk = { bytes: stat.size, modifiedAt: stat.mtime.toISOString() }
+            } catch (error) {
+              void error
+            }
+            return { assets: { boot, apk } }
           } catch (error) {
             void error
             return {}
