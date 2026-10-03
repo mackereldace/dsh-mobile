@@ -113,6 +113,19 @@ if (hostEncodes < 2) {
 for (const entry of ['decodeBinaryValue', 'BYTES_TAG']) {
   if (!boot.includes(entry)) problems.push(`lib/boot.js 里缺 ${entry}`)
 }
+/**
+ * ★ 第 67 轮：同一条道理，另两处也必须是"产物里真的有" ✗：
+ *   · 壁纸路由（第一阶段第 6 项）：手机要取的那条路由与它的标记；
+ *   · 通知的 notify 分支（第二阶段）：页面得**认得并执行** notify，
+ *     否则宿主推了、页面落到 unsupported，而宿主看到 deviceCall 返回 ok 又不退成 show
+ *     ⇒ 通知被静默丢掉（这正是用户报的那条 ✗）。
+ */
+const index = readRemote('lib/index.js')
+if (!index.includes('/mobile/desktop/wallpaper')) problems.push('lib/index.js 里没有壁纸路由')
+if (!index.includes('desktop-wallpaper')) problems.push('lib/index.js 里没有壁纸标记（desktop-wallpaper）')
+if (!boot.includes("callInfo.capability === 'notify'")) problems.push('lib/boot.js 里没有 notify 分支')
+if (!boot.includes('shellNotify(')) problems.push('lib/boot.js 里没有 shellNotify（桥调用）')
+
 const bootTag = boot.match(/var BYTES_TAG = '([^']+)'/)
 const hostTag = tunnel.match(/\$dshmBytes/)
 if (bootTag === null) problems.push('lib/boot.js 里没找到 BYTES_TAG 的值')
