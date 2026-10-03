@@ -26,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from './devices.ts'
+import { notifyTextFor, shouldNotifyEvent } from './notify-text.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
 import { createLanListener, DEFAULT_PLAIN_LISTEN, DEFAULT_TLS_LISTEN, type LanListener } from './lan-listener.ts'
@@ -838,13 +839,15 @@ export function apply(ctx: Context, config: Config = {}): void {
    *    用户没启用就退 `show`（页面可见时也能看到 ✓）；两个都没开就安静地不做 ✗。
    */
   function installApprovalPush(): void {
-    const notify = (payload: unknown): void => {
+    /**
+     * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓ ——
+     *   选择卡的事件类型名还没取证到 ✓（取证办法见 40 号文档，诊断已经能在手机上读到 ✓），
+     *   拿到之后**只改那个清单一行** ✓，通道与"点击落到会话"都已共用 ✓。
+     */
+    const notify = (type: string, payload: unknown): void => {
       try {
         const record = (payload ?? {}) as { toolName?: unknown; reason?: unknown; title?: unknown; summary?: unknown }
-        const tool = String(record.toolName ?? record.title ?? '').trim()
-        const reason = String(record.reason ?? record.summary ?? '').trim()
-        const text =
-          '电脑上的 agent 需要你确认' + (tool.length > 0 ? '：' + tool : '') + (reason.length > 0 ? '（' + reason.slice(0, 120) + '）' : '')
+        const text = notifyTextFor(type, record).body
         // ★ 先**落审计**再推送：这样"钩子到底有没有被触发"有据可查 ✓
         //   （原先只打 console —— 而 DSH 可能跑在后台终端里，用户看不到 ✗；
         //    于是"审批没通知"到底是"钩子没响"还是"通知发不出"完全分不清 ✗）
@@ -908,8 +911,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           } catch (error) {
             void error
           }
-          if (kind !== 'approval/asked') return
-          notify({ ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) })
+          if (!shouldNotifyEvent(kind)) return
+          notify(kind, { ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) })
         }
         anyCtx.on('session/event', onSessionEvent)
         channels.push(['ctx.on(session/event)', undefined])
@@ -917,8 +920,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // 兼容另外两个可能的事件名（不同 DSH 版本暴露的名字不一样；
       // 多订一个的代价只是"可能多推一条"，而漏订的代价是"功能完全不工作" ✗）
       if (typeof anyCtx.on === 'function') {
-        anyCtx.on('approval/asked', notify)
-        anyCtx.on('approval/request', notify)
+        anyCtx.on('approval/asked', (payload: unknown) => notify('approval/asked', payload))
+        anyCtx.on('approval/request', (payload: unknown) => notify('approval/asked', payload))
       }
     } catch (error) {
       console.warn('[dsh-mobile] 审批推送订阅失败（其余功能不受影响）：', error)
