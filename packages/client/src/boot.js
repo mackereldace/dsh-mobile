@@ -5661,11 +5661,28 @@
       var bucket = isTailscaleHost(parsedCandidate.hostname) ? tailscale : school
       if (bucket.indexOf(candidates[k]) < 0) bucket.push(candidates[k])
     }
+    /**
+     * ★★★ 2026-10-04（用户："它切到局域网的情况还是会发生"✗）：
+     *   **刚刚把这份页面加载出来的那条地址，必须排第一** ✗ ——
+     *   它是候选里**唯一"已经证明可达"**的那条 ✓（上面 ② 的注释自己都写着「必然可达」✓）。
+     *   ★ 而 "学校优先" 只是**另一条先验** ✓：当用户走的是 Tailscale 时，
+     *     学校桶（局域网 ✓）排第一 ⇒ 壳就会**从一条能用的地址切到一条不可达的地址** ✗✗
+     *     —— 他真机上正是如此（一切到局域网那条 ⇒ 那条没固定过证书 ⇒ 证书对不上 ⇒ 页面连不上 ✓）。
+     *   ★ 其余候选**保持学校优先** ✓（校园网里那条仍是快路径 ✓），
+     *     只是让**已证明可达**的排到最前 ✓（它排第一还省一次失败尝试 ✓）。
+     */
     var ordered = school.concat(tailscale).slice(0, 2)
+    var currentSlot = location.origin + location.pathname
+    var preferred = []
+    if (ordered.indexOf(currentSlot) >= 0) preferred.push(currentSlot)
+    for (var m = 0; m < ordered.length; m += 1) {
+      if (ordered[m] !== currentSlot) preferred.push(ordered[m])
+    }
+    var orderedFinal = preferred.slice(0, 2)
     var slots = []
-    for (var n = 0; n < ordered.length; n++) {
-      var parsedOrdered = new URL(ordered[n])
-      slots.push({ label: isTailscaleHost(parsedOrdered.hostname) ? 'Tailscale' : '学校', url: ordered[n] })
+    for (var n = 0; n < orderedFinal.length; n++) {
+      var parsedOrdered = new URL(orderedFinal[n])
+      slots.push({ label: isTailscaleHost(parsedOrdered.hostname) ? 'Tailscale' : '学校', url: orderedFinal[n] })
     }
     return slots
   }
@@ -14115,7 +14132,7 @@
     for (var i = 0; i < homeState.sessions.length; i++) {
       var item = homeState.sessions[i]
       if (item === null || typeof item !== 'object') continue
-      if (item.current === true || item.running === true) return String(item.id)
+      if (item.current === true || item.isCurrent === true || item.active === true || item.running === true) return String(item.id)
     }
     if (homeState.sessions.length > 0 && homeState.sessions[0] !== null && typeof homeState.sessions[0] === 'object') {
       var first = homeState.sessions[0]
@@ -14661,7 +14678,8 @@
        *   （不是 `request` ✗ —— 每个方法的参数名以它自己的 descriptor 为准 ✓，
        *   `session/selectModel` 才是 `request` ✓、`session/modelCatalog` 无参数 ✓）。
        */
-      var response = await link.rpc('session/list', { args: { _request: { limit: 30 } } }, undefined)
+      // ★ round 214b：**空请求** ✓ —— `limit` 未必是合法字段 ✗（描述符会整个拒 ⇒ 认不出当前会话 ✗）
+      var response = await link.rpc('session/list', { args: { _request: {} } }, undefined)
       var result = response === undefined || response === null ? undefined : response.result
       if (result === undefined || result === null || result.ok !== true) {
         var err = result === undefined || result === null ? {} : result.error || {}
@@ -15073,7 +15091,7 @@
       else lan.push(candidates[c])
     }
     var ordered = preference === 'tail' ? tails.concat(lan) : lan.concat(tails)
-    if (ordered.length === 0) {
+    if (orderedFinal.length === 0) {
       homeToast('这台智能体没有可用地址')
       return
     }

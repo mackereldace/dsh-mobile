@@ -610,20 +610,14 @@ final class HomeView extends FrameLayout {
     private View buildMachine(final HomeModel.Machine machine) {
         LinearLayout wrap = new LinearLayout(getContext());
         wrap.setOrientation(LinearLayout.VERTICAL);
-        if (machine.current) {
-            /**
-             * ★★★ 2026-10-04 用户："**整个控件（电脑）**从圆角矩形变成方角矩形"✗
-             *   （★ 我第一版还以为是缩略图 ✗ —— 看错了 ✓，他说的就是**这张卡** ✓）。
-             *
-             * ★ 病根就是这一行：原来是 `setBackgroundColor(theme.tint)` ✓ ⇒ **一把方形底色** ✓，
-             *   把这张卡（以及它所在的圆角卡片组 ✓）的外观整个顶掉 ✗。
-             * ★ 而"当前"是**会变**的：地址一切换 ✓，探测把另一台标成 current ✓
-             *   ⇒ 用户看到的规律正是"过一会就变方角 ✓ + 同时多出一条局域网地址、
-             *     当前被切过去 ✓"（三件事同一个原因 ✓）。
-             * ⇒ 换成**同半径的圆角底色** ✓：保留"当前"的高亮 ✗，但不破坏圆角 ✓。
-             */
-            wrap.setBackground(roundRect(theme.tint, 0, 14));
-        }
+        /**
+         * ★★★ 2026-10-04 **再改**（用户："截图左边会出现一个竖的白条 ✓、底下那些端口的选择
+         *   颜色明显不一样 ✓"）—— 这两样都是**我自己加的"当前"花样** ✗：
+         *   · 左边那条 `rail` ✓（本意是强调"当前"✓，实际像一道白条 ✗）；
+         *   · 给"当前"整块换底色 ✓（本意是暗示 ✓，实际让同一张卡里几行颜色不一致 ✗）。
+         *   ⇒ **两样都拿掉** ✓：卡片保持"全部同一底色"✓，只用右上角那颗「当前」小标签表达 ✓
+         *     （标签是既有的、看得懂的 ✓ —— 状态用**字**说，不靠底色暗示 ✗）。
+         */
         /**
          * ★★ 长按 ⇒ 弹出这张卡的全部判据 ✓（键 / 身份 / 每条地址 ✓）——
          *   真机排障只有屏幕上的字 ✓，而前两轮我都在看截图猜 ✗。
@@ -640,13 +634,6 @@ final class HomeView extends FrameLayout {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(13), dp(12), dp(12), dp(12));
-        if (machine.current) {
-            View rail = new View(getContext());
-            rail.setBackgroundColor(theme.rail);
-            LinearLayout.LayoutParams railParams = new LinearLayout.LayoutParams(dp(3), LayoutParams.MATCH_PARENT);
-            railParams.rightMargin = dp(10);
-            row.addView(rail, railParams);
-        }
 
         ThumbView thumb = new ThumbView(getContext(), theme, machine.online);
         /**
