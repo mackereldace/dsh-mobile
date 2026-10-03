@@ -338,6 +338,9 @@ public class MainActivity extends android.app.Activity {
      */
     private static final String VAULT_LAST_GOOD_ENDPOINT = "dsh-mobile.lastGoodEndpoint";
 
+    /** 通知点进来时要落到哪个会话（第二阶段缺口二；见 postNotification 与 onNewIntent）。 */
+    private static final String NOTIFY_SESSION_EXTRA = "dshm-notify-session";
+
     /** 已删除电脑的指纹墓碑（见 forgetMachine；只记指纹，不含任何配置）。 */
     private static final String KEY_FORGOTTEN_HOSTS = "dsh-mobile.forgottenHosts";
 
@@ -1185,9 +1188,9 @@ public class MainActivity extends android.app.Activity {
          *         `denied`（被用户或系统关了 ✓）/ `untrusted` / `error` ✓。
          */
         @JavascriptInterface
-        public String notify(String title, String body) {
+        public String notify(String title, String body, String sessionId) {
             if (!isTrustedPage()) return "untrusted";
-            if (postNotification(title, body)) return "ok";
+            if (postNotification(title, body, sessionId)) return "ok";
             String state = notificationPermissionState();
             Log.w(TAG, "通知未发出（权限=" + state + "）");
             return state;
@@ -2221,7 +2224,7 @@ public class MainActivity extends android.app.Activity {
     }
 
     /** 真的发一条系统通知 ✓（返回是否发出 ✓）。 */
-    private boolean postNotification(String title, String body) {
+    private boolean postNotification(String title, String body, String sessionId) {
         try {
             String state = notificationPermissionState();
             if (!"granted".equals(state)) return false;
@@ -2230,7 +2233,17 @@ public class MainActivity extends android.app.Activity {
             String safeBody = clip(body, 220, safeTitle);
             Intent intent = new Intent(this, MainActivity.class);
             intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            PendingIntent pending = PendingIntent.getActivity(this, 0, intent,
+            /**
+             * ★ 第二阶段缺口二：把"该落到哪个会话"塞进意图 ✓ ——
+             *   点通知进来后由 onNewIntent 读它，落到那台机器的会话 ✓。
+             *   ★ 请求码按会话区分 ✗：全用 0 的话，两条不同会话的通知会**共用同一个
+             *   PendingIntent**（FLAG_UPDATE_CURRENT 还会改写它的 extra ✓）⇒
+             *   点哪条都落到最后一条 ✗ —— 那种错很难看出来 ✓。
+             */
+            boolean hasSession = sessionId != null && sessionId.length() > 0;
+            if (hasSession) intent.putExtra(NOTIFY_SESSION_EXTRA, sessionId);
+            PendingIntent pending = PendingIntent.getActivity(this,
+                    hasSession ? sessionId.hashCode() : 0, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             Notification notification = new Notification.Builder(this, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -3718,8 +3731,50 @@ public class MainActivity extends android.app.Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        /**
+         * ★ 第二阶段缺口二（通知点击）：这条 intent 里若带着"该去哪个会话"，
+         *   就直接落到那个会话 ✓ —— 走**现成的** onEnterSession ✓，不另造 ✗。
+         *   放在扫码之前判：两者互斥 ✓，而通知这条更具体 ✓。
+         * ★ 没有这个 extra ⇒ 什么都不做 ✓（就是今天的行为 ✓）。
+         */
+        if (handleNotifyIntent(intent)) return;
         // 处理了就擦掉 ✓（与 onCreate 那条同理：别让它在重建时被重放 ✗）
         if (handlePairIntent(intent)) setIntent(new Intent());
+    }
+
+    /**
+     * 进某个会话的**唯一一份**实现 ✓ —— 首页点会话（回调 ✓）与通知点进来（{@link #handleNotifyIntent} ✓）
+     * 都走它 ✓（本仓规矩：同一件事别写两份 ✗，早晚只改一处 ✓）。
+     */
+    private void openSession(String sessionId, String why) {
+        String authority = currentAuthority();
+        if (authority == null || authority.isEmpty()) {
+            Log.w(TAG, "还没有可用的电脑地址，进不了会话");
+            return;
+        }
+        String url = "https://" + authority + "/mobile/chat?session="
+                + android.net.Uri.encode(sessionId == null ? "" : sessionId);
+        showWebView();
+        applyHostUrl(url, why);
+    }
+
+    /**
+     * 通知点进来的意图 ✓：带着 {@link #NOTIFY_SESSION_EXTRA} 就认领 ✓。
+     * @return 认领了没有 ✓（认领了就擦掉 intent，免得重建时重放 ✗）
+     */
+    private boolean handleNotifyIntent(Intent intent) {
+        if (intent == null) return false;
+        try {
+            String sessionId = intent.getStringExtra(NOTIFY_SESSION_EXTRA);
+            if (sessionId == null || sessionId.isEmpty()) return false;
+            Log.i(TAG, "从通知进入会话：" + sessionId);
+            setIntent(new Intent());
+            openSession(sessionId, "从通知进入会话");
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "处理通知意图失败（不影响其余）", t);
+            return false;
+        }
     }
 
     /** 深链入口 ✓：intent 里带着 `dshmobile://pair?d=…` 就认领 ✓。@return 认领了没有 ✓。 */
@@ -4458,15 +4513,7 @@ public class MainActivity extends android.app.Activity {
 
                 /** ★★ 点某个会话 ⇒ 进**我们自己的会话页** ✓（`?session=<id>` 深链 ✓）。 */
                 public void onEnterSession(String sessionId) {
-                    String authority = currentAuthority();
-                    if (authority == null || authority.isEmpty()) {
-                        Log.w(TAG, "还没有可用的电脑地址，进不了会话");
-                        return;
-                    }
-                    String url = "https://" + authority + "/mobile/chat?session="
-                            + android.net.Uri.encode(sessionId == null ? "" : sessionId);
-                    showWebView();
-                    applyHostUrl(url, "进入会话");
+                    openSession(sessionId, "进入会话");
                 }
 
                 public void onAddComputer() {

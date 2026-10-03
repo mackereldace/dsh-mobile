@@ -2114,11 +2114,11 @@
    * @returns `ok` / `default` / `denied` / `untrusted` / `error`；**没有壳 → null** ✓
    *          （调用方据此决定要不要退回 Web Notification / 页面横幅 ✓）。
    */
-  function shellNotify(title, body) {
+  function shellNotify(title, body, link) {
     var bridge = shellBridge()
     if (bridge === undefined || typeof bridge.notify !== 'function') return null
     try {
-      return String(bridge.notify(String(title === undefined ? '' : title), String(body === undefined ? '' : body)))
+      return String(bridge.notify(String(title === undefined ? '' : title), String(body === undefined ? '' : body), String(link === undefined || link === null ? '' : link)))
     } catch (error) {
       return 'error'
     }
@@ -23065,7 +23065,8 @@
            * ⇒ 走壳的桥发**系统通知** ✓（`shellNotify` 早就有了 ✓，只是没人调它 ✗）；
            *   桥不在（例如用手机浏览器打开，而不是 App）⇒ 退回**页面横幅** ✓，绝不静默 ✗。
            */
-          var posted = shellNotify('需要你确认', text)
+          // ★ 会话 id 一起透传（老页面/老壳都没有它 ⇒ 退回"只打开 App" ✓）
+          var posted = shellNotify('需要你确认', text, callInfo.sessionId)
           if (posted === null) {
             drawBar('info', text, [], false)
             detail = 'banner-no-bridge'
