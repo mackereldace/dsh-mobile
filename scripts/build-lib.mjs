@@ -116,16 +116,34 @@ try {
     }
     let rewrote = 0
     const hostLib = join(repo, 'packages', 'host', 'lib')
-    for (const file of readdirSync(hostLib)) {
-      if (!file.endsWith('.js') && !file.endsWith('.d.ts')) continue
-      const target = join(hostLib, file)
-      const before = readFileSync(target, 'utf8')
-      const after = before.replaceAll("'@dsh-mobile/protocol'", "'./protocol/index.js'")
-      if (after === before) continue
-      backups.push({ to: target, data: Buffer.from(before) })
-      writeFileSync(target, after)
-      rewrote += 1
+    /**
+     * 递归遍历产物目录，并且**按文件所在深度算相对路径**。
+     *
+     * 原来只 `readdirSync` 顶层、且把相对路径写死成 `./protocol/index.js`。
+     * 2026-10-04 把 Codex 那一线搬进 `lib/codex/` 之后，那个文件里的裸引用就**没人改写**了，
+     * 于是发出去的包里留着一句 `import ... from '@dsh-mobile/protocol'` ——
+     * 用户在 Windows 上装插件时，pnpm 去 npm 上找这个包，报"protocol 这包不存在"。
+     * ⇒ 现在：递归 + 按深度生成 `../protocol/index.js` 这样的相对路径。
+     */
+    const rewriteProtocolImports = (dir, prefix) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix === '' ? entry.name : prefix + '/' + entry.name
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          rewriteProtocolImports(full, rel)
+          continue
+        }
+        if (!rel.endsWith('.js') && !rel.endsWith('.d.ts')) continue
+        const before = readFileSync(full, 'utf8')
+        const up = rel.includes('/') ? '../'.repeat(rel.split('/').length - 1) : './'
+        const after = before.replaceAll("'@dsh-mobile/protocol'", `'${up}protocol/index.js'`)
+        if (after === before) continue
+        backups.push({ to: full, data: Buffer.from(before) })
+        writeFileSync(full, after)
+        rewrote += 1
+      }
     }
+    rewriteProtocolImports(hostLib, '')
     console.log(
       `[build-lib] 已内联 protocol → packages/host/lib/protocol/（${copied} 个文件 ✓，改写 ${rewrote} 个文件的引用 ✓）`,
     )
