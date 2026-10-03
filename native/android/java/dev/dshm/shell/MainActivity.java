@@ -3477,6 +3477,17 @@ public class MainActivity extends android.app.Activity {
             } catch (Throwable ignored) {
                 // 首页还没建好也无所谓 ✓ —— 它建好时会自己读 currentUrl ✓
             }
+            /**
+             * ★ 并且**立刻把首页那张卡的「当前」指到这台** ✓ ——
+             *   不等那次联网探测（它要 3 秒 ✓，用户报的就是这个 ✓）。
+             *   authority = `host:port` ✓（与首页行用的同一把钥匙 ✓）。
+             */
+            try {
+                String authority = android.net.Uri.parse(url).getAuthority();
+                if (nativeHome != null) nativeHome.setCurrentAuthorityNow(authority);
+            } catch (Throwable ignored) {
+                // 解析不出来就算了 ✓ —— 退回去仍由数据说了算 ✓，绝不因此崩 ✗
+            }
         }
         // 用户**明确指定**了地址 ⇒ 自动换槽到此为止 ✓（否则计时器还会再切走 ✗）
         stopAutoConnect(why);

@@ -220,6 +220,42 @@ final class HomeView extends FrameLayout {
      */
     private boolean everHadSnapshot = false;
 
+    /**
+     * ★★★ 2026-10-04 用户："我点进一个智能体的会话 ✓，再退出来 ✓，它把刚才用的电脑切成当前 ✓，
+     *   但**至少要 3 秒**，非常突兀 ✗ …… 我希望：刚点进去后台就直接判它为当前 ✓。"
+     *
+     * 真因（查证过 ✓）："当前"是在 **`HomeLoader.load()`** 里算进快照的 ✓，
+     *   而那个方法是**同步联网探测**（3 秒就在它里面 ✓）⇒ 退出来只能等探测完才切 ✓。
+     * ⇒ 把它改成"**画的时候决定**"✓：这一位是**外部刚设的当前** ✓ ——
+     *   只要它在，机器卡上的「当前」就听它的 ✓（**用户刚做的事优先** ✓，本仓那条老规矩 ✓）；
+     *   **探测结果一落回就清掉它** ✓（见 `setSnapshot` ✓）⇒ 3 秒窗口里立刻正确 ✓，
+     *   之后仍由数据说了算 ✓（两者不一致时也不会长期打架 ✓）。
+     */
+    private String currentAuthorityNow = null;
+
+    /** 立刻把"当前"指到这台 ✓（上网探测还没回来也不等它 ✓）。 */
+    void setCurrentAuthorityNow(String authority) {
+        currentAuthorityNow = authority == null || authority.length() == 0 ? null : authority;
+        rebuild();
+    }
+
+    /**
+     * 画的时候问一句：**这台电脑**是不是"当前"✓（外部刚设的优先 ✓）。
+     * ★ 判据是"**这台电脑身上有没有那条地址**"✓（`Machine` 本身没有 authority 字段 ✓ ——
+     *   它由 instances → addresses 组成 ✓）—— 这也顺带把"同一台机器的多个地址"一起认了 ✓。
+     */
+    private boolean isCurrent(HomeModel.Machine machine) {
+        if (currentAuthorityNow == null) return machine.current;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                String authority = instance.addresses.get(j).authority;
+                if (authority != null && authority.equals(currentAuthorityNow)) return true;
+            }
+        }
+        return false;
+    }
+
     /** 已经有数据可画了吗 ✓（调用方据此决定"要不要转圈"✓）。 */
     boolean hasSnapshot() {
         return everHadSnapshot;
@@ -227,6 +263,8 @@ final class HomeView extends FrameLayout {
 
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {
         everHadSnapshot = true;
+        // ★ 数据回来了 ⇒ 把"当前"交还给数据 ✓（见 currentAuthorityNow 那段注释 ✓）
+        currentAuthorityNow = null;
         snapshot = next;
         report = nextReport;
         error = "";
@@ -723,7 +761,7 @@ final class HomeView extends FrameLayout {
          *   那才是让"同一张卡里几行颜色不一致"的原因 ✓（用户要的是"底色一致" ✓）。
          *   ⇒ 状态：**留条 ✓，不留底色 ✓**。
          */
-        if (machine.current) {
+        if (isCurrent(machine)) {
             View rail = new View(getContext());
             rail.setBackgroundColor(theme.rail);
             LinearLayout.LayoutParams railParams = new LinearLayout.LayoutParams(dp(3), LayoutParams.MATCH_PARENT);
@@ -763,7 +801,7 @@ final class HomeView extends FrameLayout {
         nameRow.setOrientation(LinearLayout.HORIZONTAL);
         nameRow.setGravity(Gravity.CENTER_VERTICAL);
         nameRow.addView(text(machine.name, 16.5f, machine.online ? theme.ink : theme.ink2, true));
-        if (machine.current) {
+        if (isCurrent(machine)) {
             TextView pill = text("当前", 11, theme.pillInk, true);
             pill.setBackground(roundRect(theme.pillBg, 0, 999));
             pill.setPadding(dp(8), dp(2), dp(8), dp(3));
