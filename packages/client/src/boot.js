@@ -2502,13 +2502,14 @@
     var startY = 0
     var moving = false
 
-    var describeNode = function (node) {
-      if (node === null || node === undefined) return '(空)'
+    /**
+     * ★ 复用仓库里**现成**的 `describeNode`（模块级函数声明，同作用域会提升 ✓），
+     *   再补一句**稳定特征** —— 现成那个会打哈希类名（对判据没用 ✗），
+     *   而这里要的恰恰是 role / aria-label / data-* 这些**改名也不变**的东西 ✓。
+     * ★ 不重复实现：同一件事写两份，早晚只改一处 ✗（本仓老毛病）。
+     */
+    var stableFeatures = function (node) {
       var parts = []
-      var tag = String(node.tagName || '').toLowerCase()
-      if (tag.length > 0) parts.push(tag)
-      if (node.id) parts.push('#' + String(node.id))
-      // ★ 只打**稳定**特征：role / aria-label / data-* / 我们自己的标记 ✓
       try {
         var role = node.getAttribute ? node.getAttribute('role') : null
         if (role) parts.push('role=' + role)
@@ -2516,11 +2517,15 @@
         if (label) parts.push('aria-label=' + String(label).slice(0, 40))
         var panel = node.getAttribute ? node.getAttribute('data-dshm-panel') : null
         if (panel !== null && panel !== undefined) parts.push('data-dshm-panel=' + panel)
-        if (node.dataset && node.dataset.dshmPanel !== undefined) parts.push('dataset.dshmPanel')
       } catch (error) {
         void error
       }
       return parts.join(' ')
+    }
+
+    var probeDescribe = function (node) {
+      var stable = stableFeatures(node)
+      return describeNode(node) + (stable.length > 0 ? ' ' + stable : '')
     }
 
     var measureAt = function (x, y) {
@@ -2530,12 +2535,12 @@
           debugBoxLine('[probe] 那一点量不到任何节点（坐标 ' + Math.round(x) + ',' + Math.round(y) + '）')
           return
         }
-        debugBoxLine('[probe] 最上面的是：' + describeNode(top))
+        debugBoxLine('[probe] 最上面的是：' + probeDescribe(top))
         var node = top
         for (var up = 0; up < 4 && node !== null && node !== undefined; up++) {
           node = node.parentElement
           if (node === null || node === undefined) break
-          debugBoxLine('[probe]   上' + (up + 1) + '层：' + describeNode(node))
+          debugBoxLine('[probe]   上' + (up + 1) + '层：' + probeDescribe(node))
         }
       } catch (error) {
         debugBoxLine('[probe] 量的时候出错了：' + String(error && error.message ? error.message : error))
