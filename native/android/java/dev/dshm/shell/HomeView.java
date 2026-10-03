@@ -7,11 +7,14 @@ import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.os.Build;
+import android.os.SystemClock;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -78,6 +81,25 @@ final class HomeView extends FrameLayout {
     private android.widget.LinearLayout tabsBar;
     /** 已经排了一帧待重建吗 ✓（一帧里只重建一次 ✓）。 */
     private boolean rebuildPosted = false;
+
+    /**
+     * ★★★ 2026-10-04 用户报"在首页上下滑电脑卡的时候，偶尔会**抽搐**"✗。
+     *
+     * 真因（不是滚动位置丢失 ✗ —— `savedScrollY` 早就存/恢复了 ✓）：
+     * `rebuildNow()` 会把整棵树 `removeAllViews()` 重建 ✓（数据变了就得重建 ✓），
+     * 而**用户正拖着 / 正甩着**时重建 ⇒ ScrollView 连同**手势的目标**一起被换掉 ✗
+     * ⇒ 拖动被掐断、惯性被清零 ✓ ⇒ 屏幕上就是"抽搐"一下 ✓。
+     *
+     * ★ 本仓那条老规矩：**自动行为不许盖掉用户刚做的事** ✗
+     *   ⇒ 手上有触摸、或刚滚动过 ⇒ **推迟**这一帧 ✓，等它静下来再重建 ✓。
+     *   `rebuild()` 本身是合并的（下一帧一次 ✓）⇒ 推迟的代价只是"数据晚半秒出现"✓，
+     *   而不是"把用户的手甩开"✗ —— 两者谁优先，答案很清楚 ✓。
+     */
+    private boolean userTouching = false;
+    private long lastScrollAt = 0L;
+    private boolean rebuildRetryPosted = false;
+    /** 滚动停多久算"静下来了"✓（也是重试间隔 ✓）。 */
+    private static final long SCROLL_SETTLE_MS = 450L;
     /** ★ 现在哪一面通电 ✓（computers = 电脑 ✓ / sessions = 会话 ✓）。 */
     private String face = "computers";
     private List<ChatSessions.Session> sessions = new ArrayList<ChatSessions.Session>();
@@ -430,6 +452,21 @@ final class HomeView extends FrameLayout {
      */
     private void rebuild() {
         if (rebuildPosted) return;
+        // ★ 用户手上有触摸 / 刚滚过 ⇒ 这一帧先不做（见 userTouching 那段注释 ✓）
+        long now = SystemClock.uptimeMillis();
+        if (userTouching || now - lastScrollAt < SCROLL_SETTLE_MS) {
+            if (!rebuildRetryPosted) {
+                rebuildRetryPosted = true;
+                postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        rebuildRetryPosted = false;
+                        rebuild();
+                    }
+                }, SCROLL_SETTLE_MS);
+            }
+            return;
+        }
         rebuildPosted = true;
         post(new Runnable() {
             @Override
@@ -438,6 +475,37 @@ final class HomeView extends FrameLayout {
                 rebuildNow();
             }
         });
+    }
+
+    /**
+     * 记下"用户正在碰这个列表"✓ —— **只观察，绝不消费事件** ✗（返回 false ✓）。
+     * 触摸用 DOWN/UP/CANCEL 记 ✓；`setOnScrollChangeListener` 覆盖**惯性滑动** ✓
+     * （甩出去之后手指已经抬起 ✓，只有它还能告诉我们"还在动"✓）。
+     */
+    private void observeUserScroll(ScrollView scroll) {
+        scroll.setOnTouchListener(new OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                int action = event.getActionMasked();
+                if (action == MotionEvent.ACTION_DOWN) {
+                    userTouching = true;
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    userTouching = false;
+                    lastScrollAt = SystemClock.uptimeMillis();
+                }
+                return false;
+            }
+        });
+        // ★ `setOnScrollChangeListener` 是 **API 23+** ✓ —— 加一道守卫，
+        //   老机器上退回"只认触摸"✓（惯性那一小段认不出来 ✓，但绝不会崩 ✗）。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            scroll.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+                @Override
+                public void onScrollChange(View v, int x, int y, int oldX, int oldY) {
+                    lastScrollAt = SystemClock.uptimeMillis();
+                }
+            });
+        }
     }
 
     private void rebuildNow() {
@@ -468,6 +536,7 @@ final class HomeView extends FrameLayout {
         ScrollView scroll = new ScrollView(getContext());
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(false);
+        observeUserScroll(scroll);
         LinearLayout list = new LinearLayout(getContext());
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(dp(14), 0, dp(14), dp(16));
@@ -952,6 +1021,7 @@ final class HomeView extends FrameLayout {
     private View buildSessionsList() {
         ScrollView scroll = new ScrollView(getContext());
         scroll.setFillViewport(true);
+        observeUserScroll(scroll);
         LinearLayout list = new LinearLayout(getContext());
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(dp(14), dp(6), dp(14), dp(14));
