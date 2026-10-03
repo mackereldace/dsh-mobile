@@ -2686,13 +2686,15 @@ public class MainActivity extends android.app.Activity {
         } catch (Throwable t) {
             Log.w(TAG, "清理地址槽失败", t);
         }
-        // ④ 墓碑（指纹 + 主机名都记下来，供"通用清扫"用）
+        /**
+         * ★★★ 2026-10-04 用户："你把无论是证书啊，还是说配对记录啊，全都删掉 ——
+         *   我不希望你留着呀"✗ ⇒ **不再写墓碑** ✓（墓碑是"挡着不显示"，不是删除 ✓）。
+         *   改成让**网页层**（数据的另一个副本所在）执行真正的删除 ✓：
+         *   它在自己那份存储里删记录、删提到这台电脑的身份键、清当前标记 ✓，
+         *   并通过既有写入口把壳这边也一起删掉 ✓。
+         */
         java.util.Set<String> tombFp = new java.util.HashSet<String>();
         java.util.Set<String> tombHosts = new java.util.HashSet<String>();
-        readTombstone(tombFp, tombHosts);
-        tombFp.addAll(fingerprints);
-        tombHosts.addAll(hosts);
-        writeTombstone(tombFp, tombHosts);
         // ⑤ 通用清扫：偏好里 + 身份库里所有提到它的字符串
         try {
             for (java.util.Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
@@ -2726,6 +2728,17 @@ public class MainActivity extends android.app.Activity {
             }
         } catch (Throwable t) {
             Log.w(TAG, "通用清扫失败", t);
+        }
+        // 让网页层也真删（它那份副本不删，下次合并又会带回来）
+        try {
+            if (webView != null) {
+                final String wanted = fingerprints.isEmpty() ? "" : fingerprints.iterator().next();
+                webView.evaluateJavascript(
+                        "try{if(window.__dshmForgetHost&&'" + wanted + "'.length)window.__dshmForgetHost('"
+                                + wanted + "')}catch(e){}", null);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "让网页层删除失败（壳这边已删）", t);
         }
         Log.i(TAG, "已删除一台电脑的配置：记录 " + removedRecords + " 条、地址 " + authorities.size()
                 + " 个、指纹 " + fingerprints.size() + " 个");

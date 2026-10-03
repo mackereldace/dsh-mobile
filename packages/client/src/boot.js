@@ -452,6 +452,89 @@
     return writeIdentityKey(HOSTS_KEY, JSON.stringify(records))
   }
 
+  /**
+   * ★★★ 2026-10-04 用户交办（"你把无论是证书啊，还是说配对记录啊，全都删掉"）：
+   *   **真的删掉**某一台宿主在本机与壳里的全部痕迹 —— 不是挡着不显示。
+   *
+   * 为什么要网页层也参与：宿主目录是**跨源**的 ——
+   *   · 壳那边有一份全局镜像（原生首页读的就是它，`dsh-mobile.hosts` ✓）；
+   *   · 每台电脑的页面各自还有一份"它那个源"的副本 ✓，
+   *     保存目录时会把两份合并后再写回壳 ✓。
+   * ⇒ 只删壳那一份，某台电脑的页面下次一合并就又带回来了 ✓。
+   *
+   * 删法（都用既有的唯一写入口 ✓，不另造通道）：
+   *   ① 目录里那条记录；
+   *   ② 本机存储里**所有**提到它的身份键（值里含它的指纹或其地址 ⇒ 删）；
+   *   ③ 当前宿主标记（正好是它才清）。
+   * 值传 `null` 就是"删除该键"（本仓既有的约定 ✓），本机与壳两边一起删 ✓。
+   *
+   * @param {string} fingerprint 要删掉的那台宿主的指纹
+   * @returns {boolean} 有没有删到东西
+   */
+  globalThis.__dshmForgetHost = function (fingerprint) {
+    try {
+      if (typeof fingerprint !== 'string' || fingerprint.length === 0) return false
+      var records = hostsRead()
+      var hosts = []
+      var kept = []
+      var hit = false
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i]
+        if (record !== null && typeof record === 'object' && record.fingerprint === fingerprint) {
+          hit = true
+          var slots = record.slots
+          if (Object.prototype.toString.call(slots) === '[object Array]') {
+            for (var j = 0; j < slots.length; j++) {
+              var slot = slots[j]
+              var url = slot !== null && typeof slot === 'object' ? String(slot.url || '') : String(slot || '')
+              if (url.length > 0) hosts.push(url)
+            }
+          }
+          continue
+        }
+        kept.push(record)
+      }
+      if (!hit) return false
+      // ① 目录里那条记录
+      hostsWrite(kept)
+      // ② 本机存储里所有提到它的身份键（键名不猜：看值里有没有它）
+      try {
+        var storage = globalThis.localStorage
+        if (storage !== undefined && storage !== null) {
+          var doomed = []
+          for (var k = 0; k < storage.length; k++) {
+            var key = storage.key(k)
+            if (typeof key !== 'string' || key.indexOf('dsh-mobile.') !== 0) continue
+            if (key === HOSTS_KEY) continue
+            var value = String(storage.getItem(key) || '')
+            if (value.indexOf(fingerprint) >= 0) { doomed.push(key); continue }
+            for (var h = 0; h < hosts.length; h++) {
+              if (value.indexOf(hosts[h]) >= 0) { doomed.push(key); break }
+            }
+          }
+          for (var d = 0; d < doomed.length; d++) {
+            try { writeIdentityKey(doomed[d], null) } catch (error) { void error }
+          }
+        }
+      } catch (error) {
+        void error
+      }
+      // ③ 当前宿主标记
+      try {
+        if (String(localValue(HOSTS_ACTIVE_KEY) || '') === fingerprint
+            || String(vaultValue(HOSTS_ACTIVE_KEY) || '') === fingerprint) {
+          writeIdentityKey(HOSTS_ACTIVE_KEY, null)
+        }
+      } catch (error) {
+        void error
+      }
+      return true
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
   /** 当前宿主的**标记** ✓（`dsh-mobile.hosts.active` ✓）。 */
   function setActiveHost(fingerprint) {
     if (!validHostFingerprint(fingerprint)) return false
