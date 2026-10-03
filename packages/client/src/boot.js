@@ -2496,6 +2496,117 @@
    *
    * ★ 只读、不动 DOM ✗；拿不到坐标就静默跳过 ✓。
    */
+    var stableFeatures = function (node) {
+    var parts = []
+    try {
+      var role = node.getAttribute ? node.getAttribute('role') : null
+      if (role) parts.push('role=' + role)
+      var label = node.getAttribute ? node.getAttribute('aria-label') : null
+      if (label) parts.push('aria-label=' + String(label).slice(0, 40))
+      var panel = node.getAttribute ? node.getAttribute('data-dshm-panel') : null
+      if (panel !== null && panel !== undefined) parts.push('data-dshm-panel=' + panel)
+    } catch (error) {
+      void error
+    }
+    return parts.join(' ')
+  }
+
+  var probeDescribe = function (node) {
+    var stable = stableFeatures(node)
+    return describeNode(node) + (stable.length > 0 ? ' ' + stable : '')
+  }
+
+  /**
+   * ★ 第 58 轮（第三阶段第一条："选择卡无法显示"）：**看不见的"要你注意"节点自动报一行**。
+   *
+   * 为什么这样定判据 ✗：本仓在选择器/哈希上栽过多次 ⇒ 这里**不猜类名**，
+   * 只认**稳定语义**：节点自称要被注意（有 `role` / `aria-label` / `aria-modal` ✓）
+   * **却看不见**（无尺寸 / `offsetParent === null` 且尺寸为 0 ✓）⇒ 报一行。
+   * 这条判据把两种可能**当场分开** ✗：
+   *   · 报了 ⇒ 节点**在**、只是不可见 ⇒ 是"**被藏了/被盖了**"（改我们这边 ✓）；
+   *   · 不报 ⇒ 节点**压根没来** ⇒ 是"**没认出 / 没渲染**"（改识别 ✓）。
+   * 两者的外部表现一模一样（都是"看不见那张卡"）✓，而改法相反 ✓。
+   *
+   * 纪律：只读、不动 DOM；同一签名只报一次（防刷屏 ✓）；每批最多扫 300 个节点 ✓；
+   * 250ms 去抖（DOM 抖动时不至于每帧都扫 ✓）。
+   */
+  function installInvisibleAskProbe() {
+    if (typeof MutationObserver !== 'function') return
+    var reported = {}
+    var pendingRoots = []
+    var scheduled = false
+
+    var looksVisible = function (node) {
+      try {
+        var rect = node.getBoundingClientRect()
+        return rect.width > 4 && rect.height > 4
+      } catch (error) {
+        return true
+      }
+    }
+
+    var claimsAttention = function (node) {
+      try {
+        if (!node.getAttribute) return false
+        return Boolean(node.getAttribute('role'))
+          || Boolean(node.getAttribute('aria-label'))
+          || Boolean(node.getAttribute('aria-modal'))
+      } catch (error) {
+        return false
+      }
+    }
+
+    var scan = function (root) {
+      try {
+        var walk = [root]
+        var budget = 300
+        while (walk.length > 0 && budget > 0) {
+          budget -= 1
+          var node = walk.pop()
+          if (node === null || node === undefined || node.nodeType !== 1) continue
+          if (claimsAttention(node) && !looksVisible(node)) {
+            var signature = probeDescribe(node)
+            if (reported[signature] === undefined) {
+              reported[signature] = 1
+              debugBoxLine('[hidden-ask] 刚出现但看不见：' + signature)
+            }
+          }
+          var children = node.children
+          if (children) {
+            for (var i = 0; i < children.length; i++) pushRoot(walk, children[i])
+          }
+        }
+      } catch (error) {
+        void error
+      }
+    }
+
+    var pushRoot = function (walk, node) {
+      walk.push(node)
+    }
+
+    try {
+      var observer = new MutationObserver(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var added = records[i].addedNodes
+          if (added === null || added === undefined) continue
+          for (var j = 0; j < added.length; j++) pendingRoots.push(added[j])
+        }
+        if (scheduled || pendingRoots.length === 0) return
+        scheduled = true
+        setTimeout(function () {
+          scheduled = false
+          var roots = pendingRoots
+          pendingRoots = []
+          for (var k = 0; k < roots.length; k++) scan(roots[k])
+        }, 250)
+      })
+      observer.observe(document.documentElement, { childList: true, subtree: true })
+    } catch (error) {
+      void error
+    }
+  }
+
   function installCoverProbe() {
     var timer = null
     var startX = 0
@@ -2508,26 +2619,6 @@
      *   而这里要的恰恰是 role / aria-label / data-* 这些**改名也不变**的东西 ✓。
      * ★ 不重复实现：同一件事写两份，早晚只改一处 ✗（本仓老毛病）。
      */
-    var stableFeatures = function (node) {
-      var parts = []
-      try {
-        var role = node.getAttribute ? node.getAttribute('role') : null
-        if (role) parts.push('role=' + role)
-        var label = node.getAttribute ? node.getAttribute('aria-label') : null
-        if (label) parts.push('aria-label=' + String(label).slice(0, 40))
-        var panel = node.getAttribute ? node.getAttribute('data-dshm-panel') : null
-        if (panel !== null && panel !== undefined) parts.push('data-dshm-panel=' + panel)
-      } catch (error) {
-        void error
-      }
-      return parts.join(' ')
-    }
-
-    var probeDescribe = function (node) {
-      var stable = stableFeatures(node)
-      return describeNode(node) + (stable.length > 0 ? ' ' + stable : '')
-    }
-
     var measureAt = function (x, y) {
       try {
         var top = document.elementFromPoint(x, y)
@@ -23855,6 +23946,8 @@
     installDeviceChannel()
     // 「谁盖了谁」的长按探针（第三阶段：文件交付栏被覆盖）—— 只读、不碰 DOM
     installCoverProbe()
+    // 「刚出现却看不见」的自动探针（第三阶段：选择卡不显示）—— 只读、不碰 DOM
+    installInvisibleAskProbe()
   }
   } catch (error) {
     debugBoxLine('[boot] 启动期异常：' + String(error && error.stack ? error.stack : error).slice(0, 400))
