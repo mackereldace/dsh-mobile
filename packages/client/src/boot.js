@@ -485,7 +485,57 @@
     try {
       var fromVault = vaultValue(HOSTS_KEY)
       var text = fromVault === null || fromVault === undefined ? '[]' : String(fromVault)
-      return writeIdentityKey(HOSTS_KEY, text) !== false
+      /**
+       * ★★★ 2026-10-04 修（用户报："偶发把 Mac mini 认成另一台电脑的 IP，电脑被判离线"）。
+       *
+       * 原实现是**整份覆盖**（壳那份直接盖掉页面那份）✗ ⇒
+       * 页面加载器**刚探测到的新地址**会被壳里的**旧地址**冲回去 ✓，
+       * 那台电脑在界面上就显示成**老地址**（看起来"被认成别的电脑"✗）＋被判离线 ✓；
+       * 下一次探测再修正 ⇒ **偶发** ✓（与用户描述一致 ✓）。
+       *
+       * ⇒ 改成**只做删除的对账** ✓：
+       *   · 壳那份**没有**的记录 ⇒ 删掉 ✓（这正是当初要解决的"删完又自己回来"✓）；
+       *   · 壳那份**有**的记录 ⇒ **保留页面侧那份**（含地址等最新字段 ✓）；
+       *   · 页面还没有的记录 ⇒ 从壳那份补进来 ✓。
+       * ★ 额外护栏：壳那份**是空的**而页面有 ⇒ **什么都不做** ✗
+       *   （避免"壳还没准备好"时把用户的电脑全清掉 —— 那种错不可逆 ✓）。
+       */
+      var shellRecords = []
+      try {
+        var parsed = JSON.parse(text)
+        if (Object.prototype.toString.call(parsed) === '[object Array]') shellRecords = parsed
+      } catch (error) {
+        void error
+      }
+      var pageRecords = hostsRead()
+      if (shellRecords.length === 0 && pageRecords.length > 0) return true
+      var wanted = {}
+      for (var i = 0; i < shellRecords.length; i++) {
+        var rec = shellRecords[i]
+        if (rec !== null && typeof rec === 'object' && typeof rec.fingerprint === 'string') {
+          wanted[rec.fingerprint] = true
+        }
+      }
+      var out = []
+      var seen = {}
+      for (var j = 0; j < pageRecords.length; j++) {
+        var pageRec = pageRecords[j]
+        if (pageRec === null || typeof pageRec !== 'object') continue
+        var fp = typeof pageRec.fingerprint === 'string' ? pageRec.fingerprint : ''
+        if (fp.length > 0) {
+          if (wanted[fp] !== true) continue
+          seen[fp] = true
+        }
+        out.push(pageRec)
+      }
+      for (var k = 0; k < shellRecords.length; k++) {
+        var shellRec = shellRecords[k]
+        if (shellRec === null || typeof shellRec !== 'object') continue
+        var sfp = typeof shellRec.fingerprint === 'string' ? shellRec.fingerprint : ''
+        if (sfp.length > 0 && seen[sfp] === true) continue
+        out.push(shellRec)
+      }
+      return writeIdentityKey(HOSTS_KEY, JSON.stringify(out)) !== false
     } catch (error) {
       void error
       return false
@@ -5298,8 +5348,33 @@
          * ★ 只读、只在可疑时打一行 ✓（不刷屏 ✓）。
          */
         try {
+          var probeName = ''
+          try {
+            probeName = (this.requestNames !== undefined && this.requestNames[response.rpcId] !== undefined)
+              ? String(this.requestNames[response.rpcId]) : ''
+            if (this.requestNames !== undefined) delete this.requestNames[response.rpcId]
+          } catch (error) {
+            void error
+          }
           var probeValue = response && response.result && response.result.value
           var data = probeValue && probeValue.data
+          /**
+           * ★★ 只对"我们关心的那几个方法"打一行 ✓（打太多会刷屏 ✓）——
+           *   这一行同时回答两个问题：① 这条调用**走不走我们隧道** ✓；② `data` 是什么形状 ✓。
+           */
+          if (probeName.indexOf('readBytes') >= 0 || probeName.indexOf('workspaceFiles') >= 0) {
+            var brief = 'undefined'
+            if (data !== null && data !== undefined) {
+              if (typeof Uint8Array === 'function' && data instanceof Uint8Array) brief = 'Uint8Array(len=' + data.length + ')'
+              else if (typeof data === 'string') brief = '字符串(len=' + data.length + ')'
+              else if (typeof data === 'object') {
+                var ks = Object.keys(data)
+                var numeric = ks.filter(function (k) { return /^[0-9]+$/.test(k) }).length
+                brief = '对象(键=' + ks.length + '，数字键=' + numeric + ')' + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
+              } else brief = typeof data
+            }
+            debugBoxLine('[rpc] ' + probeName + ' ⇒ data=' + brief)
+          }
           if (data !== undefined && data !== null
               && !(typeof Uint8Array === 'function' && data instanceof Uint8Array)) {
             var shape = ''
@@ -5496,6 +5571,21 @@
       // 两个都要存：只存 resolve 的话，链路一断这个 Promise 就永远既不 resolve
       // 也不 reject（见 failPending 的说明，这是"侧栏永远空的"的根因）。
       self.pending.set(rpcId, { resolve: resolve, reject: reject })
+      /**
+       * ★ 取证（文件预览一直报 expected Uint8Array，而形状诊断打不出来）：
+       *   把"这个 rpcId 是哪个方法"记下来 ✓ —— 响应回来时才知道要不要打那一行 ✓。
+       *   若连这一行都没打出来 ⇒ 说明**这条调用根本不走我们这条隧道** ✓（那答案就换方向了）。
+       * ★ 教训：这段**不能插进 `self .sendFrame(...)` 的链式调用中间** ✗
+       *   —— 我第一次就是那么插的，语法当场崩（`.sendFrame` 前面多了个 `}`）✓。
+       */
+      try {
+        if (self.requestNames === undefined) self.requestNames = {}
+        var m = message !== null && message !== undefined ? message : {}
+        var name = m.method !== undefined ? m.method : (m.target !== undefined ? m.target : m.name)
+        if (typeof name === 'string') self.requestNames[rpcId] = name
+      } catch (error) {
+        void error
+      }
       self
         .sendFrame(FrameType.RpcRequest, FrameFlags.Json, utf8(JSON.stringify(message)))
         .catch(reject)
