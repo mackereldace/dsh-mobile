@@ -47,8 +47,8 @@ describe('附件还原：客户端与协议层的契约', () => {
   })
 
   it('★ 两边都要求"末端必须是 null，否则拒绝替换"（不覆盖已有真值）', () => {
-    assert.match(boot, /占位不是 null，拒绝替换/)
-    assert.match(protocol, /占位不是 null，拒绝替换/)
+    assert.match(boot, /占位不是 null\/undefined/)
+    assert.match(protocol, /占位不是 null\/undefined/)
   })
 
   it('★ 两边都拒绝空路径（不猜它该放到哪）', () => {

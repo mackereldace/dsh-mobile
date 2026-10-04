@@ -83,7 +83,7 @@ describe('按 DSH 附件表还原字节（applyAttachments）', () => {
 
   it('★ 占位不是 null ⇒ 抛错（跟着 DSH 的硬校验走，别悄悄覆盖真值）', () => {
     const result = { value: { data: 'not-null' } }
-    assert.throws(() => applyAttachments(result, [{ path: ['value', 'data'], bytes: new Uint8Array([1]) }]), /占位不是 null/)
+    assert.throws(() => applyAttachments(result, [{ path: ['value', 'data'], bytes: new Uint8Array([1]) }]), /占位不是 null\/undefined/)
   })
 
   it('★ 路径走不通 ⇒ 抛错（不猜它该放哪）', () => {
@@ -95,5 +95,17 @@ describe('按 DSH 附件表还原字节（applyAttachments）', () => {
     const result = { value: { data: null } }
     assert.equal(applyAttachments(result, []), result)
     assert.equal(result.value.data, null)
+  })
+})
+
+describe('附件还原：占位判据实测修正（2026-10-04）', () => {
+  it('★★ undefined 也算占位（真机日志证明实际就是它 —— JSON 会丢掉 undefined 键）', () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    const result: { value: { data?: unknown } } = { value: {} }
+    applyAttachments(result, [{ path: ['value', 'data'], bytes }])
+    assert.ok(result.value.data instanceof Uint8Array)
+  })
+  it('★ 真正的值仍拒绝替换（不覆盖上游真值）', () => {
+    assert.throws(() => applyAttachments({ value: { data: 'real' } }, [{ path: ['value', 'data'], bytes: new Uint8Array([1]) }]), /占位不是 null\/undefined/)
   })
 })

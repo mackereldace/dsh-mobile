@@ -5418,7 +5418,7 @@
               }
               if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（父节点不是对象）')
               var leaf = path[path.length - 1]
-              if (node[leaf] !== null) throw new Error('占位不是 null，拒绝替换（上游可能已给过真值）')
+              if (node[leaf] !== null && node[leaf] !== undefined) throw new Error('占位不是 null/undefined，拒绝替换（上游可能已给过真值）')
               node[leaf] = attachment.bytes
             }
           }
@@ -22559,7 +22559,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1004153244'
+    var BOOT_STAMP = 'BUILD-1004153623'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

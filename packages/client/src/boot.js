@@ -5418,7 +5418,7 @@
               }
               if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（父节点不是对象）')
               var leaf = path[path.length - 1]
-              if (node[leaf] !== null) throw new Error('占位不是 null，拒绝替换（上游可能已给过真值）')
+              if (node[leaf] !== null && node[leaf] !== undefined) throw new Error('占位不是 null/undefined，拒绝替换（上游可能已给过真值）')
               node[leaf] = attachment.bytes
             }
           }

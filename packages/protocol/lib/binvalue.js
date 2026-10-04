@@ -145,9 +145,9 @@ export function applyAttachments(result, attachments) {
         }
         const key = path[path.length - 1];
         const current = parent[key];
-        if (current !== null) {
+        if (current !== null && current !== undefined) {
             // ★ 只认 `null` 占位（与 DSH 的硬校验一致）——别把已有值悄悄覆盖掉 ✗
-            throw new Error('占位不是 null，拒绝替换（上游可能已经给过真值）');
+            throw new Error('占位不是 null/undefined，拒绝替换（上游可能已经给过真值）');
         }
         ;
         parent[key] = attachment.bytes;
