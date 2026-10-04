@@ -306,6 +306,47 @@ final class HomeView extends FrameLayout {
         return false;
     }
 
+    /**
+     * 画的时候问一句：**这一个智能体（实例）**是不是"当前"✓（外部刚设的优先 ✓）——
+     * ★ 与 {@link #isCurrent(HomeModel.Machine)} **同一条规矩** ✓，只是把「这台电脑」换成「这一个实例」✓。
+     *
+     * ★★★ 2026-10-05 用户："端口的右边也有一个「正在用」✓，它右边的更新逻辑还没处理 ✗ ——
+     *   换完智能体退出来，那个「正在用」要**滞后一段时间**才切过去 ✗。"
+     *
+     * 真因（与机器卡上那一条**同一个**✓）：{@link #buildAgent} 那一行**只读快照里的
+     *   {@code instance.current}** ✗，而快照里的"当前"要等 {@code HomeLoader.load()} 那次
+     *   **同步联网探测**（约 3 秒 ✓，见本文件头那条注释 ✓）才落回来 ✓
+     *   ⇒ 点进去那一刻设好的**即时覆盖**（{@link #currentAuthorityNow} ✓ / {@link #currentMachineKeyNow} ✓）
+     *   它**压根不看** ✗ ⇒ 退出首页后只能等探测 ✓ = 用户看到的滞后 ✓。
+     *
+     * ★ 判据（与机器级逐条对齐 ✓）：
+     *   ① 用户刚点的是**这台机器**（有机器键 ✓）⇒ 别的机器上的实例一律不是当前 ✓；
+     *   ② 有即时覆盖的地址 ⇒ **只有地址对得上的那一个**算当前 ✓（旧快照那一位**立刻让位** ✓，
+     *      免得同屏出现两个「正在用」✗）；对不上 ⇒ 不是当前 ✓；
+     *   ③ **没有**任何即时覆盖时 ⇒ 退回 {@code instance.current} ✓（保底：其它情况的行为一点不变 ✓）。
+     *
+     * ★ 空值/异常一律安全退化到 {@code instance.current} ✓（不许抛 ✗、不许把不该高亮的点亮 ✗）。
+     * ★ 这里**不引入任何轮询/定时器** ✗：覆盖值在点进去那一刻就设好了 ✓，只要判据读它，
+     *   切回来时**立刻**就是对的 ✓（{@link #setCurrentAuthorityNow} / {@link #markCurrentMachine}
+     *   两处都已经 {@link #rebuildNow()} ✓）。
+     */
+    private boolean isCurrentInstance(HomeModel.Machine owner, HomeModel.Instance instance) {
+        if (instance == null) return false;
+        try {
+            if (currentMachineKeyNow != null && (owner == null || !currentMachineKeyNow.equals(owner.key))) return false;
+            if (currentAuthorityNow == null) return instance.current;
+            for (int i = 0; i < instance.addresses.size(); i += 1) {
+                HomeModel.Address address = instance.addresses.get(i);
+                if (address == null) continue;
+                String authority = address.authority;
+                if (authority != null && authority.equals(currentAuthorityNow)) return true;
+            }
+            return false;
+        } catch (RuntimeException ignored) {
+            return instance.current;
+        }
+    }
+
     /** 已经有数据可画了吗 ✓（调用方据此决定"要不要转圈"✓）。 */
     boolean hasSnapshot() {
         return everHadSnapshot;
@@ -1161,6 +1202,13 @@ final class HomeView extends FrameLayout {
     }
 
     private View buildAgent(final HomeModel.Machine owner, final HomeModel.Instance instance) {
+        /**
+         * ★★★ 2026-10-05：「当前」只算**一次** ✓，四处（圆点 / 标题加粗 / 右边那个「正在用」/ 它的大小色）
+         *   共用同一个值 ✓ —— 免得出现半行是当前、半行还是旧的 ✗。
+         * ★ 走 {@link #isCurrentInstance} ✓（**不再是**裸的 {@code instance.current} ✗）：
+         *   这样点进去那一刻设好的**即时覆盖**立刻生效 ✓ ⇒ 退出首页时不再滞后 ✓。
+         */
+        final boolean current = isCurrentInstance(owner, instance);
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -1172,20 +1220,20 @@ final class HomeView extends FrameLayout {
         LinearLayout titleRow = new LinearLayout(getContext());
         titleRow.setOrientation(LinearLayout.HORIZONTAL);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        if (instance.current) {
+        if (current) {
             View mark = new View(getContext());
             mark.setBackground(oval(theme.rail));
             LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(6), dp(6));
             markParams.rightMargin = dp(7);
             titleRow.addView(mark, markParams);
         }
-        titleRow.addView(text(instanceTitle(instance), 14.5f, instance.online ? theme.ink : theme.ink3, instance.current));
+        titleRow.addView(text(instanceTitle(instance), 14.5f, instance.online ? theme.ink : theme.ink3, current));
         texts.addView(titleRow);
         texts.addView(text(instanceSubtitle(instance), 12, theme.ink3, false));
         row.addView(texts, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
 
-        String right = HomeLabels.agentTail(instance.current, instance.online);
-        TextView tail = text(right, instance.current ? 11.5f : 15, instance.current ? theme.ink2 : theme.ink3, instance.current);
+        String right = HomeLabels.agentTail(current, instance.online);
+        TextView tail = text(right, current ? 11.5f : 15, current ? theme.ink2 : theme.ink3, current);
         tail.setGravity(Gravity.CENTER);
         row.addView(tail, new LinearLayout.LayoutParams(dp(44), LayoutParams.WRAP_CONTENT));
 
