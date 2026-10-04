@@ -917,6 +917,43 @@ export function createMobileHost(options: {
     return gateway.invoke(toGatewayArgs(endpoint, payload, signal))
   }
 
+  /**
+   * ★★ **只给隧道用** 的取数入口 ✓：返回**整个信封**（含 `attachments` ✓，字节在那里 ✓）。
+   *
+   * ★★★ 与 `invokeGatewayEndpoint` 的关系（这是我上次弄挂聊天记录的地方 ✗）：
+   *   `invokeGatewayEndpoint` **必须保持原样**（返回 `gateway.invoke(...)` = 信封 ✓）——
+   *   聊天桥的 `unwrap()` 就是按信封写的 ✓，改它 ⇒ 会话清单/聊天记录整条挂 ✗。
+   *   所以本函数**另起一个**入口 ✓，只服务隧道那条路 ✓。
+   */
+  async function invokeGatewayEnvelope(
+    gateway: RemoteGateway,
+    endpoint: string,
+    payload: unknown,
+    signal: AbortSignal,
+  ): Promise<{ readonly envelope: unknown }> {
+    const dispatch = gateway as unknown as {
+      dispatchRpc?: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
+    }
+    if (typeof dispatch.dispatchRpc === 'function') {
+      /**
+       * ★ 宿主侧 RPC 入口（`connection.rpc.intercept('/api', …)` 用的就是它 ✓）：
+       *   它返回的才是**带附件表的信封** ✓（`encodeRpcResult` 在那里把字节换成 null 占位 + 收进 attachments ✓）。
+       * ★ `dispatchRpc` **失败不抛**、返回 `{ok:false,error}` ✗ ⇒ 这里转成 throw ✓。
+       */
+      const raw = await dispatch.dispatchRpc(endpoint, payload, signal)
+      if (raw !== null && typeof raw === 'object' && (raw as { ok?: unknown }).ok === false) {
+        const failure = (raw as { error?: { code?: unknown; message?: unknown } }).error ?? {}
+        throw Object.assign(new Error(String(failure.message ?? '网关拒绝了这次调用')), {
+          code: typeof failure.code === 'string' ? failure.code : ErrorCode.Internal,
+        })
+      }
+      return { envelope: raw }
+    }
+    // ★ 旧 DSH 没有 dispatchRpc ⇒ 回退老路（拿不到附件表，但**行为与今天完全一致** ✓，不回退就会更糟 ✗）
+    store.record({ deviceId: '(host)', kind: 'rpc', target: endpoint, detail: 'entry=invoke-fallback', ok: true })
+    return { envelope: await gateway.invoke(toGatewayArgs(endpoint, payload, signal)) }
+  }
+
   function capabilityCheck(device: DeviceRecord, endpoint: string): { ok: true } | { ok: false; code: string; message: string } {
     /** 显式规则：命中即要求对应能力位（未命中则放行）。 */
     const required: Record<string, keyof DeviceCapabilities> = {
@@ -1002,7 +1039,8 @@ export function createMobileHost(options: {
           const local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device)
           if (local !== undefined) {
             store.record({ deviceId: device.deviceId, kind: 'rpc', target: request.endpoint, detail: 'local', ok: true })
-            return local
+            // ★ 本地端点返回的是**值** ⇒ 包成信封（= 改动前 tunnel 那层包法 ✓，形状不变 ✓）
+            return { ok: true, value: local }
           }
           const gate = capabilityCheck(device, request.endpoint)
           if (!gate.ok) {
@@ -1011,7 +1049,9 @@ export function createMobileHost(options: {
           }
           const started = Date.now()
           try {
-            const value = await invokeGatewayEndpoint(options.gateway, request.endpoint, request.payload, signal)
+            // ★ 隧道要的是**信封**（含 attachments ✓）——走只给隧道用的那个入口 ✓，
+            //   而 `invokeGatewayEndpoint` **一个字没动** ✓（聊天桥依赖它的契约 ✓）。
+            const value = (await invokeGatewayEnvelope(options.gateway, request.endpoint, request.payload, signal)).envelope
             // ★ 成功才记 ok:true。原先这里写成 `finally { … ok: true }`，于是**每一次失败**
             //   都会额外留下一条 `12ms / ok:true` —— 审计里看到的是成对的
             //   `failed` + `12ms(ok)`，一眼看过去像"重试后成功"，实际是同一个失败被记了两次。

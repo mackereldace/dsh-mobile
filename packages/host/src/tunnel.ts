@@ -452,7 +452,11 @@ export class TunnelSession {
           JSON.stringify({
             type: 'server-response',
             rpcId: request.rpcId,
-            result: { ok: true, value: encodeBinary(value) },
+            /**
+             * ★★★ 隧道：`result` **就是 delegate 返回的那个信封** ✓（可能含 `attachments` ✓）。
+             *   不再套一层 `{ok:true,value}` ✗（"层数"错今天栽过多次 ✓）。
+             */
+            result: encodeBinary(value),
           }),
           'utf8',
         ),
