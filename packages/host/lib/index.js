@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
+import { callHostRpc } from "./gateway-rpc.js";
 import { imageMimeOf, resolveWallpaper, wallpaperSize } from "./wallpaper.js";
 import { DeviceCallQueue, DEVICE_CAPABILITIES } from "./device-calls.js";
 import { CodexBridge, handleCodexEndpoint } from "./codex/codex-bridge.js";
@@ -428,10 +429,18 @@ export function createMobileHost(options) {
      * 兜底决定 —— 表现就是"选择回不到电脑"。而审计里因为 `finally` 的写法还把失败
      * 记成了成功，把我往"传输没问题"的方向带偏了一轮。
      *
-     * `dispatchRpc` 返回的是标准信封 `{ok, value}` / `{ok:false, error}`，
-     * 所以这里把它还原成"成功给值、失败抛错"，与其余端点的语义保持一致。
      */
-    async function invokeGatewayEndpoint(gateway, endpoint, payload, signal) {
+    /**
+     * 取「带附件表的信封」（第 109 轮接线）：字节就在这张表里。
+     *
+     * `gateway.invoke()`（1 参）返回的是**已编码的值**（字节已换成 `null` 占位 ✓）
+     * 而**不把 `attachments` 往外传** ✗ ⇒ 我们手里永远没有那包字节 ✓。
+     * 宿主侧真正的入口是 `dispatchRpc`（`connection.rpc.intercept('/api', …)` 用的就是它 ✓）。
+     *
+     * ★ 特判分支是**搬进来**的（不是复制 ✗）：`$events/result` 不在反射表里，
+     *   只能走它自己的 `dispatchRpc`；第 106 轮把它漏在新函数外，于是语义与生产不同 ✗。
+     */
+    async function invokeGatewayEnvelope(gateway, endpoint, payload, signal, device) {
         // 网关特判的端点：它们不是反射出来的 Remote 方法，只能走 dispatchRpc。
         // 目前只有 `$events/result`（转发事件的回答）。名单写死是有意的 ——
         // 它对应 DSH 里唯一一处 `claimsEndpoint` 的无条件 `return true`。
@@ -443,15 +452,24 @@ export function createMobileHost(options) {
                 });
             }
             const envelope = await dispatch.dispatchRpc(endpoint, payload, signal);
+            // 特判这条路**没有字节**（事件结果里不会有附件）⇒ 包成信封即可 ✓
             if (envelope.ok === true)
-                return envelope.value;
+                return { envelope: { ok: true, value: envelope.value }, entry: 'dispatchRpc' };
             const failure = envelope.error ?? {};
             throw Object.assign(new Error(String(failure.message ?? 'gateway rejected the call')), {
                 code: typeof failure.code === 'string' ? failure.code : ErrorCode.CapabilityDenied,
                 details: failure.details,
             });
         }
-        return gateway.invoke(toGatewayArgs(endpoint, payload, signal));
+        const outcome = await callHostRpc(gateway, endpoint, payload, signal, () => gateway.invoke(toGatewayArgs(endpoint, payload, signal)));
+        if (outcome.entry !== 'dispatchRpc' && device !== undefined) {
+            // ★ 回退/裸值都是**偏离**（字节会因此丢掉 ✓）⇒ 如实记一条，不许静默 ✗
+            store.record({ deviceId: device.deviceId, kind: 'rpc', target: endpoint, detail: 'entry=' + outcome.entry, ok: true });
+        }
+        return outcome;
+    }
+    async function invokeGatewayEndpoint(gateway, endpoint, payload, signal) {
+        return (await invokeGatewayEnvelope(gateway, endpoint, payload, signal)).envelope.value;
     }
     function capabilityCheck(device, endpoint) {
         /** 显式规则：命中即要求对应能力位（未命中则放行）。 */
@@ -531,7 +549,7 @@ export function createMobileHost(options) {
                 const local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device);
                 if (local !== undefined) {
                     store.record({ deviceId: device.deviceId, kind: 'rpc', target: request.endpoint, detail: 'local', ok: true });
-                    return local;
+                    return { ok: true, value: local };
                 }
                 const gate = capabilityCheck(device, request.endpoint);
                 if (!gate.ok) {
@@ -540,7 +558,7 @@ export function createMobileHost(options) {
                 }
                 const started = Date.now();
                 try {
-                    const value = await invokeGatewayEndpoint(options.gateway, request.endpoint, request.payload, signal);
+                    const envelope = (await invokeGatewayEnvelope(options.gateway, request.endpoint, request.payload, signal, device)).envelope;
                     // ★ 成功才记 ok:true。原先这里写成 `finally { … ok: true }`，于是**每一次失败**
                     //   都会额外留下一条 `12ms / ok:true` —— 审计里看到的是成对的
                     //   `failed` + `12ms(ok)`，一眼看过去像"重试后成功"，实际是同一个失败被记了两次。
@@ -552,7 +570,7 @@ export function createMobileHost(options) {
                         detail: `${Date.now() - started}ms`,
                         ok: true,
                     });
-                    return value;
+                    return envelope;
                 }
                 catch (error) {
                     // ★ 失败要带**原因**。原先只记 `failed` 两个字，于是"端点不存在""参数形状不对"
@@ -1261,6 +1279,39 @@ export function createMobileHost(options) {
                 ...(() => {
                     try {
                         return { deviceQueue: { pending: deviceCalls.pendingCount() } };
+                    }
+                    catch (error) {
+                        void error;
+                        return {};
+                    }
+                })(),
+                ...(() => {
+                    /**
+                     * ★ 第 74 轮：把"这台电脑装的插件与 APK 是哪一版"念出来 ✓ ——
+                     *   用户验之前先看这里一眼，就知道电脑端是不是新的 ✓（消灭"验了旧的"那种白费 ✓）。
+                     */
+                    try {
+                        let boot = '';
+                        try {
+                            // boot.js 就在产物旁边（构建时拷进 lib/）⇒ 直接按模块位置取，不依赖配置类型
+                            const bootPath = join(dirname(fileURLToPath(import.meta.url)), 'boot.js');
+                            const text = readFileSync(bootPath, 'utf8');
+                            const stamp = text.match(/BUILD-[0-9]+/);
+                            boot = stamp === null ? '' : stamp[0];
+                        }
+                        catch (error) {
+                            void error;
+                        }
+                        let apk = null;
+                        try {
+                            const apkPath = join(dirname(fileURLToPath(import.meta.url)), 'dsh-mobile.apk');
+                            const stat = statSync(apkPath);
+                            apk = { bytes: stat.size, modifiedAt: stat.mtime.toISOString() };
+                        }
+                        catch (error) {
+                            void error;
+                        }
+                        return { assets: { boot, apk } };
                     }
                     catch (error) {
                         void error;

@@ -36,4 +36,33 @@ export declare function encodeBinary(value: unknown): unknown;
  *   真实数据里恰好长成这样的对象极少，而且**不猜**：多一个键就不认 ✓。
  */
 export declare function decodeBinary(value: unknown): unknown;
+/**
+ * ★★★ 2026-10-04：按 **DSH 自己的附件表**把 `null` 占位换成真字节。
+ *
+ * ## 为什么需要它（只读调研的结论，见 43 号文档）
+ *
+ * DSH **从不把字节放进 JSON** ✓。它的约定是两段式：
+ * · JSON 里留 **`null` 占位**；
+ * · 真字节走 **multipart 分片**，并在信封里带一张附件表
+ *   （每项 `{ path, codec: "bytes", part }` ✓）。
+ * 客户端**只在 `content-type` 是 multipart/form-data 时**才做替换
+ * （`@deepseek-ai/dsh-client-connection/lib/client.js:1241 parseBinaryResponse` ✓）。
+ *
+ * ⇒ 我们的隧道把应答压成一帧 JSON ✗ ⇒ 那包字节丢了 ✗ ⇒ 客户端拿到 `data: null`
+ *   ⇒ zod 的 `z.instanceof(Uint8Array)` 当场报
+ *   `client api: workspaceFiles/readBytes failed: … expected "Uint8Array"` ✓（与用户报错一字不差）。
+ *
+ * 本函数就是"我们自己的 `parseBinaryResponse`"那一小步 ✓：
+ * 在**把值交给 DSH 之前**，按附件表把占位换成 `Uint8Array` ✓。
+ *
+ * ## 纪律（两条，都是照 DSH 的规矩来的）
+ *
+ * · 路径是**相对 `result`** 的（样本：`path: ["value","data"]` ✓）；
+ * · 占位**必须是 `null`** ✓ —— 不是 `null` 就抛错 ✗（DSH 自己就是抛
+ *   `invalid binary response placeholder` ✓；我们跟着抛，才不会把坏数据悄悄放过去 ✓）。
+ */
+export declare function applyAttachments(result: unknown, attachments: ReadonlyArray<{
+    readonly path: readonly (string | number)[];
+    readonly bytes: Uint8Array;
+}>): unknown;
 //# sourceMappingURL=binvalue.d.ts.map
