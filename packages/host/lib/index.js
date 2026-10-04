@@ -549,7 +549,7 @@ export function createMobileHost(options) {
                 const local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device);
                 if (local !== undefined) {
                     store.record({ deviceId: device.deviceId, kind: 'rpc', target: request.endpoint, detail: 'local', ok: true });
-                    return { ok: true, value: local };
+                    return local;
                 }
                 const gate = capabilityCheck(device, request.endpoint);
                 if (!gate.ok) {
