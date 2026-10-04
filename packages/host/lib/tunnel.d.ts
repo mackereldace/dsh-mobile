@@ -22,15 +22,7 @@ export type TunnelState = 'awaiting-hello' | 'handshaking' | 'established' | 'cl
 export interface TunnelDelegate {
     /** 按 ClientHello 解析设备凭据；未配对返回 undefined。 */
     resolveDevice(hello: ClientHelloPayload): HostDeviceCredentials | undefined | Promise<HostDeviceCredentials | undefined>;
-    /**
-     * 执行一次一元 RPC。
-     *
-     * ★ 返回的**就是响应帧里的 `result`** ✓ —— 必须是与 DSH 逐字段一致的**信封**
-     *   （`{ok:true, value, attachments?}` ✓ / `{ok:false, error}` ✓）；`handleRpc` **不再包一层** ✗。
-     *   第 109 轮之前这里是"返回裸值、由隧道包一层" ⇒ 网关那包真字节（`attachments`）无处可放 ✗
-     *   ⇒ 手机端拿到 `data: null` ⇒ zod 报 expected "Uint8Array" ✓。
-     *   ⇒ 契约断言钉在 `test/envelope-contract.test.ts` ✓（含"判据会响"的坏样本 ✓）。
-     */
+    /** 执行一次一元 RPC。 */
     invoke(request: {
         readonly endpoint: string;
         readonly payload: unknown;

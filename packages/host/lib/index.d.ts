@@ -151,14 +151,6 @@ export interface RemoteGateway {
      * 所以这里写成"前两个固定、其余任意" ✓（两种都类型通过 ✓，具体怎么调见 `callOpenWireStream` ✓）。
      */
     openWireStream?(endpoint: string, payload: unknown, ...rest: unknown[]): Promise<AsyncIterable<unknown>>;
-    /**
-     * ★ 宿主侧 RPC 入口（DSH 的 `typertGateway` 上有它 ✓）—— 取数细节见 `gateway-rpc.ts`。
-     *
-     * 它返回的是**带附件表的信封**（`{ok, value, attachments?}` ✓），而 `invoke()` 返回的是
-     * **已编码的值**（字节已换成 `null` 占位 ✗、附件表不外传 ✗）⇒ 想让字节过隧道，只能走它 ✓。
-     * **可选**：旧 DSH 与测试替身可能没有 ⇒ 有则优先用 ✓（判断在 `callHostRpc` 里 ✓）。
-     */
-    dispatchRpc?(endpoint: string, payload: unknown, signal: AbortSignal, peer?: unknown): Promise<unknown>;
 }
 /** 设备管理更新入参。 */
 export interface DeviceUpdate {
