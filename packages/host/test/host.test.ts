@@ -454,7 +454,25 @@ async function setup(
     payload: unknown,
   ) => {
     dispatches.push({ endpoint, payload })
-    return { ok: true, value: { dispatched: true } }
+    /**
+     * ★★ 第 104 轮：替身要**像真 DSH** ✓。
+     *
+     * 真实网关里 `dispatchRpc` **就是 `/api` 的宿主侧入口**
+     * （`connection.rpc.intercept('/api', …, (e, p, s, peer) => this.dispatchRpc(e, p, s, peer))` ✓），
+     * 业务端点也返回**带信封的业务值** ✓；只有 `$events/result` 那条特判才在这里做事件处理 ✓。
+     *
+     * ★ 上一版对**所有**端点返回哨兵 `{dispatched:true}` ✗ ⇒ 替身不像真的 ⇒
+     *   一旦实现改成"优先 dispatchRpc"就**误报红** ✗（第 102 轮就是这么被绊住的 ✓）。
+     *   ⇒ 先把替身改真、且**不改实现**跑一遍 ✓：应当仍然全绿 ✓（两件事分开验证 ✓）。
+     */
+    if (endpoint === '$events/result') return { ok: true, value: { dispatched: true } }
+    const cut = endpoint.indexOf('/')
+    const namespace = cut > 0 ? endpoint.slice(0, cut) : endpoint
+    const method = cut > 0 ? endpoint.slice(cut + 1) : ''
+    const maybeArgs = payload !== null && typeof payload === 'object'
+      ? (payload as { args?: Record<string, unknown> }).args
+      : undefined
+    return { ok: true, value: await gateway.invoke({ namespace, method, args: maybeArgs ?? {} }) }
   }
 
   const host: MobileHost = createMobileHost({
