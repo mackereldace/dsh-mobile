@@ -573,6 +573,25 @@ export function createMobileHost(options) {
                     // ★ 隧道要的是**信封**（含 attachments ✓）——走只给隧道用的那个入口 ✓，
                     //   而 `invokeGatewayEndpoint` **一个字没动** ✓（聊天桥依赖它的契约 ✓）。
                     const value = (await invokeGatewayEnvelope(options.gateway, request.endpoint, request.payload, signal)).envelope;
+                    /**
+                     * ★★★ 只读诊断（再次加回 ✓）：回答"信封里到底有没有 attachments"。
+                     *   · 不改任何逻辑 ✓；结果出现在自检页 diagnostics 里（tag=attachments-probe ✓）。
+                     *   · 三种读数对应三种结论 ✗：n=0 ⇒ 有附件表但是空的；n>0 ⇒ **有字节**（那就是客户端没装上）；
+                     *     none ⇒ 这条路上根本没有附件表（入口还是不对 ✓）。
+                     */
+                    try {
+                        const probeList = value?.attachments;
+                        store.record({
+                            deviceId: device.deviceId,
+                            kind: 'rpc',
+                            target: request.endpoint,
+                            detail: 'attachments-probe n=' + (Object.prototype.toString.call(probeList) === '[object Array]' ? String(probeList.length) : 'none'),
+                            ok: true,
+                        });
+                    }
+                    catch (error) {
+                        void error;
+                    }
                     // ★ 成功才记 ok:true。原先这里写成 `finally { … ok: true }`，于是**每一次失败**
                     //   都会额外留下一条 `12ms / ok:true` —— 审计里看到的是成对的
                     //   `failed` + `12ms(ok)`，一眼看过去像"重试后成功"，实际是同一个失败被记了两次。
