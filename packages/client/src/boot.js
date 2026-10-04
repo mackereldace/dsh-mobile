@@ -22234,6 +22234,24 @@
         if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {
           console.warn('[dsh-mobile] rpcId 不一致（会导致 DSH 拒绝该响应）：发出', envelope.rpcId, '收到', response.rpcId)
         }
+        /**
+         * ★★★ 2026-10-04 深夜：交付那一段 —— 有附件表就交**真正的 multipart `Response`** ✓。
+         *
+         * 为什么（一句话）：DSH 客户端**只按 `content-type` 分流** ✓，走 JSON 那条路时
+         * 它的 `parseConnectionResponse(await response.json())` 会把 `Uint8Array` 打回普通对象 ✗
+         * ⇒ 我们在内存里装好的字节到不了它的 zod 校验 ✓。
+         * 交 multipart ⇒ **它自己的** `parseBinaryResponse` 按附件表把 `null` 占位换成
+         * `Uint8Array` ✓ ⇒ 它校验时就已经是对的 ✓。详见 `buildBinaryResponse` 的长注释 ✓。
+         * ★ 抛错**不吞**（不退回 JSON ✓）：有附件表就说明这一帧**确实带字节** ✓，
+         *   退回 JSON 是**必然错**的那条路 ✗ —— 与其静默重演老毛病 ✓，不如当场说清 ✓。
+         */
+        try {
+          var binaryResponse = buildBinaryResponse(response)
+          if (binaryResponse !== undefined) return binaryResponse
+        } catch (error) {
+          debugBoxLine('[bytes] 交 multipart 失败：' + String(error && error.message ? error.message : error))
+          throw error
+        }
         return new Response(JSON.stringify(response), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -22333,6 +22351,8 @@
     verifyHostSignature: verifyHostSignature,
     FrameType: FrameType,
     FrameFlags: FrameFlags,
+    /** ★ 交付那一段（帧 → multipart `Response` ✓）：测试直接调它 ✓（纯函数，不需要浏览器 ✓）。 */
+    buildBinaryResponse: buildBinaryResponse,
   }
 
   /**
@@ -22350,6 +22370,129 @@
     return tunnelReady.promise.then(function () {
       return globalThis.__DSH_TRANSPORT__
     })
+  }
+
+  /**
+   * ★★★ 2026-10-04 深夜：「帧 → multipart `Response`」——把字节**活着**交到 DSH 校验的那一刻。
+   *
+   * ## 为什么非这样不可（根因，源码为证）
+   *
+   * DSH 的客户端拿到我们的响应后，只看 `content-type` 分流
+   * （`@deepseek-ai/dsh-client-connection/lib/client.js:1228` ✓）：
+   * · `multipart/form-data` ⇒ `parseBinaryResponse()`（同文件 `:1240`）——按附件表把 `null`
+   *   占位换成 `new Uint8Array(await blob.arrayBuffer())`（同文件 `:1271` ✓）；
+   * · 否则 ⇒ `parseConnectionResponse(await response.json())`——**任何一次 JSON 往返都会把
+   *   `Uint8Array` 打回普通对象** ✗。
+   *
+   * ⇒ 我们在内存里把值换成 `Uint8Array` 是**到不了**它的 zod 校验的 ✗（那条路必然再过一次 JSON ✓）。
+   *   唯一活路：交一枚**真正的 `Response`**，形状与 DSH 宿主自己的 `fullResponse` 逐字段一致
+   *   （`dsh-client-connection/lib/index.js:723` ✓：`metadata` 分片装信封 JSON ✓、
+   *   `bytes-<n>` 分片装原始字节 ✓、附件表三项 `{path, codec:"bytes", part}` ✓）。
+   *   这样**它自己的** `parseBinaryResponse` 会把占位换成 `Uint8Array` ✓ ⇒ 它校验时就已经是对的 ✓。
+   *   （它期待的形状见 `dsh-api-workspace-files/lib/typert.remote-client.js:69` 的
+   *   `'data': z.instanceof(Uint8Array)` ✓ —— 报错就出在这一格 ✓。）
+   *
+   * ## 分工（本仓忌「同一件事两份」✓ —— 两套还原各自负责哪一段）
+   *
+   * · **本函数（交付那一段 ✓）**：负责「交给 DSH 那一刻值是对的」✓ —— 只有它能救 zod 校验 ✓；
+   * · 帧处理器里那套「按附件表装回」（`FrameType.RpcResponse` 那一支 ✓）：只服务**不经 DSH
+   *   的 JSON 往返**的读取方（本页内部 `tunnel.rpc` · 调试框读数 ✓）✗ —— 它不再声称负责最后一步 ✓；
+   * · `decodeBinaryValue`（`$dshmBytes` 标记 ✓）：**两套都要用它** ✓ —— 附件表里的 `bytes` 在帧里
+   *   是我们自己的标记形式 ✓，先还原成真字节 ✓ 才谈得上交出去 ✓。
+   */
+  /**
+   * 这个页面交不交得了 multipart（缺任何一个能力都不能走这条路 ✗）。
+   *
+   * ★ 为什么要有这道闸：`parseBinaryResponse` 是**DSH 那边**调 `response.formData()` 的 ✓ ——
+   *   页面没有 `FormData` / `Response.prototype.formData` 时，交出去它照样解析不了 ✗
+   *   ⇒ 与其交一个必然抛错的响应 ✓，不如退回 JSON 并把这件事**念出来** ✓（不静默 ✗）。
+   */
+  function canBuildBinaryResponse() {
+    return typeof FormData === 'function'
+      && typeof Blob === 'function'
+      && typeof Response === 'function'
+      && typeof Response.prototype.formData === 'function'
+  }
+
+  /**
+   * 把附件落点**写回 `null` 占位** ✓（`path` 相对 `result.value` ✓，与 DSH 的
+   * `parseBinaryResponse` 同一套走法 ✓）。
+   *
+   * ★ 为什么必须显式写回 ✗：DSH 对占位有一条硬校验
+   *   （`Reflect.get(parent, key) !== null` ⇒ 抛 `invalid binary response placeholder` ✓），
+   *   而帧处理器那套「内存里装回」**可能已经把这个位置填成 `Uint8Array`** ✓
+   *   ⇒ 不写回，交出去的 metadata 会让 DSH 当场抛错 ✗（比原来更难查 ✓）。
+   * ★ 顺带补上缺键：占位若在宿主侧是 `undefined`，`JSON.stringify` 会把整个键**丢掉** ✗
+   *   ⇒ DSH 走到那一格会判「路径走不通」✓；这里显式补 `null` ✓。
+   */
+  function writeNullPlaceholder(root, path) {
+    var node = root
+    for (var i = 0; i < path.length - 1; i++) {
+      if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（中间不是对象）')
+      node = node[path[i]]
+    }
+    if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（父节点不是对象）')
+    node[path[path.length - 1]] = null
+  }
+
+  /**
+   * 把一帧「带附件表的 `server-response`」交成一枚 multipart `Response` ✓；
+   * **没有附件表**（或页面交不了 multipart）⇒ 返回 `undefined` ✓（调用方退回 JSON ✓）。
+   *
+   * 形状逐字段对齐 DSH 宿主自己的 `fullResponse`（`dsh-client-connection/lib/index.js:723` ✓）：
+   * ```
+   * metadata = { type, rpcId, result: { ok: true, value }, attachments: [{ path, codec: 'bytes', part }] }
+   * bytes-0  = 原始字节（Blob ✓）
+   * ```
+   * ★ `attachments` 在**信封顶层** ✗（不是 `result.attachments` ✓）—— DSH 读的是
+   *   `envelope.attachments` ✓，而我们隧道帧里的附件表在 `result.attachments` ✓
+   *   （那是 `encodeRpcResult` 的产物 ✓）⇒ 这一层必须**搬**上去 ✓。
+   * ★ `path` 原样透传 ✓（它相对 `result.value` ✓，DSH 的走法与我们这份一致 ✓）。
+   */
+  function buildBinaryResponse(response) {
+    var result = response === null || response === undefined ? undefined : response.result
+    if (result === null || result === undefined || typeof result !== 'object' || result.ok !== true) return undefined
+    var attachments = result.attachments
+    if (Object.prototype.toString.call(attachments) !== '[object Array]' || attachments.length === 0) return undefined
+    if (!canBuildBinaryResponse()) {
+      debugBoxLine('[bytes] 本页没有 FormData/Blob/Response.formData ⇒ 只能走 JSON（字节到不了 DSH 的校验）')
+      return undefined
+    }
+    var envelope = {
+      type: response.type,
+      rpcId: response.rpcId,
+      result: { ok: true, value: result.value },
+      attachments: [],
+    }
+    var form = new FormData()
+    for (var i = 0; i < attachments.length; i++) {
+      var attachment = attachments[i]
+      var path = attachment === null || attachment === undefined ? undefined : attachment.path
+      if (Object.prototype.toString.call(path) !== '[object Array]' || path.length === 0) {
+        throw new Error('附件路径为空，拒绝猜它该放到哪')
+      }
+      /**
+       * ★ 用 `ArrayBuffer.isView` 而不是 `instanceof Uint8Array` ✗：本文件也跑在 vm 沙箱里
+       *   （测试 ✓）、可能跑在 iframe 里 ✓，跨 realm 的 `instanceof` 会**假** ✓，
+       *   而 `ArrayBuffer.isView` 是按内部槽判的 ✓。`decodeBinaryValue` 那条路照旧保留 ✓。
+       */
+      var bytes = attachment.bytes
+      if (!ArrayBuffer.isView(bytes)) {
+        if (Object.prototype.toString.call(bytes) === '[object ArrayBuffer]') bytes = new Uint8Array(bytes)
+        else bytes = decodeBinaryValue(bytes)
+      }
+      if (!ArrayBuffer.isView(bytes)) throw new Error('附件的 bytes 不是字节（宿主那一端编码没生效？）')
+      var part = 'bytes-' + i
+      form.set(part, new Blob([bytes]))
+      envelope.attachments.push({ path: path.slice(), codec: 'bytes', part: part })
+      /**
+       * ★ 落点必须是 `null` 占位 ✓（DSH 的硬校验只认 `null` ✓）——
+       *   无论帧处理器那套内存还原有没有跑过 ✓，这里**一律写回 `null`** ✓。
+       */
+      writeNullPlaceholder(result.value, path)
+    }
+    form.set('metadata', JSON.stringify(envelope))
+    return new Response(form)
   }
 
   /**

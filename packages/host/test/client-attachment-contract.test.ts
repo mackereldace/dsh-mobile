@@ -41,8 +41,14 @@ describe('附件还原：客户端与协议层的契约', () => {
     assert.ok(restoreLine < resolveLine, `附件还原必须发生在 resolve 之前（还原在第 ${restoreLine} 行，resolve 在第 ${resolveLine} 行）`)
   })
 
-  it('★ 两边都以 result 为根（不是整条 response、也不是别的层）', () => {
-    assert.match(boot, /var node = response\.result/)
+  /**
+   * ★★★ 第 126 轮：这条断言原来钉的是 `var node = response.result` ✓ ——
+   *   而第 9daab46 轮已把根改成**按 `path` 推断** ✓（实测：`["data"]` 相对 `result.value` ✓），
+   *   于是它**在我动手之前就是红的** ✓（基线：本文件 5 条里 1 条红 ✗）。
+   *   ⇒ 这里改成钉**当前**的（更贴近 DSH 真实走法的）约定 ✗，而不是把代码折回去迁就旧断言 ✓。
+   */
+  it('★ 客户端按 path 推断根（["value",…] ⇒ result；["data"] ⇒ result.value）', () => {
+    assert.match(boot, /path\[0\] === 'value' \? response\.result : response\.result\.value/)
     assert.match(protocol, /let parent: unknown = result/)
   })
 
@@ -60,5 +66,48 @@ describe('附件还原：客户端与协议层的契约', () => {
     // 客户端那边字节已被 decodeBinaryValue 还原成 Uint8Array ⇒ 必须直接赋值
     assert.match(boot, /node\[leaf\] = attachment\.bytes/)
     assert.match(protocol, /parent as Record<string, unknown>\)\[key\] = attachment\.bytes/)
+  })
+
+  /**
+   * ★★★ 第 126 轮：**交付那一段**（帧 → multipart `Response`）的契约。
+   *
+   * 为什么必须钉 ✗：DSH 只在 `content-type` 是 `multipart/form-data` 时才走
+   * `parseBinaryResponse`（`dsh-client-connection/lib/client.js:1228` ✓），否则它
+   * `parseConnectionResponse(await response.json())` —— **任何一次 JSON 往返都会把
+   * `Uint8Array` 打回普通对象** ✗。这条链上写错任何一处（少一个分片名 ✗、附件表放错层 ✗、
+   * 占位没写回 `null` ✗）都表现为**同一个** zod 报错 ✓，肉眼分不开 ✗ ⇒ 只机器能分开 ✓。
+   */
+  it('★★ 传输层里必须**先**试着交 multipart，再退回 JSON（顺序反了等于没修）', () => {
+    const lines = boot.split('\n')
+    const branchLine = lines.findIndex((line) => line.includes('case FrameType.RpcResponse:'))
+    assert.ok(branchLine >= 0, 'boot.js 里找不到 RpcResponse 分支')
+    /**
+     * ★★ 变异验证（第 126 轮自己抓出来的一个**假闸** ✗）：我第一版找的是
+     *   `buildBinaryResponse(response)` 这一**调用** ✓ —— 把交付那行改成
+     *   `if (false) return binaryResponse`（= 永不交 multipart）它**照样全绿** ✗
+     *   （调用还在、位置也还在 ✓）。⇒ 判据必须钉**真正交出去的那一行** ✗，
+     *   否则就是本仓最忌的「永远为真」✓。
+     */
+    const multipartLine = lines.findIndex((line, index) => index > branchLine && line.includes('if (binaryResponse !== undefined) return binaryResponse'))
+    const jsonLine = lines.findIndex((line, index) => index > branchLine && line.includes('return new Response(JSON.stringify(response), {'))
+    assert.ok(multipartLine > branchLine, '传输层里找不到「试着交 multipart」那一句')
+    assert.ok(jsonLine > branchLine, '传输层里找不到 JSON 回退那一句')
+    assert.ok(multipartLine < jsonLine, `必须先试 multipart（第 ${multipartLine} 行），再退回 JSON（第 ${jsonLine} 行）`)
+  })
+
+  it('★★ 分片形状与 DSH 的 fullResponse 逐字段一致（metadata + bytes-<n> + 三项附件表）', () => {
+    assert.match(boot, /var part = 'bytes-' \+ i/)
+    assert.match(boot, /form\.set\(part, new Blob\(\[bytes\]\)\)/)
+    // ★ 附件表在**信封顶层**（DSH 读的是 envelope.attachments ✓），不是 result.attachments
+    assert.match(boot, /attachments: \[\],/)
+    assert.match(boot, /envelope\.attachments\.push\(\{ path: path\.slice\(\), codec: 'bytes', part: part \}\)/)
+    assert.match(boot, /form\.set\('metadata', JSON\.stringify\(envelope\)\)/)
+    assert.match(boot, /return new Response\(form\)/)
+  })
+
+  it('★★ 交出去之前，落点一律写回 null 占位（DSH 的硬校验只认 null）', () => {
+    assert.match(boot, /writeNullPlaceholder\(result\.value, path\)/)
+    // 与 DSH 的 parseBinaryResponse 同一套走法：末端写 null、路径走不通就抛
+    assert.match(boot, /node\[path\[path\.length - 1\]\] = null/)
   })
 })

@@ -68,7 +68,7 @@ async function createDeviceKey(): Promise<{ deviceId: string; publicKeyB64u: str
   return { deviceId, publicKeyB64u, storageValue: JSON.stringify({ deviceId, publicKey: publicKeyB64u, privateKeyJwk: privateJwk }) }
 }
 
-async function setup(options: { pinnedMismatch?: boolean; revoke?: boolean } = {}) {
+async function setup(options: { pinnedMismatch?: boolean; revoke?: boolean; attachment?: Uint8Array } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mobile-direct-'))
   const store = new DeviceStore({ directory: dir })
   const hostSigningKey = generateP256KeyPair()
@@ -105,6 +105,15 @@ async function setup(options: { pinnedMismatch?: boolean; revoke?: boolean } = {
         // 注意：宿主服务的 invoke 收到的是 {endpoint, payload}，载荷在 request.payload 里。
         // 早期版本的测试桩误写成 request.endpoint，导致"返回了调用参数、没了 endpoint"。
         calls.push(request.endpoint)
+        /**
+         * ★ 第 126 轮：`attachment` 一给，桩就返回**DSH 网关那种形状**
+         *   （`encodeRpcResult` ✓：字节换成 `null` 占位 + 收进附件表 ✓，
+         *   见 `dsh-api-gateway/lib/index.js:1120` ✓）—— 让端到端测试能真的走一遍
+         *   「宿主编码 → 隧道 → 客户端解码 → 交 multipart Response」✓。
+         */
+        if (options.attachment !== undefined) {
+          return { ok: true, value: { data: null }, attachments: [{ path: ['data'], bytes: options.attachment }] }
+        }
         // ★ 隧道把这里的返回值**当 result 原样发** ✓（第 109 轮起）⇒ 必须是与 DSH 一致的
         //   信封 `{ok:true,value}` ✗ 不许返回裸值（裸值会让真机卡在"永不 resolve" ✓）。
         return { ok: true, value: { endpoint: request.endpoint, payload: request.payload } }
@@ -133,6 +142,12 @@ async function setup(options: { pinnedMismatch?: boolean; revoke?: boolean } = {
     TextEncoder,
     TextDecoder,
     Response,
+    /**
+     * ★ 第 126 轮：交付 multipart 需要这两个 ✓（Node 与浏览器同规范 ✓；注入的是**外层那一个** ✓，
+     *   于是测试里 `instanceof Blob` 不会因跨 realm 假掉 ✓）。
+     */
+    FormData,
+    Blob,
     URL,
     URLSearchParams,
     setTimeout,
@@ -353,6 +368,164 @@ test('serverNonceBase 在 ServerHello 与 ServerAuthOk 中必须一致（防拼�
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
     assert.ok(boot.tunnel?.sessionId !== undefined, '握手应完成（证明两侧 nonce 前缀一致）')
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★★★ 第 126 轮：「帧 → multipart `Response` → 还原」的**纯函数级**断言（不需要浏览器）。
+ *
+ * 为什么在这儿测 ✗：`buildBinaryResponse` 是 boot.js 里的纯函数 ✓，唯一的外部依赖是
+ * `FormData` / `Blob` / `Response`（沙箱里注入的就是 Node 自己那三个 ✓，与浏览器同规范 ✓）。
+ * 于是「帧里的字节 → 交出去的响应 → 按附件表取回原字节」这一整段能在电脑上跑 ✓，
+ * 不必等真机 ✗（真机只能回答「报错还在不在」✗，分不出是哪一段错 ✓）。
+ *
+ * 四条断言正好是 DSH 的 `parseBinaryResponse`（`client.js:1240`）要的四个条件 ✓：
+ *   ① `content-type` 以 `multipart/form-data` 开头 ✓（它按这个分流 ✓）；
+ *   ② `metadata` 分片是**字符串**且能过 `parseConnectionResponse`（type / rpcId / result.ok ✓）；
+ *   ③ 附件表在**信封顶层** ✓、三项逐字为 `{path, codec:'bytes', part}` ✓；
+ *   ④ 落点是 **`null` 占位** ✓，`bytes-<n>` 是 Blob 且字节**逐字节相等** ✓（含 250..255 ✓）。
+ */
+test('★★ 带附件表的帧 ⇒ 交一枚真正的 multipart Response（字节活着到还原那一刻）', async () => {
+  const env = await setup()
+  try {
+    const internals = env.sandbox['__DSH_MOBILE_INTERNALS__'] as {
+      buildBinaryResponse: (response: unknown) => Response | undefined
+    }
+    assert.equal(typeof internals.buildBinaryResponse, 'function', 'boot.js 应把交付函数暴露给测试')
+
+    const bytes = new Uint8Array([0, 1, 2, 3, 250, 251, 252, 253, 254, 255])
+    const frame = {
+      type: 'server-response',
+      rpcId: 'rpc-multipart-1',
+      result: { ok: true, value: { data: null }, attachments: [{ path: ['data'], bytes }] },
+    }
+    const response = internals.buildBinaryResponse(frame)
+    assert.ok(response !== undefined, '有附件表就必须交 multipart（不许退回 JSON）')
+    assert.match(String(response.headers.get('content-type')), /^multipart\/form-data;/, 'DSH 按这个 content-type 分流')
+
+    const form = await response.formData()
+    const metadata = JSON.parse(String(form.get('metadata'))) as {
+      type: string
+      rpcId: string
+      result: { ok: boolean; value: { data: unknown } }
+      attachments: Array<{ path: unknown; codec: string; part: string }>
+    }
+    assert.equal(metadata.type, 'server-response', 'parseConnectionResponse 要求 type 逐字一致')
+    assert.equal(metadata.rpcId, 'rpc-multipart-1', 'rpcId 必须回传（DSH 要校验它相等）')
+    assert.equal(metadata.result.ok, true)
+    // ★ 附件表在**信封顶层**（DSH 读的是 envelope.attachments），不在 result 里
+    assert.equal(
+      JSON.stringify(metadata.attachments),
+      JSON.stringify([{ path: ['data'], codec: 'bytes', part: 'bytes-0' }]),
+    )
+    // ★ 占位必须是 null（DSH 的硬校验：不是 null 就抛 invalid binary response placeholder）
+    assert.equal(metadata.result.value.data, null)
+
+    const part = form.get('bytes-0')
+    assert.ok(part instanceof Blob, 'bytes-0 必须是一个 Blob')
+    const restored = new Uint8Array(await part.arrayBuffer())
+    assert.equal(
+      JSON.stringify(Array.from(restored)),
+      JSON.stringify(Array.from(bytes)),
+      '字节必须逐字节相等（含 250..255 这类高字节）',
+    )
+
+    // 没有附件表的帧 ⇒ 不许改行为（仍返回 undefined，调用方退回 JSON ✓）
+    assert.equal(
+      internals.buildBinaryResponse({ type: 'server-response', rpcId: 'r', result: { ok: true, value: { a: 1 } } }),
+      undefined,
+      '没有附件表时必须返回 undefined',
+    )
+
+    /**
+     * ★★ 两套还原**共存**时不许打架（这是修完 multipart 之后最容易回归的一处 ✗）：
+     *   帧处理器那套「内存里装回」可能已经把 `value.data` 填成 `Uint8Array` ✓，
+     *   而 DSH 的硬校验**只认 `null`** ✓ ⇒ 交付这套必须把它**写回 `null`** ✓，
+     *   字节则从附件表的 `bytes` 取 ✓（不是从被填过的那棵树里取 ✓）。
+     */
+    const filledFrame = {
+      type: 'server-response',
+      rpcId: 'rpc-multipart-2',
+      result: { ok: true, value: { data: Uint8Array.from(bytes) }, attachments: [{ path: ['data'], bytes }] },
+    }
+    const filled = internals.buildBinaryResponse(filledFrame)
+    assert.ok(filled !== undefined, '占位被填过的帧同样要交 multipart')
+    const filledForm = await filled.formData()
+    const filledMeta = JSON.parse(String(filledForm.get('metadata'))) as { result: { value: { data: unknown } } }
+    assert.equal(filledMeta.result.value.data, null, '内存那套已经填过时，交付这套必须把它写回 null 占位')
+    const filledPart = filledForm.get('bytes-0')
+    assert.ok(filledPart instanceof Blob, 'bytes-0 必须仍是一个 Blob')
+    assert.equal(
+      JSON.stringify(Array.from(new Uint8Array(await filledPart.arrayBuffer()))),
+      JSON.stringify(Array.from(bytes)),
+      '字节必须从附件表取，而不是从被填过的那棵树取',
+    )
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★★★ 第 126 轮：**整条链**的端到端断言 —— 宿主编码 → 隧道帧 → 客户端解码 →
+ *   传输层交出的响应。
+ *
+ * 为什么还要这一条（纯函数那条不够 ✗）：纯函数那条只证明「给它一帧，它交得对」✓，
+ *   证明不了**传输层真的会在那儿交** ✗ —— 我把它改成 `if (false) return …`（永不交 ✓）
+ *   时，纯函数那条与位置那条**都是绿的** ✓（变异验证当场抓出来的假闸 ✓）。
+ *   这一条从 `__DSH_TRANSPORT__.fetch` 进去，所以「没交」它一定红 ✓。
+ */
+test('★★ 整条链：带附件表的帧 ⇒ 传输层交出 multipart Response ⇒ 字节逐字节回来', async () => {
+  const attachment = new Uint8Array([0, 1, 2, 3, 250, 251, 252, 253, 254, 255])
+  const env = await setup({ attachment })
+  try {
+    env.socket.readyState = 1
+    env.socket.onopen?.()
+    const boot = env.sandbox['__DSH_MOBILE_BOOT__'] as { lastError?: string; tunnel?: { sessionId?: string } }
+    const deadline = Date.now() + 5000
+    while (boot.tunnel?.sessionId === undefined && boot.lastError === undefined && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.ok(boot.tunnel?.sessionId !== undefined, `握手应先完成：${String(boot.lastError)}`)
+
+    const transport = env.sandbox['__DSH_TRANSPORT__'] as {
+      fetch: (input: string, init: { method: string; body: string }) => Promise<Response>
+    }
+    const response = await transport.fetch('api/workspaceFiles/readBytes', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'rpc-att-1',
+        method: 'workspaceFiles/readBytes',
+        payload: { args: {} },
+      }),
+    })
+    assert.match(
+      String(response.headers.get('content-type')),
+      /^multipart\/form-data;/,
+      'DSH 只按这个 content-type 分流 ⇒ 交 JSON 就等于没修',
+    )
+    const form = await response.formData()
+    const metadata = JSON.parse(String(form.get('metadata'))) as {
+      type: string
+      rpcId: string
+      result: { ok: boolean; value: { data: unknown } }
+      attachments: Array<{ path: unknown; codec: string; part: string }>
+    }
+    assert.equal(metadata.type, 'server-response')
+    assert.equal(metadata.rpcId, 'rpc-att-1', 'rpcId 必须回传（DSH 要校验相等）')
+    assert.equal(JSON.stringify(metadata.attachments), JSON.stringify([{ path: ['data'], codec: 'bytes', part: 'bytes-0' }]))
+    assert.equal(metadata.result.value.data, null, '占位必须原样留 null（DSH 会自己装回去）')
+
+    const part = form.get('bytes-0')
+    assert.ok(part instanceof Blob, 'bytes-0 必须是一个 Blob')
+    const restored = new Uint8Array(await part.arrayBuffer())
+    assert.equal(
+      JSON.stringify(Array.from(restored)),
+      JSON.stringify(Array.from(attachment)),
+      '经宿主编码 + 隧道 + 客户端解码之后，字节必须逐字节回来',
+    )
   } finally {
     env.cleanup()
   }
