@@ -5411,7 +5411,16 @@
               if (Object.prototype.toString.call(path) !== '[object Array]' || path.length === 0) {
                 throw new Error('附件路径为空，拒绝猜它该放到哪')
               }
-              var node = response.result
+              /**
+               * ★★★ 根从 `path` 推断（2026-10-04 实测：装"成功"了却没效果 ⇒ 装错位置了 ✓）。
+               *   DSH 的附件表里 `path` **并不总是**相对整个 `result` ✗：
+               *   · `["value","data"]` ⇒ 相对 `result` ✓（`result.value.data` ✓）；
+               *   · `["data"]` ⇒ 相对 **`result.value`** ✓ ⇒ 我上一版按 `result` 走，
+               *     恰好把 `undefined` 值的 `result.data` 填上 ⇒ **装错地方** ✓（日志显示"成功"✓、
+               *     而 DSH 读 `result.value.data` 仍是 undefined ⇒ zod 照旧报错 ✓）。
+               */
+              var root = path[0] === 'value' ? response.result : response.result.value
+              var node = root
               for (var pi = 0; pi < path.length - 1; pi++) {
                 if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（中间不是对象）')
                 node = node[path[pi]]
