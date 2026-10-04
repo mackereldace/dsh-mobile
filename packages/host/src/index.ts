@@ -2024,6 +2024,49 @@ export function createMobileHost(options: {
   }
 
   /**
+   * ★ 手机可读的取证快照（见 `/mobile/manifest?diag=1`）。
+   * ★ 与自检页读的是**同一份数据源**（`store` 的审计 / `deviceCalls` 的计数 ✓）——
+   *   自检页那两段是在本函数之前写的 ✓，**下一步应改为调用本函数** ✓（避免两份 ✗：
+   *   本仓规矩是同一件事只写一份 ✓；这里先保住"用户现在能读到" ✓）。
+   */
+  function phoneDiagnostics(): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
+    try {
+      let boot = ''
+      try {
+        const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'boot.js'), 'utf8')
+        const stamp = text.match(/BUILD-[0-9]+/)
+        boot = stamp === null ? '' : stamp[0]
+      } catch (error) {
+        void error
+      }
+      let apk: { bytes: number; modifiedAt: string } | null = null
+      try {
+        const stat = statSync(join(dirname(fileURLToPath(import.meta.url)), 'dsh-mobile.apk'))
+        apk = { bytes: stat.size, modifiedAt: stat.mtime.toISOString() }
+      } catch (error) {
+        void error
+      }
+      out['assets'] = { boot, apk }
+      out['deviceQueue'] = { pending: deviceCalls.pendingCount() }
+      const entries = store.listAudit({ limit: 30 })
+      const list = Array.isArray(entries) ? entries : []
+      out['diagnostics'] = list
+        .map((entry: unknown) => {
+          const record = (entry ?? {}) as { target?: unknown; detail?: unknown }
+          return {
+            tag: String(record.target ?? '').slice(0, 60),
+            detail: String(record.detail ?? '').slice(0, 160),
+          }
+        })
+        .filter((item) => item.tag.length > 0)
+    } catch (error) {
+      void error
+    }
+    return out
+  }
+
+  /**
    * 管理员端点的 HTTP 处理（`/mobile/admin/*`）。
    *
    * 授权**不在这里**判——它在 `handleHttp` 的栅栏之后、分发之前用
@@ -3462,6 +3505,23 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
       }
 
       if (req.method === 'GET' && url.pathname === '/mobile/manifest') {
+        /**
+         * ★★★ 手机可读的取证出口（用户反馈："这个自检页在手机上不可能看到"）
+         *
+         * 我的设计错误 ✗：诊断原先挂在 `/mobile/admin/selfcheck` 上，
+         * 而那一族按用户 2026-09-27 的拍板是**只允许本机（loopback）**的 ✓
+         * ⇒ 手机打开必然 403 ⇒ 用户**根本读不到**，探针与诊断等于白做 ✗。
+         *
+         * ⇒ 复用**手机侧本来就能读**的 manifest ✓（配对页也在用它 ✓），
+         *   加一个**显式开关** `?diag=1` ✓：只在要取证时才多带这几项 ✓，
+         *   正常拿 manifest 的行为一字不改 ✓。
+         * ★ 只带"验证用得上的"那几项（构建戳 / APK 大小 / 队列积压 / 最近诊断摘要 ✓），
+         *   **不**暴露管理页里的目录、设备表等敏感内容 ✗（那是收紧的初衷 ✓）。
+         */
+        if (url.searchParams.get('diag') === '1') {
+          respondJson(res, 200, { ...service.manifest(), ...phoneDiagnostics() })
+          return true
+        }
         respondJson(res, 200, service.manifest())
         return true
       }
