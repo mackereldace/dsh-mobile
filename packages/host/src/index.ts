@@ -16,6 +16,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { callHostRpc, type HostRpcGateway } from './gateway-rpc.ts'
 import type { KeyObject } from 'node:crypto'
 import { randomBytes, randomInt } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -914,7 +915,26 @@ export function createMobileHost(options: {
         details: failure.details,
       })
     }
-    return gateway.invoke(toGatewayArgs(endpoint, payload, signal))
+    /**
+     * ★★★ 第 101 轮：优先走**宿主侧 RPC 入口** `dispatchRpc` ✓ ——
+     *   它返回的才是**带 `attachments` 的信封** ✓（字节在那里 ✓）；
+     *   `gateway.invoke(...)` 只给"已编码的值"（`data: null`）而**丢掉附件** ✗。
+     * ★ **行为保持与今天一致** ✗：这里仍旧解出 `.value` 往上传 ✓ ——
+     *   "把信封本身发过隧道 + 客户端还原"必须两边**同时**翻 ✓（见 `43-…md` §七）。
+     * ★ 回退只在 `dispatchRpc` **不存在**时发生 ✓（不在调用失败时回退 ✗ —— 那会重复调用 ✓）。
+     */
+    const outcome = await callHostRpc(
+      gateway as unknown as HostRpcGateway,
+      endpoint,
+      payload,
+      signal,
+      () => gateway.invoke(toGatewayArgs(endpoint, payload, signal)),
+    )
+    if (outcome.entry === 'invoke-fallback') {
+      // ★ 回退要**能看见** ✗（静默回退 = 以后不知道为什么走到这儿 ✓）
+      store.record({ deviceId: '(host)', kind: 'rpc', target: endpoint, detail: 'entry=invoke-fallback', ok: true })
+    }
+    return outcome.envelope.value
   }
 
   function capabilityCheck(device: DeviceRecord, endpoint: string): { ok: true } | { ok: false; code: string; message: string } {
