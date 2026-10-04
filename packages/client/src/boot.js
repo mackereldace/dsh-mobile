@@ -5289,6 +5289,32 @@
         return
       case FrameType.RpcResponse: {
         var response = decodeBinaryValue(JSON.parse(fromUtf8(body)))
+        /**
+         * ★★★ 取证（文件预览一直报 expected Uint8Array，且宿主已确认是新版）：
+         *   把"这条响应里 data 到底是什么形状"念一行到调试框 ✓ —— 三种可能当场分开 ✗：
+         *   · 还是 `{$dshmBytes: …}` ⇒ 是**解码没生效**（我这边 ✗）；
+         *   · 是数字键对象（`{"0":137,…}`）⇒ 宿主**没编码**（上游还没打我那个标 ✗）；
+         *   · 是 base64 字符串 / 别的东西 ⇒ 那报错来自**另一层的类型约定** ✓（改法完全不同 ✓）。
+         * ★ 只读、只在可疑时打一行 ✓（不刷屏 ✓）。
+         */
+        try {
+          var probeValue = response && response.result && response.result.value
+          var data = probeValue && probeValue.data
+          if (data !== undefined && data !== null
+              && !(typeof Uint8Array === 'function' && data instanceof Uint8Array)) {
+            var shape = ''
+            if (typeof data === 'string') shape = '字符串(len=' + data.length + ')'
+            else if (typeof data === 'object') {
+              var keys = Object.keys(data)
+              var numeric = keys.filter(function (k) { return /^[0-9]+$/.test(k) }).length
+              shape = '对象(键=' + keys.length + '，其中数字键=' + numeric + ')'
+                + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
+            } else shape = typeof data
+            debugBoxLine('[bytes] data 形状：' + shape)
+          }
+        } catch (error) {
+          void error
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
