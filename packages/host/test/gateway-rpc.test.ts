@@ -47,6 +47,12 @@ describe('宿主侧 RPC 入口', () => {
     )
   })
 
+  it('★★ dispatchRpc 返回**裸值**（没有 ok 字段）⇒ 宽容地当成值，而不是判成失败', async () => {
+    const outcome = await callHostRpc({ dispatchRpc: async () => ({ some: 'value' }) }, 'x', {}, signal, async () => undefined)
+    assert.equal(outcome.entry, 'dispatchRpc-plain')
+    assert.deepEqual(outcome.envelope.value, { some: 'value' })
+  })
+
   it('★★★ 只有在 dispatchRpc 不存在时才回退（调用失败绝不回退 ⇒ 不重复调用）', async () => {
     let fallbackCount = 0
     const missing = {}

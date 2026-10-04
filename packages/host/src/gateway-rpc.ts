@@ -48,7 +48,7 @@ export interface HostRpcGateway {
 }
 
 /** 这次调用走的是哪个入口（要能看见 ✗ —— 静默回退是"以后不知道为什么在这儿"的来源 ✓）。 */
-export type HostRpcEntry = 'dispatchRpc' | 'invoke-fallback'
+export type HostRpcEntry = 'dispatchRpc' | 'dispatchRpc-plain' | 'invoke-fallback'
 
 export interface HostRpcOutcome {
   readonly envelope: HostRpcEnvelope
@@ -72,10 +72,16 @@ export async function callHostRpc(
   const dispatch = gateway.dispatchRpc
   if (typeof dispatch === 'function') {
     const raw = await dispatch(endpoint, payload, signal)
-    const envelope = raw !== null && typeof raw === 'object' ? (raw as HostRpcEnvelope) : undefined
-    if (envelope === undefined) {
-      throw Object.assign(new Error('宿主 RPC 返回了非对象'), { code: 'Internal' })
+    /**
+     * ★★ 宽容两种形态 ✓（第 101 轮收尾时改的，起因是端到端测试红了 ✗）：
+     *   · `dispatchRpc` 返回**信封**（`ok` 是布尔 ✓）⇒ 按信封处理 ✓（真实 DSH 就是这样 ✓）；
+     *   · 返回**裸值**（没有 `ok` 字段 ✓，例如测试替身或别的 DSH 版本 ✓）⇒ 当成值包成信封 ✓。
+     * ★ 不宽容的写法会把"实现不同"误判成**调用失败** ✗ —— 本仓栽过"把无害差异当故障"✓。
+     */
+    if (raw === null || typeof raw !== 'object' || typeof (raw as HostRpcEnvelope).ok !== 'boolean') {
+      return { envelope: { ok: true, value: raw }, entry: 'dispatchRpc-plain' }
     }
+    const envelope = raw as HostRpcEnvelope
     if (envelope.ok !== true) {
       // ★ `dispatchRpc` **失败不抛**、返回 `{ok:false,error}` ✗ ⇒ 这里转成 throw ✓
       //   （否则上层会把失败当成功 —— 本仓栽过"失败被记成 ok"✓）
