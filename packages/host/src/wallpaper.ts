@@ -77,6 +77,46 @@ export function imageMimeOf(path: string): string | undefined {
 }
 
 /**
+ * ★★★ 2026-10-05（按本机实测新增）：从**现代位置**取当前壁纸的**文件路径**。
+ * 来源：`~/Library/Application Support/com.apple.wallpaper/Store/Index.plist` ✓
+ * （先 `plutil -convert json -o - <该文件>` 转 JSON 再喂进来 ✓）。
+ * ★ 动态（航拍）壁纸**没有文件路径** ✓ ⇒ 返回 undefined ✓ ⇒ 上层给**人话失败** ✓
+ *   （绝不编路径 ✗、绝不退回截屏 ✗）。
+ */
+export function parseWallpaperStore(json: string): string | undefined {
+  let root: unknown
+  try {
+    root = JSON.parse(json)
+  } catch {
+    return undefined
+  }
+  const found: string[] = []
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 8) return
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1)
+      return
+    }
+    if (node === null || typeof node !== 'object') return
+    const record = node as Record<string, unknown>
+    const files = record['Files']
+    if (Array.isArray(files)) {
+      for (const entry of files) if (typeof entry === 'string' && entry.length > 0) found.push(entry)
+    }
+    for (const key of Object.keys(record)) {
+      if (key === 'Files') continue
+      walk(record[key], depth + 1)
+    }
+  }
+  if (root !== null && typeof root === 'object') {
+    const preferred = (root as Record<string, unknown>)['AllSpacesAndDisplays']
+    if (preferred !== undefined) walk(preferred, 0)
+  }
+  walk(root, 0)
+  return found[0]
+}
+
+/**
  * 找壁纸 ✓。
  *
  * @param platform `process.platform` ✓（注入是为了断言 ✓）
@@ -137,6 +177,22 @@ export function resolveWallpaper(
   }
 
   if (platform === 'darwin') {
+    /**
+     * ★★★ 2026-10-05 实测：现代 macOS 的壁纸在上面那个 plist 里 ✓
+     *   （实测：`defaults read com.apple.desktop` 报「域不存在」✗、`desktoppicture.db` 不存在 ✗
+     *   ⇒ 下面两段旧尝试注定读不到 ✓，只留作老系统兜底 ✓）。
+     *   ★ 动态（航拍）壁纸没有文件路径 ⇒ 如实说原因 ✓（绝不编路径/绝不退回截屏 ✗）。
+     */
+    const home = process.env['HOME'] ?? ''
+    const store = `${home}/Library/Application Support/com.apple.wallpaper/Store/Index.plist`
+    const asJson = run('plutil', ['-convert', 'json', '-o', '-', store], 4000)
+    if (asJson.ok) {
+      const fromStore = parseWallpaperStore(asJson.stdout)
+      if (fromStore !== undefined) {
+        const found = check(fromStore, '系统设置')
+        if (found.ok) return found
+      }
+    }
     const legacy = run('defaults', ['read', 'com.apple.desktop', 'Background'], 4000)
     if (legacy.ok) {
       const found = check(parseMacWallpaper(legacy.stdout), '系统设置')
@@ -151,7 +207,7 @@ export function resolveWallpaper(
     }
     return {
       ok: false,
-      reason: '这台 Mac 没让我们读到壁纸（系统把壁纸存在自己的配置里，且自动化权限没给）',
+      reason: '这台 Mac 读不到壁纸的文件路径（现在多是系统动态壁纸，本身没有图片文件）',
     }
   }
 

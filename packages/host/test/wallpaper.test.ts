@@ -11,6 +11,7 @@ import { describe, it } from 'node:test'
 import {
   imageMimeOf,
   parseMacWallpaper,
+  parseWallpaperStore,
   parseWindowsWallpaper,
   resolveWallpaper,
   type CommandResult,
@@ -90,11 +91,23 @@ describe('壁纸解析', () => {
   })
 
   it('★ macOS：旧接口读不到就退 osascript；都失败时说清原因', () => {
-    let calls = 0
-    const result = resolveWallpaper('darwin', () => { calls += 1; return fail('no') }, () => true)
+    const calls: string[] = []
+    // ★ 现代位置先被问一句（plutil）⇒ 桩也得认它 ✓，否则连"退旧接口"都走不到 ✓。
+    //   这里返回 **Files 为空** 的 JSON ⇒ 表示当前是**动态（航拍）壁纸** ✓（没有文件路径 ✓）。
+    const dynamic = JSON.stringify({
+      AllSpacesAndDisplays: {
+        Content: { Choices: [{ Files: [], Provider: 'com.apple.NeptuneOneExtension' }] },
+      },
+    })
+    const run = (command: string) => {
+      calls.push(command)
+      if (command === 'plutil') return ok(dynamic)
+      return fail('no')
+    }
+    const result = resolveWallpaper('darwin', run, () => true)
     assert.equal(result.ok, false)
-    assert.equal(calls, 2) // defaults + osascript 各一次
-    assert.match(result.reason ?? '', /没让我们读到壁纸/)
+    assert.deepEqual(calls, ['plutil', 'defaults', 'osascript']) // 先现代位置，再 defaults + osascript 各一次
+    assert.match(result.reason ?? '', /动态壁纸|文件路径/)
   })
 
   it('不支持的平台如实说，不猜', () => {
@@ -108,5 +121,71 @@ describe('壁纸解析', () => {
     assert.equal(imageMimeOf('c:\\w\\a.jpeg'), 'image/jpeg')
     assert.equal(imageMimeOf('/a/b.heic'), 'image/heic')
     assert.equal(imageMimeOf('/a/b.txt'), undefined)
+  })
+
+  /**
+   * ★★★ 2026-10-05 新增（按本机实测）：现代 macOS 壁纸在
+   *   `~/Library/Application Support/com.apple.wallpaper/Store/Index.plist` ✓
+   *   下面 5 条钉的是"新解析器 + 它在 darwin 分支里的接法" ✓。
+   */
+
+  it('★ 现代位置：plist 里有 Files ⇒ 取该路径（优先 AllSpacesAndDisplays）', () => {
+    // ★ 故意把"系统默认"那个放在前面（JSON 键序）⇒ 只有真正优先 AllSpacesAndDisplays 才会取到后者 ✓
+    const json = JSON.stringify({
+      SystemDefault: {
+        Content: { Choices: [{ Files: ['/System/Library/Desktop Pictures/other.heic'] }] },
+      },
+      AllSpacesAndDisplays: {
+        Content: {
+          Choices: [{ Files: ['/Users/me/Pictures/wall.png'], Provider: 'com.apple.wallpaper.choice.image' }],
+        },
+      },
+    })
+    assert.equal(parseWallpaperStore(json), '/Users/me/Pictures/wall.png')
+  })
+
+  it('★ 现代位置：Files 为空（动态/航拍壁纸）⇒ 没有路径，返回 undefined', () => {
+    const json = JSON.stringify({
+      AllSpacesAndDisplays: {
+        Content: { Choices: [{ Files: [], Provider: 'com.apple.NeptuneOneExtension' }] },
+      },
+    })
+    assert.equal(parseWallpaperStore(json), undefined)
+  })
+
+  it('★ 现代位置：不是 JSON ⇒ undefined，且**不抛错**', () => {
+    assert.equal(parseWallpaperStore(''), undefined)
+    assert.equal(parseWallpaperStore('not json'), undefined)
+  })
+
+  it('★★ macOS 全链路：现代位置给路径且文件在 ⇒ 成功，且只问 plutil', () => {
+    const calls: string[] = []
+    const json = JSON.stringify({
+      AllSpacesAndDisplays: {
+        Content: { Choices: [{ Files: ['/Users/me/Pictures/wall.png'] }] },
+      },
+    })
+    const run = (command: string) => {
+      calls.push(command)
+      return ok(json)
+    }
+    const result = resolveWallpaper('darwin', run, () => true)
+    assert.deepEqual(calls, ['plutil']) // ★ 一次就够，别再去问 defaults / osascript
+    assert.equal(result.ok, true)
+    assert.equal(result.path, '/Users/me/Pictures/wall.png')
+  })
+
+  it('★★ 动态（航拍）壁纸：没有文件路径 ⇒ 人话失败，且**不提截屏**', () => {
+    const json = JSON.stringify({
+      AllSpacesAndDisplays: {
+        Content: { Choices: [{ Files: [], Provider: 'com.apple.NeptuneOneExtension' }] },
+      },
+    })
+    const run = (command: string) => (command === 'plutil' ? ok(json) : fail('no'))
+    const result = resolveWallpaper('darwin', run, () => true)
+    assert.equal(result.ok, false)
+    assert.equal(result.path, undefined)
+    assert.match(result.reason ?? '', /文件路径|动态壁纸/)
+    assert.doesNotMatch(result.reason ?? '', /截屏|截图/) // ★ 绝不退回截屏
   })
 })
