@@ -5390,6 +5390,41 @@
         } catch (error) {
           void error
         }
+        /**
+         * ★★★ 第 111 轮（客户端那半）：按 DSH 自己的**附件表**把 `null` 占位换成真字节 ✓。
+         *
+         * 为什么在这儿 ✗：必须在 `entry.resolve(response)` **之前** ✓ ——
+         *   DSH 自己的 zod 校验（`z.instanceof(Uint8Array)`）就在 resolve 之后的下一步 ✓，
+         *   顺序错了等于没修 ✗。
+         * 字节从哪来 ✓：宿主把信封（含 `attachments`）发过来 ✓，其中 `bytes` 已被
+         *   `decodeBinaryValue` 还原成真的 `Uint8Array` ✓（同一帧里就解好了 ✓）。
+         * 规则与 `packages/protocol/src/binvalue.ts` 的 `applyAttachments` **逐字同语义** ✓：
+         *   以 `response.result` 为根 ✓、沿 `path` 走 ✓、末端必须是 `null`（否则抛 ✗，别覆盖真值 ✓）。
+         * ★ 宿主那半还没上线时，这里找不到 `attachments` ⇒ **空转** ✓ ⇒ 不会改变现状 ✓。
+         */
+        try {
+          var attachments = response && response.result ? response.result.attachments : undefined
+          if (Object.prototype.toString.call(attachments) === '[object Array]') {
+            for (var ai = 0; ai < attachments.length; ai++) {
+              var attachment = attachments[ai]
+              var path = attachment ? attachment.path : undefined
+              if (Object.prototype.toString.call(path) !== '[object Array]' || path.length === 0) {
+                throw new Error('附件路径为空，拒绝猜它该放到哪')
+              }
+              var node = response.result
+              for (var pi = 0; pi < path.length - 1; pi++) {
+                if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（中间不是对象）')
+                node = node[path[pi]]
+              }
+              if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（父节点不是对象）')
+              var leaf = path[path.length - 1]
+              if (node[leaf] !== null) throw new Error('占位不是 null，拒绝替换（上游可能已给过真值）')
+              node[leaf] = attachment.bytes
+            }
+          }
+        } catch (error) {
+          debugBoxLine('[bytes] 附件还原失败：' + String(error && error.message ? error.message : error))
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
