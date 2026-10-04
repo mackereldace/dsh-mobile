@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { BYTES_TAG, decodeBinary, encodeBinary } from '../src/binvalue.ts'
+import { BYTES_TAG, applyAttachments, decodeBinary, encodeBinary } from '../src/binvalue.ts'
 
 describe('二进制值编码', () => {
   it('字节数组往返无损（类型也要回来）', () => {
@@ -58,5 +58,42 @@ describe('二进制值编码', () => {
     // 这是打标方案的固有代价；键名取得够怪，实际数据撞上的概率极低。
     const back = decodeBinary({ [BYTES_TAG]: 'AAEC' })
     assert.ok(back instanceof Uint8Array)
+  })
+})
+
+describe('按 DSH 附件表还原字节（applyAttachments）', () => {
+  it('把 result 里的 null 占位换成真 Uint8Array（路径照 DSH，相对 result）', () => {
+    const bytes = new Uint8Array([137, 80, 78, 71])
+    const result: { value: { data: unknown; offset: number } } = { value: { data: null, offset: 0 } }
+    const out = applyAttachments(result, [{ path: ['value', 'data'], bytes }]) as typeof result
+    assert.ok(out.value.data instanceof Uint8Array)
+    assert.equal((out.value.data as Uint8Array).length, 4)
+    assert.equal(out.value.offset, 0)
+  })
+
+  it('多个附件、不同路径都认得', () => {
+    const result: { value: { a: unknown; b: unknown } } = { value: { a: null, b: null } }
+    applyAttachments(result, [
+      { path: ['value', 'a'], bytes: new Uint8Array([1]) },
+      { path: ['value', 'b'], bytes: new Uint8Array([2, 3]) },
+    ])
+    assert.equal((result.value.a as Uint8Array).length, 1)
+    assert.equal((result.value.b as Uint8Array).length, 2)
+  })
+
+  it('★ 占位不是 null ⇒ 抛错（跟着 DSH 的硬校验走，别悄悄覆盖真值）', () => {
+    const result = { value: { data: 'not-null' } }
+    assert.throws(() => applyAttachments(result, [{ path: ['value', 'data'], bytes: new Uint8Array([1]) }]), /占位不是 null/)
+  })
+
+  it('★ 路径走不通 ⇒ 抛错（不猜它该放哪）', () => {
+    assert.throws(() => applyAttachments({ value: null }, [{ path: ['value', 'data'], bytes: new Uint8Array([1]) }]), /走不通/)
+    assert.throws(() => applyAttachments({}, [{ path: [], bytes: new Uint8Array([1]) }]), /路径为空/)
+  })
+
+  it('没有附件 ⇒ 原样返回（不动任何东西）', () => {
+    const result = { value: { data: null } }
+    assert.equal(applyAttachments(result, []), result)
+    assert.equal(result.value.data, null)
   })
 })
