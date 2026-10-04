@@ -5448,6 +5448,21 @@
         } catch (error) {
           void error
         }
+        /**
+         * ★★★ 直接量结果（2026-10-04）：上一版只报"处理了几条"✓，报不出**目标位置到底变成什么** ✗。
+         *   这行在装回**之后**打 ✓：`装回后 value.data = [object Uint8Array] len=…` ⇒ 字节到位 ✓；
+         *   `[object Undefined] len=-` ⇒ 还是没装上（根/路径仍不对 ✓）。
+         */
+        try {
+          var __dshmAttList = response && response.result ? response.result.attachments : undefined
+          if (Object.prototype.toString.call(__dshmAttList) === '[object Array]') {
+            var __dshmVal = response.result && response.result.value ? response.result.value.data : undefined
+            debugBoxLine('[bytes] 装回后 value.data = ' + Object.prototype.toString.call(__dshmVal)
+              + ' len=' + (__dshmVal !== null && __dshmVal !== undefined && __dshmVal.length !== undefined ? __dshmVal.length : '-'))
+          }
+        } catch (error) {
+          void error
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)

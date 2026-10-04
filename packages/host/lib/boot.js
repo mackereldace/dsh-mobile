@@ -5448,6 +5448,21 @@
         } catch (error) {
           void error
         }
+        /**
+         * ★★★ 直接量结果（2026-10-04）：上一版只报"处理了几条"✓，报不出**目标位置到底变成什么** ✗。
+         *   这行在装回**之后**打 ✓：`装回后 value.data = [object Uint8Array] len=…` ⇒ 字节到位 ✓；
+         *   `[object Undefined] len=-` ⇒ 还是没装上（根/路径仍不对 ✓）。
+         */
+        try {
+          var __dshmAttList = response && response.result ? response.result.attachments : undefined
+          if (Object.prototype.toString.call(__dshmAttList) === '[object Array]') {
+            var __dshmVal = response.result && response.result.value ? response.result.value.data : undefined
+            debugBoxLine('[bytes] 装回后 value.data = ' + Object.prototype.toString.call(__dshmVal)
+              + ' len=' + (__dshmVal !== null && __dshmVal !== undefined && __dshmVal.length !== undefined ? __dshmVal.length : '-'))
+          }
+        } catch (error) {
+          void error
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
@@ -22582,7 +22597,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1004154850'
+    var BOOT_STAMP = 'BUILD-1004155047'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
