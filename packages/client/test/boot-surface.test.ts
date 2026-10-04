@@ -1026,7 +1026,9 @@ async function bootReplayWorld(): Promise<ReplayWorld> {
           },
           invoke: async (request) => {
             callsOf(socket).push(request.endpoint)
-            return { endpoint: request.endpoint, payload: request.payload }
+            // ★ 隧道把这里的返回值**当 result 原样发** ✓（第 109 轮起）⇒ 必须是与 DSH 一致的
+            //   信封 `{ok:true,value}` ✗ 不许返回裸值（裸值会让真机卡在"永不 resolve" ✓）。
+            return { ok: true, value: { endpoint: request.endpoint, payload: request.payload } }
           },
           openStream: () =>
             (async function* () {

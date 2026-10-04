@@ -105,7 +105,9 @@ async function setup(options: { pinnedMismatch?: boolean; revoke?: boolean } = {
         // 注意：宿主服务的 invoke 收到的是 {endpoint, payload}，载荷在 request.payload 里。
         // 早期版本的测试桩误写成 request.endpoint，导致"返回了调用参数、没了 endpoint"。
         calls.push(request.endpoint)
-        return { endpoint: request.endpoint, payload: request.payload }
+        // ★ 隧道把这里的返回值**当 result 原样发** ✓（第 109 轮起）⇒ 必须是与 DSH 一致的
+        //   信封 `{ok:true,value}` ✗ 不许返回裸值（裸值会让真机卡在"永不 resolve" ✓）。
+        return { ok: true, value: { endpoint: request.endpoint, payload: request.payload } }
       },
       openStream: () => {
         return (async function* () {
