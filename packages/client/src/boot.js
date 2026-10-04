@@ -5425,6 +5425,20 @@
         } catch (error) {
           debugBoxLine('[bytes] 附件还原失败：' + String(error && error.message ? error.message : error))
         }
+        /**
+         * ★★★ 让「装没装上」自己说话（2026-10-04，截图显示：`data=undefined` 是在**装回之前**打的 ✓，
+         *   所以它不能回答"装回成功没有" ✗）。这行在**装回之后**打 ✓：
+         *   · 有 `[bytes] 已按附件表处理 n 条` ⇒ 装回那一步跑到了 ✓（再看报错还在不在 ✓）；
+         *   · 一行都没有 ⇒ 这一帧根本没有 `attachments`（或客户端还是旧脚本 ✓）。
+         */
+        try {
+          var __dshmAtt = response && response.result ? response.result.attachments : undefined
+          if (Object.prototype.toString.call(__dshmAtt) === '[object Array]') {
+            debugBoxLine('[bytes] 已按附件表处理 ' + __dshmAtt.length + ' 条')
+          }
+        } catch (error) {
+          void error
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)

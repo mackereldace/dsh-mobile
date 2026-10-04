@@ -5425,6 +5425,20 @@
         } catch (error) {
           debugBoxLine('[bytes] 附件还原失败：' + String(error && error.message ? error.message : error))
         }
+        /**
+         * ★★★ 让「装没装上」自己说话（2026-10-04，截图显示：`data=undefined` 是在**装回之前**打的 ✓，
+         *   所以它不能回答"装回成功没有" ✗）。这行在**装回之后**打 ✓：
+         *   · 有 `[bytes] 已按附件表处理 n 条` ⇒ 装回那一步跑到了 ✓（再看报错还在不在 ✓）；
+         *   · 一行都没有 ⇒ 这一帧根本没有 `attachments`（或客户端还是旧脚本 ✓）。
+         */
+        try {
+          var __dshmAtt = response && response.result ? response.result.attachments : undefined
+          if (Object.prototype.toString.call(__dshmAtt) === '[object Array]') {
+            debugBoxLine('[bytes] 已按附件表处理 ' + __dshmAtt.length + ' 条')
+          }
+        } catch (error) {
+          void error
+        }
         var entry = this.pending.get(response.rpcId)
         if (entry !== undefined) {
           this.pending.delete(response.rpcId)
@@ -22559,7 +22573,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1004153623'
+    var BOOT_STAMP = 'BUILD-1004154319'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
