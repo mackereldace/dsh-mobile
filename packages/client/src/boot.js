@@ -5340,57 +5340,6 @@
       case FrameType.RpcResponse: {
         var response = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         /**
-         * ★★★ 取证（文件预览一直报 expected Uint8Array，且宿主已确认是新版）：
-         *   把"这条响应里 data 到底是什么形状"念一行到调试框 ✓ —— 三种可能当场分开 ✗：
-         *   · 还是 `{$dshmBytes: …}` ⇒ 是**解码没生效**（我这边 ✗）；
-         *   · 是数字键对象（`{"0":137,…}`）⇒ 宿主**没编码**（上游还没打我那个标 ✗）；
-         *   · 是 base64 字符串 / 别的东西 ⇒ 那报错来自**另一层的类型约定** ✓（改法完全不同 ✓）。
-         * ★ 只读、只在可疑时打一行 ✓（不刷屏 ✓）。
-         */
-        try {
-          var probeName = ''
-          try {
-            probeName = (this.requestNames !== undefined && this.requestNames[response.rpcId] !== undefined)
-              ? String(this.requestNames[response.rpcId]) : ''
-            if (this.requestNames !== undefined) delete this.requestNames[response.rpcId]
-          } catch (error) {
-            void error
-          }
-          var probeValue = response && response.result && response.result.value
-          var data = probeValue && probeValue.data
-          /**
-           * ★★ 只对"我们关心的那几个方法"打一行 ✓（打太多会刷屏 ✓）——
-           *   这一行同时回答两个问题：① 这条调用**走不走我们隧道** ✓；② `data` 是什么形状 ✓。
-           */
-          if (probeName.indexOf('readBytes') >= 0 || probeName.indexOf('workspaceFiles') >= 0) {
-            var brief = 'undefined'
-            if (data !== null && data !== undefined) {
-              if (typeof Uint8Array === 'function' && data instanceof Uint8Array) brief = 'Uint8Array(len=' + data.length + ')'
-              else if (typeof data === 'string') brief = '字符串(len=' + data.length + ')'
-              else if (typeof data === 'object') {
-                var ks = Object.keys(data)
-                var numeric = ks.filter(function (k) { return /^[0-9]+$/.test(k) }).length
-                brief = '对象(键=' + ks.length + '，数字键=' + numeric + ')' + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
-              } else brief = typeof data
-            }
-            debugBoxLine('[rpc] ' + probeName + ' ⇒ data=' + brief)
-          }
-          if (data !== undefined && data !== null
-              && !(typeof Uint8Array === 'function' && data instanceof Uint8Array)) {
-            var shape = ''
-            if (typeof data === 'string') shape = '字符串(len=' + data.length + ')'
-            else if (typeof data === 'object') {
-              var keys = Object.keys(data)
-              var numeric = keys.filter(function (k) { return /^[0-9]+$/.test(k) }).length
-              shape = '对象(键=' + keys.length + '，其中数字键=' + numeric + ')'
-                + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
-            } else shape = typeof data
-            debugBoxLine('[bytes] data 形状：' + shape)
-          }
-        } catch (error) {
-          void error
-        }
-        /**
          * ★★★ 第 111 轮（客户端那半）：按 DSH 自己的**附件表**把 `null` 占位换成真字节 ✓。
          *
          * 为什么在这儿 ✗：必须在 `entry.resolve(response)` **之前** ✓ ——
@@ -5644,21 +5593,6 @@
       // 两个都要存：只存 resolve 的话，链路一断这个 Promise 就永远既不 resolve
       // 也不 reject（见 failPending 的说明，这是"侧栏永远空的"的根因）。
       self.pending.set(rpcId, { resolve: resolve, reject: reject })
-      /**
-       * ★ 取证（文件预览一直报 expected Uint8Array，而形状诊断打不出来）：
-       *   把"这个 rpcId 是哪个方法"记下来 ✓ —— 响应回来时才知道要不要打那一行 ✓。
-       *   若连这一行都没打出来 ⇒ 说明**这条调用根本不走我们这条隧道** ✓（那答案就换方向了）。
-       * ★ 教训：这段**不能插进 `self .sendFrame(...)` 的链式调用中间** ✗
-       *   —— 我第一次就是那么插的，语法当场崩（`.sendFrame` 前面多了个 `}`）✓。
-       */
-      try {
-        if (self.requestNames === undefined) self.requestNames = {}
-        var m = message !== null && message !== undefined ? message : {}
-        var name = m.method !== undefined ? m.method : (m.target !== undefined ? m.target : m.name)
-        if (typeof name === 'string') self.requestNames[rpcId] = name
-      } catch (error) {
-        void error
-      }
       self
         .sendFrame(FrameType.RpcRequest, FrameFlags.Json, utf8(JSON.stringify(message)))
         .catch(reject)
