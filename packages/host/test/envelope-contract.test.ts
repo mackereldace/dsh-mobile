@@ -22,6 +22,7 @@ import { describe, it } from 'node:test'
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const tunnel = readFileSync(join(repo, 'packages', 'host', 'src', 'tunnel.ts'), 'utf8')
 const index = readFileSync(join(repo, 'packages', 'host', 'src', 'index.ts'), 'utf8')
+const boot = readFileSync(join(repo, 'packages', 'client', 'src', 'boot.js'), 'utf8')
 
 const count = (text: string, needle: string): number => text.split(needle).length - 1
 
@@ -46,6 +47,19 @@ describe('隧道发"信封本身"的契约', () => {
   it('★★ 判据会响：把 result 包回一层 ⇒ 必须报"多包一层"', () => {
     const bad = { tunnel: tunnel.replace('result: encodeBinary(', 'result: { ok: true, value: encodeBinary('), index }
     assert.ok(envelopeProblems(bad).some((p) => p.includes('多包一层')))
+  })
+
+  it('★★ 跨端一致：宿主把附件放在**信封顶层**、客户端也从 `result.attachments` 读（两端必须对齐）', () => {
+    /**
+     * 这两行是**同一份约定**的两端 ✗：
+     * · 宿主：`result` = 信封本身 ⇒ 附件就在 `result.attachments` ✓；
+     * · 客户端：`response.result.attachments` ✓。
+     * ★ 这类"两端各写各的、谁也不核对"最容易出事 ✓ ⇒ 在这里对齐钉住 ✓
+     *   （一处改成 `result.value.attachments` 之类，这里立刻红 ✓）。
+     */
+    assert.ok(count(tunnel, 'result: encodeBinary(value)') === 1, '宿主应把信封（含 attachments）整体作为 result')
+    // ★ 精确字符串，不用带 `|` 的宽松正则 ✗（宽松判据 = 假判据：它可能因为别的原因通过 ✓）
+    assert.ok(boot.includes('response.result.attachments'), '客户端应从 response.result.attachments 读附件')
   })
 
   it('★★ 判据会响：调用方不解包 ⇒ 必须报出来', () => {
