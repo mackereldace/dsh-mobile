@@ -452,7 +452,7 @@ export class TunnelSession {
           JSON.stringify({
             type: 'server-response',
             rpcId: request.rpcId,
-            result: { ok: true, value: encodeBinary(value) },
+            result: encodeBinary(value),
           }),
           'utf8',
         ),
