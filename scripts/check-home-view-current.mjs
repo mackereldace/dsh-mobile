@@ -27,8 +27,12 @@
  * HOME_VIEW=/tmp/别的/HomeView.java node scripts/check-home-view-current.mjs   # 变异验证用 ✓
  * ```
  *
- * ★ 变异（本轮实测 ✓）：把 `setCurrentAuthorityNow` 里那两行「认领机器」去掉 ⇒ **恰好 3 条红** ✓；
- *   把 `setSnapshot` 改回"无条件清掉" ⇒ **恰好 2 条红** ✓；改回 ⇒ **21/21** ✓。
+ * ★ 变异（上一轮实测 ✓）：把 `setCurrentAuthorityNow` 里那两行「认领机器」去掉 ⇒ **恰好 3 条红** ✓；
+ *   把 `setSnapshot` 改回「无条件清掉」⇒ **恰好 2 条红** ✓；改回 ⇒ **21/21** ✓。
+ * ★★ 变异（2026-10-05 本轮实测 ✓ —— 治"亮 → 灭 → 再亮"那一改 ✓）：
+ *   把 `currentChoiceConfirmedBy` 里那句「**同一行**」的判据去掉（＝改回"机器对上就交还"✗）⇒
+ *   **恰好 3 条红** ✓，而且**全在 ⑦** ✓（那三条就是"灭"✗）；改回 ⇒ **31/31** ✓。
+ *   ★ 仓库那份 `HomeView.java` **变异前后 md5 一致** ✓（只在 `/tmp` 的副本上动手 ✓）。
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -52,8 +56,16 @@ const ANCHORS = [
   '    private static String hostOfAuthority(String authority) {',
   '    private static boolean machineHasAuthorityExactly(HomeModel.Machine machine, String authority) {',
   '    private boolean currentChoiceConfirmedBy(HomeModel.Snapshot from, HomeModel.Machine fromData) {',
+  '    private static boolean dataLightsSameRow(HomeModel.Snapshot from, String machineKey, String authority) {',
   '    void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {',
 ]
+
+/**
+ * ★ 断言条数下界 ✓ —— **只许上调、不许下调** ✗（与 `HomeModelTest` / `check-apk.mjs` 同一个思路 ✓）：
+ *   治"亮 → 灭 → 再亮"那几条（⑦）如果有人删了，这里当场红 ✓，而不是"少跑几条也算过"✗。
+ *   2026-10-05：21 ⇒ **31**（新增 10 条 ✓）。
+ */
+const EXPECTED_MIN_CHECKS = 31
 
 /**
  * 把注释与字符串/字符字面量换成空格（**只用来数括号** ✓ —— 返回的那份不进产物 ✓）。
@@ -175,6 +187,20 @@ const CHECK = `
         rows.add(instance("hid:dacling-web", true, rowCurrent, true,
                 addr("10.34.255.229:3443", "局域网", rowCurrent, true)));
         return machine("fp:dacling", "Dacling", machineCurrent, true, rows);
+    }
+
+    /**
+     * ★★ 用户那台 **Windows**（地址形状取自 「20-手机连Windows隧道问题-交接给Windows侧agent.md」：
+     *    宿主插件 TLS 监听 3443 ✓、桌面 3453 ✓）——
+     *    同一张卡上**两行** ✓（两个身份 ✓）：这正是"亮 → 灭 → 再亮"会撞上的那种卡 ✓。
+     */
+    private static HomeModel.Machine windowsMachine(boolean machineCurrent, boolean webCurrent, boolean desktopCurrent) {
+        java.util.List<HomeModel.Instance> rows = new java.util.ArrayList<HomeModel.Instance>();
+        rows.add(instance("hid:win-web", true, webCurrent, true,
+                addr("10.34.139.224:3443", "局域网", webCurrent, true)));
+        rows.add(instance("hid:win-desktop", true, desktopCurrent, true,
+                addr("10.34.139.224:3453", "局域网", desktopCurrent, true)));
+        return machine("fp:win", "Dacling", machineCurrent, true, rows);
     }
 
     private static HomeModel.Address addr(String authority, String kind, boolean current, boolean reachable) {
@@ -307,7 +333,62 @@ const CHECK = `
         check("⑥ 只有机器键：这台按数据判 ✓",
                 marked.isCurrentInstance(macMachine(true, true), macMachine(true, true).instances.get(0)));
 
+        // ── ⑦ ★★ 秒退不闪（2026-10-05 用户："它对于 Mac 而言是成功的 ✓，但对于我们连接的**另一台
+        //      Windows 电脑** ✗ —— 如果你**秒退**的话，它会**一开始是正在用** ✓，然后**消失** ✗，
+        //      然后再出现 ✓"）
+        //      ⇒ 判据 = "机器对上了**还不够**，得是**同一行**"✓（同机器 ✓ + 同端口 ✓）。
+        HomeViewCurrentLogic flash = new HomeViewCurrentLogic();
+        HomeModel.Machine winBefore = windowsMachine(true, true, false);   // 用户此刻正连着 Windows 的 3443 ✓
+        flash.setSnapshot(snapshot(winBefore, macMachine(false, false)), null);
+        flash.currentMachineKeyNow = "fp:win";
+        flash.setCurrentAuthorityNow("10.34.139.224:3453");               // 首页上点了同一张卡的另一行 ✓
+        check("⑦ 点那一行：机器键认到这台 Windows ✓（逐字命中 ✓ ⇒ ownerKeyOfAuthority ✓）",
+                "fp:win".equals(flash.currentMachineKeyNow));
+        check("⑦ 秒退那一下：刚点的 3453 那一行**先亮** ✓（当场就亮 ✓ —— 这一条不许丢 ✗）",
+                flash.isCurrentInstance(winBefore, winBefore.instances.get(1)));
+        check("⑦ 秒退那一下：同卡的另一行（3443）不亮 ✓（**只有一条**亮 ✓）",
+                !flash.isCurrentInstance(winBefore, winBefore.instances.get(0)));
+
+        // ★ 约 3 秒前那次探测（"当前"还是 **3443** ✓、同一台电脑 ✓）落回来 —— ★★ 这一趟就是"灭"的来源 ✗
+        HomeModel.Machine winStale = windowsMachine(true, true, false);
+        flash.setSnapshot(snapshot(winStale, macMachine(false, false)), null);
+        check("★★ 秒退不闪：旧快照（**同机器、不同行**）落回来 ⇒ 覆盖值**留着** ✓"
+                + "（原来这里判成「谈成了」⇒ 3453 那一行当场灭 ✗ = 用户说的「消失」✗）",
+                "10.34.139.224:3453".equals(flash.currentAuthorityNow));
+        check("★★ 秒退不闪：3453 那一行**仍然亮** ✓（先亮之后不许灭 ✓）",
+                flash.isCurrentInstance(winStale, winStale.instances.get(1)));
+        check("★★ 秒退不闪：也没让同卡另一行亮起来 ✗（仍然**只有一条** ✓）、别的机器更不许亮 ✗",
+                !flash.isCurrentInstance(winStale, winStale.instances.get(0))
+                        && !flash.isCurrentInstance(macMachine(false, false), macMachine(false, false).instances.get(0)));
+
+        // ★ 换完那次探测（"当前" = **3453** ✓、**同一行** ✓）落回来 ⇒ 这才交还给数据 ✓
+        HomeModel.Machine winFresh = windowsMachine(true, false, true);
+        flash.setSnapshot(snapshot(winFresh, macMachine(false, false)), null);
+        check("⑦ 同一行真的对上了 ⇒ 这才交还给数据 ✓（两个即时信号一起清 ✓）",
+                flash.currentAuthorityNow == null && flash.currentMachineKeyNow == null);
+        check("★★ 交还之后：3453 那一行**仍然亮** ✓（现在是数据说的 ✓ —— 全程**一次都没灭** ✓）",
+                flash.isCurrentInstance(winFresh, winFresh.instances.get(1)));
+
+        // ★ 护栏（这条不许松 ✗ —— §4.1ce 的"太松"）：**跨机器同端口** + 另一台才是数据的当前
+        //   ⇒ 绝不把用户的覆盖值交还出去 ✓（宁可不亮也不误亮 ✓）
+        HomeViewCurrentLogic otherMachine = new HomeViewCurrentLogic();
+        HomeModel.Machine winIdle = windowsMachine(false, false, false);
+        otherMachine.setSnapshot(snapshot(macMachine(true, true), winIdle), null);
+        otherMachine.currentMachineKeyNow = "fp:win";
+        otherMachine.setCurrentAuthorityNow("10.34.139.224:3453");        // 与 Mac 那条同端口（3453）✓
+        check("⑦ 护栏：数据说当前的是**另一台**（Mac ✓）⇒ 不许交还 ✓",
+                "10.34.139.224:3453".equals(otherMachine.currentAuthorityNow));
+        check("⑦ 护栏：那一行仍然按「用户刚点的」亮 ✓（没被另一台同端口那条顶掉 ✗）",
+                otherMachine.isCurrentInstance(winIdle, winIdle.instances.get(1)));
+
         System.out.println("── check-home-view-current ────────────────────");
+        /**
+         * ★ 条数下界 ✓（**只许上调** ✗）：删掉几条断言也"全绿"是最坏的一种绿 ✓。
+         */
+        if (total < ${EXPECTED_MIN_CHECKS}) {
+            failed += 1;
+            System.out.println("✗ 断言条数 " + total + " **少于**下界 ${EXPECTED_MIN_CHECKS} ✗（只许多 ✗不许少 ✓）");
+        }
         System.out.println((failed == 0 ? "通过 " : "失败 ") + (total - failed) + " 项，失败 " + failed + " 项（共 " + total + " 项）");
         if (failed != 0) System.exit(1);
     }`

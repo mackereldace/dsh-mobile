@@ -559,6 +559,8 @@ final class HomeView extends FrameLayout {
      * · 有覆盖值 ⇒ **只认它** ✓：数据里那台身上要有**逐字一样**的这条 authority ✓
      *   （★ 这里**故意不用端口** ✗ —— 跨机器同端口会让"旧快照"冒充"谈成了"✓，
      *    于是又退回"等下一趟探测"✗ ⇒ 只逐字比最稳 ✓）；
+     * ★★ 2026-10-05 **再补一道**（用户：「亮 → 灭 → 再亮」✗）：机器对上了**还不够** ✗ ——
+     *   还要是**同一行** ✓（见 {@link #dataLightsSameRow} ✓），否则交还那一刻那一行会灭 ✓。
      * · 没有覆盖值 ⇒ 才用机器键比 ✓（与原来那句同口径 ✓）。
      */
     private boolean currentChoiceConfirmedBy(HomeModel.Snapshot from, HomeModel.Machine fromData) {
@@ -566,14 +568,76 @@ final class HomeView extends FrameLayout {
         if (currentAuthorityNow != null) {
             /**
              * ★ 与 {@link #ownerKeyOfAuthority} **同一把钥匙** ✗（认领与交还各写一套，早晚飘 ✓）：
-             *   数据里"当前那台"就是这条 authority 认领的那台 ⇒ 谈成了 ✓。
+             *   数据里"当前那台"就是这条 authority 认领的那台 ⇒ 机器这一层谈成了 ✓。
              * ★ **不许**退化成"按端口比" ✗：跨机器同端口时，旧快照会冒充"谈成了"✓
-             *   ⇒ 又退回"等下一趟探测"✗（正是这一轮要治的病 ✓）。
+             *   ⇒ 又退回"等下一趟探测"✗（正是上一轮要治的病 ✓）。
              */
             String owner = ownerKeyOfAuthority(from, currentAuthorityNow);
-            return owner.length() > 0 && owner.equals(fromData.key);
+            if (owner.length() == 0 || !owner.equals(fromData.key)) return false;
+            /**
+             * ★★★ 2026-10-05（用户：「它对于 Mac 而言是成功的 ✓，但对于我们连接的**另一台 Windows 电脑** ✗，
+             *   如果你**秒退**的话，它会**一开始是正在用** ✓，然后**消失** ✗，然后再出现 ✓"）：
+             *   **机器对上了、可那一行还没对上** ✗ ⇒ 这时交还 = 那一行当场灭 ✓（＝「消失」✗）
+             *   ⇒ 判据得跟"画的时候"**同一个粒度** ✓（见 {@link #dataLightsSameRow} ✓）。
+             */
+            return dataLightsSameRow(from, owner, currentAuthorityNow);
         }
         if (currentMachineKeyNow != null) return currentMachineKeyNow.equals(fromData.key);
+        return false;
+    }
+
+    /**
+     * ★★★ 2026-10-05 用户真机报的**第三个**形状：「**亮 → 灭 → 再亮**」✗
+     *   （前两个是「都不亮」✗ 与「一直滞后」✗，见 `10-交接文档` §4.1ce ✓）。
+     *
+     * ## 真因：**交还与画的粒度不一致** ✗
+     *
+     * · 用户眼里的「正在用」是**按行**画的 ✓ —— {@link #isCurrentInstance} 要求那台电脑上
+     *   **有同一个端口** ✓（`HomeView.buildAgent` ✓）；
+     * · 而交还（{@link #setSnapshot} 里清掉那两个覆盖值 ✓）原先只看
+     *   「**哪台电脑**」✗（{@link #ownerKeyOfAuthority} 给的机器键 ✓）。
+     * ⇒ 机器对上了、端口还没对上时就交还 ✗ ⇒ 画的那一行（用户的端口）**当场灭** ✓
+     *   ＝ 用户说的「消失」✗；等下一趟探测（约 3 秒 ✓）把「当前」指过来 ⇒ **再亮** ✓ ＝「再出现」✓。
+     *
+     * ## 为什么 Mac 那台没这个现象、Windows 那台有 ✗（用户的原话就是这条对比 ✓）
+     *
+     * 差别**不在**判据本身 ✓，而在「**同一张卡上会不会有两行**」✗：
+     * · Mac 那条链上，"用户刚点进去的 authority"与"数据说当前的那条"是**同一个端口** ✓
+     *   （同一台机上 tail／局域网两种写法**并成一行** ✓ —— 端口相同 ⇒ 交还之后仍由那一行说话 ✓ ⇒ 不闪 ✓）；
+     * · Windows 那台身上挂着**多个端口** ✓（宿主插件 TLS `3443` ✓ 与桌面 `3453` ✓）、
+     *   而且**装过不止一次** ⇒ 同一台电脑有**两个身份（hostId）** ✓ ⇒ 那张卡上有**两行** ✓
+     *   ⇒ 旧快照（换之前那次探测 ✓）说"当前"的是**另一行** ✗ ⇒ 交还 = 灭 ✓✓。
+     *   （依据：Windows 的 `configuredEndpoints` 同时有好几条 ✓ —— `10.34.139.224:3081` /
+     *    `10.33.195.95:3443` ✓，见 `10-交接文档` §4.1ak／`20-手机连Windows隧道问题` ✓。）
+     *
+     * ## 判据（一条 ✓）
+     *
+     * **数据此刻点亮的那一行，就是覆盖值点亮的那一行** ✓ ＝ 同一台电脑 ✓ + **同一个端口** ✓。
+     * · 是 ⇒ 交还 ✓（数据接管，那一行**不会灭** ✓ —— 点亮它的本来就是同一行 ✓）；
+     * · 不是 ⇒ **留着** ✓（那 3 秒窗口里一直亮着 ✓ ＝「**先亮之后不许灭**」✓）。
+     *
+     * ★ 与老规矩一致 ✓：不改画法 ✗、不加轮询 ✗、不松「跨机器同端口不猜」✗ ——
+     *   只有**已经认领到这台电脑**（机器键对得上 ✓）之后，才多问这一句 ✓。
+     * ★ 找的是数据**自己说 current** 的那条地址 ✓（{@code HomeModel.Address.current} ⇐ `currentHost` ✓）
+     *   ⇒ 不猜、不看探测通不通 ✓、也不认识别不出来的实例 ✗。
+     */
+    private static boolean dataLightsSameRow(HomeModel.Snapshot from, String machineKey, String authority) {
+        if (from == null || machineKey == null || machineKey.length() == 0) return false;
+        String wantedPort = portOfAuthority(authority);
+        if (wantedPort.length() == 0) return false;
+        for (int i = 0; i < from.machines.size(); i += 1) {
+            HomeModel.Machine machine = from.machines.get(i);
+            if (machine == null || machine.key == null || !machineKey.equals(machine.key)) continue;
+            for (int k = 0; k < machine.instances.size(); k += 1) {
+                HomeModel.Instance instance = machine.instances.get(k);
+                if (instance == null) continue;
+                for (int j = 0; j < instance.addresses.size(); j += 1) {
+                    HomeModel.Address address = instance.addresses.get(j);
+                    if (address == null || !address.current) continue;
+                    if (wantedPort.equals(portOfAuthority(address.authority))) return true;
+                }
+            }
+        }
         return false;
     }
 
@@ -596,6 +660,11 @@ final class HomeView extends FrameLayout {
          *
          * ⇒ 判据改成"**谈成了才交还**" ✓：数据与用户刚做的一致 ⇒ 两个即时信号一起交还 ✓；
          *   不一致 ⇒ **留着** ✓（本仓那条老规矩：**自动行为不许盖掉用户刚做的事** ✓）。
+         * ★★ 2026-10-05 **再收紧一格** ✗（用户：「**亮 → 灭 → 再亮**」✗）：「谈成了」原先只问到
+         *   「**哪台电脑**」✗，而用户看到的那条「正在用」是**按行（端口）**画的 ✓ ⇒
+         *   机器对上、那**一行**还没对上时就交还 = 那一行当场灭 ✓
+         *   ⇒ 交还条件补成「**数据点亮的就是同一行**」✓（见
+         *   {@link #currentChoiceConfirmedBy} 与 {@link #dataLightsSameRow} ✓）。
          */
         HomeModel.Machine fromData = next == null ? null : next.currentMachine();
         if (fromData != null && currentChoiceConfirmedBy(next, fromData)) {
