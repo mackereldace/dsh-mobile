@@ -1278,6 +1278,28 @@
    * 所以一律走 `removeIdentityKey`（= `writeIdentityKey(key, null)` ✓，全文件唯一写入口 ✓）。
    */
   function handleDeviceRejection(tunnel, code, detail) {
+    /**
+     * ★★★ 方案 A **灾难闸**（2026-10-06）✗✗ —— 旁挂隧道被拒 ⇒ **只记日志、一个字都不动** ✓。
+     *
+     * ## 为什么这是「灾难」级的（不是夸张 ✗）
+     * 这个函数接下来会做两件**不可逆**的事 ✓：
+     *   ① 清掉**当前宿主**那四条身份键（本机 + 壳 ✓）；
+     *   ② `location.replace('/mobile')` —— 整页跳去配对界面 ✓。
+     * 而 `deviceRejected` 是**模块级单例** ✗（`var deviceRejected = false` ✓）
+     * ⇒ 旁挂那条（B 电脑）被撤销 ⇒ **A 这台好好的配对被清 + 整页跳走** ✗✗。
+     * 也就是说：**B 被撤销 = A 的配对没了** ✓ —— 这正是本轮方案 A 唯一会碰到的灾难 ✓。
+     *
+     * ## 为什么闸放在**这里**（而不是在调用点各判一次 ✗）
+     * 这个函数是「清身份 + 跳页」的**唯一**出口 ✓（全文件三处调用 ✓：`open()` 的
+     * 「全部端点都被明确拒绝」✓、Revoked 帧（0x13）✓、验收直通口 ✓）——
+     * 只有把闸放在**出口本身** ✓，以后新加的调用点才**不可能**绕过去 ✓。
+     * 放在调用点那三处各写一遍 ⇒ 第四个调用点出现时就会漏 ✓（本项目为「两处各判一半」
+     * 栽过不止一次 ✓）。
+     *
+     * ★ 判据是**这条隧道是不是旁挂的** ✓（`isSideChannelTunnel` ✓ 读 `config.sideChannel` ✓），
+     *   不是「哪台宿主」 ✗ —— 主隧道无论连的是哪台，走的都是原来那条路 ✓（一个字节不改 ✓）。
+     */
+    if (isSideChannelTunnel(tunnel)) return noteSideTunnelRejected(tunnel, code, detail)
     if (deviceRejected) return false
     deviceRejected = true
     try {
@@ -4077,13 +4099,21 @@
   // ───────────────────────────── 设备身份 ─────────────────────────────
 
   /** 载入或生成设备签名密钥（P-256，raw 公钥 65 字节）。 */
-  async function loadOrCreateDeviceKey() {
+  async function loadOrCreateDeviceKey(explicitFingerprint) {
     /**
      * ★ P1a：读**当前源对应指纹**那一份 ✓（旧键在此仅作"归属可证"的回退 ✓ ——
      *   见 `readIdentityKeyValue` ✓）。指纹不可得 ⇒ 生成新密钥并写旧键形态 ✓
      *   （纯旧模式 ✓ —— 行为与改动前一致 ✓）。
+     *
+     * ★★ 方案 A（2026-10-06）追加可选参数 ✓：**旁挂隧道**必须取**它自己那台宿主**的凭据 ✓
+     *   （`config.hostFingerprint` ✓ —— 见 `Tunnel.prototype.performHandshake` ✓）。
+     *   为什么非有它不可 ✗：本函数原来**写死**当前指纹 ✓ ⇒ 旁挂那条会拿着**当前这台**的
+     *   私钥去连别的电脑 ✓，对面注册表里没有这个 deviceId ⇒ 必被拒 ✓
+     *   （而且「按指纹命名空间化」这条既有安全属性当场作废 ✗）。
+     *   ★ 省略 / 传的不是合法指纹 ⇒ 与改动前**逐字一致** ✓（主隧道就是这么调的 ✓ ——
+     *     它的 config 里没有这个字段 ✗✓）。
      */
-    var fingerprint = currentHostFingerprint()
+    var fingerprint = validHostFingerprint(explicitFingerprint) ? explicitFingerprint : currentHostFingerprint()
     var stored = readIdentityKeyValue(DEVICE_KEY, fingerprint)
     if (stored !== null) {
       try {
@@ -4662,6 +4692,15 @@
     // ★★ round 156（B ✓）：连上了 ⇒ "等你点允许"那一阶段结束 ✓（下一次断线重新判 ✓）
     this.awaitingApproval = false
     this.hadTrouble = false
+    /**
+     * ★★ 方案 A：旁挂隧道**不碰 DSH 的联网状态** ✗✓ —— 走到这里说明这条旁挂隧道
+     *   「从失败里恢复了」✓，而那是**一台额外电脑**的事 ✓：给 DSH 派发 `online` 会让它
+     *   以为「当前这台也回来了」✗（主隧道可能还断着 ✓）。
+     * ★ `offlineDispatched` 在旁挂那条上**恒为 false** ✓（它永远走不到
+     *   `giveUpAutoReconnect` ✓ —— 判据见 `noteDialFailure` / `scheduleReconnect` 里的
+     *   `config.autoReconnect === false` ✓），所以这里直接返回不欠任何账 ✓。
+     */
+    if (this.config.sideChannel === true) return
     if (!recovered) return
     this.offlineDispatched = false
     // ⚠️ 有去必须有回 ✗✗：不派发 online 的话 DSH 那套会**永远**停在 disconnected ✗
@@ -4834,7 +4873,26 @@
           self.activeEndpoint = url
           try {
             // ★ 身份写入口 ✓（壳换槽时会把 vault 里这一条删掉 ✓ ⇒ 换源后不会拿旧端点在前面白等 ✗）
-            writeIdentityKey(LAST_ENDPOINT_KEY, url)
+            /**
+             * ★★ 方案 A **第一道闸**（写在**这里**，不是写在旁挂那一段里 ✗✓）：
+             * **旁挂那条绝不写「上次成功的端点」** ✗✗。
+             *
+             * ## 为什么非拦不可（这一处是真会出事的 ✓）
+             * `readLastGoodEndpointForCurrentSource()` 会把「host 与**当前源**不一致」的那条
+             * **当成脏数据删掉** ✓ —— 于是旁挂那条（去 B 的）写进来的地址，
+             * 下一次在 A 的页面上加载时会被判成「属于别的源」⇒ **删掉当前这台电脑的
+             * `lastGoodEndpoint`** ✗（「换网一次就中」这条优化静默失效 ✓）。
+             * ★ 这一处是**真跑**才暴露出来的 ✗：旁挂那一段自己确实一个字节都没写 ✓，
+             *   但「拨号成功就记一笔」这条副作用长在**共用**的 `open()` 里 ✓ ——
+             *   只按代码形状在旁挂那一段里找写入口，会得到一个**假绿** ✓
+             *   （项目里的头号教训：判据必须量到**真的会执行**的那一处 ✓）。
+             *
+             * ## 为什么拦在**副作用本身**（而不是「让旁挂别调 open」✗）
+             * 旁挂本来就得拨号 ✓（`open` 是唯一的拨号入口 ✓）；以后再多一条拨号路时，
+             * 闸在这里仍然管用 ✓。
+             * ★ 主隧道那一路 `config.sideChannel` 是 `undefined` ✓ ⇒ **一个字节不变** ✓。
+             */
+            if (self.config.sideChannel !== true) writeIdentityKey(LAST_ENDPOINT_KEY, url)
           } catch (error) {
             void error
           }
@@ -5280,7 +5338,12 @@
     if (this.socket === undefined || this.socket.readyState !== 1) return false
     // 记账放在"确实要发"这一支 ✓（诊断行的"最近一次 ping"= 真的发了 ✓，
     // 而不是"定时器跑了但被前置判断挡住"✗ —— 那两个数在排障时意思完全不同 ✓）。
-    keepAliveStats.lastPingAt = Date.now()
+    /**
+     * ★★ 方案 A：这个读数**只由主隧道写** ✗✓ —— 它回答的是「**当前这条通道**还活着没有」✓
+     *   （真机排障靠它分清「原生在戳」与「活真的干了」✓）。旁挂那条的 ping 混进来的话，
+     *   主隧道**早就死了**而旁挂还活着时这个数照样在动 ✗ ⇒ 读数骗人 ✓。
+     */
+    if (this.config.sideChannel !== true) keepAliveStats.lastPingAt = Date.now()
     this.sendFrame(FrameType.Ping, FrameFlags.None, new Uint8Array(0)).catch(function (error) {
       console.warn('[dsh-mobile] 保活 Ping 发送失败：', error)
     })
@@ -5381,7 +5444,12 @@
 
   /** 握手：ClientHello（明文）→ ServerHello（K_hs）→ ClientAuth（K_hs）→ ServerAuthOk（会话密钥）。 */
   Tunnel.prototype.performHandshake = async function () {
-    var device = await loadOrCreateDeviceKey()
+    /**
+     * ★★ 方案 A：**按这条隧道自己那台宿主**取凭据 ✓（`config.hostFingerprint` ✓）。
+     * 主隧道的 config 里没有这个字段 ⇒ `undefined` ⇒ 走 `currentHostFingerprint()` ✓
+     * ⇒ 与改动前逐字一致 ✓（见 `loadOrCreateDeviceKey` ✓）。
+     */
+    var device = await loadOrCreateDeviceKey(this.config.hostFingerprint)
     this.device = device
     var ephemeral = await generateEphemeral()
     var ephemeralPublic = await exportRawPublic(ephemeral.publicKey)
@@ -6029,6 +6097,382 @@
     } catch (error) {
       console.warn('[dsh-mobile] 提交配对请求失败（将重试连接）：', error)
     }
+  }
+
+  // ───────────── 方案 A（2026-10-06 用户拍板 ✓）：旁挂隧道 ─────────────
+  //
+  // 目标只有一个 ✗：手机停在 A 电脑的页面上时，**B 电脑**推的端侧待办
+  // （提醒 / 通知 / 审批 ✓）也能被取到 ✓ —— 今天它们要等用户切到 B 那台才会送达 ✓。
+  //
+  // 形状（四条 ✓，少一条就出事 ✗）：
+  //   ① 只在**手机表面**装 ✓（`isShellSurface()` ✓ —— 它是给端侧通道用的 ✓）；
+  //   ② 只挂**目录里其它**那几台 ✓，而且那台的凭据本机**确实持有** ✓；
+  //   ③ `autoReconnect: false` + `sideChannel: true` ✓ ⇒ 失败**安静退化** ✓
+  //      （不弹横幅 / 不发通知 / 不给 DSH 派发 offline ✓）；
+  //   ④ 三道闸（见下面各处 ✓）：不写 `LAST_ENDPOINT_KEY` ✗ / 不动
+  //      `setActiveHost` 与 `hostsWrite` ✗ / **绝不**触发 `handleDeviceRejection` ✗✗。
+  //
+  // ★ 硬约束：**必须去不同的电脑** ✗✗ —— 宿主侧 `sessions` 按 `deviceId` 记 ✓ ⇒
+  //   同一条设备凭据连**同一台**宿主两次，第二条会把第一条**顶掉** ✓（症状是主隧道
+  //   被自己人踢下线 ✓）。两条保证：只对「指纹 ≠ 当前指纹」的记录建 ✓；凭据按宿主
+  //   命名空间化 ✓（`device-key:<指纹>` ✓）⇒ 两台的 deviceId 天然不同 ✓。
+
+  /**
+   * ★★ 旁挂隧道总共挂上的那几条 ✓（`installDeviceChannel` 的轮询遍历读它 ✓ ——
+   *   见 `devicePollTargets` ✓）。
+   * ★ 每条元素同时是**那条隧道的轮询状态** ✓（护栏 / 去重键 / 节拍都挂在它自己身上 ✓，
+   *   见 `makePollTarget` ✓）—— 一份数据、三个用途（登记 / 轮询 / 读数 ✓）。
+   */
+  var sideTunnelEntries = []
+
+  /**
+   * ★★ 旁挂隧道的轮询节拍：**15 秒** ✓（不是 4 秒 ✗）。
+   *
+   * 为什么这一档是 15 秒 ✗：4 秒那一档是为**主隧道**定做的 ✓ —— 它的用途里有
+   * 「人在电脑前点了「允许此设备」，手机上要尽快看到」✓（端侧通道的授权条与提醒 ✓），
+   * 而**多出来的电脑**不需要这个体感 ✓：它们的待办是提醒 / 通知 / 审批推送 ✓，
+   * 晚十几秒完全够用 ✓。代价只有一半：轮询本身极轻（一个很小的加密帧 ✓）。
+   * ★ **耗电未实测** ✗ —— 如实写在这里：15 秒一轮比 4 秒一轮省 ✓ 是推算，
+   *   不是量出来的 ✓（真机电流没人量过 ✗）。
+   * ★ 节拍说的是**两轮之间** ✓：**第一轮不额外等** ✗（建起来那一发就跟着
+   *   `devicePollTick` 走出去 ✓）—— 页面刚打开时别的电脑可能正压着待办 ✓，
+   *   而用户走方案 A 的动机本来就是**延迟低** ✓（见本段开头 ✓）。
+   */
+  var SIDE_TUNNEL_POLL_MS = 15000
+
+  /**
+   * 「这条隧道是不是旁挂的」✓ —— 灾难闸（`handleDeviceRejection` ✓）与
+   * `noteDialSuccess`（别给 DSH 派发 `online` ✓）读的就是它 ✓。
+   * ★ 判据只有**一个字段** ✓（`config.sideChannel` ✓）：两处各写一套判据必然漂 ✗。
+   */
+  function isSideChannelTunnel(tunnel) {
+    return (
+      tunnel !== null && tunnel !== undefined && tunnel.config !== undefined && tunnel.config.sideChannel === true
+    )
+  }
+
+  /** 某条旁挂隧道的登记记录 ✓（不是旁挂 / 还没登记 ⇒ `null` ✓，绝不抛 ✗）。 */
+  function sideTunnelEntryFor(tunnel) {
+    for (var i = 0; i < sideTunnelEntries.length; i++) {
+      if (sideTunnelEntries[i].tunnel === tunnel) return sideTunnelEntries[i]
+    }
+    return null
+  }
+
+  /**
+   * ★★ 一条隧道**自己的**轮询状态 ✓（主隧道一条 + 每条旁挂各一条 ✓）。
+   *
+   * ## 为什么必须是「每台一份」✗✗（真会出事 ✓）
+   * 原来「上一轮还在飞」只有一个变量 ✓（`pollInFlightAt` ✓）——
+   * 于是**第二台会被第一台的「在飞」永久挡住** ✗（那一轮要是挂住了 ✓，
+   * 它要等 15 秒兜底才放行 ✓；而两条隧道节奏不同步 ⇒ 永久互相挡 ✓）。
+   * 同理，`lastPollSummary` / `lastPollErrorKey` 只有一份时 ⇒
+   * 两条隧道每轮都会把对方的去重键顶掉 ✓ ⇒ 调试框每 15 秒两种话轮流刷 ✗。
+   *
+   * @param id - 这条隧道的稳定标识 ✓（护栏与日志按它分份 ✓）。
+   * @param side - 是不是旁挂那条 ✓（主隧道 `false` ✓）。
+   * @param label - 给人念的短名 ✓（主隧道是空串 ✓ ⇒ 日志与今天逐字一致 ✓）。
+   */
+  function makePollTarget(id, side, label) {
+    return {
+      id: id,
+      side: side,
+      label: label,
+      fingerprint: undefined,
+      tunnel: undefined,
+      transport: undefined,
+      /**
+       * ★ 最近一次**真的驱动了一轮**的时刻 ✓。
+       * 两条隧道都是 0 起 ✓ ⇒ **建起来那一发就轮得到它** ✓（第一轮不额外等 ✓）；
+       * 之后旁挂那条按 `SIDE_TUNNEL_POLL_MS`（15 秒 ✓）走 ✓（见 `drivePollTarget` ✓）。
+       */
+      lastDrivenAt: 0,
+      /** ★★ 并发护栏**每台各一份** ✗✓（值 = 起飞时刻 ✓，0 = 没有在飞 ✓）。 */
+      pollInFlightAt: 0,
+      lastPollSummary: null,
+      lastPollErrorKey: null,
+      lastDialErrorKey: null,
+      lastPollAt: 0,
+      /** 这台电脑的 DSH 没有 `mobile/device/pending` ⇒ **只停它自己** ✗（见 `poll` ✓）。 */
+      unsupported: false,
+      /** 这台电脑**明确拒绝**了这台设备 ⇒ 只记日志 + 停它自己 ✓（灾难闸 ✓）。 */
+      rejected: false,
+      /** 这条隧道已经跑完几轮 ✓（日志里的轮数 ✓；与主隧道那个全局轮数分开 ✓）。 */
+      rounds: 0,
+    }
+  }
+
+  /**
+   * ★ 本机（或壳的库里）**确实持有**这台宿主的设备私钥吗 ✓ —— **纯读** ✗。
+   *
+   * 判据与 `handleDeviceRejection` 里那句「本机到底有没有这台宿主的身份」**同一口径** ✓
+   * （`identityKeyFor(DEVICE_KEY, 指纹)` ✓）—— 只是这里**本机与壳都看** ✓：
+   * 壳那份是**跨源**的 ✓，而「换过源」正是本方案要覆盖的常见情形 ✓。
+   *
+   * ★ 为什么必须问这一句 ✗：`loadOrCreateDeviceKey()` 在「取不到」时会**生成一份新私钥** ✓
+   * —— 对一台从来没配过对的电脑来说，那份新凭据连上去**必被拒** ✓（对面注册表里没有它 ✓），
+   * 而且会在手机上留下一份**没人认的私钥** ✗。⇒ 没凭据的机器**一条都不挂** ✓。
+   */
+  function hasStoredHostCredential(fingerprint) {
+    if (!validHostFingerprint(fingerprint)) return false
+    var key = identityKeyFor(DEVICE_KEY, fingerprint)
+    if (localValue(key) !== null) return true
+    return vaultValue(key) !== null
+  }
+
+  /** 一条 URL 的 authority ✓（解析不出来 ⇒ 空串 ✓，绝不抛 ✗）。 */
+  function tunnelUrlHost(url) {
+    if (typeof url !== 'string' || url.length === 0) return ''
+    try {
+      return new URL(url, location.href).host
+    } catch (error) {
+      void error
+      return ''
+    }
+  }
+
+  /**
+   * ★★ 这条宿主记录**自己的**候选隧道端点 ✓（空数组 = 一条都推不出来 ✓）。
+   *
+   * 三步 ✓（顺序就是理由 ✓）：
+   *   ① 记下这条记录**所有**槽的 authority ✓（槽 = 这台电脑的地址 ✓，见 `hostSlotsForConfig` ✓）；
+   *   ② 把「上次成功的端点」按**这台自己的指纹**取出来当首选 ✓（**只读** ✗✓ ——
+   *      三道闸的第一道：旁挂那条**绝不写** `LAST_ENDPOINT_KEY` ✓。
+   *      为什么能取到 ✗：壳的身份库是**跨源**的 ✓ ⇒ 手机在 B 那台的页面上连成功过，
+   *      这个键就在库里 ✓，在 A 的页面上也读得到 ✓）；
+   *   ③ 走**既有那个纯函数** `deriveTunnelUrls(...)` ✓（绝不另写一套拼接 ✗）——
+   *      然后**只留属于这台记录**的候选 ✓。
+   *
+   * ★ 第 ③ 步那道过滤**不是洁癖** ✗✗：`deriveTunnelUrls` 里混着一条「上次成功的端点」
+   *   （它按**当前源**取 ✓）与一条「当前页面源」 ✓ —— 那两条都是**当前这台电脑**的地址 ✓
+   *   ⇒ 不过滤的话，去 B 的旁挂隧道会**先拿 B 的凭据去连 A** ✓（对面回 device-unknown ✓）。
+   *   **「必须去不同的电脑」这条硬约束就落在这个过滤上** ✓。
+   */
+  function sideTunnelEndpoints(record) {
+    var slots = record !== null && Array.isArray(record.slots) ? record.slots : []
+    var allowed = {}
+    var sources = []
+    for (var i = 0; i < slots.length; i++) {
+      var slotUrl = slots[i] !== null && typeof slots[i] === 'object' ? slots[i].url : slots[i]
+      var slotHost = tunnelUrlHost(slotUrl)
+      if (slotHost === '') continue
+      allowed[slotHost] = true
+      sources.push(slotUrl)
+    }
+    if (sources.length === 0) return []
+    var lastGood = readIdentityKeyValue(LAST_ENDPOINT_KEY, record.fingerprint)
+    if (typeof lastGood === 'string' && lastGood.length > 0) sources.unshift(lastGood)
+    var derived = deriveTunnelUrls(sources, location.origin)
+    var out = []
+    for (var j = 0; j < derived.length; j++) {
+      var derivedHost = tunnelUrlHost(derived[j])
+      if (derivedHost === '' || allowed[derivedHost] !== true) continue
+      if (out.indexOf(derived[j]) < 0) out.push(derived[j])
+    }
+    return out
+  }
+
+  /**
+   * ★★ 把一条旁挂隧道包成「和主传输**同形状**」的最小 transport ✓。
+   *
+   * 为什么只做 `fetch` 一个口 ✗：端侧轮询只用它 ✓（`call(transport, ...)` ✓）——
+   * 多开一个口就多一处「可能跑错机器」的地方 ✓。
+   * ★ 为什么**不**复用 `__DSH_TRANSPORT__.fetch` ✗：那一个**绑死在主隧道上** ✓，
+   *   而且它还要处理附件表 / `rpcId` 核对 ✓（端侧待办全是小 JSON ✓，用不上 ✓）——
+   *   更要紧的是：主传输那一段是**本轮明令「一个字节不改」的** ✓。
+   * ★ 返回的是**最小响应形状**（不是 `Response` ✗）：唯一的消费者是本文件的 `call()` ✓，
+   *   而 `Response` 在若干沙箱 / 旧环境里不一定有 ✓ —— 为它把端侧通道搭进去不值得 ✓。
+   */
+  function sideChannelTransport(sideTunnel) {
+    return {
+      fetch: async function (input, init) {
+        var url = typeof input === 'string' ? input : input.url
+        var path = new URL(url, location.href)
+        var endpoint = path.pathname.replace(/^\/api\//, '')
+        var body = init && init.body !== undefined ? init.body : undefined
+        var envelope =
+          body === undefined ? {} : JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))
+        var response = await sideTunnel.rpc(endpoint, envelope.payload, envelope.rpcId)
+        return {
+          ok: true,
+          status: 200,
+          json: async function () {
+            return response
+          },
+        }
+      },
+    }
+  }
+
+  /**
+   * ★★ **灾难闸的另一半** ✓：旁挂隧道被宿主**明确拒绝**（`device-unknown` /
+   * `device-revoked` ✓）⇒ **只记日志** ✗ —— 一个身份键都不动 ✓、不导航 ✓、
+   * 不给 DSH 派发任何事件 ✓。
+   *
+   * 它由 `handleDeviceRejection` 顶上那道闸调进来 ✓（那条路是「清身份 + 跳页」的唯一出口 ✓）
+   * —— 所以本函数里**绝不许**出现那两个动作 ✗✗：`boot-surface.test.ts` 里那条
+   * 结构性断言钉的就是这件事 ✓（把 `handleDeviceRejection` 写回来 ⇒ 那条断言当场红 ✓）。
+   */
+  function noteSideTunnelRejected(tunnel, code, detail) {
+    var entry = sideTunnelEntryFor(tunnel)
+    if (entry !== null) entry.rejected = true
+    if (tunnel !== null && tunnel !== undefined && tunnel.config !== undefined) {
+      /**
+       * ★ 只**停这一条** ✓：`autoReconnect` 本来就 `false` ✓（见创建处 ✓）——
+       * 这里再写一次，是把「**这台电脑已经不认这台设备了**」这件事钉在配置上 ✓
+       * （与主隧道 `handleDeviceRejection` 里那一句同一个口径 ✓）。
+       * ★ 之后轮询会跳过它 ✓（见 `devicePollTargets` ✓）—— 再去戳一台明确不认我们的
+       * 电脑只会换来同样的拒绝 ✓，而屏幕上的东西一个字都不会多 ✓。
+       */
+      tunnel.config.autoReconnect = false
+    }
+    var text = '旁挂隧道被这台电脑明确拒绝（' + String(code) + '）：' + shortReason(detail)
+    debugBoxLine('[side] ' + text + ' ⇒ 只记日志、**不动这台手机上的任何身份** ✓（灾难闸 ✓）')
+    console.warn(
+      '[dsh-mobile] ' +
+        text +
+        ' ⇒ 按方案 A 的灾难闸**只记日志** ✓：绝不走「清身份 + 跳页」那条路 ✗' +
+        '（那会清掉**当前宿主**的配对、并把整页跳去配对界面 ✗✗）',
+    )
+    return false
+  }
+
+  /**
+   * ★★ 旁挂隧道的**拨号失败** ⇒ 网络类**安静退化** ✓（不闹 ✓）。
+   *
+   * 三道「不许闹」 ✓（真机上一条都不许少 ✗）：
+   *   · **不弹横幅 / 不发系统通知** ✓ —— 靠 `config.autoReconnect === false`
+   *     （`noteDialFailure` 在数轮次之前就返回 ✓；`giveUpAutoReconnect` 因此永远到不了 ✓）；
+   *   · **不给 DSH 派发 `offline`/`online`** ✓（同上 + `noteDialSuccess` 里那道闸 ✓）；
+   *   · **不做自动重连** ✓（`scheduleReconnect` 开头就返回 ✓）——
+   *     重试由我们那 15 秒一轮的轮询**按需**带起来 ✓（`rpc` → `dialNow(false)` ✓）。
+   *
+   * ★ 明确被拒那一种**不在这里记** ✗：它已经由上面那条灾难闸记过一行了 ✓
+   *   （两处都记 ⇒ 调试框里同一件事两行 ✓，本项目最恨的就是这种重复 ✓）。
+   */
+  function noteSideTunnelDialFailure(entry, error) {
+    if (entry === null || entry === undefined) return
+    var code = deviceRejectionCode(error === null || error === undefined ? undefined : error.code)
+    if (code !== undefined || entry.rejected === true) return
+    var text = shortReason(error && error.message ? error.message : error)
+    if (text === entry.lastDialErrorKey) return
+    entry.lastDialErrorKey = text
+    debugBoxLine('[side] 「' + entry.label + '」暂时连不上（安静退化，不上横幅 / 不发通知）：' + text)
+    console.info('[dsh-mobile] 旁挂隧道「' + entry.label + '」暂时连不上（安静退化）：' + text)
+  }
+
+  /** 一条宿主记录在旁挂隧道里的短名 ✓（人工填的名字 > 槽名 > 地址 ✓ + 指纹前 9 位 ✓）。 */
+  function sideTunnelLabel(record) {
+    var short = validHostFingerprint(record.fingerprint) ? formatFingerprint(record.fingerprint).slice(0, 9) + '…' : '?'
+    return hostRecordLabel(record) + '（' + short + '）'
+  }
+
+  /**
+   * ★★ 启动时：给**目录里其它那几台**各挂一条「只取待办」的轻量隧道 ✓。
+   *
+   * @returns 真的挂起来的条数 ✓（给人念 / 验收读 ✓；没挂 ⇒ 0 ✓）。
+   */
+  function startSideTunnels() {
+    if (sideTunnelEntries.length > 0) return sideTunnelEntries.length
+    var current = currentHostFingerprint()
+    /**
+     * ★★ 定不出「当前这台」 ⇒ **一条都不建** ✗✗（绝不猜 ✓）。
+     * 猜错的方向只有一个：把**当前这台**也当成「别的电脑」挂上第二条隧道 ✓ ——
+     * 而两条隧道会用**同一份凭据**（同一个 deviceId ✓）去连**同一台**宿主 ✓
+     * ⇒ 宿主按 deviceId 记的会话被第二条顶掉 ✓ ⇒ **主隧道当场被踢下线** ✗✗。
+     */
+    if (!validHostFingerprint(current)) {
+      console.info(
+        '[dsh-mobile] 旁挂隧道：定不出「当前这台」的指纹 ⇒ 一条都不建 ✓' +
+          '（猜错会把当前这台也挂上第二条，而宿主按 deviceId 记会话 ⇒ 顶掉主隧道 ✗）',
+      )
+      return 0
+    }
+    var records = hostsRead()
+    var built = 0
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i]
+      var fingerprint = record.fingerprint
+      if (!validHostFingerprint(fingerprint)) continue
+      /** ★★ 硬约束：**必须去不同的电脑** ✗（同机同凭据再开一条会顶掉主隧道 ✓）。 */
+      if (fingerprint === current) continue
+      /** ★ 没有凭据的机器一条都不挂 ✓（连上去必被拒，而且会凭空生成一份新私钥 ✗）。 */
+      if (!hasStoredHostCredential(fingerprint)) {
+        console.info('[dsh-mobile] 旁挂隧道：跳过 ' + fingerprint + '（本机没有它的设备私钥 ⇒ 不凭空生成凭据 ✗）')
+        continue
+      }
+      var endpoints = sideTunnelEndpoints(record)
+      if (endpoints.length === 0) {
+        console.info('[dsh-mobile] 旁挂隧道：跳过 ' + fingerprint + '（这条记录里一条地址都没有 ✓）')
+        continue
+      }
+      var label = sideTunnelLabel(record)
+      var sideTunnel = new Tunnel({
+        tunnelUrl: endpoints[0],
+        tunnelUrls: endpoints,
+        /** ★ 它属于哪台 ✓（`loadOrCreateDeviceKey` 靠它取**那台**的凭据 ✓）。 */
+        hostFingerprint: fingerprint,
+        /**
+         * ★★ 身份钉死 ✗✓：目录里那条记录的指纹就是**带外锚** ✓ ——
+         *   与主隧道用的是同一个判据（`acceptServerHello` 里那句「电脑身份已变化！」✓）。
+         *   少了它，旁挂那条会接受**任何一个**能在那个地址上完成握手的对端 ✓
+         *   （对端只要自备一对密钥就能当「B 电脑」 ✓）—— 那是把「这台电脑是谁」
+         *   交给网络位置去回答 ✗，本项目在别处从不肯这么干 ✓。
+         */
+        pinnedHostFingerprint: fingerprint,
+        /**
+         * ★★ 安静退化的**总开关** ✓（判据全在既有代码里 ✓，不另造一套 ✗）：
+         * `noteDialFailure` 数轮次之前就返回 ✓、`scheduleReconnect` 开头就返回 ✓、
+         * `nativeClockRedial` 回 `'off'` ✓ ⇒ 不弹横幅 / 不发通知 / 不派发 offline ✓。
+         */
+        autoReconnect: false,
+        /** ★ 这条是旁挂的 ✓（灾难闸与 `noteDialSuccess` 读它 ✓）。 */
+        sideChannel: true,
+      })
+      /**
+       * ★ 只**记一个读数** ✓（`lastState` ✓）—— 方便 `sideChannels()` 与真机排障 ✓。
+       * ★ 它自己**一个字都不做** ✗：不进日志、不派发事件、不碰 DSH 的联网状态 ✓
+       * （给 DSH 派发 `online`/`offline` 那一半由 `noteDialSuccess` 里那道闸挡着 ✓）。
+       */
+      sideTunnel.onState(function (state) {
+        sideTunnel.lastState = state
+      })
+      var entry = makePollTarget('side:' + fingerprint, true, label)
+      entry.fingerprint = fingerprint
+      entry.tunnel = sideTunnel
+      entry.transport = sideChannelTransport(sideTunnel)
+      sideTunnelEntries.push(entry)
+      built++
+      debugBoxLine('[side] 旁挂隧道已挂上「' + label + '」：' + endpoints.join(' → '))
+      ;(function (target) {
+        void target.tunnel.connect().catch(function (error) {
+          noteSideTunnelDialFailure(target, error)
+        })
+      })(entry)
+    }
+    if (built > 0) {
+      console.info('[dsh-mobile] 旁挂隧道：已挂上 ' + built + ' 条 ✓（各自只取**它那台电脑**的端侧待办 ✓）')
+    }
+    return built
+  }
+
+  /** 旁挂隧道的**只读读数** ✓（真机排障 / 验收念它：挂了几条、各自连上没有 ✓）。 */
+  function sideTunnelsReadout() {
+    var out = []
+    for (var i = 0; i < sideTunnelEntries.length; i++) {
+      var entry = sideTunnelEntries[i]
+      out.push({
+        fingerprint: entry.fingerprint === undefined ? null : entry.fingerprint,
+        label: entry.label,
+        endpoints: entry.tunnel === undefined ? [] : entry.tunnel.endpoints.slice(),
+        activeEndpoint: entry.tunnel === undefined ? null : entry.tunnel.activeEndpoint || null,
+        state: entry.tunnel === undefined ? null : entry.tunnel.lastState || null,
+        rejected: entry.rejected === true,
+        unsupported: entry.unsupported === true,
+        polls: entry.rounds,
+      })
+    }
+    return out
   }
 
   // ───────────────────────────── 配置与安装 ─────────────────────────────
@@ -9627,30 +10071,36 @@
       '.dshm-file-name { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }',
       '.dshm-file-name > [data-dshm-fs-head] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
       '.dshm-file-name > [data-dshm-fs-ext] { flex: 0 0 auto; white-space: nowrap; }',
-      /* ★★ round 199：名字栏**右端**那颗标签 ✓ —— 文件行吃后缀 ✓、文件夹行吃「文件夹」✓。
+      /* ★★ round 199：名字栏**右端**那颗标签 ✓ —— 文件行吃后缀 ✓、目录行吃「目录」✓。
          它占的正是上一单删掉的「文件大小 / 目录」那一段位置 ✓（名字之后、`⋯` 之前 ✓）：
 
            · `margin-left: auto` ⇒ 在第一行里被推到**最右**（紧挨着 `⋯` ✓）——
              这就是用户说的"右侧那个位置"✓（原来写的是文件大小 ✓）；
            · **淡**：`--dsw-alias-label-tertiary` ✓ —— 主题里那颗**次要文字**色 ✓（不新造颜色 ✗，
              与上面 `.dshm-more-info` 用的是同一颗 ✓）；
-           · ★ **宽度上限 64px** ✓（11.5px 实测：`.PDF` = 25.8px ✓、`.DOCX` = 36.7px ✓、
-             `.NUMBERS` = 60.0px ✓、「文件夹」= 34.5px ✓；唯有最长那颗 `.MARKDOWN` = 73.2px ✗ ——
-             它在标签**自己内部**收尾 ✓，换来的是名字那一栏不被挤没 ✓）——
+           · ★ **宽度上限 64px** ✓（11.5px **真布局实测** ✓ —— 下面这些数**都含**标签左边那 8px 内边距：
+             ★ 改前那版挂着 `text-transform: uppercase` ✗ ⇒ `.PDF` = 34.2px、`.DOCX` = 44.4px、
+             `.NUMBERS` = 68.7px、`.MARKDOWN` = 72px 且 `scrollWidth` 81 ⇒ **真被自己剪了一刀** ✗；
+             ★ 改后（原样 ✓）`.pdf` = 27.2px、`.docx` = 35.5px、`.numbers` = 55.9px、
+             `.markdown` = 64.3px ✓ ⇒ **一个都没被剪** ✓。
+             ★ 去大写只会让同一串字**变窄** ✓（实测这几串全变窄 ✓）⇒ 上限这个数**不用动** ✓ ——
              320px 视口下名字栏只有 **≈105px** ✓（算式见 `FILE_NAME_MAX_UNITS` 那段注释 ✓），
              不设上限就是把名字挤没 ✗；
            · `box-sizing: content-box` 是**故意**写的 ✓：让 `max-width` 只量文字那一段 ✓；
              左边留 8px 内边距 = "名字与标签之间至少留一条缝"✓（不留的话两者会贴在一起 ✗）。
              不写它的话，全局若有 `* { box-sizing: border-box }`，上限会被内边距悄悄吃掉 8px ✗；
-           · **不加** `letter-spacing` ✓：先写了 `.02em`，实测它把 `.NUMBERS`（60.0px）顶到 62px 上限外
-             一点点 ⇒ 一个**真实后缀**被自己的上限多剪一刀 ✗（上限这个数是拿实测换来的 ✓，不是拍脑袋 ✗）；
+           · **不加** `letter-spacing` ✓：先写了 `.02em`，实测它把 `.NUMBERS`（60.0px，那是还在大写那版量的 ✓）
+             顶到 62px 上限外一点点 ⇒ 一个**真实后缀**被自己的上限多剪一刀 ✗（上限这个数是拿实测换来的 ✓，不是拍脑袋 ✗）；
+           · ★★ 2026-10-05：这里原来还写着 `text-transform: uppercase` ✗ —— 屏上于是成了
+             `.PDF` / `.DOCX` ✗（用户原话："**后缀名不要大写**"✗）⇒ **整条删掉** ✓，
+             后缀按**文件名原样**显示 ✓（`.pdf` / `.docx` / `.md` ✓；既不 upper ✗ 也不 lower ✗）；
            · `overflow: hidden` + `text-overflow: ellipsis` 只作用在**标签自己**身上 ✓ ——
-             比上限还长的后缀（如 `.markdown`）在标签内部收尾 ✓；**名字**永远是先被压的那一段 ✓
+             比上限还长的后缀（如 `.typescript` 这种更长的陌生后缀 ✓）在标签内部收尾 ✓；**名字**永远是先被压的那一段 ✓
              ⇒ 上一单"后缀剪不掉"那条保证这一轮**换到这颗标签上兑现** ✓（见测试里那段转移说明 ✓）。 */
       '.dshm-file-name > .dshm-file-tag {',
       '  box-sizing: content-box; flex: 0 0 auto; white-space: nowrap; margin-left: auto;',
       '  max-width: 64px; padding-left: 8px; overflow: hidden; text-overflow: ellipsis;',
-      '  font-size: 11.5px; text-transform: uppercase;',
+      '  font-size: 11.5px;',
       '  color: var(--dsw-alias-label-tertiary, #7d858e);',
       '}',
       '.dshm-file-more {',
@@ -21141,7 +21591,7 @@
    *   ⇒ "保住后缀"不能只靠预算估算 ✓，得靠**结构** ✓（见 `.dshm-file-name > [data-dshm-fs-ext]` ✓）。
    *
    * ★★ round 199：多了一个 `asFolder` ✓ —— **目录名不许拆后缀** ✗。
-   *   为什么非要有它 ✗：目录右侧那颗标签是固定的「文件夹」✓，名字本身要**完整** ✓；
+   *   为什么非要有它 ✗：目录右侧那颗标签是固定的「目录」✓，名字本身要**完整** ✓；
    *   而像 `v1.2` / `dsh-mobile.old` 这种目录名，按文件那条路会被拆出一个假后缀 ✗
    *   （`.2` / `.old` ✗）⇒ 名字平白短一截 ✓，右侧还可能冒出一颗莫名其妙的标签 ✗。
    *   （上一版没有这个开关 ✓，只是因为那时目录行的右侧压根没有标签 ✓ —— 这一轮才暴露出来 ✓。）
@@ -21263,8 +21713,13 @@
    * ★★ round 199：目录行**右端那颗标签**的文案（纯函数 ✓ —— 判据直接打在它身上 ✓）。
    *
    * 用户原话："我记得之前我们**文件夹会标注出类型**"✓ + "**只有名字这一块可能需要改一改**"✓。
-   * 上一单把「目录」那一段连同文件大小一起删掉了 ✗ —— 这一轮让它**回来** ✓，
-   * 文案按用户嘴里的那个词写成「**文件夹**」✓（不再写「目录」✓）。
+   * 上一单把「目录」那一段连同文件大小一起删掉了 ✗ —— 这一轮让它**回来** ✓。
+   *
+   * ★★ 2026-10-05 改口径：用户新原话"**文件夹改成目录**"✓ ⇒ 这里由「文件夹」改成「**目录**」✓
+   *   （上一版这段注释写的是"文案按用户嘴里的那个词写成「文件夹」"✗ —— 本轮按**新**原话改 ✓）。
+   *   ★ 只有这一处是"列表里那一行**右端标签**"的文案 ✓：面板里其它写着「文件夹」的地方
+   *   （工具栏那颗「新建文件夹」✓、DSH 原生菜单里的「打开所在文件夹」✓）**都不是**这颗标签 ✗
+   *   ⇒ 本轮**一个字没动** ✓（要动得先问用户 ✓）。
    *
    * ★ 为什么把这一句单拎成函数 ✗：它是**唯一**一处决定这个字符串的地方 ✓ ——
    *   单拎出来，判据才能打在**生产**代码上 ✓（打在测试里另抄一份的复制品上就是假断言 ✗）。
@@ -21273,11 +21728,11 @@
    */
   function dirTagText(entry) {
     if (entry === null || entry === undefined) return ''
-    return entry.type === 'directory' ? '文件夹' : ''
+    return entry.type === 'directory' ? '目录' : ''
   }
 
   /**
-   * 一个条目：类型图标 + 名称（中段省略）+ **右端那颗标签**（后缀 / 「文件夹」✓）；点一下进目录 / 预览。
+   * 一个条目：类型图标 + 名称（中段省略）+ **右端那颗标签**（后缀 / 「目录」✓）；点一下进目录 / 预览。
    *
    * 用"就地展开操作"而不是弹菜单：手机上弹菜单要么太小要么挡住列表，
    * 就地展开还能让用户看清自己操作的是哪一项。
@@ -21287,7 +21742,7 @@
    *
    * ★★ round 199：用户接着说"**或许把文件的大小直接替换为文件名后缀**就好了"✓ ⇒
    *   那**同一段位置**（名字之后、`⋯` 之前 ✓）现在装的是：
-   *     · 目录 ⇒ 「文件夹」✓（"以前文件夹会标注出类型"✓ —— 上一单删掉的那条**回来**了 ✓）；
+   *     · 目录 ⇒ 「目录」✓（"以前文件夹会标注出类型"✓ —— 上一单删掉的那条**回来**了 ✓）；
    *     · 文件 ⇒ 后缀 ✓（`fitFileNameParts` 认出来的那一段 ✓）；
    *     · 没后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
    *   ★ 图标（图 / 表 / PDF / 码 / 压缩 / 文 / 其它 + 颜色 ✓）用户点名"改的很好"✓ ⇒ **一个字没动** ✓。
@@ -21336,7 +21791,7 @@
     name.className = 'dshm-file-name'
     /**
      * ★ round 199：第三个参数 `isDir` ✓ —— 目录名**不许拆后缀** ✗（目录右侧那颗标签固定是
-     *   「文件夹」✓，名字要完整 ✓；不传它的话 `v1.2` 这种目录会被拆出一个假后缀 `.2` ✗）。
+     *   「目录」✓，名字要完整 ✓；不传它的话 `v1.2` 这种目录会被拆出一个假后缀 `.2` ✗）。
      */
     var shownName = fitFileNameParts(entry.name, FILE_NAME_MAX_UNITS, isDir)
     /**
@@ -21357,7 +21812,7 @@
     /**
      * ★★ round 199：**右端那颗标签** ✓ —— 用户原话："或许把**文件的大小直接替换为文件名后缀**就好了"✓。
      *   位置就是上一单删掉的「大小 / 目录」那一段 ✓（CSS 里 `margin-left: auto` 把它推到名字栏最右 ✓）。
-     *   · 目录 ⇒ 「文件夹」✓（文案来自 `dirTagText` ✓ —— 那是**唯一**一处生产它的地方 ✓）；
+     *   · 目录 ⇒ 「目录」✓（文案来自 `dirTagText` ✓ —— 那是**唯一**一处生产它的地方 ✓）；
      *   · 文件 ⇒ 后缀 ✓（`shownName.ext` ✓，就是 `fileNameExt` 认出来的那一段 ✓）；
      *   · 没有后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
      * ★ "后缀必须看得见"这条保证，这一轮从**名字那一栏**转移到这颗标签上 ✓：
@@ -22901,6 +23356,18 @@
       endpoints: function () {
         return tunnel === undefined ? [] : tunnel.endpoints.slice()
       },
+      /**
+       * ★★ 方案 A：旁挂隧道的**只读读数** ✓ —— 真机排障时念它就知道「挂了几条、
+       *   各自连到哪个端点、有没有被明确拒绝」 ✓（`__DSH_MOBILE_BOOT__.sideChannels()` ✓）。
+       *
+       * ★ 它是**既有诊断口那一排**的邻居 ✓（`state` / `endpoint` / `endpoints` ✓）——
+       *   不是测试专用口 ✗：手机上「多挂的那几条到底活了没有」此前**一个字都看不见** ✓，
+       *   而「看得见」正是本项目对真机问题的第一条要求 ✓。
+       * ★ 只读 ✓：回的是**当场算出来的快照** ✓（不回隧道对象本身 ✗ —— 那会多一个能改它的入口 ✓）。
+       */
+      sideChannels: function () {
+        return sideTunnelsReadout()
+      },
     }
 
     // ── 移动端外壳：**只在手机页面上安装** ─────────────────────────────
@@ -23086,6 +23553,27 @@
     })
     globalThis.__DSH_MOBILE_BOOT__.tunnel = tunnel
 
+    /**
+     * ★★ 方案 A：给**目录里其它那几台**各挂一条「只取待办」的轻量隧道 ✓。
+     *
+     * 放在**这里**（主隧道建好之后、`__DSH_TRANSPORT__` 之前 ✓）的理由：
+     *   · 它**只**读目录与身份 ✓（不动当前这台的身份、不写目录 ✓）；
+     *   · 越早挂上 ⇒ 别的电脑推来的提醒 / 审批越早能送到 ✓（用户要的就是**低延迟** ✓）；
+     *   · 那两条代码块（当前隧道的创建 ✓ 与 `__DSH_TRANSPORT__` ✓）本轮**一个字节不改** ✓，
+     *     所以这里只是「在旁边加一段」 ✗✓。
+     * ★ 只在**手机表面**装 ✓（`mobileSurface` = `isShellSurface()` ✓ —— 与端侧通道同一个口径 ✓）：
+     *   电脑端不该多拨任何一条连接 ✗（本文件那条老规矩：给手机加的东西先问 `isShellSurface()` ✓）。
+     * ★ `void` + 自己消化异常 ✓：旁挂那条**绝不许**影响主流程 ✗（下面那句 `.catch` 在
+     *   `startSideTunnels` 内部已经有了 ✓ —— 这里的 `try` 兜的是「连建都没建起来」 ✓）。
+     */
+    if (mobileSurface) {
+      try {
+        startSideTunnels()
+      } catch (error) {
+        debugBoxLine('[side] 旁挂隧道安装失败（不影响当前这条 ✓）：' + String(error && error.message ? error.message : error))
+      }
+    }
+
     // 关键：把 DSH 的全部业务流量接进加密隧道
     globalThis.__DSH_TRANSPORT__ = {
       fetch: async function (input, init) {
@@ -23249,7 +23737,7 @@
     fitFileName: fitFileName,
     /**
      * ★★ round 199：目录行右端那颗标签的文案 ✓ —— 判据直接打在它身上 ✓
-     *   （目录 ⇒ 「文件夹」✓ / 其它 ⇒ 空串 ✓；文件的标签文案走 `fitFileNameParts` 的 `ext` ✓）。
+     *   （目录 ⇒ 「目录」✓ / 其它 ⇒ 空串 ✓；文件的标签文案走 `fitFileNameParts` 的 `ext` ✓）。
      */
     dirTagText: dirTagText,
     fileNameFamily: fileNameFamily,
@@ -24166,14 +24654,18 @@
       vibrate: { ask: '允许电脑让这台手机震动？', short: '震动' },
       open: { ask: '允许电脑把链接推送到这台手机上？', short: '打开链接' },
     }
-    // ★ 这个标志必须**声明**。它原先只有赋值（`unsupported = true`）和读取
-    //   （`if (unsupported) return`），却从未 `var` 过，而本文件是 'use strict' ——
-    //   于是定时器里**第一句**就抛 ReferenceError，而且抛在 `poll()` 之前：
-    //   端侧通道从来没有轮询过一次。电脑侧 enabled 永远为空、审批推送永远没有
-    //   落点、授权条永远不弹 —— 全部由这一行解释。
+    // ★★ `unsupported` 那个标志的**历史教训**（留着，别删 ✗）：它原先只有赋值
+    //   （`unsupported = true`）和读取（`if (unsupported) return`），却从未 `var` 过，
+    //   而本文件是 'use strict' —— 于是定时器里**第一句**就抛 ReferenceError，
+    //   而且抛在 `poll()` 之前：端侧通道从来没有轮询过一次。电脑侧 enabled 永远为空、
+    //   审批推送永远没有落点、授权条永远不弹 —— 全部由这一行解释。
     //   未捕获的定时器异常只进控制台，手机上完全看不见，所以它能活到今天：
     //   唯一的破案工具是 scripts/repro-boot.mjs（把手机屏幕搬到电脑上跑）。
-    var unsupported = false
+    // ★ 教训本身要留住 ✓：**凡是被赋值/读取的标识，必须先声明** ✓。
+    //   方案 A 之后这个标志**搬到每条隧道自己那条记录上**了 ✓
+    //   （`mainPollTarget.unsupported` ✓ / 旁挂那条在它自己的 `entry.unsupported` ✓
+    //   —— 见 `makePollTarget` ✓）：原来它只有**一份** ✓，
+    //   于是「另一台电脑的 DSH 没有这条端点」会把**整条通道**停掉 ✗。
     /** Service Worker 注册（用于系统通知；失败则为 null，通知自动退回横幅）。 */
     var swRegistration = null
     try {
@@ -24339,33 +24831,40 @@
 
     // ★ 这条原先**一个字都不打**：隧道没就绪时每 4 秒静默跳过，
     //   于是“通道在跑但什么都没发生”与“通道根本没跑”在手机屏幕上完全一样 ✗。
+    /**
+     * ★★ 方案 A：轮询的**每一条隧道自己那份状态** ✓（`makePollTarget` ✓）。
+     *
+     * 原来是四个闭包变量 ✓（`pollTicks` / `lastPollSummary` / `lastPollErrorKey` /
+     * `pollInFlightAt` ✓）—— 主隧道那一条**语义逐字不变** ✓，只是从「一个变量」
+     * 变成「一条记录」 ✗✓：第二台再也不会被第一台的「在飞」挡住 ✓、
+     * 也不会把它的去重键顶掉 ✓（见 `makePollTarget` 的说明 ✓）。
+     * `pollTicks` 那一个**照旧是全局的** ✓ —— 但它只由主隧道推进 ✓
+     * （旁挂的轮数记在它自己那条上 ✓），所以「前 5 轮 / 前 3 轮」那几处日志窗
+     * 与今天**逐字一致** ✓。
+     */
     var pollTicks = 0
-    var lastPollSummary = null
+    var mainPollTarget = makePollTarget('main', false, '')
     /**
-     * ★★ round 153（用户真机反馈的噪声源 ✓）：**同类"轮询失败"只记一行** ✓。
-     *
-     * 为什么必须有 ✗：自动重连放弃之后，这一条 4 秒一轮的轮询会**每轮都失败** ✓
-     *   （`rpc` → `dialNow(false)` 被"自动已放弃"挡下 ⇒ 同一个错误 ✓），
-     *   调试框于是被"轮询失败"刷屏 ✗ —— 而"放弃"这件事在设置页「隧道」那一行
-     *   与页面提示条里**已经说清楚了** ✓，不需要每 4 秒重复一遍 ✗。
-     * 判据：去重键 = 错误文本本身 ✓（换了一种失败 ⇒ 仍然单独记一行 ✓）；
-     *   轮询**成功**一次就把键清掉 ✓（之后真的又坏了 ⇒ 值得再记一行 ✓）。
+     * ★★ 一次 tick 要跑**哪几条**隧道 ✓：主隧道永远第一 ✓（`tick('poll')` 那条口径
+     *   因此一个字都不变 ✓），后面是旁挂那几条 ✓。
+     * ★ 明确被拒 / 这台电脑没有那条端点的旁挂隧道**跳过** ✗（它已经没戏了 ✓，
+     *   再去戳只会换来同样的拒绝 ✓）。
      */
-    var lastPollErrorKey = null
+    function devicePollTargets() {
+      var targets = [mainPollTarget]
+      for (var i = 0; i < sideTunnelEntries.length; i++) {
+        var entry = sideTunnelEntries[i]
+        if (entry.unsupported === true || entry.rejected === true) continue
+        targets.push(entry)
+      }
+      return targets
+    }
     /**
-     * ★★ 并发护栏：上一轮还没跑完 ⇒ 第二个触发源**直接让开** ✓（两个触发源共用它 ✓）。
-     *
-     * 存的是**起飞时刻**（0 = 没有在飞 ✓），不是布尔 ✗ —— 理由见 `devicePollTick` 里
-     * "超时兜底"那段 ✓：一次挂死绝不许变成"端侧通道永久停摆"✗。
-     * 它活在本函数的闭包里 ✓ —— `installDeviceChannel` 全文件只有一个调用点 ✓
-     * （`isMobileSurface()` 那一支 ✓），所以不存在"两份标志各管一半"✗。
-     */
-    var pollInFlightAt = 0
-    /**
-     * 一轮轮询最多算"在飞"多久 ✓（超过 ⇒ 认定挂死，放行新的 ✓，见 `devicePollTick` ✓）。
+     * 一轮轮询最多算「在飞」多久 ✓（超过 ⇒ 认定挂死，放行新的 ✓，见 `drivePollTarget` ✓）。
      * 15 秒 = 4 秒周期的近四倍 ✓：正常的轮询（等隧道 3 秒上限 + 一次 RPC ✓）远在它之内 ✓，
      * 只有**真的挂住**才会撞上 ✓ —— 那一支存在的意义是"不把通道永久锁死"✗，
      * 不是"给轮询设超时"✓（给 RPC 设超时是另一件事 ✓，本轮不碰 ✓）。
+     * ★ 它现在被**每一条隧道各自**拿来比 ✓（比的是那条自己的 `pollInFlightAt` ✓）。
      */
     var POLL_INFLIGHT_MAX_MS = 15000
     /**
@@ -24387,28 +24886,72 @@
         }),
       ])
     }
-    async function poll() {
-      pollTicks++
-      var index = pollTicks
-      var transport = await waitForTunnelOrTimeout(3000)
-      if (transport === '__timeout__') {
-        if (pollTicks <= 5) log('轮询#' + index + ' 等隧道超时（3s）—— tunnelReady 从未 resolve')
-        return
-      }
-      if (transport === undefined || transport.placeholder === true) {
-        if (pollTicks <= 5) {
-          log('轮询#' + index + ' 隧道未就绪（placeholder=' + String(transport && transport.placeholder) + '）')
+    /**
+     * ★★ 一轮轮询的**唯一实现** ✓ —— 每一发都带上「这一轮属于**哪条隧道**」 ✓
+     * （`target` ✓，见 `makePollTarget` ✓）。主隧道那条**逐字不变** ✓：
+     * 它仍然走 `waitForTunnelOrTimeout(3000)` ✓、`placeholder` 那两处判据一个字不改 ✓。
+     *
+     * ★ 旁挂那条为什么**不等** `waitForTunnel` ✗：那个 promise 等的是**主传输**
+     * （`tunnelReady` ✓），与旁挂那条毫无关系 ✓；旁挂的 `transport` 是它自己的
+     * （`target.transport` ✓）—— 它的 `rpc` 自己会 `dialNow(false)` ✓
+     * （连不上就拒 ✓，不会静默挂住 ✓）。
+     *
+     * @param target - 这一轮跑的是哪条隧道 ✓（`makePollTarget` 造的那条记录 ✓）。
+     */
+    async function poll(target) {
+      var side = target.side === true
+      /** ★ 轮数**按隧道各算一份** ✓（主隧道那个全局 `pollTicks` 只由主隧道推进 ✓）。 */
+      var index = target.rounds + 1
+      target.rounds = index
+      if (!side) pollTicks++
+      var transport
+      if (side) {
+        transport = target.transport
+      } else {
+        transport = await waitForTunnelOrTimeout(3000)
+        if (transport === '__timeout__') {
+          if (pollTicks <= 5) log('轮询#' + index + ' 等隧道超时（3s）—— tunnelReady 从未 resolve')
+          return
         }
-        return
+        if (transport === undefined || transport.placeholder === true) {
+          if (pollTicks <= 5) {
+            log('轮询#' + index + ' 隧道未就绪（placeholder=' + String(transport && transport.placeholder) + '）')
+          }
+          return
+        }
       }
+      /**
+       * ★ 日志前缀 ✓：主隧道是**空串** ✓ ⇒ 它那几行与今天逐字一致 ✓；
+       *   旁挂那条带上「这是哪台电脑」 ✓ —— 两条隧道的日志混在一个调试框里，
+       *   不带名字就等于没记 ✓（手机上没有控制台，调试框是唯一现场 ✓）。
+       */
+      var tag = side ? '[旁挂 ' + target.label + '] ' : ''
 
       // ① 取待办并执行（只有已启用的能力会被宿主投递过来）
       var result = await call(transport, 'mobile/device/pending', { args: {} })
       if (result === undefined || result.ok !== true) {
+        /**
+         * ★★ 旁挂隧道**绝不许**把整条端侧通道停掉 ✗✗：`unsupported` 原来是**全局**的 ✓
+         * ——「这台电脑的 DSH 版本没有那条端点」是**它一台**的事 ✓
+         * ⇒ **只停它自己** ✓（主隧道与别的旁挂一个字都不动 ✓）。
+         */
+        if (side) {
+          target.unsupported = true
+          log(
+            tag + '!! 这台电脑没有 mobile/device/pending（多半是旧版本 DSH）⇒ **只停这一条** ✓' +
+              '（主隧道一个字都不动 ✓）result=' + JSON.stringify(result),
+          )
+          return
+        }
         // 宿主还没重启（端点不存在）→ **别再每 4 秒试一次**。
         // 那只是噪音，而且会让人误以为"功能在跑"。
-        unsupported = true
-        clearInterval(timer)
+        /**
+         * ★★ 方案 A：这里**不再** `clearInterval(timer)` ✗✓ —— 那张表现在同时驱动
+         * **旁挂那几条** ✓（`devicePollTick` 是同一个入口 ✓）。停掉它 =
+         * 顺手把其它电脑的端侧待办也停了 ✗。主隧道自己由 `unsupported` 挡住 ✓
+         * （每一发都当场返回 ✓，一个字节都不发 ✓）⇒ **对用户可见的行为零变化** ✓。
+         */
+        target.unsupported = true
         log('!! 已停止轮询：mobile/device/pending 未返回 ok（重启 DSH 后刷新本页即可）result=' + JSON.stringify(result))
         debugBoxLine('[device] !! 端侧通道已停摆（上面那行就是原因）')
         return
@@ -24423,25 +24966,33 @@
           var missing = ASK_ORDER[e]
           if (localStorage.getItem(enabledKey(missing)) !== 'yes') continue
           if (hostEnabled.indexOf(missing) !== -1) continue
-          log('[enable] 电脑侧没有 ' + missing + ' 的授权，重新声明一次')
+          log(tag + '[enable] 电脑侧没有 ' + missing + ' 的授权，重新声明一次')
           void call(transport, 'mobile/device/enable', { args: { capability: missing, enabled: true } })
         }
       }
-      var summary = '待办' + String(result.value && result.value.calls ? result.value.calls.length : 0) +
-        '条 电脑侧已启用=' + JSON.stringify(result.value ? result.value.enabled : null)
-      // ★ 前 3 轮**无条件**打出来：只按“内容变化”打的话，第一轮如果恰好和上一轮
-      //   相同（例如本地 localStorage 与电脑侧都是空），屏幕上就一条都没有 ——
-      //   于是“问了但没变化”和“根本没问”又混在一起了。
-      if (summary !== lastPollSummary || pollTicks <= 3) {
-        lastPollSummary = summary
+      var calls = result.value ? result.value.calls || [] : []
+      var summary =
+        '待办' + String(calls.length) + '条 电脑侧已启用=' + JSON.stringify(result.value ? result.value.enabled : null)
+      if (side) {
+        /**
+         * ★ 旁挂那条**只在真有东西可取时**才上调试框 ✓：15 秒一轮的「待办0条」也全打
+         * 的话，调试框会被几台电脑的空轮询刷没 ✗（主隧道那条照旧按内容去重 ✓）。
+         */
+        if (calls.length > 0) log(tag + '轮询#' + index + ' 通 ' + summary)
+      } else if (summary !== target.lastPollSummary || pollTicks <= 3) {
+        // ★ 前 3 轮**无条件**打出来：只按“内容变化”打的话，第一轮如果恰好和上一轮
+        //   相同（例如本地 localStorage 与电脑侧都是空），屏幕上就一条都没有 ——
+        //   于是“问了但没变化”和“根本没问”又混在一起了。
+        target.lastPollSummary = summary
         log('轮询#' + index + ' 通 ' + summary)
       }
-      var calls = result.value ? result.value.calls || [] : []
       // ★★ round 185 取证①：**这一轮到底取到几条** ✓ —— 0 条也记一条 ✓。
       //   为什么连 0 条都要记 ✗：只有每一轮都落一条，「那 4 秒到底取没取到」
       //   才能与「取到了但没弹出来」分开 ✓（前者是 count=0 ✓、后者是有条目却没有 report ✗）。
       //   summary 就是上面那句给人念的：「待办N条 电脑侧已启用=[...]」✓（不另算一份 ✗）。
-      deviceCallLogPush('pending', '-', 'taken', 'count=' + calls.length, summary)
+      //   ★ 方案 A：旁挂那条的落盘**带上「是哪台电脑」** ✓（同一个环形表里几条隧道混着记，
+      //     不带名字就分不清 ✓ —— 主隧道那条 `detail` 与今天逐字一致 ✓）。
+      deviceCallLogPush('pending', '-', 'taken', 'count=' + calls.length, (side ? target.label + ' · ' : '') + summary)
       if (calls.length > 0) {
         // 取到东西才上调试框 ✓：0 条那一轮 4 秒一次，全打会把框刷没 ✗
         //（0 条那一轮照旧有上面那句按内容去重的「轮询#N 通 待办0条」✓。）
@@ -24449,7 +25000,7 @@
         for (var logIndex = 0; logIndex < calls.length; logIndex++) {
           callLabels.push(String(calls[logIndex].capability) + '#' + String(calls[logIndex].id))
         }
-        log('[call-log] 取到 ' + calls.length + ' 条：' + callLabels.join(', '))
+        log(tag + '[call-log] 取到 ' + calls.length + ' 条：' + callLabels.join(', '))
       }
       for (var i = 0; i < calls.length; i++) {
         // ★★ round 185 取证②：**每条开始执行之前** ✓（与下面的 exec-end 配对 ✓：
@@ -24468,7 +25019,7 @@
         return
       }
       // ★ round 153：这一轮**走通了** ⇒ 清掉去重键 ✓（下一类失败值得单独记一行 ✓）。
-      lastPollErrorKey = null
+      target.lastPollErrorKey = null
     }
 
     /** 执行一条请求并回报结果。 */
@@ -24828,11 +25379,9 @@
     }
 
     /**
-     * ★★ 端侧轮询**那一轮**的**唯一实现** ✓ —— 两个触发源共用 ✓：
-     *   ① 页面自己的 4 秒定时器 ✓；② **原生时钟**注入的 `tick('poll')` ✓
-     *   （App 退到后台、页面定时器被冻结时靠的就是它 ✓）。
+     * ★★ 驱动**一条**隧道的一轮轮询 ✓（主隧道 + 每条旁挂各调一次 ✓）。
      *
-     * ## 为什么"一轮只能有一个在飞"✗✗（这不是洁癖 ✓）
+     * ## 为什么「一条隧道一轮只能有一个在飞」✗✗（这不是洁癖 ✓）
      *
      * 宿主的 `takePending` 是"**取走即标记为已投递**"✓（`packages/host/src/device-calls.ts:174` ✓），
      * 而它内部是**同步**遍历 ✓（Node 单线程 ⇒ 两条并发请求拿到的是**互不相交**的两半 ✓、
@@ -24845,6 +25394,11 @@
      * 两端都不报错 ✗）。**并发的第二条** poll 会把落在窗口里的条数**翻倍** ✓ ——
      * 而它买到的只是"某一轮早了几十毫秒"✗。⇒ 收益极小、风险翻倍 ⇒ **加护栏** ✓。
      *
+     * ★★ 方案 A：护栏**按隧道各记一份** ✗✓（`target.pollInFlightAt` ✓）——
+     *   原来只有**一个**闭包变量 ✓ ⇒ 两条隧道节奏不同步时，
+     *   **第二台会被第一台的「在飞」永久挡住** ✗（那一轮要是挂住了 ✓，
+     *   它得等 15 秒兜底才放行 ✓，而下一发又正好撞上第一台的下一轮 ✓）。
+     *
      * ## 超时兜底（★ 不许省 ✗）
      *   `poll()` 里 `await` 的是隧道的 RPC ✓（`rpc` 的 pending **没有超时**✓，
      *   只靠链路关闭时的 `failPending` 结算 ✓）⇒ 万一它挂住不返回 ✓，
@@ -24854,35 +25408,73 @@
      *     最坏情形退化回改动前的行为（一轮一个 ✓），**绝不会更坏** ✓。
      *
      * @returns 一个给人念的串 ✓：`'poll'`（真驱动了一轮 ✓）/ `'busy'`（上一轮还没完 ✓）/
-     *          `'unsupported'`（宿主没有那条端点，通道已停 ✓）。
+     *          `'idle'`（旁挂那条还没到它那 15 秒的节拍 ✓）/ `'unsupported'`（这条已停 ✓）。
      */
-    function devicePollTick() {
-      if (unsupported) return 'unsupported'
-      if (pollInFlightAt !== 0 && Date.now() - pollInFlightAt < POLL_INFLIGHT_MAX_MS) return 'busy'
+    function drivePollTarget(target) {
+      if (target.unsupported === true) return 'unsupported'
+      /**
+       * ★★ 旁挂那条**每 15 秒一轮** ✓（`SIDE_TUNNEL_POLL_MS` ✓ —— 不是主隧道那档 4 秒 ✗）。
+       * 判据落在**每一发**上 ✓（不是「启动时停表」✗）—— 理由同 ping 那处 ✓。
+       * ★ 第一轮**不额外等** ✓：`lastDrivenAt` 从 0 起 ✓（见 `makePollTarget` ✓）。
+       */
+      if (target.side === true && Date.now() - target.lastDrivenAt < SIDE_TUNNEL_POLL_MS) return 'idle'
+      var inFlightAt = target.pollInFlightAt
+      if (inFlightAt !== 0 && Date.now() - inFlightAt < POLL_INFLIGHT_MAX_MS) return 'busy'
       var ticket = Date.now()
-      pollInFlightAt = ticket
+      target.pollInFlightAt = ticket
+      target.lastDrivenAt = ticket
+      target.lastPollAt = ticket
       // 记账：这是**真的跑了一轮**的时刻 ✓（诊断行读它 ✓）—— 与 `mobileTick` 的
       // "收到几次原始 tick"分开 ✓，两个数一起看才能分清"原生在戳"与"活真的干了"✓。
-      keepAliveStats.lastPollAt = ticket
-      void poll().then(
+      // ★ 只由**主隧道**写 ✓（那一行的语义是「当前这条通道还活着没有」 ✓ ——
+      //   旁挂那几条各自的读数在 `sideTunnelsReadout()` 里 ✓，不混进这个数 ✓）。
+      if (target.side !== true) keepAliveStats.lastPollAt = ticket
+      void poll(target).then(
         function () {
           // ★ 只清**自己那一张**票 ✓：超时兜底放行过新一轮时 ✗，
           //   旧这一轮的收尾**绝不许**把新一轮的"在飞"标志抹掉 ✓。
-          if (pollInFlightAt === ticket) pollInFlightAt = 0
+          if (target.pollInFlightAt === ticket) target.pollInFlightAt = 0
         },
         function (error) {
-          if (pollInFlightAt === ticket) pollInFlightAt = 0
+          if (target.pollInFlightAt === ticket) target.pollInFlightAt = 0
           /**
-           * ★★ round 153：**同类失败只记一行** ✓（见 `lastPollErrorKey` 那段 ✓）——
+           * ★★ round 153：**同类失败只记一行** ✓（见 `target.lastPollErrorKey` ✓）——
            *   键是错误文本本身 ✓；同一句话再来就不再写 ✓（调试框不再被刷屏 ✓）。
+           * ★ 方案 A：这个键**每台各一份** ✓ —— 只有一份时两条隧道会互相把对方的键顶掉 ✓
+           *   ⇒ 每 15 秒两种话轮流刷屏 ✗。
            */
           var key = String(error && error.message ? error.message : error)
-          if (key === lastPollErrorKey) return
-          lastPollErrorKey = key
-          log('轮询失败', error)
+          if (key === target.lastPollErrorKey) return
+          target.lastPollErrorKey = key
+          log(target.side === true ? '[旁挂 ' + target.label + '] 轮询失败' : '轮询失败', error)
         },
       )
       return 'poll'
+    }
+
+    /**
+     * ★★ 端侧轮询**那一发**的**唯一实现** ✓ —— 两个触发源共用 ✓：
+     *   ① 页面自己的 4 秒定时器 ✓；② **原生时钟**注入的 `tick('poll')` ✓
+     *   （App 退到后台、页面定时器被冻结时靠的就是它 ✓）。
+     *
+     * ★ 方案 A：这一发**遍历**所有该跑的隧道 ✓（主隧道第一 ✓，然后是旁挂那几条 ✓），
+     *   每条走它自己那一份护栏与节拍 ✓（见 `drivePollTarget` ✓）。
+     *
+     * @returns `'poll'`（至少真驱动了一条 ✓）/ `'busy'`（都在飞 ✓）/
+     *          `'unsupported'`（主隧道那条已停 ✓ —— 与今天同一个口径 ✓）。
+     */
+    function devicePollTick() {
+      var targets = devicePollTargets()
+      var drove = false
+      var busy = false
+      for (var i = 0; i < targets.length; i++) {
+        var verdict = drivePollTarget(targets[i])
+        if (verdict === 'poll') drove = true
+        else if (verdict === 'busy') busy = true
+      }
+      if (drove) return 'poll'
+      if (busy) return 'busy'
+      return 'unsupported'
     }
     /**
      * ★ 把这一轮的入口**登记**给原生时钟 ✓（`tick('poll')` 读的就是它 ✓）。
@@ -24894,6 +25486,12 @@
      */
     devicePollEntry = devicePollTick
 
+    /**
+     * ★★ 方案 A：这里**故意不清这张表** ✗✓（`timer` 这个句柄因此不再被用到 ✓）——
+     *   它同时驱动**旁挂那几条** ✓（`devicePollTick` 是同一个入口 ✓）。
+     *   停掉它 = 顺手把其它电脑的端侧待办也停了 ✗。主隧道自己由 `mainPollTarget.unsupported`
+     *   挡住 ✓（每一发都当场返回、一个字节都不发 ✓）⇒ 用户可见的行为零变化 ✓。
+     */
     var timer = setInterval(function () {
       /**
        * ★★ 原生在驱动 ⇒ 页面这一路**让位** ✓（判据见 `keepAliveShouldRun` ✓）。

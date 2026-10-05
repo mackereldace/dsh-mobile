@@ -136,6 +136,17 @@ interface Surface {
        */
       identityDiagnostics: () => { data: IdentityDiagnostics; group: FakeElement }
     }
+    /**
+     * ★★ 方案 A（2026-10-06）追加：**旁挂隧道的只读读数** ✓ ——
+     *   就是 `__DSH_MOBILE_BOOT__.sideChannels()` 那个**生产入口** ✓
+     *   （真机排障念的是同一个 ✓，不是测试专用口 ✗）。
+     */
+    sideChannels: () => SideChannelReadout[]
+    /**
+     * ★★ 方案 A 追加：**主隧道对象** ✓（`__DSH_MOBILE_BOOT__.tunnel` ✓ —— 真机上同一个 ✓）。
+     *   本节只读它的 `sessionId`、并在收尾时停掉保活 ✓。
+     */
+    tunnel?: { sessionId?: string; stopKeepalive?: () => void }
   }
   /** ★ round 185 追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
   storage: Map<string, string>
@@ -157,6 +168,18 @@ interface Surface {
    *   它证明的是"**没壳时退的是提示条、不是蓝横幅**"✓（本轮的核心契约之一 ✓）。
    */
   toastText: () => string | null
+}
+
+/** ★★ 方案 A：`sideChannels()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
+interface SideChannelReadout {
+  fingerprint: string | null
+  label: string
+  endpoints: string[]
+  activeEndpoint: string | null
+  state: string | null
+  rejected: boolean
+  unsupported: boolean
+  polls: number
 }
 
 /** ★★ R5：`identityDiagnostics()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
@@ -219,6 +242,22 @@ function bootOnSurface(options: {
    * （只能到"两条路都不行"的降级横幅 ✓），而本轮新加的那条"**无壳** ⇒ 退页面提示条"正好要它 ✓。
    */
   webClipboard?: boolean
+  /**
+   * ★★ 方案 A 追加：`localStorage` 的**种子** ✓（默认空 ⇒ 不传时与原来逐字一致 ✓）。
+   *
+   * 为什么需要 ✗：旁挂隧道**只在启动时**建 ✓（`startSideTunnels` ✓）——
+   * 它读的是「宿主目录 + 本机到底持有哪几台的凭据」✓，那两样都必须**在 boot 之前**就在
+   * localStorage 里 ✓；像 R1a 那几条用例那样「跑起来之后再种」是**来不及**的 ✗。
+   */
+  seed?: Record<string, string>
+  /**
+   * ★★ 方案 A 追加：`WebSocket` 换成**真宿主那套替身** ✓（`ReplaySocket` ✓，
+   *   默认仍是那个什么都不做的桩 ⇒ 不传时与原来逐字一致 ✓）。
+   *
+   * 为什么需要 ✗：要证明「两条隧道各自取各自队列」必须让**真的握手**跑起来 ✓ ——
+   * 本文件既有的 `ReplaySocket` + 真 `TunnelSession` 就是干这个的 ✓（见 `bootReplayWorld` ✓）。
+   */
+  webSocket?: unknown
 }): Surface {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
@@ -284,6 +323,10 @@ function bootOnSurface(options: {
 
   const store = new Map<string, string>([['dsh-mobile.debug', '1']])
   for (const capability of options.consent) store.set('dsh-mobile.deviceEnabled.' + capability, 'yes')
+  // ★★ 方案 A：启动前就把种子放进去 ✓（旁挂隧道只在启动时建 ✓ —— 见那个选项的说明 ✓）。
+  if (options.seed !== undefined) {
+    for (const [key, value] of Object.entries(options.seed)) store.set(key, value)
+  }
 
   const documentStub = {
     readyState: options.readyState ?? 'complete',
@@ -372,7 +415,11 @@ function bootOnSurface(options: {
       ...(options.webClipboard === true ? { clipboard: { writeText: async () => undefined } } : {}),
     },
     Notification: { permission: 'granted', requestPermission: async () => 'granted' },
-    WebSocket: class {
+    /**
+     * ★★ 方案 A：默认仍是那个**什么都不做**的桩 ✓（不传 `webSocket` 时与原来逐字一致 ✓）；
+     *   传了就换成 `ReplaySocket` ✓ —— 真的把字节交给宿主侧的 `TunnelSession` ✓。
+     */
+    WebSocket: options.webSocket ?? class {
       readyState = 0
       binaryType = 'blob'
       send() {}
@@ -1421,6 +1468,8 @@ test('★ 取证：localStorage 读写都抛错时不崩（而且投递链照旧
 
 const { DEFAULT_CAPABILITIES, FrameType, fingerprint, generateP256KeyPair } = await import('@dsh-mobile/protocol')
 const { DeviceStore } = await import('../../host/src/devices.ts')
+/** ★★ 方案 A 真跑：端侧队列用**真的**那个 ✓（取走即投递 ✓、回报即出队 ✓）。 */
+const { DeviceCallQueue, DEVICE_CAPABILITIES } = await import('../../host/src/device-calls.ts')
 const { TunnelSession } = await import('../../host/src/tunnel.ts')
 const { mkdtempSync, rmSync } = await import('node:fs')
 const { tmpdir } = await import('node:os')
@@ -2720,8 +2769,31 @@ test('★ PDF 单独一族 + 红色取自主题变量；Markdown 不与它同族
  *
  * ⇒ 三条落到代码上：
  *   ① 文件行右端吃**后缀** ✓（位置 = 上一单删掉的「大小 / 目录」那一段 ✓）；
- *   ② 目录行右端吃「**文件夹**」✓（上一单被删掉的那条**回来** ✓）；
+ *   ② 目录行右端吃「**目录**」✓（上一单被删掉的那条**回来** ✓；★ 文案由 2026-10-05 那次改动定稿 ✓）；
  *   ③ 名字那一段**只显示 head** ✓ ⇒ 后缀在整行里**只出现一次** ✓（"避免重复显示"✓）。
+ *
+ * ## ★★ 2026-10-05 这一轮的两处改动（用户原话照抄 ✓）
+ *   · "文件列表里**文件夹改成目录** ✓" ⇒ `dirTagText` 的返回值 `'文件夹'` ⇒ `'目录'` ✓
+ *     （上面那段 199 的原话里那个词是**历史** ✓ —— 口径以这一条为准 ✓）；
+ *   · "**后缀名不要大写** ✓" ⇒ 屏上原来是 `.PDF` / `.DOCX` ✗。★ **是谁把它变大的**：那条标签 CSS 里的
+ *     `text-transform: uppercase` ✗（**不是** JS ✓ —— `entryRow` / `fitFileNameParts` / `dirTagText`
+ *     里从来没有 `toUpperCase` ✓，后缀一直是按文件名原样存着的 ✓）⇒ **把那一句删掉** ✓，
+ *     屏上回到 `.pdf` / `.docx` / `.md` ✓（既不 upper ✗ 也不 lower ✗）。
+ *   ★ 图标 / 颜色**一个字没动** ✓（用户：「图标改的很好」✓）；上限 64px 那个数也**没动** ✓（见下面几何那段 ✓）。
+ *
+ * ## ★ 这一轮新加的判据：**六条独立 test**（都写在**本 test 之后** ✓ —— 见文件末尾 ✓）
+ *   为什么拆出去 ✗：node:test 里一条 test 到**第一个**失败的断言就停 ✓ —— 判据挤在一起时，
+ *   变异只能让「最前面那条」报红 ✗，后面那几条**根本没跑到** ✗ ⇒ 「恰好变红」就没法说清 ✓。
+ *   本组里只留一句 `equal(...) === '目录'`（就地判据 ✓），其余六条各自独立 ✓：
+ *     · Ⅰ. `★ 目录标签负例（一）`：`dirTagText` 的**函数体**里不许再出现旧文案 ✗；
+ *     · Ⅱ. `★ 目录标签负例（二）`：`entryRow` 里不许把旧文案当**字符串**用 ✗
+ *       （★ 要求那个词**带引号** ✓ ⇒ 注释里提到它不会误报 ✓；也不许变成「只匹配注释里的字符串」✗）；
+ *     · Ⅲ. `★ 后缀原样（一）`：标签**那条 CSS 规则**里不许有任何 `text-transform` ✗；
+ *     · Ⅳ. `★ 后缀原样（二）`：**任何一行 CSS 字符串**里都不许有 `text-transform` ✗
+ *       （★ `text-transform` 是**继承**属性 ✓ ⇒ 挂到父规则上照样能顶到标签 ✗，这条专治那种 ✓）；
+ *     · Ⅴ. `★ 后缀原样（三）`：JS 生产路径里不许有 `toUpperCase` ✗ / 内联样式 `textTransform` ✗；
+ *     · Ⅵ. `★ 后缀原样（四）`：**值**逐字原样 ✓（小写不被顶上去 ✗、大写也不被压下来 ✗）——
+ *       ★ 只查「那行 CSS 还在不在」是**软判据** ✗；打在**值**上这一条才硬 ✓。
  *
  * ## ★ 两条"保证"的转移（这一轮最要紧的一处，必须写清楚 ✓）
  *   · 上一单的保证是"**后缀在结构上剪不掉**" ✓ —— 它打在三处：`entryRow` 里后缀有**自己的**
@@ -2740,16 +2812,28 @@ test('★ PDF 单独一族 + 红色取自主题变量；Markdown 不与它同族
  *   （行宽 = `min(64vw, 264px) - 20`，即 184.8 / 220 / 243.7px ✓）。实测（macOS system-ui ✓）：
  *     · 标签**右边缘三档各自恒定**（139.8 / 175 / 198.7px ✓）、距 `⋯` 恒为 **11px** ✓
  *       ⇒ 右边这一列是对齐的 ✓（不是每行飘 ✓）；
- *     · `.pdf`(34.2) `.docx`(44.4) `.png`(36.1) `.gz`(27.2) `.md`(29.1) `.numbers`(68.7)
- *       「文件夹」(42.5) —— **一个都没被自己那颗上限剪到** ✓（`scrollWidth <= clientWidth` ✓）；
+ *     · ★ 2026-10-05 去掉 `uppercase` 之后**在同一台机器上重测过**（同一套"从 boot.js 原样抽 CSS"+
+ *       真布局引擎 ✓，320 / 375 / 412px 三档数值一致 ✓；下列数都**含**标签左边那 8px 内边距 ✓）：
+ *       `.pdf` 27.2 / `.docx` 35.5 / `.png` 30.4 / `.gz` 23.3 / `.md` 27.2 / `.numbers` 55.9 /
+ *       `.markdown` 64.3（★ 改前那版 `.MARKDOWN` = 72 且 `scrollWidth` = 81 ⇒ **真被自己剪了一刀** ✗）/
+ *       两字标签 31.0 —— **一个都没被自己那颗上限剪到** ✓（`scrollWidth <= clientWidth` ✓）；
+ *       ★ 结论：**去大写只会让同一串字更窄** ✓（实测这几串全变窄 ✓）⇒ 上限 64px 那条结论**不变** ✓
+ *       —— 所以下面那条上限断言**只换说明文字，数一个字没动** ✓（只许加、不许松 ✗）；
  *     · 被剪的**只有名字那一段** ✓（长名字 `headClipped=true` ✓，标签 `tagClipped=false` ✓）——
- *       这正是本组要保的那条 ✓；320px 下最坏一档（`.numbers`）名字还剩 36.1px ✓；
+ *       这正是本组要保的那条 ✓；320px 下最坏一档（`.numbers`）名字还剩 36.1px ✓
+ *       （★ 这一条与上面「右边缘对齐 / 距 ⋯ 11px」是**上一版**量的 ✓ —— 本轮**没有**重量行宽 ✗：
+ *       我这次只量了标签自己的宽度 ✓，而行宽那一栏要另拼容器 ✓；标签变窄只会让名字**更多** ✓
+ *       所以这两条更宽松的结论没有被本轮改动推翻 ✓）；
  *     · **没有后缀**的行（`README`）根本没有标签节点 ✓（留白 ✓，不是空标签 ✓）。
- *   ★ 上限为什么是 **64px**（而不是 62 或 72）：`.NUMBERS` 实测 60.0px ✓ ⇒ 64 留了 4px 余量 ✓；
- *     先写 62px + `letter-spacing: .02em` 时它**真被剪了** ✗ ⇒ 去掉字距、上限提到 64 ✓；
- *     再往上（≥73px）就轮到 320px 下的名字被挤 ✗ —— 唯有 `.markdown`（73.2px）与更长的陌生后缀
- *     会在标签**自己内部**收尾 ✓（全名仍在 `title` / 长按里 ✓）。
- *   ★ 字体差异：以上是 SF Pro 的数字 ✓；安卓 WebView 是 Roboto ✓ ⇒ 4px 余量就是给它的 ✓。
+ *   ★ 上限为什么是 **64px**（而不是 62 或 72）：那是**大写那一版**量的 ✓ ——
+ *     `.NUMBERS` 实测 60.0px ⇒ 64 留了 4px 余量 ✓；先写 62px + `letter-spacing: .02em` 时它
+ *     **真被剪了** ✗ ⇒ 去掉字距、上限提到 64 ✓；再往上（≥73px）就轮到 320px 下的名字被挤 ✗。
+ *     ★ 去掉大写之后**同一套量法**重测：`.numbers` 只剩 55.9px ✓、最长的 `.markdown` 也只有 64.3px
+ *     ⇒ **一个都没被剪** ✓（大写那版 `.markdown` 是 72/`scrollWidth` 81 ⇒ 真被剪 ✗）——
+ *     上限这个数**不用动** ✓（理由写进了 `boot.js` 那条 CSS 的注释 ✓）。
+ *   ★ 字体差异：★ 本轮重测用的是无头 Chrome 的**默认无衬线**（`getComputedStyle` 报 Arial ✓）——
+ *     它与上一版量出的大写数字**逐个吻合**（34.2 / 44.4 / 68.7 ✓）⇒ 至少是**同一把尺子** ✓；
+ *     安卓 WebView 是 Roboto ✓ ⇒ 那 4px 余量就是给它的 ✓。
  *
  * ## ★ 变异验证（各做一次 ⇒ **恰好**新增那几条变红 ✓，做完改回 ✓）
  *   · ① 把右端标签整个去掉 ✗（删掉 `entryRow` 里 `data-dshm-fs-ext` 那一段 ✓）⇒
@@ -2759,8 +2843,24 @@ test('★ PDF 单独一族 + 红色取自主题变量；Markdown 不与它同族
  *   · ③ 把目录的 `asFolder` 丢掉 ✗（调用改成两参 ✓）⇒ 下面 `v1.2` 那条"目录不许被拆出假后缀"红 ✓；
  *   · ④ 把 `.dshm-file-tag` 的 `margin-left: auto` 去掉 ✗ ⇒ "标签靠右"那条红 ✓。
  *   ★ 四条都实跑过 ✓：①②③④ 每次都是**恰好**那几条红、其余全绿 ✓（还原后 sha256 回到原值 ✓）。
+ *
+ * ## ★★ 2026-10-05 追加的变异（实跑四次 ✓，每次都**恰好**只多红该红的那几条 ⇒ 改回 ✓）
+ *   （下面提到的「红」都**不含**那条既有的 notify 死代码红 ✓ —— 它在本轮的每一次跑里都红 ✓，
+ *    与这两处改动无关 ✓：临时换回 HEAD 版 `boot.js` 单独跑它，**照样红** ✓，已核 ✓。）
+ *   · ⑤ `dirTagText` 里 `'目录'` 改回旧词 ✗ ⇒ **恰好 2 条**红：本组那句 `equal` ✓ +
+ *     `目录标签负例（一）` ✓（★ `负例（二）`**不红** ✓ —— 它盯的是 `entryRow` 里的字符串字面量，
+ *     ⑤ 没碰那里 ✓；这两条负例各管一处、都留着 ✓）；
+ *   · ⑥a 标签那条 CSS 里加回 `text-transform: uppercase` ✗ ⇒ **恰好 2 条**红：
+ *     `后缀原样（一）` + `后缀原样（二）` ✓（值那条**不红** ✓ ⇒ "CSS 判据"与"值判据"各自独立 ✓）；
+ *   · ⑥a' 把 `text-transform: uppercase` 挂到**父规则** `.dshm-file-name` 上 ✗（靠继承生效 ✓）
+ *     ⇒ **恰好 1 条**红：`后缀原样（二）` ✓ —— ★ 这一条正是（二）非有不可的理由 ✓
+ *     （只盯标签那条规则的（一）**对父规则完全无感** ✗）；
+ *   · ⑥b `entryRow` 里把后缀 `.toUpperCase()` 一下 ✗（`nameExt.textContent = shownName.ext.toUpperCase()` ✓）
+ *     ⇒ **恰好 1 条**红：`后缀原样（三）` ✓（★ 值那条**不红** ✓ —— 纯函数没被碰 ✓）；
+ *   · ⑥c `fitFileNameParts` 里把后缀顺手 `.toLowerCase()` ✗ ⇒ **恰好 1 条**红：`后缀原样（四）` ✓
+ *     —— ★ 反过来证明「值」那条也**不是**多余的 ✓（⑥b 打不红它、它专治「值被改」✓）。
  */
-test('★★ 右端标签：文件行吃后缀、文件夹行有「文件夹」、名字里不再重复后缀', () => {
+test('★★ 右端标签：文件行吃原样后缀、目录行有「目录」、名字里不再重复后缀', () => {
   const body = functionBodyAtColumn2(bootSource, 'entryRow')
   const internals = fileNameInternals()
 
@@ -2779,18 +2879,19 @@ test('★★ 右端标签：文件行吃后缀、文件夹行有「文件夹」�
   )
 
   // ② 目录那一侧：文案来自**生产函数** `dirTagText` ✓ + 结构上真有那颗标签 ✓（两处合起来才成立 ✓）
-  assert.match(body, /dirTag\.className = 'dshm-file-tag'/, '「文件夹」那颗也要挂同一个类 ✓')
+  assert.match(body, /dirTag\.className = 'dshm-file-tag'/, '「目录」那颗也要挂同一个类 ✓')
   assert.match(
     body,
     /dirTag\.textContent = dirTagText\(entry\)/,
-    '「文件夹」必须由 `dirTagText` 这个生产函数给 ✓（在测试里另抄一份就是假断言 ✗）',
+    '「目录」必须由 `dirTagText` 这个生产函数给 ✓（在测试里另抄一份就是假断言 ✗）',
   )
   assert.ok(body.includes('data-dshm-fs-tag'), '目录标签要有自己的记号 ✓（data-dshm-fs-tag ✓）')
-  assert.equal(internals.dirTagText({ type: 'directory' }), '文件夹', '目录 ⇒ 「文件夹」✓（用户原话 ✓）')
+  assert.equal(internals.dirTagText({ type: 'directory' }), '目录', '目录 ⇒ 「目录」✓（用户原话：把这个词改成「目录」✓ —— 原话见上面照抄那段 ✓）')
   assert.equal(internals.dirTagText({ type: 'file' }), '', '文件 ⇒ 空串 ✓（文件那条走 ext ✓，不许在这里也吐一个 ✗）')
   assert.equal(internals.dirTagText(undefined), '', 'undefined 不许崩 ✓')
   assert.equal(internals.dirTagText(null), '', 'null 不许崩 ✓')
 
+  // ②b / ②c 那几条（旧文案的负例、后缀原样）搬成了**独立 test** ✓ —— 见本文件末尾那五条 ✓
   // ③ 名字里不再重复后缀 ✓ —— 整段 `entryRow` 里后缀只被写进**一个**元素 ✓（写两次 = 重复显示 ✗）
   const extWrites = body.match(/textContent = shownName\.ext\b/g) ?? []
   assert.equal(
@@ -2836,10 +2937,14 @@ test('★★ 右端标签：文件行吃后缀、文件夹行有「文件夹」�
   )
   assert.match(tagRule, /max-width:\s*\d+(?:\.\d+)?px/, '标签必须有**宽度上限** ✓（否则窄栏里把名字挤没 ✗）')
   const cap = Number((/max-width:\s*(\d+(?:\.\d+)?)px/.exec(tagRule) ?? [])[1] ?? '0')
-  // 下界：要放得下「文件夹」（11.5px 实测 34.5px ✓）；上界：320px 视口下名字栏只有 ≈105px ✓
+  // ★ 下界 35 / 上界 72：与 2026-10-05 之前**逐字相同** ✓（只许加、不许松 ✗）——
+  //   本轮两个变化（去掉 `uppercase` ✗、文案变两字「目录」✓）都只会让标签**更窄** ✓
+  //   （真布局实测：`.pdf` 27.2 / `.docx` 35.5 / `.numbers` 55.9 / `.markdown` 64.3 ✓，
+  //   改前那版 `.markdown` 是 72 且 `scrollWidth` 81 ⇒ 真被剪 ✗）⇒ 64px 这个上限的结论**继续成立** ✓
+  //   所以这里**只换了说明文字，两个数一个字没动** ✓。
   assert.ok(
     cap >= 35 && cap <= 72,
-    `上限要放得下「文件夹」（实测 34.5px ✓）又要在 320px 下给名字留出大半（实测上限 ${cap}px ✓）`,
+    `上限要放得下常见后缀（实测 \`.docx\` = 35.5px ✓）又要在 320px 下给名字留出大半（实测上限 ${cap}px ✓）`,
   )
   assert.ok(!/flex:\s*\d+\s+1\b/.test(tagRule), `标签**不许**允许收缩 ✗（收缩就是被剪 ✓）：${tagRule}`)
 
@@ -2875,4 +2980,871 @@ test('★★ 右端标签：文件行吃后缀、文件夹行有「文件夹」�
   assert.equal(internals.fileNameFamily('报告.pdf'), 'pdf')
   assert.equal(internals.fileNameFamily('脚本.mjs'), 'code')
   assert.equal(internals.fileNameFamily('备份.zip'), 'archive')
+})
+
+
+/**
+ * ★★ 2026-10-05（用户原话：把那个词改成「**目录**」✓ —— 照抄见上面那组的大注释 ✓）—— 目录标签文案的**负例**，两条。
+ *
+ * 为什么要**独立 test** ✗：node:test 里一条 test 到**第一个**失败的断言就停 ✓ ——
+ *   几条判据塞在同一个 test 里，变异时只能看见最前面那条红 ✗，后面那几条**根本没跑到** ✗
+ *   ⇒ 「恰好变红」这句话就没法说清楚 ✓。拆开之后每条判据各自独立报红 ✓，
+ *   上面那组（round 199 的 ①②③④⑤⑥⑦）也**照旧全绿** ✓。
+ *
+ * ★ 负例打在**生产源码**上，不是打在测试自己抄的一份复制品上 ✗：
+ *   `functionBodyAtColumn2` 只切**函数体** ✓ ⇒ `dirTagText` 上面那段 JSDoc 里「照抄原话」的
+ *   那个旧词**不在**范围内 ✓ —— 那段是**故意**留的历史 ✓（用户 199 那轮嘴里就是那么说的 ✓）。
+ *
+ * 变异验证（实跑 ✓）：把 `dirTagText` 里的 `'目录'` 改回旧词 ✗ ⇒
+ *   ① 上面那组的 `equal` 红 ✓、② 本 test 红 ✓、③ 下面那条 `entryRow` 负例红 ✓ —— 其余全绿 ✓。
+ */
+test('★★ 目录标签负例（一）：dirTagText 的函数体里不许再出现旧文案 ✗', () => {
+  const dirTagBody = functionBodyAtColumn2(bootSource, 'dirTagText')
+  assert.ok(
+    !dirTagBody.includes('文件夹'),
+    `dirTagText 的函数体里不许再出现旧文案 ✗（用户已改口径 ✓，实际：${dirTagBody.replace(/\n/g, ' / ')}）`,
+  )
+})
+
+/**
+ * ★★ 目录标签负例（二）：`entryRow` 里不许把那个旧词当**字符串**用 ✗。
+ *
+ * ★ 判据要求那个词**带引号** ✓（`'…'` / `"…"`）—— 两条好处：
+ *   · 注释里用「」提到它**不会**误报 ✓（这一轮我写了不少说明 ✓）；
+ *   · ★ 反过来也不会变成「只匹配注释里的字符串」那种**假判据** ✗（要我匹配的那东西，
+ *     必须真的能被 `entryRow` 当字符串写出来 ✓，光写在注释里不算 ✓）。
+ *
+ * 变异验证（实跑 ✓）：同（一）那个变异 ⇒ 本 test 红 ✓。
+ */
+test('★★ 目录标签负例（二）：entryRow 里不许把旧文案当字符串用 ✗', () => {
+  const body = functionBodyAtColumn2(bootSource, 'entryRow')
+  const quoted = /['"]文件夹['"]/.exec(body)
+  assert.equal(
+    quoted,
+    null,
+    `entryRow 里不许把那个旧词当**字符串**用 ✗（目录标签必须走 dirTagText ✓，实际命中：${quoted === null ? '（无）' : quoted[0]}）`,
+  )
+})
+
+/**
+ * ★★ 2026-10-05（用户原话：「**后缀名不要大写** ✓」）—— 后缀**原样**的四条判据。
+ *
+ * ★ 先回答"**是谁把它变成大写的**"✗：是那条标签 CSS 里的 `text-transform: uppercase` ✓ ——
+ *   **不是** JS ✓（`entryRow` / `fitFileNameParts` / `dirTagText` 里从来没有 `toUpperCase` ✓，
+ *   后缀一直按文件名原样存着 ✓）⇒ 这一轮**删掉那一句** ✓，屏上回到 `.pdf` / `.docx` / `.md` ✓。
+ *
+ * ★ 为什么「屏上会不会变大写」要拆成四条 ✗：能把它顶成大写的路**不止一条** ✓ ——
+ *   · ① 标签**那条规则**自己的 `text-transform` ✗；
+ *   · ② 任何一条 CSS 字符串里的 `text-transform` ✗（`text-transform` 是**继承**属性 ✓ ⇒
+ *     挂到父规则（`.dshm-file-name` / `.dshm-file-head` ✓）上照样能顶到标签 ✓）；
+ *   · ③ JS 生产路径里的 `.toUpperCase()` ✗ / 内联样式 `el.style.textTransform` ✗；
+ *   · ④ 值本身（**纯函数**）—— ★ 前面三条只说明「没写那句话」 ✗，这一条才说明「屏上会是什么」 ✓。
+ *   三条「形状」判据 + 一条「值」判据，缺一条都会漏一种写法 ✗。
+ */
+test('★★ 后缀原样（一）：标签那条 CSS 规则里不许有任何 text-transform ✗', () => {
+  const rule = (/\.dshm-file-name > \.dshm-file-tag \{([^}]*)\}/.exec(bootSource) ?? [])[1] ?? ''
+  assert.ok(rule !== '', 'CSS 里必须有 `.dshm-file-name > .dshm-file-tag` 那条规则 ✓')
+  const decl = /text-transform[^;]*/.exec(rule)
+  assert.equal(
+    decl,
+    null,
+    `标签那条 CSS 里不许再有 \`text-transform\` ✗（它就是屏上变大写的原因 ✓，实际：${decl === null ? '（无）' : decl[0]}）`,
+  )
+})
+
+test('★★ 后缀原样（二）：任何一行 CSS 字符串里都不许有 text-transform ✗', () => {
+  /**
+   * ★ 判据要求命中那一行**以字符串字面量开头**（`'…'` ✓）：
+   *   CSS 进浏览器只有 `style.textContent = [ '…' ]` 这一条路 ✓ ⇒ 那一行必然以 `'` 开头 ✓；
+   *   注释行以 `*` / `/*` / `//` / `·` 开头 ✓ ⇒ ★ 我在源码注释里写下的那个词**打不红这条** ✓，
+   *   也**不会**被这条当成实现 ✗（否则就是「匹配注释里的字符串」那种假判据 ✗）。
+   * 变异验证（实跑 ✓）：把 `text-transform: uppercase` 加回**标签那条**规则 ⇒ 本 test 与（一）一起红 ✓；
+   *   加回到**父规则** `.dshm-file-name` 上 ✗ ⇒ **只有本 test 红** ✓（这正是它非有不可的理由 ✓）。
+   */
+  const hit = /(^|\n)[ \t]*'[^'\n]*text-transform[^'\n]*'/.exec(bootSource)
+  assert.equal(
+    hit,
+    null,
+    `boot.js 的 CSS 字符串里不许再有 \`text-transform\` ✗（换到父规则上靠继承生效同样算 ✗，实际：${hit === null ? '（无）' : hit[0].trim()}）`,
+  )
+})
+
+test('★★ 后缀原样（三）：JS 生产路径里不许有 toUpperCase / textTransform ✗', () => {
+  for (const fnName of ['fitFileNameParts', 'entryRow', 'dirTagText']) {
+    const fnBody = functionBodyAtColumn2(bootSource, fnName)
+    assert.ok(
+      !/toUpperCase|toLocaleUpperCase/.test(fnBody),
+      `${fnName} 的函数体里不许有 toUpperCase ✗（后缀要原样 ✓）`,
+    )
+    assert.ok(
+      !/textTransform/.test(fnBody),
+      `${fnName} 的函数体里不许出现 textTransform ✗（内联样式那条路同样能把后缀顶成大写 ✗）`,
+    )
+  }
+})
+
+test('★★ 后缀原样（四）：后缀**逐字原样**（小写不被顶上去 ✗、大写也不被压下来 ✗）', () => {
+  const internals = fileNameInternals()
+  assert.equal(internals.fitFileNameParts('报告.pdf', 22).ext, '.pdf', '小写后缀必须**原样**留着 ✓（不许变 .PDF ✗）')
+  assert.equal(internals.fitFileNameParts('REPORT.PDF', 22).ext, '.PDF', '本来就大写的后缀也不许被改 ✗（既不 upper ✗ 也不 lower ✗）')
+  assert.equal(internals.fitFileNameParts('说明.MD', 22).ext, '.MD', '混合大小写同样原样 ✓')
+})
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ 方案 A（2026-10-06 用户拍板 ✓）：**旁挂隧道** —— 手机页面同时挂多条隧道 ✓
+ *
+ * 用户原话：「先查一下 **A 的实现有没有机会** ✓，因为**如果走 A，延迟可能会更低** ✓。」
+ * 目标只有一个 ✗：手机停在 A 电脑的页面上时，**B 电脑**推的端侧待办
+ * （提醒 / 通知 / 审批 ✓）也能被取到 ✓ —— 今天它们要等用户切到 B 那台才会送达 ✓。
+ *
+ * ## 这一组钉的是什么（逐条都是「少一条就出事」✗）
+ *   ① **灾难闸** ✗✗：旁挂那条被拒 ⇒ **只记日志** ✓。它一旦走到
+ *      `handleDeviceRejection` ✓，就会清掉**当前宿主**那四条身份键
+ *      （`deviceRejected` 是**模块级单例** ✗）并把整页 `location.replace('/mobile')` ✗
+ *      ⇒ 「B 被撤销 = A 的配对被清 + 整页跳走」✓；
+ *   ② 旁挂那条**不许写** `LAST_ENDPOINT_KEY` ✓（会被「host 不一致就删」判成脏数据 ✓
+ *      ⇒ 下次加载删掉**当前这台电脑**的 `lastGoodEndpoint` ✗）、
+ *      **不许动** `setActiveHost` / `hostsWrite` ✓（只读目录 + 只取待办 ✓）；
+ *   ③ **必须去不同的电脑** ✓（宿主 `sessions` 按 `deviceId` 记 ✓ ⇒ 同机同设备再开一条
+ *      会把原来那条**顶掉** ✗）；端点只许用**这条记录自己**的地址 ✓；
+ *   ④ 轮询护栏**按隧道各记一份** ✓（只有一份 ⇒ 第二台会被第一台的「在飞」永久挡住 ✗）；
+ *   ⑤ 旁挂的节拍 **15 秒** ✓（4 秒那档是给主隧道「人在电脑前等确认」的体感 ✓）；
+ *   ⑥ `__DSH_TRANSPORT__` 那一段**逐行不许变** ✓（主传输一个字节不改 ✓）。
+ *
+ * ★ 写法纪律（本项目的头号教训 ✓）：判据只打**可执行代码**上 ✓（注释整行先滤掉 ✓）——
+ *   ✗ 不许只匹配注释里的字符串 ✗；每条判据都**能被变异打红** ✓
+ *   （变异对照逐条写在交付说明里 ✓，也在每条断言旁注明「怎么把它打红」✓）。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/** 注释整行滤掉 ⇒ 只剩**可执行代码** ✓（与本文件上面几条结构性断言同一个手法 ✓）。 */
+function executableOnly(source: string): string {
+  return source
+    .split('\n')
+    .filter((line) => {
+      const text = line.trim()
+      return !(text.startsWith('*') || text.startsWith('/*') || text.startsWith('//'))
+    })
+    .join('\n')
+}
+
+/**
+ * 从 `startMarker` 切到 `lastFunction` 那个函数的**结束大括号**为止 ✓。
+ * ★ 两个锚点都是**纯 ASCII** ✓（汉字一个都不进判据 ✗ —— 判据里的汉字只出现在**给人看的消息**里 ✓）。
+ */
+function sourceRegionBetween(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker)
+  assert.ok(start >= 0, '必须能在源码里找到起点：' + startMarker)
+  const end = source.indexOf(endMarker, start + startMarker.length)
+  assert.ok(end > start, '必须能在源码里找到终点：' + endMarker)
+  return source.slice(start, end)
+}
+
+/**
+ * 方案 A **那一整块**旁挂代码 ✓：
+ *   起点 = 登记表那个 `var` ✓；终点 = **下一段的第一个函数** ✓（`deriveTunnelUrls` ✓，
+ *   即「配置与安装」那一段的开头 ✓ —— 两个锚点都是**纯 ASCII** ✓）。
+ * ★ 为什么终点取「下一段的开头」而不是「我这一段的最后一个函数」 ✗：后者留了一条**缝** ✓ ——
+ *   在段尾**追加**一个函数（比如一个新的失败处理 ✓）就不会被任何判据看见 ✓
+ *   （变异实验：把 `writeIdentityKey(LAST_ENDPOINT_KEY, …)` 追加到段尾 ⇒ 旧判据全绿 ✗）。
+ */
+function sideTunnelRegion(): string {
+  return executableOnly(sourceRegionBetween(bootSource, 'var sideTunnelEntries = []', '  function deriveTunnelUrls('))
+}
+
+/** 第 4 列缩进的函数（`poll` / `drivePollTarget` 这类活在 `installDeviceChannel` 里的 ✓） */
+function innerFunctionBody(source: string, signature: string): string {
+  const start = source.indexOf(signature)
+  assert.ok(start >= 0, '必须能找到：' + signature)
+  const endAt = source.indexOf('\n    }\n', start)
+  assert.ok(endAt > start, signature + ' 的结束大括号应当能在第 4 列找到 ✓')
+  return executableOnly(source.slice(start, endAt + 6))
+}
+
+/**
+ * ★★ 主传输那一段的**可执行行** ✓（注释与空行滤掉 ✓）。
+ * 这一组断言量的是「**本轮一个字节都没动它**」✓ —— 所以这里把当前内容**冻住** ✗：
+ * 以后谁要改那一段，就必须**显式**来改这份清单 ✓（改清单这个动作本身就是一次复核 ✓）。
+ */
+function transportBlockLines(): string[] {
+  const start = bootSource.indexOf('globalThis.__DSH_TRANSPORT__ = {')
+  assert.ok(start >= 0, '必须能找到主传输那一段（__DSH_TRANSPORT__ ✓）')
+  const ownsAt = bootSource.indexOf('ownsHost: true,', start)
+  assert.ok(ownsAt > start, '必须能找到 ownsHost: true ✓')
+  const closeAt = bootSource.indexOf('\n    }\n', ownsAt)
+  assert.ok(closeAt > ownsAt, '主传输那个对象的结束大括号应当能在第 4 列找到 ✓')
+  return executableOnly(bootSource.slice(start, closeAt + 6))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+/** ★★ 冻住的那一份（= 2026-10-06 方案 A 落地时主传输的样子 ✓）。 */
+const TRANSPORT_BLOCK_LINES: string[] = [
+  'globalThis.__DSH_TRANSPORT__ = {',
+  'fetch: async function (input, init) {',
+  "var url = typeof input === 'string' ? input : input.url",
+  'var path = new URL(url, location.href)',
+  "var endpoint = path.pathname.replace(/^\\/api\\//, '')",
+  'var body = init && init.body !== undefined ? init.body : undefined',
+  "var envelope = body === undefined ? {} : JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))",
+  'var response = await tunnel.rpc(envelope.method, envelope.payload, envelope.rpcId)',
+  'if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {',
+  "console.warn('[dsh-mobile] rpcId 不一致（会导致 DSH 拒绝该响应）：发出', envelope.rpcId, '收到', response.rpcId)",
+  '}',
+  'try {',
+  'var binaryResponse = buildBinaryResponse(response)',
+  'if (binaryResponse !== undefined) return binaryResponse',
+  '} catch (error) {',
+  "debugBoxLine('[bytes] 交 multipart 失败：' + String(error && error.message ? error.message : error))",
+  'throw error',
+  '}',
+  'return new Response(JSON.stringify(response), {',
+  'status: 200,',
+  "headers: { 'content-type': 'application/json' },",
+  '})',
+  '},',
+  'openStream: function (endpoint, payload) {',
+  'return tunnel.openStream(endpoint, payload)',
+  '},',
+  'ownsHost: true,',
+  '}',
+]
+
+test('★★ 灾难闸：旁挂那一整块绝不许碰到 handleDeviceRejection / 身份键 / 导航', () => {
+  const side = sideTunnelRegion()
+  /**
+   * ★★ 怎么把它打红 ✗：往 `noteSideTunnelRejected`（或旁挂那一块里任何地方）写一句
+   *   `handleDeviceRejection(tunnel, code, detail)` ⇒ **下面第一条当场红** ✓。
+   *   这正是「以后有人觉得'被拒了就该清身份'」时会发生的那一步 ✓ ——
+   *   而它的后果是「B 被撤销 ⇒ A 的配对被清 + 整页跳去配对界面」✗✗。
+   * ★ 为什么判据放在「整块」而不是只看那一个函数 ✗：以后新加的任何旁挂代码
+   *   （失败处理 / 读数 / 安装 ✓）都该受这一条管 ✓。
+   */
+  assert.equal(
+    side.split('handleDeviceRejection').length - 1,
+    0,
+    '★ 旁挂那一整块里绝不许出现 handleDeviceRejection ✗：它会清**当前宿主**的四条身份键 + location.replace(/mobile) ✗✗',
+  )
+  assert.equal(side.split('deviceRejected').length - 1, 0, '★ 旁挂那块也不许碰 `deviceRejected` 那个**模块级单例** ✗')
+  assert.equal(side.split('location.replace').length - 1, 0, '★ 旁挂那块绝不许导航 ✗（被拒 ⇒ 只记日志 ✓）')
+  /**
+   * ★★ 再加一道**全文件**的判据 ✓（与上面那条**互相独立** ✓）：
+   *   那个函数的**调用点**全文件恰好 3 处（`open()` 的「全部端点都被明确拒绝」 ✓、
+   *   Revoked 帧 ✓、验收直通口 ✓）+ 1 处定义 = 4 ✓。
+   * ★ 为什么非要有它 ✗：上面那条只覆盖「我这一段」 ✓ —— 而**段尾追加**、
+   *   或**别处新增**一个调用点，都会绕过它 ✓（变异实验见交付说明 ✓）。
+   * ★ 怎么把它打红 ✗：在任何地方**再加一个调用**（哪怕在旁挂段尾 ✓）⇒ 变成 5 ⇒ 当场红 ✓。
+   */
+  assert.equal(
+    executableOnly(bootSource).split('handleDeviceRejection(').length - 1,
+    4,
+    '★ 清身份那条路的出生点全文件只许这 4 处（1 定义 + 3 调用）—— 多一处就要人来复核 ✓',
+  )
+  assert.equal(
+    side.split('PAIRING_PAGE_PATH').length - 1,
+    0,
+    '★ 旁挂那块连配对页那个常量都不许出现 ✓（出现就意味着有人想「跳回配对界面」✗）',
+  )
+  // ★ 反向：那条「只记日志」的路**真的在** ✓（没有实现的话，「变异打红」就无从谈起 ✓）
+  assert.ok(side.includes('function noteSideTunnelRejected('), '旁挂被拒必须有它自己的处理函数 ✓')
+  const rejected = executableOnly(functionBodyAtColumn2(bootSource, 'noteSideTunnelRejected'))
+  assert.ok(rejected.includes('console.warn('), '被拒之后必须留下**可念的一行** ✓（手机上没有控制台 ✓）')
+  assert.ok(rejected.includes('debugBoxLine('), '而且必须进调试框 ✓')
+  assert.equal(
+    rejected.split('writeIdentityKey(').length + rejected.split('removeIdentityKey(').length,
+    2,
+    '★ 被拒那条路里**一个身份键都不许动** ✗（本机与壳的那四条都是当前宿主的 ✓）',
+  )
+  // ★★ 闸本体：必须排在「清身份 + 跳页」**之前** ✗（排后面 = 身份已经被清了 ✓）
+  const rejectBody = executableOnly(functionBodyAtColumn2(bootSource, 'handleDeviceRejection'))
+  const guardAt = rejectBody.indexOf('isSideChannelTunnel(tunnel)')
+  assert.ok(guardAt >= 0, '★ handleDeviceRejection 顶上必须有「这条是不是旁挂」那道闸 ✓')
+  const clearAt = rejectBody.indexOf('writeIdentityClearedMarker(code, detail, cleared, undefined)')
+  const navAt = rejectBody.indexOf('location.replace(PAIRING_PAGE_PATH)')
+  assert.ok(clearAt > guardAt, '★ 闸必须在「清身份」之前 ✗（排在后面 = 身份已经被清掉了 ✓）')
+  assert.ok(navAt > guardAt, '★ 闸必须在「跳页」之前 ✗')
+})
+
+test('★ 另外两道闸：旁挂那条不写 LAST_ENDPOINT_KEY、也不动宿主目录', () => {
+  const side = sideTunnelRegion()
+  /**
+   * ★★ 第一道闸怎么把它打红 ✗：在旁挂那块里写一句
+   *   `writeIdentityKey(LAST_ENDPOINT_KEY, url)`（「顺手记一下上次端点」是个很自然的念头 ✓）
+   *   ⇒ 下面第一条（只许出现一次）当场红 ✓。
+   *   为什么要禁 ✗：`readLastGoodEndpointForCurrentSource()` 对 host 不一致的那条
+   *   **会删掉它** ✓ —— 于是 B 那条隧道写进去的地址，下一次在 A 的页面上加载时
+   *   会把**当前这台**的 `lastGoodEndpoint` 清掉 ✗（「首选端点」这条优化静默失效 ✓）。
+   */
+  assert.equal(
+    side.split('LAST_ENDPOINT_KEY').length - 1,
+    1,
+    '★ 旁挂那块只许**读**一次 lastGoodEndpoint（多出来的那一次必然是写 ✗）',
+  )
+  assert.ok(
+    side.includes('readIdentityKeyValue(LAST_ENDPOINT_KEY, record.fingerprint)'),
+    '★ 而且必须是按**那台自己的指纹**读 ✓（「那台的上次端点」才配当首选 ✓）',
+  )
+  /**
+   * ★★ 第二道闸怎么把它打红 ✗：在旁挂那块里调 `setActiveHost(...)` / `hostsWrite(...)`
+   *   ⇒ 下面那个循环当场红 ✓。旁挂隧道只该**读**目录 ✓、只该**取**待办 ✓。
+   */
+  for (const forbidden of [
+    'writeIdentityKey(',
+    'removeIdentityKey(',
+    'hostsWrite(',
+    'setActiveHost(',
+    'hostRecordUpsert(',
+    'forgetHost(',
+  ]) {
+    assert.equal(
+      side.split(forbidden).length - 1,
+      0,
+      '★ 旁挂那一整块里不许出现 ' + forbidden + ' ✗（只读目录 + 只取待办 ✓）',
+    )
+  }
+  /**
+   * ★★ 但上面那条**只覆盖「旁挂那一段」** ✗ —— 而「拨号成功就记一笔」这个副作用长在
+   *   **共用的** `open()` 里 ✓：真跑的第一次就把它抓出来了 ✓
+   *   （旁挂那段确实一个字节没写 ✓，可它一拨通，`open()` 就替它写了 ✗✗）。
+   *   ⇒ 判据必须落在**副作用本身**上 ✓：那句写要被 `self.config.sideChannel !== true` 挡着 ✓。
+   * ★ 怎么把它打红 ✗：把 `if (self.config.sideChannel !== true)` 去掉（回到原样一句 ✓）
+   *   ⇒ 下面这条**当场红** ✓，而且**真跑**那条也会红 ✓（旁挂一拨通就写进来 ✓）。
+   */
+  const openAt = bootSource.indexOf('Tunnel.prototype.open = function')
+  assert.ok(openAt >= 0, '必须能找到 Tunnel.prototype.open ✓')
+  const openEnd = bootSource.indexOf('Tunnel.prototype.', openAt + 10)
+  assert.ok(openEnd > openAt, '必须能切出 open() 这一块 ✓')
+  const openBody = executableOnly(bootSource.slice(openAt, openEnd))
+  assert.ok(
+    openBody.includes('if (self.config.sideChannel !== true) writeIdentityKey(LAST_ENDPOINT_KEY, url)'),
+    '★ open() 里那句「记上次成功端点」必须被旁挂那道闸挡着 ✗（否则旁挂一拨通就替当前这台写脏了 ✓）',
+  )
+  assert.equal(
+    openBody.split('LAST_ENDPOINT_KEY').length - 1,
+    1,
+    '★ open() 里碰这个键只此一处 ✓（多一处都要人来复核 ✓）',
+  )
+})
+
+test('★★ 旁挂隧道必须去**别的电脑**：跳过当前那台、且端点只用这条记录自己的地址', () => {
+  const start = executableOnly(functionBodyAtColumn2(bootSource, 'startSideTunnels'))
+  /**
+   * ★★ 怎么把它打红 ✗：把 `if (fingerprint === current) continue` 删掉
+   *   ⇒ 当前这台也会被挂上第二条隧道 ✓ —— 而两条隧道用**同一份凭据**
+   *   （同一个 `deviceId` ✓）连**同一台**宿主 ⇒ 宿主按 deviceId 记会话 ⇒
+   *   **主隧道当场被顶掉** ✗✗。下面第一条就是钉这件事 ✓。
+   */
+  assert.ok(start.includes('if (fingerprint === current) continue'), '★ 当前这台必须跳过 ✗（同机同凭据会顶掉主隧道 ✓）')
+  assert.ok(
+    start.includes('if (!validHostFingerprint(current))'),
+    '★ 定不出「当前这台」⇒ **一条都不建** ✓（猜错的方向就是把当前这台也挂上 ✓）',
+  )
+  assert.ok(
+    start.includes('hasStoredHostCredential(fingerprint)'),
+    '★ 本机没有那台的凭据 ⇒ 不建 ✓（连上去必被拒，而且会**凭空生成一份新私钥** ✗）',
+  )
+  assert.ok(start.includes('hostFingerprint: fingerprint'), '★ 那条隧道必须**知道自己是哪台** ✓（取凭据靠它 ✓）')
+  assert.ok(start.includes('pinnedHostFingerprint: fingerprint'), '★ 而且要把那台的指纹**钉死** ✓（否则等于让网络位置回答「这台是谁」✗）')
+  assert.ok(start.includes('autoReconnect: false'), '★ 安静退化的总开关 ✓（不数轮次 / 不发通知 / 不派发 offline ✓）')
+  assert.ok(start.includes('sideChannel: true'), '★ 灾难闸与 noteDialSuccess 的判据 ✓（一个字段、两处读 ✓）')
+  /**
+   * ★★ 怎么把它打红 ✗：把 `allowed[derivedHost] !== true` 那道过滤删掉 ——
+   *   于是 `deriveTunnelUrls` 混进来的「当前页面源」与「当前源上次成功的端点」
+   *   会留在候选里 ✓ ⇒ 去 B 的旁挂隧道会**先拿 B 的凭据去连 A** ✓（对面回 device-unknown ✓）。
+   */
+  const endpoints = executableOnly(functionBodyAtColumn2(bootSource, 'sideTunnelEndpoints'))
+  assert.ok(endpoints.includes('deriveTunnelUrls('), '★ 端点必须走**既有那个纯函数** ✓（不许另写一套拼接 ✗）')
+  assert.ok(
+    endpoints.includes('allowed[derivedHost] !== true'),
+    '★ 只留属于**这条记录**的候选 ✓ —— 「必须去不同的电脑」这条硬约束就落在这一句上 ✓',
+  )
+  assert.equal(
+    endpoints.split('LAST_ENDPOINT_KEY').length - 1,
+    1,
+    '★ 端点推导里只许**读**那台的 lastGoodEndpoint ✓（绝不写 ✗）',
+  )
+  /**
+   * ★ 身份那条链：可选指纹参数 ⇒ 旁挂取**那台**的凭据 ✓；省略 ⇒ 与改动前逐字一致 ✓。
+   * ★ 怎么把它打红 ✗：把 `validHostFingerprint(explicitFingerprint) ? … : currentHostFingerprint()`
+   *   改回写死 `currentHostFingerprint()` ⇒ 旁挂会拿**当前这台**的私钥去连别的电脑 ✓。
+   */
+  const loaderAt = bootSource.indexOf('  async function loadOrCreateDeviceKey(')
+  assert.ok(loaderAt >= 0, '必须能找到 loadOrCreateDeviceKey ✓')
+  const loaderEnd = bootSource.indexOf('\n  }\n', loaderAt)
+  const loader = executableOnly(bootSource.slice(loaderAt, loaderEnd))
+  assert.ok(
+    loader.includes('validHostFingerprint(explicitFingerprint) ? explicitFingerprint : currentHostFingerprint()'),
+    '★ 给了合法指纹就用它 ✓、没给就与改动前**逐字一致** ✓（主隧道正是「没给」那一支 ✓）',
+  )
+  const hsAt = bootSource.indexOf('Tunnel.prototype.performHandshake = async function')
+  assert.ok(hsAt >= 0, '必须能找到 performHandshake ✓')
+  const hsEnd = bootSource.indexOf('\n  }\n', hsAt)
+  const handshake = executableOnly(bootSource.slice(hsAt, hsEnd))
+  assert.ok(
+    handshake.includes('loadOrCreateDeviceKey(this.config.hostFingerprint)'),
+    '★ 握手必须按**这条隧道自己那台**取凭据 ✓',
+  )
+})
+
+test('★★ 轮询护栏按**隧道各记一份**（只有一份 ⇒ 第二台会被第一台的「在飞」永久挡住）', () => {
+  const codeOnly = executableOnly(bootSource)
+  /**
+   * ★★ 怎么把它打红 ✗：把护栏改回**单个闭包变量**（`var pollInFlightAt = 0`
+   *   + `if (pollInFlightAt !== 0 …) return 'busy'` ✓）⇒ 下面第一条当场红 ✓。
+   */
+  assert.ok(
+    !/var pollInFlightAt = 0\b/.test(codeOnly),
+    '★ 护栏不许再是**单个变量** ✗ —— 那正是「第二台被第一台永远挡住」的形状 ✓',
+  )
+  const drive = innerFunctionBody(bootSource, '    function drivePollTarget(target) {')
+  const uses = drive.split('target.pollInFlightAt').length - 1
+  assert.ok(
+    uses >= 3,
+    '★ 护栏必须记在**每条隧道自己**那条记录上 ✓（读一次 / 起飞写一次 / 收尾各清一次 ✓），实际 ' + String(uses) + ' 处',
+  )
+  assert.ok(!drive.includes('var pollInFlightAt'), '★ 这里不许再有「本函数的那一份」 ✗')
+  const factory = executableOnly(functionBodyAtColumn2(bootSource, 'makePollTarget'))
+  assert.ok(factory.includes('pollInFlightAt: 0'), '★ 每造一条隧道就带**它自己**那份护栏 ✓')
+  assert.ok(
+    factory.includes('lastPollSummary: null') && factory.includes('lastPollErrorKey: null'),
+    '★ 两个去重键也必须每台各一份 ✓（一份 ⇒ 两条隧道互相顶掉 ⇒ 调试框两种话轮流刷 ✗）',
+  )
+  /**
+   * ★★ 怎么把它打红 ✗：让 `devicePollTick` 只驱动主隧道（去掉遍历 ✓）
+   *   ⇒ 下面这两条当场红 ✓。
+   */
+  const tick = innerFunctionBody(bootSource, '    function devicePollTick() {')
+  assert.ok(tick.includes('devicePollTargets()'), '★ 这一发必须**遍历**所有该跑的隧道 ✓')
+  assert.ok(tick.includes('drivePollTarget('), '★ 每条走**它自己**那一份护栏与节拍 ✓')
+  const targets = innerFunctionBody(bootSource, '    function devicePollTargets() {')
+  assert.ok(targets.includes('mainPollTarget'), '★ 主隧道永远第一 ✓（`tick(\'poll\')` 那条口径因此不变 ✓）')
+  assert.ok(targets.includes('sideTunnelEntries'), '★ 后面接上旁挂那几条 ✓')
+  assert.ok(
+    targets.includes('entry.rejected === true') && targets.includes('entry.unsupported === true'),
+    '★ 已经明确没戏的旁挂隧道要跳过 ✓（再去戳只会换来同样的拒绝 ✓）',
+  )
+  /**
+   * ★★ 怎么把它打红 ✗：让旁挂那条也用主传输（把 `transport = target.transport` 删掉 ✓）
+   *   ⇒ 下面这条红 ✓ —— 那等于「拿 B 的待办去问 A」✗。
+   */
+  /**
+   * ★★ 诊断读数也要**按隧道分份** ✗✓：`keepAliveStats.lastPingAt` 回答的是
+   *   「**当前这条通道**还活着没有」✓ —— 旁挂的 ping 混进来的话，
+   *   主隧道早死了而旁挂还活着时这个数照样在动 ✗（读数骗人 ✓）。
+   * ★ 怎么把它打红 ✗：把那句 `if (this.config.sideChannel !== true)` 去掉 ⇒ 下面这条红 ✓。
+   */
+  const pingAt = bootSource.indexOf('Tunnel.prototype.sendKeepalivePing = function')
+  assert.ok(pingAt >= 0, '必须能找到 sendKeepalivePing ✓')
+  const pingEnd = bootSource.indexOf('Tunnel.prototype.', pingAt + 10)
+  const pingBody = executableOnly(bootSource.slice(pingAt, pingEnd))
+  assert.ok(
+    pingBody.includes('if (this.config.sideChannel !== true) keepAliveStats.lastPingAt'),
+    '★ 保活那个读数只许由主隧道写 ✓（旁挂的 ping 不许混进「当前这条通道」的读数 ✗）',
+  )
+  const pollBody = innerFunctionBody(bootSource, '    async function poll(target) {')
+  assert.ok(pollBody.includes('target.transport'), '★ 旁挂那条必须用**它自己的**传输 ✓（绝不用主传输 ✗）')
+  assert.ok(
+    pollBody.includes('target.unsupported = true') && pollBody.includes('target.lastPollErrorKey = null'),
+    '★ 状态也必须落在**它自己**那条记录上 ✓（原来那三个全局变量的位置 ✓）',
+  )
+})
+
+test('★ 旁挂那条的节拍是 15 秒（不是主隧道那档 4 秒），而且第一轮不额外等', () => {
+  const codeOnly = executableOnly(bootSource)
+  /**
+   * ★★ 怎么把它打红 ✗：把 `var SIDE_TUNNEL_POLL_MS = 15000` 改成 `4000`
+   *   ⇒ 第一条当场红 ✓；把 `drivePollTarget` 里那句 `SIDE_TUNNEL_POLL_MS`
+   *   换回写死的 `4000` ⇒ 第二、三条红 ✓。
+   */
+  assert.ok(/var SIDE_TUNNEL_POLL_MS = 15000\b/.test(codeOnly), '★ 旁挂的节拍常量必须是 **15000ms** ✓（不是 4 秒 ✗）')
+  const drive = innerFunctionBody(bootSource, '    function drivePollTarget(target) {')
+  assert.ok(drive.includes('SIDE_TUNNEL_POLL_MS'), '★ 节拍必须由那个常量说了算 ✓（不许在别处写死 ✓）')
+  assert.ok(!drive.includes('4000'), '★ 旁挂那条绝不走主隧道那档 4 秒 ✗')
+  assert.ok(drive.includes('target.side === true'), '★ 那一档**只对旁挂**生效 ✓（主隧道照旧 4 秒 ✓）')
+  assert.ok(codeOnly.includes('}, 4000)'), '★ 主隧道那条 4 秒的定时器必须**原样还在** ✓（不许被顺手改掉 ✗）')
+  /**
+   * ★ 第一轮不额外等 ✓（建起来时不写 `lastDrivenAt` ⇒ 下一发 tick 就轮得到它 ✓）——
+   * 用户走方案 A 的动机就是**低延迟** ✓；★ 怎么把它打红 ✗：在创建处加一句
+   * `entry.lastDrivenAt = Date.now()` ⇒ 下面这条红 ✓。
+   */
+  const start = executableOnly(functionBodyAtColumn2(bootSource, 'startSideTunnels'))
+  assert.ok(!start.includes('lastDrivenAt'), '★ 建的时候就写 lastDrivenAt ⇒ 第一轮要白等 15 秒 ✗（用户要的是延迟低 ✓）')
+})
+
+test('★★ 不许弄坏今天能用的：__DSH_TRANSPORT__ 那一段**逐行原样**', () => {
+  /**
+   * 怎么把它打红 ✗：往主传输里加/删/改**任何一行**（哪怕只是多一句注释之外的语句 ✓）
+   *   ⇒ 下面这条 `deepEqual` 当场红 ✓。
+   * ★ 这一条是「旁挂不许蹭主传输」的**另一半** ✓：
+   *   旁挂自己那套最小传输写在方案 A 那一块里 ✓（见 `sideChannelTransport` ✓），
+   *   主传输那一段**本轮一个字节都没动** ✓。
+   */
+  assert.deepEqual(transportBlockLines(), TRANSPORT_BLOCK_LINES, '★ 主传输那一段必须与冻结时**逐行一致** ✗')
+  const codeOnly = executableOnly(bootSource)
+  assert.equal(
+    codeOnly.split('globalThis.__DSH_TRANSPORT__ = {').length - 1,
+    2,
+    '★ 全文件主传输的出生地应当仍是**两处**（真传输 + 占位层 ✓）—— 多一处/少一处都要人来复核 ✓',
+  )
+  // ★ 旁挂自己那条最小传输：只给 `fetch` 一个口 ✓（多开一个口就多一处「可能跑错机器」的地方 ✓）
+  const sideTransport = executableOnly(functionBodyAtColumn2(bootSource, 'sideChannelTransport'))
+  assert.ok(sideTransport.includes('fetch:'), '★ 旁挂传输至少要有 fetch ✓（端侧轮询只用它 ✓）')
+  assert.ok(
+    !sideTransport.includes('openStream') && !sideTransport.includes('ownsHost'),
+    '★ 旁挂传输只许有 fetch 一个口 ✗（它不承载 DSH 业务流量 ✓）',
+  )
+  assert.ok(sideTransport.includes('sideTunnel.rpc('), '★ 它必须走**那条隧道自己**的 rpc ✓')
+})
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★★ 方案 A 的**端到端证据**：两台**真宿主** + 两条**真隧道** ⇒ 各取各的待办 ✓
+ *
+ * ## 为什么非要真跑一次 ✗
+ * 上面那一组全是**代码形状**的判据 ✓ —— 它们证明不了「两个 `TunnelSession` 与两条隧道
+ * 能**同时**活着、而且各自从**自己那台**的队列里取待办」 ✓，而那正是方案 A 的前提
+ * （上一单实跑过 14/14 ✓，但验的不是本轮这段代码 ✓）。
+ *
+ * ## 与真机一致的三处 ✓（都靠本文件既有的那套夹具 —— `ReplaySocket` + 真 `TunnelSession` ✓）
+ *   · 页面源 = **A 那台** ✓（`location.host` ✓）；B 那台**在宿主目录里** ✓（槽 = 它自己的地址 ✓）；
+ *   · 本机两台的凭据**各自命名空间化** ✓（`dsh-mobile.device-key:<指纹>` ✓，deviceId 也不同 ✓）；
+ *   · 端侧队列是**真的** `DeviceCallQueue` ✓（取走即投递 ✓、回报即出队 ✓）。
+ *
+ * ★ 这一条**不是**替身戏法 ✓：跑的是 `startSideTunnels` **生产那条路** ✓
+ *   （boot → 建旁挂 → 15 秒节拍那条 `devicePollTick` ✓），断言打在
+ *   **生产读数**（`__DSH_MOBILE_BOOT__.sideChannels()` ✓）与**宿主那两台的收发记录**上 ✓。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/** 一台「真电脑」：真 `DeviceStore` + 真 `DeviceCallQueue` + 真宿主签名密钥 ✓。 */
+interface SideWorldHost {
+  name: string
+  /** 它的 authority ✓（`host:port` ✓）。 */
+  host: string
+  fingerprint: string
+  deviceId: string
+  /** 本机为它存的凭据（`dsh-mobile.device-key:<指纹>` 的值 ✓）。 */
+  deviceKeyStorageValue: string
+  signing: ReturnType<typeof generateP256KeyPair>
+  store: InstanceType<typeof DeviceStore>
+  queue: InstanceType<typeof DeviceCallQueue>
+  /**
+   * 这台收到的每一次隧道请求 ✓（「各取各的」就断言在这上面 ✓）。
+   * ★ 连**响应**一起记 ✓：`mobile/device/pending` 的响应里就带着「这一轮取到了哪几条」✓
+   *   —— 只记请求的话，「A 取到的是不是 A 那条」就只能靠 id 猜 ✓（id 由队列各自编号 ✓）。
+   */
+  seen: Array<{ endpoint: string; payload: Record<string, unknown>; response: unknown }>
+  /** 这次握手它认出来的设备 ✓（用来证明「用的是**它自己**那份凭据」✓）。 */
+  authenticated: string
+}
+
+/** 页面源（= A 那台 ✓ —— 与 `bootOnSurface` 默认的 `location.host` 必须一致 ✓）。 */
+const SIDE_HOST_A = '10.34.221.181:3443'
+/** 目录里**另一台**电脑 ✓（旁挂那条该去的地方 ✓）。 */
+const SIDE_HOST_B = '100.123.136.82:3443'
+
+async function makeSideWorldHost(name: string, host: string): Promise<SideWorldHost> {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-mobile-side-' + name + '-'))
+  const store = new DeviceStore({ directory: dir })
+  const signing = generateP256KeyPair()
+  const fingerprintHex = fingerprint(signing.publicKey)
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+  const publicRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+  const privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey)
+  const deviceId = 'web-side-' + name
+  const publicKeyB64u = Buffer.from(publicRaw).toString('base64url')
+  store.upsert({
+    deviceId,
+    devicePublicKey: '',
+    deviceSigningKey: publicKeyB64u,
+    fingerprint: fingerprint(publicKeyB64u),
+    name: '方案A真跑-' + name,
+    pairedAt: new Date().toISOString(),
+    authorization: 'persistent',
+    capabilities: { ...DEFAULT_CAPABILITIES },
+  })
+  const queue = new DeviceCallQueue()
+  // ★ 端侧能力**默认全禁** ⇒ 不显式打开的话 `takePending` 一条都不投递 ✓（真实语义 ✓）。
+  queue.setEnabled(deviceId, 'show', true)
+  return {
+    name,
+    host,
+    fingerprint: fingerprintHex,
+    deviceId,
+    deviceKeyStorageValue: JSON.stringify({ deviceId, publicKey: publicKeyB64u, privateKeyJwk: privateJwk }),
+    signing,
+    store,
+    queue,
+    seen: [],
+    authenticated: '',
+  }
+}
+
+test('★★★ 方案 A 真跑：两条隧道同时 pending ⇒ 各取各的队列（两台真宿主 + 真握手 + 真队列）', async () => {
+  const hostA = await makeSideWorldHost('a', SIDE_HOST_A)
+  const hostB = await makeSideWorldHost('b', SIDE_HOST_B)
+  assert.notEqual(hostA.deviceId, hostB.deviceId, '前置：两台的 deviceId 必须不同 ✓（宿主就是按它记会话的 ✓）')
+
+  // ★ 两台各压一条待办 ✓（A 一条、B 一条 ✓ —— 各取各的才测得出串台 ✓）
+  const callA = hostA.queue.enqueue(hostA.deviceId, 'show', 'A 那条提醒')
+  /**
+   * ★ 隔开几毫秒再压第二条 ✗：`DeviceCallQueue` 的 id 是**每个队列各自编号**的
+   *   （`dc-<序号>-<时间戳36进制>` ✓）⇒ 两台在同一毫秒里各压一条会得到**同样的 id** ✓
+   *   —— 那样「各取各的」就只能靠 id 之外的东西证明 ✓。这里隔开，
+   *   是为了让下面那些**按 id** 的判据本身有意义 ✓（并且单独断言两个 id 真的不同 ✓）。
+   */
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const callB = hostB.queue.enqueue(hostB.deviceId, 'show', 'B 那条提醒')
+  assert.notEqual(callA.id, callB.id, '前置：两条待办的 id 必须不同 ✓（否则按 id 的判据证明不了什么 ✓）')
+
+  /** 每条 socket 归哪台宿主 ✓（按它的 URL 认 ✓ —— 真机上就是「连到哪台」✓）。 */
+  const sessions = new Map<ReplaySocket, InstanceType<typeof TunnelSession>>()
+  const hostOfSocket = (socket: ReplaySocket): SideWorldHost => (socket.url.includes(SIDE_HOST_B) ? hostB : hostA)
+  const dirs: string[] = []
+  const cleanup = (): void => {
+    ReplaySocket.onSend = undefined
+    try {
+      surface.boot.tunnel?.stopKeepalive?.()
+    } catch (error) {
+      void error
+    }
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  }
+
+  ReplaySocket.created.length = 0
+  ReplaySocket.onSend = (socket, bytes) => {
+    const host = hostOfSocket(socket)
+    let session = sessions.get(socket)
+    if (session === undefined) {
+      session = new TunnelSession(
+        {
+          resolveDevice: (hello) => {
+            host.authenticated = hello.deviceId
+            const record = host.store.get(hello.deviceId)
+            if (record === undefined) return undefined
+            return {
+              deviceId: record.deviceId,
+              devicePublicKey: record.devicePublicKey,
+              deviceSigningKey: record.deviceSigningKey,
+              fingerprint: record.fingerprint,
+              capabilities: record.capabilities,
+              authorization: record.authorization,
+            }
+          },
+          invoke: async (request) => {
+            /**
+             * ★ 这一段与**宿主生产实现**（`packages/host/src/index.ts` 的 `mobile/device/*`）
+             * 同一个形状 ✓：`pending` 取走即投递 ✓、`result` 回报即出队 ✓ ——
+             * 断言因此量的是**真语义** ✓，不是「我编个回声」✓。
+             */
+            const payload = (request.payload ?? {}) as Record<string, unknown>
+            const args = (payload['args'] ?? {}) as Record<string, unknown>
+            let value: unknown = { ok: true, value: { endpoint: request.endpoint } }
+            if (request.endpoint === 'mobile/device/pending') {
+              value = {
+                ok: true,
+                value: {
+                  calls: host.queue.takePending(host.authenticated),
+                  // ★ 与宿主生产实现逐字同源 ✓（`index.ts` 的 `mobile/device/pending` ✓）
+                  capabilities: [...DEVICE_CAPABILITIES],
+                  enabled: host.queue.listEnabled(host.authenticated),
+                },
+              }
+            } else if (request.endpoint === 'mobile/device/result') {
+              value = {
+                ok: true,
+                value: host.queue.recordResult(
+                  host.authenticated,
+                  String(args['id'] ?? ''),
+                  args['ok'] === true,
+                  String(args['detail'] ?? ''),
+                ),
+              }
+            } else if (request.endpoint === 'mobile/device/enable') {
+              value = {
+                ok: true,
+                value: {
+                  capabilities: host.queue.setEnabled(
+                    host.authenticated,
+                    String(args['capability'] ?? ''),
+                    args['enabled'] !== false,
+                  ),
+                },
+              }
+            }
+            host.seen.push({ endpoint: request.endpoint, payload, response: value })
+            return value
+          },
+          openStream: () => (async function* () {})(),
+        },
+        (out) => {
+          socket.deliver(new Uint8Array(out))
+          return true
+        },
+      )
+      session.hostId = 'host-' + host.name
+      session.hostSigningKey = host.signing as never
+      sessions.set(socket, session)
+    }
+    session.receive(bytes)
+  }
+
+  const seed: Record<string, string> = {
+    ['dsh-mobile.device-key:' + hostA.fingerprint]: hostA.deviceKeyStorageValue,
+    ['dsh-mobile.device-key:' + hostB.fingerprint]: hostB.deviceKeyStorageValue,
+    ['dsh-mobile.host:' + hostA.fingerprint]: JSON.stringify({
+      baseUrl: 'https://' + SIDE_HOST_A,
+      tunnelUrl: 'wss://' + SIDE_HOST_A + '/mobile/ws',
+      pinnedHostFingerprint: hostA.fingerprint,
+    }),
+    'dsh-mobile.hosts': JSON.stringify([
+      {
+        fingerprint: hostA.fingerprint,
+        label: '电脑A',
+        slots: [{ label: '本机', url: 'https://' + SIDE_HOST_A }],
+        lastState: 'paired',
+        lastSeenAt: 1,
+        updatedAt: 1,
+      },
+      {
+        fingerprint: hostB.fingerprint,
+        label: '电脑B',
+        slots: [{ label: '学校', url: 'https://' + SIDE_HOST_B }],
+        lastState: 'paired',
+        lastSeenAt: 2,
+        updatedAt: 2,
+      },
+    ]),
+    // ★ 端侧能力那条征询不参与本用例 ✓（`runCall` 自己不看它 ✓ —— 只有征询条看 ✓）
+    'dsh-mobile.deviceAsk.show': 'yes',
+  }
+
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    seed,
+    webSocket: ReplaySocket,
+    unrefTimers: true,
+  })
+  try {
+    assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+
+    /**
+     * ★★ 第一道闸的**真跑**判据用的是**顺序**✗✓：**先只放行旁挂那条（去 B 的）** ✓，
+     *   等它真的连上 ✓ ⇒ 此刻「上次成功的端点」必须**一个字节都没有** ✓
+     *   （若它写了，下面那条当场红 ✓）。这样断言就**不依赖**「谁后写谁赢」那种时序 ✓ ——
+     *   否则主隧道随后写一次就会把证据盖掉 ⇒ **假绿** ✓（项目里的头号教训 ✓）。
+     */
+    const sideSocket = await waitForValue(
+      () => ReplaySocket.created.find((socket) => socket.url.includes(SIDE_HOST_B)),
+      '旁挂那条拨出 socket（去 B）',
+    )
+    const mainSocket = await waitForValue(
+      () => ReplaySocket.created.find((socket) => socket.url.includes(SIDE_HOST_A)),
+      '主隧道拨出 socket（去 A）',
+    )
+    sideSocket.fireOpen()
+    await waitForValue(() => {
+      const side = surface.boot.sideChannels()
+      return side.length === 1 && side[0]!.activeEndpoint !== null ? true : undefined
+    }, '旁挂那条（B）先连上')
+    assert.equal(
+      surface.storage.get('dsh-mobile.lastGoodEndpoint:' + hostA.fingerprint),
+      undefined,
+      '★ 旁挂那条拨号成功**一个字节都不许写**「上次成功的端点」✗✗（写了会在下次加载时被当成「属于别的源」删掉当前这台的 ✓）',
+    )
+    assert.equal(
+      surface.storage.get('dsh-mobile.lastGoodEndpoint:' + hostB.fingerprint),
+      undefined,
+      '★ B 那个命名空间下同样不许有 ✓（旁挂那条不该留任何「上次端点」✓）',
+    )
+    // ★ 再放行主隧道 ✓ —— 它照旧要写（今天这条优化一个字不改 ✓）
+    mainSocket.fireOpen()
+    await waitForValue(
+      () => (surface.boot.tunnel !== undefined && surface.boot.tunnel.sessionId !== undefined ? true : undefined),
+      '主隧道（A）连上',
+    )
+    assert.equal(
+      surface.storage.get('dsh-mobile.lastGoodEndpoint:' + hostA.fingerprint),
+      'wss://' + SIDE_HOST_A + '/mobile/ws',
+      '★ 主隧道照旧把「上次成功的端点」记下来 ✓（这条优化今天怎么用，现在还怎么用 ✓）',
+    )
+
+    assert.equal(hostA.authenticated, hostA.deviceId, '★ A 那台认出来的必须是**A 自己**那份凭据 ✓')
+    assert.equal(hostB.authenticated, hostB.deviceId, '★ B 那台认出来的必须是**B 自己**那份凭据 ✓（命名空间化 ✓）')
+    assert.equal(hostA.queue.pendingCount(), 1, '前置：驱动之前 A 那条还在 ✓（证明是这一轮取的 ✓）')
+    assert.equal(hostB.queue.pendingCount(), 1, '前置：驱动之前 B 那条还在 ✓')
+
+    // ── 驱动**一发**轮询 ✓（页面那个 4 秒定时器在沙箱里就是 `intervals[0]` ✓）──
+    const onTick = surface.intervals[0]
+    assert.ok(onTick !== undefined, '端侧通道应注册轮询定时器')
+    onTick()
+    try {
+      await waitForValue(
+        () =>
+          hostA.seen.some((entry) => entry.endpoint === 'mobile/device/result') &&
+          hostB.seen.some((entry) => entry.endpoint === 'mobile/device/result')
+            ? true
+            : undefined,
+        '两台电脑各自收到回报',
+      )
+    } catch (error) {
+      // ★ 这里的现场必须**带出来** ✗：手机上排障只有调试框与读数可用 ✓，测试也一样 ✓。
+      assert.fail(
+        String(error) +
+          '\nA 收到：' + JSON.stringify(hostA.seen.map((entry) => entry.endpoint)) +
+          '\nB 收到：' + JSON.stringify(hostB.seen.map((entry) => entry.endpoint)) +
+          '\n旁挂读数：' + JSON.stringify(surface.boot.sideChannels()) +
+          '\n调试框：\n' + surface.boxText(),
+      )
+    }
+
+    // ── ① 两台**各自**被取过一次待办 ✓（不是一台被取两次、另一台零次 ✗）──
+    const aTook = hostA.seen.filter((entry) => entry.endpoint === 'mobile/device/pending')
+    const bTook = hostB.seen.filter((entry) => entry.endpoint === 'mobile/device/pending')
+    assert.equal(aTook.length, 1, '★ A 那台应当恰好被取过一次待办 ✓')
+    assert.equal(bTook.length, 1, '★ B 那台应当恰好被取过一次待办 ✓')
+
+    // ── ② 回报的 id 只能是**各自主人**那条 ✓（跑错机器就是这几条红 ✓）──
+    const aReport = hostA.seen.find((entry) => entry.endpoint === 'mobile/device/result')
+    const bReport = hostB.seen.find((entry) => entry.endpoint === 'mobile/device/result')
+    assert.ok(aReport !== undefined && bReport !== undefined, '两台都必须收到回报 ✓')
+    assert.equal((aReport.payload['args'] as Record<string, unknown>)['id'], callA.id, '★ A 回报的必须是 **A 那条** ✓')
+    assert.equal((bReport.payload['args'] as Record<string, unknown>)['id'], callB.id, '★ B 回报的必须是 **B 那条** ✓')
+    assert.ok(!JSON.stringify(hostA.seen).includes(callB.id), '★ A 那台绝不许看到 B 那条 ✓')
+    assert.ok(!JSON.stringify(hostB.seen).includes(callA.id), '★ B 那台绝不许看到 A 那条 ✓')
+    /**
+     * ★★ 最直白的那一条判据 ✓：**每一轮取到的那几条，正文只能是它自己那台压的那条** ✓
+     *   （上面那几条按 id ✓，这一条按**正文** ✓ —— 两个口径互相独立 ✓）。
+     */
+    const callsTakenBy = (host: SideWorldHost): string[] => {
+      const entry = host.seen.find((item) => item.endpoint === 'mobile/device/pending')
+      const value = (entry?.response ?? {}) as { value?: { calls?: Array<{ text?: string }> } }
+      return (value.value?.calls ?? []).map((call) => String(call.text ?? ''))
+    }
+    assert.deepEqual(callsTakenBy(hostA), ['A 那条提醒'], '★ A 取到的必须**只有 A 那条** ✓')
+    assert.deepEqual(callsTakenBy(hostB), ['B 那条提醒'], '★ B 取到的必须**只有 B 那条** ✓')
+
+    // ── ③ 两条队列都**真的**被取空并回报完 ✓（真 `DeviceCallQueue` 的语义 ✓）──
+    assert.equal(hostA.queue.pendingCount(), 0, '★ A 那条必须已经被取走并回报 ✓')
+    assert.equal(hostB.queue.pendingCount(), 0, '★ B 那条必须已经被取走并回报 ✓')
+    assert.equal(hostA.queue.getResult(callA.id)?.ok, true, '★ A 那边记下的结果必须是 ok ✓')
+    assert.equal(hostB.queue.getResult(callB.id)?.ok, true, '★ B 那边记下的结果必须是 ok ✓')
+
+    // ── ④ 生产读数：只挂一条、去的是 B、真的连上了 ✓ ──
+    const side = surface.boot.sideChannels()
+    assert.equal(side.length, 1, '★ 只许挂**一条**旁挂 ✓（当前那台 = A 必须被跳过 ✓）')
+    assert.equal(side[0]!.fingerprint, hostB.fingerprint, '★ 旁挂那条去的必须是**别的**电脑 ✓')
+    assert.equal(side[0]!.state, 'connected', '★ 旁挂那条真的连上了 ✓')
+    assert.equal(side[0]!.activeEndpoint, 'wss://' + SIDE_HOST_B + '/mobile/ws', '★ 而且端点只用了 B 自己的地址 ✓')
+    assert.ok(side[0]!.polls >= 1, '★ 这一轮真的驱动过它 ✓')
+    assert.equal(side[0]!.rejected, false, '★ 没有被拒绝 ✓')
+
+    // ── ⑤ 两边身份都在 ✓（灾难闸：谁都没被清 ✓）──
+    assert.notEqual(surface.storage.get('dsh-mobile.device-key:' + hostA.fingerprint), undefined, '★ 当前那台（A）的身份必须还在 ✓')
+    assert.notEqual(surface.storage.get('dsh-mobile.device-key:' + hostB.fingerprint), undefined, '★ B 的身份也必须还在 ✓')
+    assert.equal(surface.boot.tunnel?.sessionId !== undefined, true, '★ 主隧道（A）必须仍然活着 ✓（没被旁挂顶掉 ✓）')
+  } finally {
+    dirs.push(join(tmpdir(), 'dsh-mobile-side-a-'), join(tmpdir(), 'dsh-mobile-side-b-'))
+    cleanup()
+  }
 })
