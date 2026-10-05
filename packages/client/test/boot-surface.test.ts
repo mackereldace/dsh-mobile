@@ -1913,8 +1913,11 @@ test('★ 结构性：R5 那组身份读数必须挂在「端侧诊断」那一�
  *   ⇒ 本组"必须以扩展名结尾"那几条**恰好**变红 ✓，其余全绿 ✓。
  */
 interface FileNameInternals {
+  /** ★ round 198：显示层现在要的是**两段**（`head` 允许被压 / `ext` 绝不 ✗）。 */
+  fitFileNameParts: (name: unknown, maxUnits?: number) => { head: string; ext: string }
   fitFileName: (name: unknown, maxUnits?: number) => string
   fileNameFamily: (name: unknown) => string
+  fileFamilyIcon: (family: string) => string
   fileNameExt: (text: string) => string
   fileNameUnits: (text: string) => number
   FILE_NAME_MAX_UNITS: number
@@ -2021,7 +2024,7 @@ test('★ 列表里不再显示文件大小（用户："这个感觉没必要" �
   )
   const body = functionBodyAtColumn2(bootSource, 'entryRow')
   assert.ok(!body.includes('formatSize('), 'entryRow 里不许再算大小 ✗（省下来的宽度全给名字 ✓）')
-  assert.ok(body.includes('fitFileName(entry.name'), 'entryRow 必须走 fitFileName ✓')
+  assert.ok(body.includes('fitFileNameParts(entry.name'), 'entryRow 必须走 fitFileNameParts ✓')
   assert.ok(body.includes('data-dshm-fs-name'), '完整名字必须留在 data-dshm-fs-name 上 ✓（工具靠它认行 ✓）')
   assert.ok(body.includes('完整名称：'), '长按看全名的入口必须留着 ✓（截断之后它就是兜底 ✓）')
   // 长按那套的四个口一个都不能少 ✓（少一个 = 真机上"按住不动也会被取消"或"看完名字又进了目录"✗）
@@ -2030,4 +2033,116 @@ test('★ 列表里不再显示文件大小（用户："这个感觉没必要" �
   }
   // 交叉确认：`formatSize` 这个函数本身**不能**删 —— 预览那几处还在用 ✓
   assert.ok(bootSource.includes('function formatSize('), 'formatSize 仍要被预览那几处用着 ✓')
+})
+
+/**
+ * ★★ round 198：用户又追了两条反馈，都在"窄栏文件列表"上 ✓：
+ *   · "文件列表首先有的没有中间省略 ✗，最后导致没有保住扩展名 ✗"；
+ *   · "Markdown 和 PDF 还是分不开 ✗，我觉得 PDF 还是有必要单独分出来一类的 ✓，这个最好是红色 ✓"。
+ *
+ * ## ① 为什么上一单"保住后缀"没兜住（这条是本轮最值钱的 ✓）
+ *   上一单只把后缀塞进 `fitFileName` 的**返回字符串**里 ✓，而那一整串落到 DOM 上是
+ *   **同一个**文本节点 ✗，它的容器 `.dshm-file-name` 上又挂着 `text-overflow: ellipsis` ✗
+ *   ⇒ 只要真实渲染比预算宽一点，CSS 就从**尾部**补一刀 ✗，中间那个省略号和后半截后缀一起没 ✗
+ *   （用户看到的正是"有的没有中间省略"✓）。预算为什么会偏小 ✓：
+ *     · 它按"一个半角单位 ≈ 7px"估 ✗ —— 实测 SF Pro 14px 下 22 个数字 = **187px** ✓；
+ *     · 它漏算了 `#dsh-mobile-sheet-body` 的 `padding: 10px 10px` ✓（= 20px ✓）；
+ *     · `min(64vw, 264px)` 在 375px 视口上只有 **240px** ✓（264 只是上限 ✓）。
+ *
+ * ⇒ 这一轮把后缀做成**独立元素** ✓（`[data-dshm-fs-ext]` ✓，CSS `flex: 0 0 auto` ✓）：
+ *   它**在结构上不参与收缩** ✓ ⇒ 中段省略由 JS 算 ✓、尾部由结构保证 ✓，两条各管一段 ✓。
+ *   ★ 顺带把容器自己那条 `overflow: hidden` 也摘了 ✗：留着它等于给容器右边缘留了一把剪刀 ✓，
+ *     而那正好落在外层缩不动、内层又剪得动的缝里 ✓（详见 boot.js 里那段注释 ✓）。
+ *
+ * ★ 变异验证（各做一次 ⇒ **恰好**变红 ✓，做完改回 ✓）：
+ *   · 把后缀那个元素改回"和头部同一个可收缩元素"✗（`nameHead.textContent = shownName.head + shownName.ext`
+ *     并删掉 `data-dshm-fs-ext` 那一段 ✓）⇒ 下面"结构上剪不掉"那组红 ✓；
+ *   · 把 `.pdf` 塞回 `doc` 族 ✗ ⇒ 下面"PDF 单独一族"那组红 ✓。
+ */
+test('★★ 扩展名在**结构上**剪不掉（独立元素 + 不许收缩）——治"有的行没保住后缀"✗', () => {
+  const body = functionBodyAtColumn2(bootSource, 'entryRow')
+  // ① 后缀必须挂在**自己的**元素上 ✓（不许跟头部混在同一个可收缩元素里 ✗）
+  assert.ok(body.includes('data-dshm-fs-ext'), 'entryRow 必须给后缀单独挂一个元素 ✓（data-dshm-fs-ext ✓）')
+  assert.ok(body.includes('data-dshm-fs-head'), '头部那个元素也要有记号 ✓（data-dshm-fs-head ✓）')
+  assert.match(
+    body,
+    /nameExt\.textContent = shownName\.ext/,
+    '后缀元素里放的必须正好是 `ext` 那一段 ✓（不许把 head + ext 塞回同一个元素 ✗）',
+  )
+  assert.ok(
+    !/nameHead\.textContent = [^\n]*\+/.test(body),
+    '头部元素里**不许**再拼后缀 ✗（那样它就退化回上一版那个"一个可收缩元素"✗）',
+  )
+  // ② CSS：后缀那一条必须**不收缩** ✓；允许被裁的只能是头部那一条 ✓
+  const extRule = (/\.dshm-file-name > \[data-dshm-fs-ext\] \{([^}]*)\}/.exec(bootSource) ?? [])[1] ?? ''
+  assert.ok(extRule !== '', 'CSS 里必须有 [data-dshm-fs-ext] 那条规则 ✓')
+  assert.match(extRule, /flex:\s*0\s+0\s+auto/, `后缀必须 flex: 0 0 auto（结构上不参与收缩 ✓）：${extRule}`)
+  assert.match(extRule, /white-space:\s*nowrap/, `后缀必须 nowrap ✓：${extRule}`)
+  assert.ok(!/flex:\s*\d+\s+1\b/.test(extRule), `后缀**不许**允许收缩 ✗：${extRule}`)
+  const headRule = (/\.dshm-file-name > \[data-dshm-fs-head\] \{([^}]*)\}/.exec(bootSource) ?? [])[1] ?? ''
+  assert.ok(headRule !== '', 'CSS 里必须有 [data-dshm-fs-head] 那条规则 ✓')
+  assert.match(headRule, /overflow:\s*hidden/, '头部才是允许被裁的那一段 ✓')
+  assert.match(headRule, /min-width:\s*0/, '头部要能收缩就必须 min-width: 0 ✓')
+  // ③ 名字那一栏自己**不许**再挂尾部省略 / 裁剪：那正是上一版剪掉后缀的那把刀 ✗
+  const boxRule = (/\.dshm-file-name \{([^}]*)\}/.exec(bootSource) ?? [])[1] ?? ''
+  assert.ok(boxRule !== '', 'CSS 里必须有 .dshm-file-name 那条规则 ✓')
+  assert.ok(!/text-overflow/.test(boxRule), `这一栏自己不许挂 text-overflow ✗（那就是剪后缀的刀 ✓）：${boxRule}`)
+  assert.ok(!/overflow:\s*hidden/.test(boxRule), `这一栏自己也不许 overflow: hidden ✗（等于换一把刀 ✓）：${boxRule}`)
+  /**
+   * ④ 纯函数这一段与显示层那一段必须**逐字对得上** ✓ ——
+   *    否则"结构上剪不掉"就只是文字游戏 ✓（挂错了元素照样白搭 ✗）。
+   */
+  const internals = fileNameInternals()
+  const cases = [
+    '一份很长的项目文档最终版.docx',
+    'IMG_20240930_183045_副本.pdf',
+    `${'a'.repeat(60)}.png`,
+    '归档备份.tar.gz',
+    '工作记录.md',
+    'README',
+    '.gitignore',
+  ]
+  for (const name of cases) {
+    for (const limit of [22, 18, 12, 8]) {
+      const parts = internals.fitFileNameParts(name, limit)
+      const shown = internals.fitFileName(name, limit)
+      const where = `「${name}」@${limit}`
+      assert.equal(parts.head + parts.ext, shown, `两段接起来必须正好是显示串 ✓：${where}`)
+      // ★ 认出来的后缀**永远**只在 `ext` 那一段里 ⇒ 它永远落在那颗不可收缩的元素上 ✓
+      assert.equal(parts.ext, internals.fileNameExt(name), `ext 必须就是认出来的后缀 ✓：${where}`)
+      if (parts.ext !== '') {
+        assert.ok(shown.endsWith(parts.ext), `显示必须以那一段后缀收尾 ✓：${where} ⇒ 「${shown}」`)
+      }
+    }
+  }
+})
+
+test('★ PDF 单独一族 + 红色取自主题变量；Markdown 不与它同族（用户原话 ✓）', () => {
+  const internals = fileNameInternals()
+  const pdf = internals.fileNameFamily('报告.pdf')
+  assert.equal(pdf, 'pdf', 'PDF 必须自己一族 ✓（"PDF 还是有必要单独分出来一类"✓）')
+  assert.equal(internals.fileNameFamily('扫描件.PDF'), 'pdf', '大写后缀也要认 ✓')
+  const md = internals.fileNameFamily('说明.md')
+  assert.notEqual(md, pdf, 'Markdown 不许和 PDF 混在一族 ✗（"还是分不开"✗）')
+  assert.equal(md, 'code', 'Markdown 归到"码"族（本轮的取舍 ✓，理由见 boot.js 里那张表 ✓）')
+  assert.equal(internals.fileNameFamily('笔记.markdown'), 'code')
+  assert.equal(internals.fileNameFamily('报告.docx'), 'doc', 'doc 族剩下的一堆不许被带跑 ✗')
+  // ★ 表族（Excel ✓）用户明确满意 ⇒ 一个字都不许动 ✗
+  assert.equal(internals.fileNameFamily('预算.xlsx'), 'sheet', '表族必须原样 ✓')
+  assert.equal(internals.fileNameFamily('导出.csv'), 'sheet')
+  // ★ 图标与颜色一一对应：PDF 那颗必须与**其它每一族**都不一样 ✓
+  const pdfIcon = internals.fileFamilyIcon('pdf')
+  for (const family of ['image', 'sheet', 'code', 'archive', 'doc', 'other']) {
+    assert.notEqual(pdfIcon, internals.fileFamilyIcon(family), `PDF 的图标不许和 ${family} 撞 ✗`)
+  }
+  // ★ 颜色：必须是主题变量 ✓，而且必须是那颗**语义红** ✓（不许写死 hex ✗）
+  const rule = (/\.dshm-file-icon\[data-family="pdf"\] \{[^}]*\}/.exec(bootSource) ?? [])[0] ?? ''
+  assert.ok(rule !== '', 'CSS 里必须有 pdf 那一族的颜色规则 ✓')
+  const color = ((/color:\s*([^;]+);/.exec(rule) ?? [])[1] ?? '').trim()
+  assert.ok(color.startsWith('var(--dsw-alias-'), `类型色必须取自主题变量 ✓（实际 ${color}）`)
+  assert.match(
+    color,
+    /var\(--dsw-alias-state-error-primary,/,
+    `PDF 必须用主题里那颗语义红 ✓（实际 ${color}）`,
+  )
 })

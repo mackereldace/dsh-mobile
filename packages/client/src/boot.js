@@ -9457,12 +9457,25 @@
          `doc` 与 `other` 不回落到这里 ⇒ 用上面那条默认的 tertiary ✓。 */
       '.dshm-file-icon[data-family="image"] { color: var(--dsw-alias-state-success-primary, #4cc38a); }',
       '.dshm-file-icon[data-family="sheet"] { color: var(--dsw-alias-state-warn-primary, #e0a33e); }',
+      /* ★★ round 198：PDF **单独一族** ✓（用户原话："Markdown 和 PDF 还是分不开"✗、
+         "PDF 还是有必要单独分出来一类"✓）。颜色取主题里那颗**语义红** ✓ ——
+         `--dsw-alias-state-error-primary`（DSH 主题里它 = `var(--dsw-static-red-400)` 深色 /
+         `var(--dsw-static-red-600)` 浅色 ✓ ⇒ 两套主题各自都还是"红"✓，**不写死 hex** ✗）。 */
+      '.dshm-file-icon[data-family="pdf"] { color: var(--dsw-alias-state-error-primary, #ff6b6b); }',
       '.dshm-file-icon[data-family="code"] { color: var(--dsw-alias-state-idle-primary, #9aa4b2); }',
       '.dshm-file-icon[data-family="archive"] { color: var(--dsw-alias-label-secondary, #a9b0b8); }',
-      /* 名字这一栏是**唯一**要抢宽度的那一栏 ✓（大小那一段已按用户要求删掉 ✗ ⇒ 省下来的宽度全给它 ✓）。
-         这里的 `text-overflow: ellipsis` 只是**兜底** ✓ —— 保住后缀那件事由 `fitFileName` 在代码里做 ✓
-         （CSS 的省略号截的是尾部 ✗，后缀会第一个没 ✗）。 */
-      '.dshm-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      /* ★★ round 198：名字这一栏拆成**两个元素** —— 中段省略由 JS 算 ✓、尾部由结构保证 ✓，两条各管一段 ✓。
+         上一版为什么"有的行没保住后缀 ✗"：整串 `头…后缀` 是**一个**文本节点 ✓，而这一栏当时挂着
+         `text-overflow: ellipsis` ✓ ⇒ 只要真实渲染比 JS 的估算宽一点（估算见 `FILE_NAME_MAX_UNITS` ✓），
+         CSS 就从**尾部**补一刀 ✗（连中间那个省略号一起盖掉 ✗）⇒ 后缀第一个没 ✗。
+         现在：头部（`[data-dshm-fs-head]` ✓，可能自带 `…` ✓）是**唯一**允许收缩 +
+         `overflow: hidden` 的元素 ✓；后缀挂在 `[data-dshm-fs-ext]` 上、`flex: 0 0 auto` ✓
+         ⇒ **它在结构上不参与收缩** ⇒ 谁也剪不掉它 ✓。
+         ★ 这一栏自己**不留** `overflow: hidden` ✗：留着的话，极端窄的行会把"容器右边缘"当剪刀 ✗
+         ——而那正好落在外层缩不动、内层又剪得动的缝里 ✓；去掉之后最坏也只是"多出来一点点"✓。 */
+      '.dshm-file-name { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }',
+      '.dshm-file-name > [data-dshm-fs-head] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
+      '.dshm-file-name > [data-dshm-fs-ext] { flex: 0 0 auto; white-space: nowrap; }',
       '.dshm-file-more {',
       '  flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 9px;',
       '  background: transparent; cursor: pointer;',
@@ -20941,35 +20954,59 @@
   }
 
   /**
-   * ★ 一行文件名**真正显示**的文本 ✓（纯函数 ✓ —— 判据直接打在它身上 ✓）。
+   * ★★ 一行文件名拆成**两段**（纯函数 ✓ —— 判据直接打在它身上 ✓）：
+   *   · `head`：**允许被压**的那一段 ✓（名字放得下时 = 去掉后缀的名字 ✓；放不下时带中段省略号 ✓）；
+   *   · `ext`：**认得出来的扩展名** ✓（含那个点 ✓；认不出 ⇒ 空串 ✓）。
+   *
+   * ★ 为什么必须**分成两段**（而不是像上一版那样返回一整串 ✗）：
+   *   显示层要把 `ext` 挂到一个 `flex: 0 0 auto` 的**独立元素**上 ✓ ——
+   *   同一个可收缩元素里的文本，CSS 会从**尾部**切 ✗，而后缀正是尾部 ✗。
+   *   ⇒ "保住后缀"不能只靠预算估算 ✓，得靠**结构** ✓（见 `.dshm-file-name > [data-dshm-fs-ext]` ✓）。
    *
    * @param name - 完整文件名（目录名也走这里 ✓）。
    * @param maxUnits - 允许占多少个半角单位（省略时用 `FILE_NAME_MAX_UNITS` ✓）。
    */
-  function fitFileName(name, maxUnits) {
+  function fitFileNameParts(name, maxUnits) {
     var text = String(name === undefined || name === null ? '' : name)
     var limit = Number(maxUnits) > 0 ? Number(maxUnits) : FILE_NAME_MAX_UNITS
-    if (text === '' || fileNameUnits(text) <= limit) return text
+    if (text === '') return { head: '', ext: '' }
     var ext = fileNameExt(text)
+    var stem = ext === '' ? text : text.slice(0, text.length - ext.length)
+    // 放得下 ⇒ 原样显示；但后缀**照样单独挂** ✓ —— 短名字也不给 CSS 任何剪尾巴的机会 ✓
+    if (fileNameUnits(text) <= limit) return { head: stem, ext: ext }
     // 没有扩展名 ⇒ 普通尾部省略（留头 ✓）—— 这是"退化"那条路 ✓
-    if (ext === '') return fileNameHead(text, limit - 1) + '\u2026'
-    var head = text.slice(0, text.length - ext.length)
+    if (ext === '') return { head: fileNameHead(text, limit - 1) + '\u2026', ext: '' }
     var room = limit - 1 - fileNameUnits(ext)
     // 后缀自己就快占满整行 ⇒ 至少留一个字 ✓（宁可这一行挤一点 ✓，也**绝不**把后缀丢掉 ✓）
     if (room < 1) room = 1
-    return fileNameHead(head, room) + '\u2026' + ext
+    return { head: fileNameHead(stem, room) + '\u2026', ext: ext }
   }
 
   /**
-   * 名字那一栏大约放得下多少个**半角单位** ✓ —— 由 CSS 的实际尺寸推出来 ✓，不是拍的 ✗：
+   * 一行文件名**真正显示**的文本 ✓（= `fitFileNameParts` 两段接起来 ✓）——
+   * 上一单的判据打的就是它 ✓（"有扩展名 ⇒ 显示的必须以扩展名结尾"✓），这个入口继续留着 ✓。
+   */
+  function fitFileName(name, maxUnits) {
+    var parts = fitFileNameParts(name, maxUnits)
+    return parts.head + parts.ext
+  }
+
+  /**
+   * 名字**头部**那一栏大约放得下多少个**半角单位** ✓ —— 由 CSS 的实际尺寸推出来 ✓，不是拍的 ✗：
    *
-   *   · 面板宽 = `--dshm-files-w` = `min(64vw, 264px)` ⇒ 取最窄的那一档 264 ✓；
+   *   · 面板宽 = `--dshm-files-w` = `min(64vw, 264px)` ✓ —— ★ 264 只是**上限** ✗：
+   *     视口只要小于 412.5px（375 / 360 / 320 都比它小 ✓），`64vw` 先到 ⇒ 面板更窄 ✓；
+   *   · ★ round 198 补上上一版漏掉的一项：`#dsh-mobile-sheet-body` 的 `padding: 10px 10px` ✓ = **20** ✓
+   *     （上一版只算了 `.dshm-file-head` 的 4 ✓ ⇒ 预算系统性偏大 ✓）；
    *   · 一行里除名字外还占掉：左右内边距 4 + 图标 22 + 两个 gap 22 + 「⋯」32 = 80 ✓；
-   *   · 名字字号 14px（见 `.dshm-file-head` ✓）⇒ 一个半角单位 ≈ 7px ✓；
-   *   ⇒ (264 - 80) / 7 ≈ 26 个单位，再乘约 0.85 的保守系数 ⇒ **22** ✓。
+   *   · 名字字号 14px ⇒ 上一版按"一个半角单位 ≈ 7px"估 ✓ —— ★ 实测这颗系数偏小 ✗：
+   *     SF Pro 14px 下 22 个数字 = **187px**（按 7px/单位只有 154px ✗）⇒ 它只能算个保守近似 ✓。
+   *   ⇒ (264 - 100) / 7 ≈ 23 个单位，再乘保守系数 ⇒ **22** ✓。
    *
-   * 估算只负责"别溢出太多" ✓ —— 真正兜底的是 `.dshm-file-name` 上那条 CSS 省略 ✓
-   * （估算偏小 = 早一点省略 ✓；偏大 = CSS 再切一次 ✗ ⇒ 所以宁小不大 ✓）。
+   * ★★ 这一版最关键的变化：**这个数字不再决定后缀的生死** ✓。
+   *   它只决定"中段省略从哪里开始" ✓ —— 后缀挂在 `flex: 0 0 auto` 的独立元素上 ✓，
+   *   所以就算它偏大（真实渲染更宽 ✓），被 CSS 剪掉的也只是**头部**那一段的尾巴 ✓，
+   *   永远剪不到后缀 ✓（上一版正是"估算偏大 ⇒ CSS 从尾部补刀 ⇒ 后缀第一个没"✗）。
    */
   var FILE_NAME_MAX_UNITS = 22
 
@@ -20981,19 +21018,37 @@
   var ICON_FILE_SHEET = svgIcon('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 9v12"/>', 18)
   var ICON_FILE_CODE = svgIcon('<path d="M9 7l-5 5 5 5"/><path d="M15 7l5 5-5 5"/>', 18)
   var ICON_FILE_ARCHIVE = svgIcon('<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>', 18)
+  /**
+   * ★ round 198：PDF 单独一族用的字形 ✓ —— 与其它族**长得不一样**才谈得上"分得开" ✓：
+   *   `doc` / `other` 是**没有字的一页纸** ✓，这一颗是"一页纸带两行" ✓。
+   *   同网格（24 ✓）/ 同线宽（1.7 ✓）/ `currentColor` ✓ —— 与上面那一排同一套 ✓。
+   */
+  var ICON_FILE_PDF = svgIcon('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M8.5 14h7"/><path d="M8.5 17.5h7"/>', 18)
 
-  /** 扩展名 → 族 ✓（图 / 文 / 表 / 码 / 压缩 ✓；不在表里的都是 `other` ✓）。 */
+  /**
+   * 扩展名 → 族 ✓（图 / 表 / **PDF** / 码 / 压缩 / 文 ✓；不在表里的都是 `other` ✓）。
+   *
+   * ★★ round 198 两处调整（都由用户原话决定 ✓）：
+   *   · `.pdf` **单独一族** ✓（"PDF 还是有必要单独分出来一类"✓）—— 颜色见 CSS 那颗语义红 ✓；
+   *   · `.md` / `.markdown` 从 `doc` **挪进 `code`** ✓（"Markdown 和 PDF 还是分不开"✗）——
+   *     为什么不另起一族 ✗：主题里能用的语义色就那么几颗 ✓，再切一族只能跟别人撞色 ✓
+   *     （那就不成"图标 ↔ 颜色一一对应"了 ✗）；Markdown 本来就是**纯文本源码** ✓，
+   *     与 `txt` / `docx` 那种"成品文档"分开、跟 `<>` 一族反而更贴 ✓。
+   *   ★ `sheet`（Excel ✓）用户明确说"可以明确看出来，很不错"✓ ⇒ **一个字都不动** ✗。
+   */
   var FILE_FAMILY_EXT = {
     image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif', 'avif', 'tif', 'tiff', 'ico'],
     sheet: ['csv', 'tsv', 'xls', 'xlsx', 'ods', 'numbers'],
+    pdf: ['pdf'],
     code: [
       'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'json', 'css', 'scss', 'less', 'html', 'htm', 'xml',
       'py', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'go', 'rs', 'rb', 'php',
       'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'sql', 'swift', 'dart', 'lua', 'vue',
       'svelte', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'gradle',
+      'md', 'markdown',
     ],
     archive: ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', '7z', 'rar', 'jar', 'war', 'apk', 'ipa', 'dmg', 'iso', 'pkg', 'deb', 'rpm'],
-    doc: ['md', 'markdown', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'odt', 'pages', 'tex', 'log', 'epub'],
+    doc: ['txt', 'doc', 'docx', 'rtf', 'odt', 'pages', 'tex', 'log', 'epub'],
   }
 
   /** 一个名字属于哪一族 ✓（没有扩展名 / 认不出 ⇒ `other` ✓）。 */
@@ -21001,7 +21056,7 @@
     var ext = fileNameExt(String(name === undefined || name === null ? '' : name))
     if (ext === '') return 'other'
     var key = ext.slice(1).toLowerCase()
-    var families = ['image', 'sheet', 'code', 'archive', 'doc']
+    var families = ['image', 'sheet', 'pdf', 'code', 'archive', 'doc']
     for (var i = 0; i < families.length; i++) {
       if (FILE_FAMILY_EXT[families[i]].indexOf(key) >= 0) return families[i]
     }
@@ -21012,6 +21067,8 @@
   function fileFamilyIcon(family) {
     if (family === 'image') return ICON_FILE_IMAGE
     if (family === 'sheet') return ICON_FILE_SHEET
+    // ★ round 198：PDF 单独一颗 ✓（"带两行的一页纸"✓ —— `doc` / `other` 是无字的那一页 ✓）
+    if (family === 'pdf') return ICON_FILE_PDF
     if (family === 'code') return ICON_FILE_CODE
     if (family === 'archive') return ICON_FILE_ARCHIVE
     return ICON_FILE
@@ -21069,14 +21126,30 @@
 
     var name = document.createElement('span')
     name.className = 'dshm-file-name'
+    var shownName = fitFileNameParts(entry.name, FILE_NAME_MAX_UNITS)
     /**
-     * ★ 显示文本走 `fitFileName`（**中段省略、保住扩展名** ✓）——
-     *   绝不用 CSS 的 `ellipsis` 硬凑 ✗：那种截的是尾部 ⇒ 后缀第一个没 ✗。
+     * ★★ round 198：后缀渲染成**独立元素**（`[data-dshm-fs-ext]` ✓）——
+     *   CSS 给它 `flex: 0 0 auto` ✓ ⇒ 它**在结构上不参与收缩** ⇒ 谁也剪不掉它 ✓。
+     *   上一版是把 `头…后缀` 整串塞进**同一个**可收缩元素里 ✗ ⇒ 估算一旦偏小，
+     *   CSS 就从尾部补一刀 ✗（后缀第一个没 ✗）—— 这正是用户那条反馈 ✓。
+     * 头部（`[data-dshm-fs-head]` ✓）才是允许收缩 + `overflow: hidden` 的那一个 ✓：
+     *   中段省略由 JS 算 ✓、尾部由 CSS 保证 ✓，两条各管一段 ✓。
+     */
+    var nameHead = document.createElement('span')
+    nameHead.setAttribute('data-dshm-fs-head', '1')
+    nameHead.textContent = shownName.head
+    name.appendChild(nameHead)
+    if (shownName.ext !== '') {
+      var nameExt = document.createElement('span')
+      nameExt.setAttribute('data-dshm-fs-ext', '1')
+      nameExt.textContent = shownName.ext
+      name.appendChild(nameExt)
+    }
+    /**
      * 完整名字同时留在 `title` 与 `data-dshm-fs-name` 上 ✓：
      *   · 长按看全名、桌面悬停看全名 ✓；
      *   · 验收脚本 / 工具按**真名**定位那一行 ✓（拿被截过的文本反推真名必然错 ✗）。
      */
-    name.textContent = fitFileName(entry.name, FILE_NAME_MAX_UNITS)
     name.title = String(entry.name === undefined || entry.name === null ? '' : entry.name)
     head.appendChild(name)
 
@@ -22905,12 +22978,15 @@
     /** ★ 交付那一段（帧 → multipart `Response` ✓）：测试直接调它 ✓（纯函数，不需要浏览器 ✓）。 */
     buildBinaryResponse: buildBinaryResponse,
     /**
-     * ★ 文件名那一行**显示什么** ✓（中段省略、保住扩展名 ✓）—— 纯函数 ✓，
+     * ★ 文件名那一行**拆两段**的那个纯函数 ✓（`head` 允许被压 ✓ / `ext` 绝不 ✗）——
      *   判据直接打在它身上 ✓（见 `packages/client/test/boot-surface.test.ts` ✓），
      *   而不是打在测试里另抄一份的复制品上 ✗。
      */
+    fitFileNameParts: fitFileNameParts,
+    /** ★ 一行文件名**真正显示**的文本 ✓（= 上面两段接起来 ✓；上一单那条判据仍打它 ✓）。 */
     fitFileName: fitFileName,
     fileNameFamily: fileNameFamily,
+    fileFamilyIcon: fileFamilyIcon,
     fileNameExt: fileNameExt,
     fileNameUnits: fileNameUnits,
     FILE_NAME_MAX_UNITS: FILE_NAME_MAX_UNITS,
