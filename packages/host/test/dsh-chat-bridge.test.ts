@@ -36,6 +36,41 @@ function fakeGateway(table: Record<string, unknown> = {}): { call: GatewayCaller
 
 const args = (value: Record<string, unknown>) => ({ args: value })
 
+/**
+ * ★★ 真形状的 `SessionSummary` ✓ —— **一个字段都不是我编的** ✓。
+ *
+ * 来源：`app.asar` 的 `dsh-api-session-controller/lib/typert.host.js` 里
+ * `session/list` 的 `result.create`（`..._session_list_result$schema` ✓），
+ * 它就是 `SessionListValue = { items: SessionSummary[] }` ✓，而 `SessionSummary` 是：
+ *
+ * ```
+ * { agentAvailable: boolean, sessionId: string, updatedAt: number, running: boolean, blank: boolean,
+ *   parentSessionId?: string, origin?: 'subagent', cwd?: string,
+ *   projections?: { kind: 'cached'|'sequenced', asOfSeq: number, values: { title?: string|null, … } } }
+ * ```
+ *
+ * ★★ 为什么夹具必须是这个样子 ✗（第 106 与第 108 轮的同一个教训 ✓）：
+ *   夹具给 `{ sessions:[{ id:'x' }] }` ⇒ 桥"只认 `id`"的 bug 被**掩住** ⇒
+ *   **单测全绿而真机里会话列表恒为空** ✓。夹具是**证词** ✓，证词与事实不符，绿就是假的 ✗。
+ */
+function realSummary(sessionId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    agentAvailable: true,
+    sessionId,
+    updatedAt: 1700000000000,
+    running: false,
+    blank: false,
+    cwd: '/Volumes/Data/workspace/工程设计',
+    projections: { kind: 'sequenced', asOfSeq: 12, values: { title: `标题-${sessionId}` } },
+    ...extra,
+  }
+}
+
+/** 真形状的整包返回 ✓（`invoke` 那条路给的就是它 ✓ —— 没有 `ok` 信封 ✓）。 */
+function realList(...items: Array<Record<string, unknown>>): Record<string, unknown> {
+  return { items }
+}
+
 describe('mobile/dsh 桥：端点分发', () => {
   it('不认识的端点 ⇒ undefined（让它继续往下走）', async () => {
     const { call } = fakeGateway()
@@ -124,7 +159,7 @@ describe('mobile/dsh 桥：坏参数要说得出话', () => {
  */
 describe('unwrap：两种真实形状都要解得出', () => {
   it('★ 信封形（`dispatchRpc` 那条路）：{ok:true,value} ⇒ 取 value', async () => {
-    const { call } = fakeGateway({ 'session/list': { ok: true, value: { sessions: [{ id: 's-envelope' }] } } })
+    const { call } = fakeGateway({ 'session/list': { ok: true, value: realList(realSummary('s-envelope')) } })
     const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({}))) as {
       ok: boolean
       sessions: Array<Record<string, unknown>>
@@ -135,14 +170,14 @@ describe('unwrap：两种真实形状都要解得出', () => {
   })
 
   it('★★ 裸值形（`invoke` 那条路 = 真机上走的就是它）：没有 ok 字段 ⇒ 整体当业务值', async () => {
-    // 这一条就是真机的形状：`session/list` 回 `{sessions:[…]}`，**没有** ok 字段
-    const { call } = fakeGateway({ 'session/list': { sessions: [{ id: 's-bare' }] } })
+    // 这一条就是真机的形状：`session/list` 回 `{items:[…]}`，**没有** ok 字段
+    const { call } = fakeGateway({ 'session/list': realList(realSummary('s-bare')) })
     const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})) as {
       ok: boolean
       sessions: Array<Record<string, unknown>>
     })
     assert.equal(result.ok, true, '裸值必须被当成业务值，而不是"网关拒绝"')
-    assert.equal(result.sessions.length, 1, '裸值里的 sessions 必须真的被归一出来（否则手机上还是空清单）')
+    assert.equal(result.sessions.length, 1, '裸值里的 items 必须真的被归一出来（否则手机上还是空清单）')
     assert.equal(result.sessions[0]?.['id'], 's-bare')
   })
 
@@ -156,6 +191,10 @@ describe('unwrap：两种真实形状都要解得出', () => {
      * 失败信封**一定**带 `error` 对象 ✓；只按"`ok` 是布尔"判定的话 ✓，
      * 一个碰巧带 `ok:false` 字段的**业务值**会被误报成「网关拒绝了这次调用」✗
      * —— 那正是本仓最忌的"把无害差异当故障"✓。判据见 `gateway-rpc.ts` 的 `readHostRpcResult` ✓。
+     *
+     * ★ 外层那三个键（`ok` / `sessions` / `id`）**故意**留成老式写法 ✓：
+     *   这一条要证的只是"业务值里的 `ok:false` 不是失败信号"✓，
+     *   与条目叫什么名字无关 ✓（真形状那条已由上面两条断言 ✓）。
      */
     const { call } = fakeGateway({ 'session/list': { ok: false, sessions: [{ id: 's-still-here' }] } })
     const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})) as {
@@ -167,22 +206,71 @@ describe('unwrap：两种真实形状都要解得出', () => {
   })
 })
 
-describe('normalizeSessions：宽进 + 白名单', () => {
-  it('sessions 与 items 两种都认', () => {
-    const a = normalizeSessions({ sessions: [{ id: 'a', title: '甲' }] }) as Array<Record<string, unknown>>
-    const b = normalizeSessions({ items: [{ id: 'b', title: '乙' }] }) as Array<Record<string, unknown>>
-    assert.equal(a.length, 1)
-    assert.equal(a[0]?.['id'], 'a')
-    assert.equal(b[0]?.['id'], 'b')
+/**
+ * ★★ 第 108 轮的回归断言 ✓ —— **真机会话列表恒为空** 的那个根因 ✓。
+ *
+ * 根因（已证实 ✓）：真 DSH 的 `SessionSummary` 里**没有 `id`** ✗，它叫 **`sessionId`** ✓；
+ * 桥改前只读 `record['id']` ⇒ `if (id.length === 0) continue` ⇒ **每一条都被丢掉** ✗
+ * ⇒ `curl /mobile/chat/sessions` = `{"ok":true,"sessions":[]}` ✓（实测 ✓）。
+ * 对照：`~/.dsh/sessions` 里 **6 个工作区、378 个会话目录** ✓ —— 空表是**被过滤的** ✗。
+ */
+describe('normalizeSessions：真形状（sessionId / items）与老式形状（id / sessions）都要出', () => {
+  it('★★★ 真形状：{items:[{sessionId,…}]} ⇒ 不再被丢掉（改前这里的长度是 0）', () => {
+    const out = normalizeSessions(realList(realSummary('s1'))) as Array<Record<string, unknown>>
+    assert.equal(out.length, 1, '真形状的条目必须出得来 —— 改前 sessionId 认不出，整条被 continue 丢掉')
+    assert.equal(out[0]?.['id'], 's1', '我们对外仍叫 id（前端与壳都按 id 读）')
   })
 
-  it('没有 id 的条目丢掉（点不动的东西不进界面）', () => {
-    const out = normalizeSessions({ sessions: [{ title: '没有 id' }, { id: 'ok' }, null, 42] }) as unknown[]
+  it('★★ 老式形状：{sessions:[{id}]} ⇒ 兼容照样出（回退到 id）', () => {
+    const out = normalizeSessions({ sessions: [{ id: 'old-1', title: '老的' }] }) as Array<Record<string, unknown>>
     assert.equal(out.length, 1)
-    assert.equal((out[0] as Record<string, unknown>)['id'], 'ok')
+    assert.equal(out[0]?.['id'], 'old-1')
   })
 
-  it('状态位归一：running/busy、awaiting/awaitingApproval、current/isCurrent/active', () => {
+  it('两个键都在 ⇒ 以 sessionId 为准（与真形状一致）', () => {
+    const out = normalizeSessions(realList({ sessionId: 'real', id: '假的' })) as Array<Record<string, unknown>>
+    assert.equal(out[0]?.['id'], 'real')
+  })
+
+  it('★ 空 items ⇒ []，不崩', () => {
+    assert.deepEqual(normalizeSessions({ items: [] }), [])
+    assert.deepEqual(normalizeSessions({ sessions: [] }), [])
+  })
+
+  it('两个键都没有的条目丢掉（点不动的东西不进界面）', () => {
+    const out = normalizeSessions({
+      items: [realSummary('keep'), { title: '两个键都没有' }, null, 42],
+    }) as Array<Record<string, unknown>>
+    assert.deepEqual(out.map((item) => item['id']), ['keep'])
+  })
+
+  it('★★ 标题的真身在 projections.values.title ⇒ 要取出来（顶层没有 title ✗）', () => {
+    const out = normalizeSessions(realList(realSummary('s1'))) as Array<Record<string, unknown>>
+    assert.equal(out[0]?.['title'], '标题-s1', '真形状里 title 只在投影里 ⇒ 不取它界面上就没有标题')
+  })
+
+  it('★ 投影里没有 title ⇒ 空串（**不编** ✗）', () => {
+    const out = normalizeSessions(realList({ sessionId: 's1', projections: { kind: 'cached', asOfSeq: 1, values: {} } })) as Array<
+      Record<string, unknown>
+    >
+    assert.equal(out[0]?.['title'], '')
+  })
+
+  it('★ 真形状的字段逐个对上：updatedAt / running / blank', () => {
+    const out = normalizeSessions(realList(realSummary('s1', { updatedAt: 1700000000123, running: true, blank: true }))) as Array<
+      Record<string, unknown>
+    >
+    assert.equal(out[0]?.['updatedAt'], 1700000000123)
+    assert.equal(out[0]?.['running'], true)
+    assert.equal(out[0]?.['blank'], true, 'blank 是真形状的顶层字段 ⇒ 要读出来（改前没读 ✗）')
+  })
+
+  it('★ status 不是真形状的字段 ⇒ 恒为空串（**不编** ✗）', () => {
+    const out = normalizeSessions(realList(realSummary('s1'))) as Array<Record<string, unknown>>
+    assert.equal(out[0]?.['status'], '', '真形状里没有 status ✗ ⇒ 不许拿别的字段冒充它')
+  })
+
+  it('状态位归一：running/busy、awaiting/awaitingApproval、current/isCurrent/active（都是老式回退 ✓）', () => {
     const out = normalizeSessions({
       sessions: [
         { id: 'a', busy: true, awaiting: true, isCurrent: true },
@@ -197,9 +285,11 @@ describe('normalizeSessions：宽进 + 白名单', () => {
     assert.equal(out[1]?.['current'], true)
   })
 
-  it('坏输入不抛：null / 数组 / 字符串 ⇒ 空表', () => {
+  it('坏输入不抛：null / 数组 / 字符串 / 容器不是数组 ⇒ 空表', () => {
     assert.deepEqual(normalizeSessions(null), [])
     assert.deepEqual(normalizeSessions('x'), [])
+    assert.deepEqual(normalizeSessions(42), [])
+    assert.deepEqual(normalizeSessions({ items: 'not-array' }), [])
     assert.deepEqual(normalizeSessions({ sessions: 'not-array' }), [])
   })
 })

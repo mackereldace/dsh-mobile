@@ -15,7 +15,9 @@
  * `$schema` 编解码器。已核实的部分：
  *
  * ```
- * session/list    参数 _request（**空请求**即可）；返回 { sessions | items: [...] }
+ * session/list    参数 _request（**空请求**即可）；返回 { items: SessionSummary[] } ✓
+ *                 （★ 真形状只有 items ✓ —— 从 `dsh-api-session-controller` 的 typert 描述符读的 ✓；
+ *                   `sessions` 是我们为老式替身留的**回退** ✓，不是真形状 ✗）
  * session/page    参数 request = { address:{kind:"session",sessionId} | {kind:"subagent",…},
  *                                  throughSeq / beforeSeq / maxMessages / turnWindow / … }
  *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore, asOfSeq,
@@ -174,32 +176,90 @@ async function createSession(deps: DshChatDeps, args: Record<string, unknown>, s
 // ────────────────────────────── 归一化（都是纯函数 ✓，单测直接打 ✓）──────────────────────────────
 
 /**
+ * 读一个字符串字段 ✓（真形状里 `title` 是 `string | null` ⇒ 非字符串一律当空串 ✓）。
+ *
+ * @param key 纯 ASCII 键名 ✓（`sessionId` / `title` 是真形状的键 ✓，`id` 是**老式兼容**键 ✓）。
+ */
+function stringField(source: Record<string, unknown>, key: string): string {
+  const value = source[key]
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * ★ 取投影值（`projections.values` ✓ —— `title` 的**真身在这里** ✓）。
+ *
+ * 真形状（`SessionListValue` 的 zod 描述符 ✓，从 `app.asar` 的
+ * `dsh-api-session-controller/lib/typert.host.js` 读的 ✓）里，`SessionSummary` 的顶层字段只有
+ * `agentAvailable` / `sessionId` / `updatedAt` / `running` / `blank` ✗ ——
+ * **没有顶层的 `title`** ✗：会话标题是**投影**，挂在 `projections.values.title` ✓
+ * （同层还有 `todos` / `inbox` / `agentPreset` / `title` ✓）。
+ * 认不出投影就返回空表 ✓（**不猜** ✗）。
+ */
+function projectionValues(record: Record<string, unknown>): Record<string, unknown> {
+  const projections = record['projections']
+  if (projections === null || typeof projections !== 'object') return {}
+  const values = (projections as Record<string, unknown>)['values']
+  return values !== null && typeof values === 'object' ? (values as Record<string, unknown>) : {}
+}
+
+/**
  * `session/list` 的返回 ⇒ 我们那套会话条目 ✓。
  *
- * 宽进：`value.sessions` 与 `value.items` 两种都认（手机那边本来就在两个名字之间试 ✓ ——
- * 与其让每台手机各猜一遍，不如在这里认下来 ✓）。
+ * ## 容器：`value.items` 是真形状 ✓、`value.sessions` 是**历史写法** ✓
+ *
+ * 真 DSH（`0.2.0-rc.2` ✓）的 `SessionListValue` 就是 `{ items: SessionSummary[] }` ✓。
+ * `sessions` 一并认下来 ✓ —— 手机那边本来就在两个名字之间试 ✓，
+ * 与其让每台手机各猜一遍，不如在这里认下来 ✓。
+ *
+ * ## ★★ 条目 id：**`sessionId` 是真名** ✗ ✗（第 108 轮的真机故障 ✓）
+ *
+ * `SessionSummary` 里**没有 `id`** ✗ —— 它叫 `sessionId` ✓（同上的 typert 描述符 ✓）。
+ * 改前只认 `record['id']` ⇒ 真机上**每一条都被 `continue` 丢掉** ✓ ⇒
+ * `GET /mobile/chat/sessions` 恒为 `{"ok":true,"sessions":[]}` ✓（实测 ✓），
+ * 而 `~/.dsh/sessions` 里**6 个工作区、378 个会话目录** ✓ —— 空表是**被过滤的** ✗，不是没有 ✓。
+ *
+ * ⇒ 这里读 **`sessionId` 优先** ✓（与真形状一致 ✓）、`id` 作**老式回退** ✓。
+ *   ★ 我们**对外的** `id` 键名不变 ✓（前端与壳都按 `id` 读 ✓ —— 见模块注释"不发明契约"✓）。
+ *
+ * ## ★ 其余字段与真形状的对照（第 108 轮逐条核过 ✓）
+ *
+ * | 我们用到的 | 真名 / 位置 | 处置 |
+ * |---|---|---|
+ * | `id` | **`sessionId`**（顶层 ✓ 必需 ✓） | 改前只认 `id` ✗ ⇒ 改成 `sessionId` 优先 + `id` 回退 ✓ |
+ * | `title` | **`projections.values.title`** ✓（`string \| null` ✓，**顶层没有** ✗） | 改前只读顶层 ✗ ⇒ 改成投影优先 + 顶层回退 ✓ |
+ * | `updatedAt` | `updatedAt` ✓（顶层 ✓ `number` ✓） | 名对 ✓，不变 ✓ |
+ * | `running` | `running` ✓（顶层 ✓ `boolean` ✓） | 名对 ✓；`busy` 只作老式回退 ✓ |
+ * | `blank` | **`blank`** ✓（顶层 ✓ `boolean` ✓） | 改前**没读** ✗ ⇒ 补上 ✓ |
+ * | `status` | **不存在** ✗（`SessionSummary` 里没有这个字段 ✗） | 保留为老式回退 ⇒ 真机上恒为空串 ✓（**不编** ✗） |
+ * | `awaitingApproval` | **不存在** ✗（同上 ✗） | 保留为老式回退 ⇒ 真机上恒为 `false` ✓（**不编** ✗） |
+ * | `current` | **不存在** ✗（"当前会话"是**客户端**拿 `tunnel.sessionId` 比出来的 ✓，见 `boot.js` ✓） | 保留为老式回退 ✓（真机上不由网关给 ✓） |
  */
 export function normalizeSessions(value: unknown): unknown[] {
   const container = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-  const raw = Array.isArray(container['sessions'])
-    ? (container['sessions'] as unknown[])
-    : Array.isArray(container['items'])
-      ? (container['items'] as unknown[])
+  const raw = Array.isArray(container['items'])
+    ? (container['items'] as unknown[])
+    : Array.isArray(container['sessions'])
+      ? (container['sessions'] as unknown[])
       : []
   const out: unknown[] = []
   for (const item of raw) {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
-    const id = typeof record['id'] === 'string' ? (record['id'] as string) : ''
-    if (id.length === 0) continue // 没有 id 的条目对界面没有意义（点不动）⇒ 丢掉
+    // ★ `sessionId` 优先 ✓（真形状 ✓），`id` 回退 ✓（老式样本 / 我们的测试替身 ✓）
+    const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id')
+    if (id.length === 0) continue // 两个都没有的条目对界面没有意义（点不动）⇒ 丢掉
+    const values = projectionValues(record)
+    const projectionTitle = stringField(values, 'title')
     out.push({
       id,
-      title: typeof record['title'] === 'string' ? (record['title'] as string) : '',
-      status: typeof record['status'] === 'string' ? (record['status'] as string) : '',
+      // ★ 标题的真身在投影里 ✓；顶层那个只作老式回退 ✓
+      title: projectionTitle.length > 0 ? projectionTitle : stringField(record, 'title'),
+      status: stringField(record, 'status'), // ★ 真形状里**没有** status ✗ ⇒ 恒为空串 ✓
       running: record['running'] === true || record['busy'] === true,
       awaitingApproval: record['awaitingApproval'] === true || record['awaiting'] === true,
       current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
       updatedAt: typeof record['updatedAt'] === 'number' ? (record['updatedAt'] as number) : null,
+      blank: record['blank'] === true,
     })
   }
   return out
