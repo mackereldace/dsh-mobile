@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from './devices.ts'
-import { machineDisplayName, notifyTextFor, shouldNotifyEvent } from './notify-text.ts'
+import { machineDisplayName, notifyTextFor, questionTextFor, shouldNotifyEvent } from './notify-text.ts'
 import { localMachineName } from './lan-trust.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
@@ -841,10 +841,39 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   function installApprovalPush(): void {
     /**
-     * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓ ——
-     *   选择卡的事件类型名还没取证到 ✓（取证办法见 40 号文档，诊断已经能在手机上读到 ✓），
-     *   拿到之后**只改那个清单一行** ✓，通道与"点击落到会话"都已共用 ✓。
+     * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓。
+     * ★ 2026-10-05 取证后的更正 ✗✗：原先这里写着"选择卡的事件类型名还没取证到、
+     *   拿到之后只改那个清单一行" —— 那个前提**是错的**：
+     *   选择卡**没有**对应的会话事件类型（DSH 的 `SessionEventMap` 里以 `/asked` 结尾的
+     *   只有 `approval/asked` ✓），它落下来是一条 `tool/call`（`name === 'ask_user_question'` ✓）。
+     *   ⇒ 所以它在下面那条订阅里走**按工具名**的独立分支（`notifyQuestion` ✓），
+     *     而不是往事件类型清单里加一行 ✗（事件清单 vs 工具名，语义不混 ✓）。
      */
+    /**
+     * 选择卡通知道**独立入口**（不是 `shouldNotifyEvent` 的入口 ✗）：
+     * 它按**工具名**判定，不按事件类型 —— 证据与理由见 `notify-text.ts` 文件头那条更正 ✓。
+     * 文案仍是 `notifyTextFor` 的中性分支拼的（这一点由 `questionTextFor` 保证 ✓）。
+     */
+    const notifyQuestion = (argumentsText: unknown, sessionId: string | undefined): void => {
+      try {
+        const composed = questionTextFor(argumentsText, machineDisplayName(localMachineName()), sessionId)
+        /** 解析不出内容 ⇒ **不推** ✗（宁可少一条，也不推一条无信息的通知 ✓）。 */
+        if (composed === undefined) return
+        try {
+          mobileHost.recordDiagnostic(
+            'selection-card-push',
+            composed.title + '｜' + composed.body.replace(/\s+/g, ' ').slice(0, 80),
+          )
+        } catch (error) {
+          void error
+        }
+        const first = mobileHost.deviceCall('notify', composed.body, undefined, sessionId, composed.title)
+        if (!first.ok) mobileHost.deviceCall('show', composed.body, undefined, sessionId, composed.title)
+      } catch (error) {
+        console.warn('[dsh-mobile] 选择卡推送失败（不影响其余功能）：', error)
+      }
+    }
+
     const notify = (type: string, payload: unknown): void => {
       try {
         const record = (payload ?? {}) as {
@@ -871,10 +900,21 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           // ★ 标题一起落审计 ✗：真机上"通知栏里到底写了什么"只有这一条能回答 ✓
           //   （推送返回 ok 只说明"发出去了" ✓）。正文压成一行 —— 审计是一条一行 ✓。
-          mobileHost.recordDiagnostic(
-            'approval-push',
-            composed.title + '｜' + text.replace(/\s+/g, ' ').slice(0, 80),
-          )
+          /**
+           * ★ 2026-10-05 第三轮：通知栏里**只有那一句** ✗ ⇒ **原始细节改落这里** ✓
+           *   （`composed.detail` ✓，60 字截断 ✓）—— 用户看不到那串原始英文了 ✓，
+           *   但自检页 / 审计里照样查得到"当时到底要批准什么" ✓（可追溯这条不许丢 ✗）。
+           * ★ 只在"命中关键词"时才两者不同 ✓（没命中时正文本身就是原始细节 ⇒ 不重复写一遍 ✗）。
+           * ★ 上限从 80 放到 200 ✓：标题 + 正文 + `｜原文 ` + 60 字细节要放得下 ✓。
+           */
+          const audited = [
+            composed.title,
+            text,
+            composed.detail.length > 0 && composed.detail !== text ? '原文 ' + composed.detail : '',
+          ]
+            .filter((part) => part.length > 0)
+            .join('｜')
+          mobileHost.recordDiagnostic('approval-push', audited.replace(/\s+/g, ' ').slice(0, 200))
         } catch (error) {
           void error
         }
@@ -922,6 +962,16 @@ export function apply(ctx: Context, config: Config = {}): void {
           return undefined
         }
 
+        /**
+         * ★ 选择卡去重：`tool/call` 的 `callId` 是天然主键 ✓。
+         *   为什么需要 ✗：同一条 `tool/call` 会**再送一次** —— 断线重连 / 会话重放
+         *   （`agent/inbox/spliced` 那条链路）时事件是重新发的 ✓ ⇒ 没有它就会连推两条 ✗。
+         *   上限 256 条滚动（先来先出 ✓）—— 只用来挡"刚刚才推过的那些"，
+         *   不是历史账本，所以不必精确 ✓。
+         */
+        const notifiedQuestionCalls = new Set<string>()
+        const NOTIFY_QUESTION_CALL_MAX = 256
+
         const onSessionEvent = (_session: unknown, event: unknown): void => {
           const record = (event ?? {}) as { type?: unknown; data?: { toolName?: unknown; reason?: unknown } }
           const kind = String(record.type ?? '')
@@ -932,6 +982,30 @@ export function apply(ctx: Context, config: Config = {}): void {
             mobileHost.recordDiagnostic('session-event', kind.slice(0, 60) || '(no-type)')
           } catch (error) {
             void error
+          }
+          /**
+           * ★ 选择卡：DSH 里它**不是**会话事件类型，而是一条普通 `tool/call`
+           *   （`name === 'ask_user_question'`，负载在 `data.arguments` 的 JSON 里 ✓）。
+           *   ⇒ 所以这条判据按**工具名**，放在 `shouldNotifyEvent`（按事件类型）**之前** ✓，
+           *     两者语义不混 ✓（别把工具名塞进 `NOTIFY_EVENT_SUFFIXES` ✗）。
+           * ★ 为什么必须在 `tool/call` 这一刻推 ✗✗：本机实测 `ask_user_question` 是
+           *   **非 timed** 模式（`request/header` 里它的参数只有 `['questions']`、没有 `timeout` ✓）
+           *   ⇒ `ctx.userQuestions.ask()` 会**阻塞等待**解答 ✓ ⇒ 等 `tool/result` 就是"答完才通知"✗。
+           */
+          if (
+            kind === 'tool/call' &&
+            String((record as { data?: { name?: unknown } }).data?.name ?? '') === 'ask_user_question'
+          ) {
+            const callId = String((record as { data?: { callId?: unknown } }).data?.callId ?? '')
+            if (callId.length > 0 && !notifiedQuestionCalls.has(callId)) {
+              notifiedQuestionCalls.add(callId)
+              if (notifiedQuestionCalls.size > NOTIFY_QUESTION_CALL_MAX) {
+                const oldest = notifiedQuestionCalls.values().next().value
+                if (typeof oldest === 'string') notifiedQuestionCalls.delete(oldest)
+              }
+              notifyQuestion((record as { data?: { arguments?: unknown } }).data?.arguments, sessionIdOf(_session, event))
+            }
+            return
           }
           if (!shouldNotifyEvent(kind)) return
           notify(kind, { ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) })

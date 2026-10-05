@@ -9,16 +9,23 @@
  * 2. **可以被断言**：文案是纯函数，电脑上就能钉住，
  *    不必等真机上"看起来不对"才发现（本仓在选择器/类型名上栽过多次）。
  *
- * ## 触发规则：明写清单 + 一条结构规律
+ * ## 触发规则：明写清单 + 一条结构规律（都只管**会话事件类型**）
  *
- * 唯一已知的类型是 `approval/asked`——"agent 在问你"这类事件的形状就是
- * "某动作 + 斜杠 + asked"（选择卡也属于"在问你"）。
- * 所以除了明写清单，还按这条**结构规律**认一类。
+ * 唯一已知的类型是 `approval/asked`——审批这类"agent 在问你"的形状就是
+ * "某动作 + 斜杠 + asked"。所以除了明写清单，还按这条**结构规律**认一类。
  *
  * ★ 为什么敢这么放宽：宿主**把每一个** session/event 的类型都记进了诊断，
  *   而诊断现在能在手机的自检页读到 ⇒ 万一多推了一条，
  *   回头**看得到是哪个类型**，再把清单收紧即可——不是"猜了就完事"。
- * ★ 反之不做的代价：选择卡一直收不到通知（用户报的就是它）。
+ *
+ * ★★ 更正（2026-10-05 取证 ✓）：这条结构规律**认不出选择卡** ✗ ——
+ *   原先这里写着"选择卡也属于'在问你'、事件类型大概是 `question/asked`"，
+ *   那是**推断**，已被证据否掉：DSH 的 `SessionEventMap` 里
+ *   **以 `/asked` 结尾的只有 `approval/asked`** 一个，根本没有 question/select 类事件；
+ *   选择卡落下来是一条**普通工具调用** `tool/call`（`name === 'ask_user_question'`，
+ *   负载在 `data.arguments` 的 JSON 里 ✓）。
+ *   ⇒ 所以选择卡走 {@link questionTextFor} 这条**独立入口**（按工具名判定 ✓），
+ *     而**不是**往下面那个事件类型清单里塞一个工具名 ✗（事件清单 vs 工具名，语义不能混 ✓）。
  *
  * ★ 纪律：不合规律的类型**不通知**（宁可少推一条，也不要凭"看起来像"就推）。
  */
@@ -45,10 +52,18 @@ export function shouldNotifyEvent(type: string | undefined | null): boolean {
 /** 原始细节那一行的上限（**含**省略号 ⇒ 整行恒 ≤ 这个数）。 */
 export const NOTIFY_DETAIL_MAX = 60
 
-/** 一句人话那一行的上限。 */
+/**
+ * 一句人话那一行的上限（★ 现在是**映射表的不变量**而不是运行时切片 ✓：
+ * 兜底那句已被用户 2026-10-05 第二轮否掉 ✗ ⇒ 每一条映射都 ≤ 这个数 ✓，由断言钉住 ✓）。
+ */
 export const NOTIFY_SENTENCE_MAX = 40
 
-/** 标题 + 正文的总长上限（超过就被系统通知栏截掉尾巴）。 */
+/**
+ * 标题 + 正文的总长上限（超过就被系统通知栏截掉尾巴）。
+ * ★ 2026-10-05 第三轮起，通知正文恒为**一行** ✓（审批那一支 ≤ 40 字 ✓、中性那一支 ≤ 160 字 ✓
+ *   —— 后者由调用方 `questionTextFor` 收到 60 字 ✓）⇒ 这个上限**结构上恒满足** ✓，
+ *   留它是因为**断言**（真机样本的总长 ✓）与将来改文案时的那道线都钉在它上面 ✓。
+ */
 export const NOTIFY_TOTAL_MAX = 120
 
 /** 标题里那个电脑名的上限（超过就留前 24 字 + `…`）—— 完整域名可以很长，标题不该被它撑爆。 */
@@ -79,7 +94,9 @@ export function machineDisplayName(raw?: string): string {
  *   （提权 / 写工作区外 / 删文件 / 装依赖 / 联网 ✓），硬编码一句会**张冠李戴** ✗
  *   —— 用户看到"允许写文件"却其实是"允许删文件"，比看不懂英文更糟 ✗。
  * ★ 先命中者胜 ✓（顺序即优先级：`danger-full-access` 比"工作区外"更具体 ⇒ 排前面 ✓）。
- * ★ 一条都不命中 ⇒ 由 `humanSentenceFor` 退回带工具名的一句 ✓（**绝不空着** ✗）。
+ * ★ 一条都不命中 ⇒ **不写第一行** ✗✗（2026-10-05 第二轮用户反馈 ✓）——
+ *   退回「允许执行 <工具名>」/「允许一次需要批准的操作」都是**通用兜底话术** ✗：
+ *   两者都看不出"要批准什么"✗；宁可只剩**原始细节那一行** ✓（那才是具体的那件事 ✓）。
  */
 export const HUMAN_SENTENCES: ReadonlyArray<readonly [RegExp, string]> = [
   [/danger-full-access/i, '允许一次提权到 danger-full-access'],
@@ -92,21 +109,26 @@ export const HUMAN_SENTENCES: ReadonlyArray<readonly [RegExp, string]> = [
 ]
 
 /**
- * 原始文本 ⇒ 一句人话（**≤ `NOTIFY_SENTENCE_MAX` 字**）。
+ * 原始文本 ⇒ 一句人话（**只有关键词命中时才有**；一条都不命中 ⇒ 空串）。
  *
- * @param raw  原始文本（工具名 + 原因，宿主给什么就用什么 ✓）
- * @param tool 工具名（一条关键词都没命中时，用它凑一句能念的话 ✓）
+ * ★ 为什么不再退回「允许执行 <工具名>」✗：「允许执行」是**通用套壳** ✓，
+ *   而工具名本身又原样出现在下面那一行原始细节里 ⇒ 等于把同一件事说两遍 ✗
+ *   （用户 2026-10-05 第二轮：这类**通用话**一律不要 ✗）。
+ *
+ * @param raw 原始文本（工具名 + 原因，宿主给什么就用什么 ✓）
  */
-export function humanSentenceFor(raw: string, tool = ''): string {
+export function humanSentenceFor(raw: string): string {
   for (const [pattern, sentence] of HUMAN_SENTENCES) {
     if (pattern.test(raw)) return sentence
   }
-  const name = tool.trim()
-  return (name.length > 0 ? `允许执行 ${name}` : '允许一次需要批准的操作').slice(0, NOTIFY_SENTENCE_MAX)
+  return ''
 }
 
 /**
- * 原始细节 ⇒ 正文第二行（**截断到 `NOTIFY_DETAIL_MAX` 字**，保留可追溯）。
+ * 原始细节 ⇒ **给审计/自检页看**的那一行（**截断到 `NOTIFY_DETAIL_MAX` 字**，保留可追溯）。
+ *
+ * ★ 它**不进系统通知** ✗（2026-10-05 主线拍板 ✓）：通知栏只留"具体是什么"那一句 ✓，
+ *   原始细节由 `notifyTextFor` 的 `detail` 字段交给调用方落审计 ✓（见那个函数的形状说明 ✓）。
  *
  * ★ 截断用一个 `…` 收尾 ✗：一是告诉用户"后面还有"（否则像内容本来就完了 ✓），
  *   二是**整行仍然 ≤ 上限** ✓（先切到 `上限 - 1` 再补省略号 ✓）。
@@ -117,16 +139,30 @@ export function detailLineFor(raw: string): string {
 }
 
 /**
- * 通知文案（标题 + 正文）。纯函数，给断言用。
+ * 通知文案（标题 + 正文 + 审计用的原始细节）。纯函数，给断言用。
  *
- * ## 形状（2026-10-05按用户真机反馈定稿 ✓）
+ * ## 形状（2026-10-05 **第三轮**定稿 ✓：通知栏里只有一句 ✓）
  *
  * ```
- * 标题：<电脑名> 需要你确认          ← 一眼看出是**哪台电脑** ✓
- * 正文：允许一次提权到 danger-full-access   ← 第一行：一句人话（≤40 字 ✓）
- *       bash escalate sandbox to danger-…   ← 第二行：原始细节（截断到 60 字 ✓）
- *       会话 web-HbO3D4m                    ← 第三行：放得下才带（可选 ✓）
+ * 标题：<电脑名> 需要你确认               ← 一眼看出是**哪台电脑** ✓（用户认可的，别动 ✓）
+ * 正文：允许一次提权到 danger-full-access  ← ★ **只有这一句**（"具体是什么"✓，≤40 字 ✓）
  * ```
+ *
+ * ★ 第三轮砍掉的是**原始细节那一行**（用户："第二句话就说具体是什么 ✓、不要那些通用描述 ✗" +
+ *   主线解读 ✓）：`bash escalate sandbox to danger-full-access: 提权演练：…`✗ 在他眼里
+ *   既是**冗余**（与第一句说同一件事 ✓）又是**通用描述** ✗ ⇒ **不再进通知** ✗。
+ * ★ 但要**可追溯** ✓：原始细节仍然截断到 60 字 ✓ 由返回值里的 `detail` 带出来 ✓，
+ *   调用方（`cordis.ts` 的 approval-push ✓）把它落进 `recordDiagnostic` ✓
+ *   ⇒ 手机自检页 / 审计里照样查得到"当时到底要批准什么" ✓。
+ * ★ `detail` 与 `body` 的关系 ✓：
+ *   · 关键词命中 ⇒ `body` = 映射表那一句 ✓，`detail` = 原始细节（**两者不同** ✓）；
+ *   · 没命中 ⇒ `body` = `detail` = 原始细节那一行 ✓（拿不到"具体是什么"时的**唯一**具体内容 ✓，
+ *     绝不编通用话 ✗）；
+ *   · 连一个字段都没有 ⇒ 两者都是空串 ✓（标题已经说了"需要确认" ✓）。
+ * ★ 会话号不再进正文 ✗（正文恒为**一行** ✓）：`sessionId` 照样由调用方交给端侧通道 ✓
+ *   ⇒ 点通知仍然落到那个会话 ✓。
+ * ★ 非审批类型（选择卡等 ✓）走下面的**中性**分支 ✓ —— 不许被套上审批话术 ✗
+ *   （用户看到"确认"却找不到审批会更慌 ✗）；那一支没有"原始细节"，`detail` 恒为空串 ✓。
  *
  * 旧形状（用户 2026-10-04 截图的原文 ✗）：标题只有「需要你确认」✓（不知道是哪台电脑 ✗），
  * 正文是 `电脑上的 agent 需要你确认：bash（escalate sandbox to danger-full-access: …）`✗
@@ -146,7 +182,7 @@ export function notifyTextFor(
     sessionId?: unknown
   } | undefined,
   machineName?: string,
-): { title: string; body: string } {
+): { title: string; body: string; detail: string } {
   const record = data ?? {}
   const tool = String(record.toolName ?? record.title ?? '').trim()
   const reason = String(record.reason ?? record.summary ?? '').trim()
@@ -154,43 +190,105 @@ export function notifyTextFor(
   const prefix = machine.length === 0 ? '' : machine + ' '
   if (type === 'approval/asked') {
     const title = prefix + '需要你确认'
-    /** 原始细节 = 工具名 + 原因（两样都可能没有 ✓）。 */
+    /** 原始细节 = 工具名 + 原因（两样都可能没有 ✓）—— **只给审计**，不进通知栏 ✓。 */
     const raw = [tool, reason].filter((part) => part.length > 0).join(' ')
-    // ★ 一个字都没有 ⇒ 保持原来那句话 ✓（既有断言钉的就是它 ✓，别在这里换花样 ✗）
-    if (raw.length === 0) return { title, body: '电脑上的 agent 需要你确认' }
-    const sentence = humanSentenceFor(raw, tool)
     /**
-     * ★ 最后一道闸（**总长**）✗✗：上面那三个上限**加起来**仍可能超 ✓
-     *   —— 机器名是长域名（已砍到 24 字 ✓）、工具名很长（第一行可到 40 字 ✓）、
-     *   细节 60 字 ✓ ⇒ 19 + 40 + 60 已经越线 ✗。
-     * ★ 裁的是**细节那一行**：第一行是"要我干什么"（一个字都不许少 ✓），
-     *   细节本来就是可截断的 ✓（裁到放不下就整行去掉 —— 剩一句人话也比被系统截掉尾巴强 ✓）。
+     * ★ 通知栏里**只有一句** ✗✗（2026-10-05 主线拍板 ✓）：那一句就是"具体是什么" ✓。
+     *   关键词命中 ⇒ 映射表那一句 ✓（如「允许一次提权到 danger-full-access」✓）；
+     *   没命中 ⇒ 只剩**原始细节那一行** ✓（拿不到"具体是什么"时的唯一具体内容 ✓，
+     *   绝不编通用话 ✗）；连一个字段都没有 ⇒ 正文为空 ✓。
+     * ★ 原始细节**不进通知** ✗（与第一句说同一件事 = 用户抱怨的冗余 ✓）⇒ 由 `detail` 带出去，
+     *   调用方落进 `recordDiagnostic` ✓ ⇒ 可追溯这条不许丢 ✓。
+     * ★ 正文恒为**一行** ✓ ⇒ 标题(≤ 24+1+5) + 正文(≤ 60 ✓，没命中关键词时正文就是那一行
+     *   原始细节 ✓）结构上就 ≤ `NOTIFY_TOTAL_MAX` ✓
+     *   —— 原先那道"裁细节那一行"的总长闸门因此不再需要 ✗。
      */
-    const roomForDetail = NOTIFY_TOTAL_MAX - title.length - sentence.length - 1
-    let detail = detailLineFor(raw)
-    if (detail.length > roomForDetail) {
-      detail = roomForDetail >= 2 ? detail.slice(0, roomForDetail - 1) + '…' : ''
-    }
-    const lines = detail.length > 0 ? [sentence, detail] : [sentence]
-    /**
-     * ★ 第三行（哪个会话 ✓）**只在放得下时才带** ✗✗：
-     *   用户的抱怨就是"太长被截断" ✓ ⇒ 宁可少带一行，也不许把任何一行挤出去 ✓
-     *   （会话本来就是**可选**信息 ✓ —— 而且点通知照样会落到那个会话 ✓）。
-     */
-    const session = String(record.sessionId ?? '').trim()
-    if (session.length > 0) {
-      const sessionLine = '会话 ' + (session.length > 12 ? session.slice(0, 12) + '…' : session)
-      const wouldBe = title.length + lines.join('\n').length + 1 + sessionLine.length
-      if (wouldBe <= NOTIFY_TOTAL_MAX) lines.push(sessionLine)
-    }
-    return { title, body: lines.join('\n') }
+    const sentence = humanSentenceFor(raw)
+    const detail = detailLineFor(raw)
+    const body = sentence.length > 0 ? sentence : detail
+    return { title, body, detail }
   }
   /**
-   * 走到这里的是"按结构规律认出来、清单里没明写"的类型（例如选择卡）⇒
+   * 走到这里的是"清单/规律以外"的类型（**审批以外的中性类型** ✓，今天由选择卡走到这里 ✓）⇒
    * 文案**中性但明确**：说"在等你回应"，绝不编造"需要你确认"这种会让人
    * 误判成审批的话（用户看到"确认"却找不到审批，会更慌）。
+   *
+   * ★ 长度纪律（2026-10-05，选择卡接入时补 ✓）：这一支的 `body` 会给**系统通知栏**用
+   *   （`deviceCall('notify', text, …)` ⇒ 落到通知的正文 ✓）⇒ 调用方必须先把它收到
+   *   `NOTIFY_DETAIL_MAX`（60 字）以内 ✗（不然 标题 + 正文 可能越过 `NOTIFY_TOTAL_MAX` ✗）。
+   *   {@link questionTextFor} 就是按这条收的 ✓。
    */
   const body = (tool.length > 0 ? tool : reason).slice(0, 160) || '电脑上的 agent 在等你回应'
   const title = machine.length === 0 ? '电脑上的 agent 在等你回应' : prefix + '在等你回应'
-  return { title, body }
+  /** ★ 这一支没有"原始细节"可言 ✓（`detail` 恒为空串 ✓ —— 形状与审批那一支一致 ✓）。 */
+  return { title, body, detail: '' }
+}
+
+/**
+ * 选择卡的**触发入口**：工具调用负载 ⇒ 通知文案（纯函数 ✓，电脑上就能钉住 ✓）。
+ *
+ * ## 为什么不是 `notifyTextFor` 的第三个分支 ✗
+ *
+ * 两者是**两种入口**，混在一起会把"事件类型清单"的含义搅乱 ✗：
+ * · `notifyTextFor(type, …)`：按**会话事件类型**分派（`approval/asked` = 审批 ✓）；
+ * · 本函数：按**工具名**分派（`ask_user_question` = 选择卡 ✓）——
+ *   选择卡今天**不是**会话事件类型（DSH 全事件表里没有它 ✗，见文件头那条更正 ✓）。
+ *
+ * ## 为什么复用 `notifyTextFor` 的中性分支 ✓
+ *
+ * 标题（`<电脑名> 在等你回应` ✓）、"绝不编造'需要你确认'"那条纪律、
+ * 以及评测/断言的落点，都在那一个地方 ✓ ⇒ 另写一套话术就等于**两处真相** ✗
+ * （本项目反复吃过的亏 ✓）。所以这里只负责：**把工具负载解析成一句话** ✓，
+ * 语气与标题一律交给中性分支 ✓。
+ *
+ * ## 形状（用户 2026-10-05 第三轮定的口径 ✓）
+ *
+ * ```
+ * 标题：<电脑名> 在等你回应
+ * 正文：「<header>」<question>
+ * ```
+ *
+ * · 只报 `questions[0]`（**第一条** ✓）—— 细节留给点开后的那张卡 ✓；
+ *   **不加**"等 N 个问题" ✗（那是通用描述，用户刚要求删通用话 ✗）。
+ * · 正文收到 `NOTIFY_DETAIL_MAX`（60 字）以内 ✓ ⇒ 标题 + 正文恒 ≤ `NOTIFY_TOTAL_MAX` ✓
+ *   （中性分支的上限是 160 字，够不到通知栏那条总长闸门 ✗）。
+ * · 解析不出来（不是合法 JSON / 空数组 / 两个字段都没有）⇒ **返回 undefined** ✓，
+ *   调用方据此**不推** ✗ —— 宁可少推一条，也不推一条"电脑上的 agent 在等你回应"的
+ *   无信息通知 ✗（那是用户点名要删的那类话 ✓）。
+ *
+ * @param argumentsText `tool/call` 事件里 `data.arguments` 的原文（JSON 字符串）
+ * @param machineName   本机机器名（宿主给 ✓；拿不到 ⇒ 中性分支退回不带名字的标题 ✓）
+ * @param sessionId     该会话 id（可选 ✓；点了通知要落到它 ✓）
+ */
+export function questionTextFor(
+  argumentsText: unknown,
+  machineName?: string,
+  sessionId?: string,
+): { title: string; body: string } | undefined {
+  if (typeof argumentsText !== 'string' || argumentsText.trim().length === 0) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argumentsText)
+  } catch (error) {
+    void error
+    return undefined
+  }
+  // 顶层 questions 是数组；`arguments` 的其余形状一律不认（不猜语义 ✗）
+  const questions = (parsed as { questions?: unknown } | null)?.questions
+  if (!Array.isArray(questions) || questions.length === 0) return undefined
+  const first = (questions[0] ?? {}) as { header?: unknown; question?: unknown }
+  const header = String(first.header ?? '').trim()
+  const question = String(first.question ?? '').trim()
+  if (header.length === 0 && question.length === 0) return undefined
+  /**
+   * 正文 = `「header」question`（header 可能没有 ✓ ⇒ 就只有那个问题 ✓）。
+   * ★ 先拼再截断，且**整串**过 `detailLineFor`：截断的是尾部（问题那句话 ✓），
+   *   而 `「header」`（"是哪一条"）留在最前面 ✓ —— 用户看通知时先认得出是哪件事 ✓。
+   */
+  const detail = header.length > 0 ? '「' + header + '」' + question : question
+  /**
+   * ★ 仍交给中性分支拼（标题 + 语气只有一处真相 ✓）：把整句塞进 `toolName`
+   *   （中性分支取 `toolName` 优先 ✓、`reason` 留空 ⇒ 不会与它重复 ✓）。
+   */
+  return notifyTextFor('tool/call', { toolName: detailLineFor(detail), sessionId }, machineName)
 }
