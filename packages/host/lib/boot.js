@@ -2154,6 +2154,129 @@
   }
 
   /**
+   * ★★ 本轮 C：「手机下载」这条链的提示口 —— **优先壳的系统通知**（APK 里唯一进得了通知栏的
+   *   那条路），壳不在 / 通知没发出去 ⇒ 退回一条**短**页面横幅。
+   *
+   * 为什么页面内那条横幅必须让位（用户原话：「手机下载这功能，它的那个提示，现在会闪烁一下，
+   *   闪烁一串很长的东西，我看不清，然后再提示成功下载。把这种通知，你可以考虑改成安卓的通知」）：
+   *   这条链一次要说三句 ——「正在从电脑读取 …」→「已交给手机保存：<文件名>（<体积>）——
+   *   存好之后会告诉你落在哪」→「已保存到「下载」：<文件名>」，每一句都**替换**上一条横幅
+   *   ⇒ 屏幕上就是闪一串看不清的字；而壳那条系统通知是通知栏里一条短的、读得完的东西
+   *   （壳那边用同一个 notification id ⇒ 后来的替换先前的，不会堆成一片）。
+   *
+   * @param title 通知标题（短：「正在下载」/「已下载」/「下载失败」）。
+   * @param body  正文；超过 72 字就截断 —— 全量文案仍然写进面板提示行与调试框
+   *              （长路径只在调试框里打）。
+   * @returns `'notify'` / `'toast'`（调试框那行据此能分清「通知真发出去了」与「退回横幅了」）。
+   */
+  function downloadNotice(title, body) {
+    var short = String(body === undefined || body === null ? '' : body)
+    if (short.length > 72) short = short.slice(0, 72) + '…'
+    var result = shellNotify(title, short, '')
+    if (result === 'ok') {
+      try {
+        debugBoxLine('[download] 系统通知已发出：' + String(title) + '｜' + short)
+      } catch (error) {
+        void error
+      }
+      return 'notify'
+    }
+    /**
+     * 到这儿说明**通知栏那一路没走通**（没有壳 / 权限是 default|denied / untrusted / 壳报错）
+     * ⇒ 退回页面横幅，而且只有上面那一份**短的**（绝不把长串再闪一遍）。
+     */
+    shellToast(String(title) + '：' + short)
+    try {
+      debugBoxLine('[download] 系统通知没发出去（' + String(result) + '）⇒ 退回短横幅：' + short)
+    } catch (error) {
+      void error
+    }
+    return 'toast'
+  }
+
+  /**
+   * ★★ 2026-10-05：**系统通知的统一出口** ✓ —— 蓝色横幅 / 页面提示条改用安卓通知时都走它 ✓。
+   *
+   * 用户原话：「把我们的蓝色横幅都改成安卓的通知」✓ +「那种中间跳的横幅（下载跳的那种）
+   * 也改成安卓的通知」✓。下载那条链早已改完（`downloadNotice` ✓），这里是**其余能换的**那两处 ✓。
+   *
+   * ## 为什么要有这一层 ✗（而不是各自直调 `shellNotify` ✓）
+   *
+   * 壳那条渠道是 `IMPORTANCE_HIGH` ✓、而且**没设** `onlyAlertOnce` ✗ ⇒ 同一条连着来几次
+   * 就**每次都会响** ✓（例如每 4 秒一轮的轮询连着投递同一条剪贴板正文 ✓）。
+   * ⇒ 去重窗必须加 ✓，而**只能加在客户端** ✓ —— 改壳侧要重打 APK、手机得覆盖安装 ✗，
+   *   而本轮的目标恰恰是"**不用装 APK**、刷新页面就生效"✓。
+   *
+   * ## 三条契约（与 `downloadNotice` / `shellClipboard` 同一套写法 ✓）
+   *
+   * · **长度**：通知里先截 ✓（标题 20 / 正文 72 —— 照 `downloadNotice` 那位先例 ✓；
+   *   壳自己还会再截一遍 40 / 220 / BigText 500 ✓）；超出加 `…` ✓；
+   * · **无壳退什么** ✗：`shellNotify` 返回 `null` ⇔ 没有壳 ✓ ⇒ 退 `shellToast` ✓（深色底部条 ✓）。
+   *   ★ **绝不退回 `drawBar`** ✗ —— 那正是本轮要消掉的蓝条 ✓，退回去等于白改 ✗；
+   *   ★ 退给提示条的正文**不按 72 截** ✗（见 `SHELL_NOTICE_PAGE_MAX` 那段证据 ✓）；
+   * · **去重**：10 秒内**同一条**（键 = 标题 + 正文 ✓）只发一次 ✓；重复那条**连提示条也不弹** ✓
+   *   —— 第一条那 12 秒的提示条本来就还在屏幕上 ✓（见 `shellToast` 的 12_000 ✓），用户什么都没少看见 ✓。
+   *
+   * @param title 通知标题 ✓（≤20 字 ✓）。
+   * @param body  **通知**里的正文 ✓（≤72 字 ✓）；退到提示条时也用它（截到 220 字 ✓）。
+   * @param pageText 只在"通知那 72 字"会切掉关键半句时才给 ✓（省略 ⇒ 与 `body` 同一句 ✓）：
+   *   提示条没有 72 字这个约束 ✓，于是"页面上那句"仍然可以与旧行为**逐字一致** ✓
+   *   （手动重连那条就是这种情形 ✓ —— 见调用点与 `SHELL_NOTICE_PAGE_MAX` ✓）。
+   * @returns `'notify'`（通知已发出 ✓）/ `'toast'`（退回页面提示条 ✓）/ `'dedup'`（窗口内重复 ⇒ 什么都没做 ✓）。
+   */
+  var SHELL_NOTICE_TITLE_MAX = 20
+  var SHELL_NOTICE_BODY_MAX = 72
+  /**
+   * ★ 退给**页面提示条**的正文上限 ✓ —— **必须**比 `shortReason` 的上限（120 ✓）加上那句
+   *   「（可再点一次那颗橙色提示重试）」（16 字 ✓）还宽 ✓：否则"点哪颗橙色提示"会被截掉 ✗
+   *   ⇒ `scripts/check-mobile-layout.mjs` 第 152-⑨ 条（它读的正是**无壳**时这条提示条 ✓）当场红 ✗。
+   *   取 220 = 壳自己给正文的上限（`MainActivity` 那条 ✓）⇒ 两条路说的信息量一致 ✓。
+   */
+  var SHELL_NOTICE_PAGE_MAX = 220
+  var SHELL_NOTICE_DEDUP_MS = 10_000
+  /** 同一条通知**上一次发出**的时刻表 ✓（键 = 标题 + 正文 ✓；每页一份 ✓）。 */
+  var shellNoticeSentAt = {}
+
+  /**
+   * 去重判据 ✓（**纯的**：`now` 由调用方给 ✓ —— 测试注入时钟即可，不必真等 10 秒 ✓）。
+   * 返回 true ⇔ 窗口内已经发过同一条 ✓（并在**第一次**返回 false 时把时刻记下 ✓）。
+   */
+  function shellNoticeDeduped(key, now) {
+    var at = shellNoticeSentAt[key]
+    if (at !== undefined && now - at < SHELL_NOTICE_DEDUP_MS) return true
+    shellNoticeSentAt[key] = now
+    return false
+  }
+
+  /** 截一段文本 ✓（只给**通知**那一侧用 ✓ —— 页面提示条用的是另一个上限 ✓，见上面 ✓）。 */
+  function shellNoticeShort(value, max) {
+    var text = String(value === undefined || value === null ? '' : value)
+    return text.length > max ? text.slice(0, max) + '…' : text
+  }
+
+  function shellNotice(title, body, pageText) {
+    var head = shellNoticeShort(title, SHELL_NOTICE_TITLE_MAX)
+    var notice = shellNoticeShort(body, SHELL_NOTICE_BODY_MAX)
+    if (shellNoticeDeduped(head + '\u0000' + notice, Date.now())) {
+      debugBoxLine('[notice] ' + String(SHELL_NOTICE_DEDUP_MS / 1000) + ' 秒内同一条不再重复发：' + head)
+      return 'dedup'
+    }
+    var result = shellNotify(head, notice, '')
+    if (result === 'ok') {
+      debugBoxLine('[notice] 系统通知已发出：' + head + '｜' + notice)
+      return 'notify'
+    }
+    /**
+     * ★ 退给提示条的是**没按 72 截过的**那一句（上限 `SHELL_NOTICE_PAGE_MAX` ✓）——
+     *   两份证据 ✓：① 与旧行为逐字一致 ✓（`shellClipboard` 那条契约的同一套写法 ✓）；
+     *   ② 上面那段：既有验收 152-⑨ 钉着它 ✓。
+     */
+    shellToast(head + '：' + shellNoticeShort(pageText === undefined ? body : pageText, SHELL_NOTICE_PAGE_MAX))
+    debugBoxLine('[notice] 系统通知没发出去（' + String(result) + '）⇒ 退回页面提示条：' + head)
+    return 'toast'
+  }
+
+  /**
    * ★ 发一条**原生**系统通知 ✓ —— APK 里唯一进得了通知栏的路 ✓。
    *
    * 为什么网页那套（`new Notification()` / `ServiceWorkerRegistration.showNotification()`）
@@ -2210,6 +2333,40 @@
       return typeof Notification === 'undefined' ? 'unsupported' : String(Notification.permission)
     } catch (error) {
       return 'unknown'
+    }
+  }
+
+  /**
+   * ★★ 剪贴板原生桥（2026-10-05）：**把文本交给壳的原生剪贴板** ✓（`DshmShell.setClipboard` ✓）。
+   *
+   * ## 为什么必须有一条原生的路 ✗
+   *
+   * 用户真机上看到的那句是「电脑想放进剪贴板，但浏览器不允许自动复制」✗ ——
+   * 触发时机是**每 4 秒一轮的轮询** ✓ ⇒ **没有任何用户手势** ✗，而网页那两条路都要手势：
+   * `navigator.clipboard.writeText` ✓（还要安全上下文 ✓）与 `document.execCommand('copy')` ✓
+   * ⇒ 两条**必然被拒** ✓。壳那边用的是原生 `ClipboardManager` ✓ —— **不需要手势** ✓。
+   *
+   * ## 契约（与 `shellNotify` 逐条对齐 ✓）
+   *
+   * · **没有壳 / 桥没这个方法 ⇒ `null`** ✓ —— 调用方据此**原样退回**网页那两条路 ✓
+   *   （旧 APK 没有这条桥时，行为与今天**逐字一致** ✓）；
+   * · 桥**同步**返回一个短字符串状态 ✓（`ok` / `empty` / `too-long` / `untrusted` / `error` ✓，
+   *   见 `MainActivity.ShellBridge#setClipboard` ✓）——
+   *   ★ 所以页面**能**据它说真话 ✓：`ok` 就是"系统收下了"✓；
+   * · 桥抛了 ⇒ 回 `'error'` ✓（**绝不**把异常往上扔 ✗ —— 那会让整条投递链看起来像"执行失败"✗，
+   *   而我们其实还有网页那两条路可以试 ✓）。
+   *
+   * ★ 只认 `'ok'` 作为成功 ✗（**不是**"有桥就算成功"✓）：
+   *   `empty` / `too-long` / `untrusted` / `error` 一律**继续走网页路** ✓ ——
+   *   多一条路就多一次机会 ✓，绝不因为壳摇头就放弃 ✗。
+   */
+  function shellClipboard(text) {
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge.setClipboard !== 'function') return null
+    try {
+      return String(bridge.setClipboard(String(text === undefined || text === null ? '' : text)))
+    } catch (error) {
+      return 'error'
     }
   }
 
@@ -2283,6 +2440,30 @@
   }
 
   /** 「保存」这件事的统一反馈口 ✓（面板提示行 + 页面提示条 + 调试框 ✓，三处同一条文案 ✓）。 */
+  /**
+   * ★★ 本轮 C：这句话是不是「把文件存进手机」那条链说的 —— 是就返回**通知标题**，不是返回 null。
+   *
+   * 判据只用**那几句自己就有的措辞**（它们全出自壳保存那两条链：`shellSaveBytes` 与
+   * `handleShellSaveCallback`，以及卡片那颗「手机下载」的入口 `runCardDownload`）；
+   * 一处都没命中 ⇒ 照旧走页面横幅（例如「在文件面板中打开：…」「已在我们的文件面板里打开并跳到：…」
+   * 这些**面板内**的反馈，本来就不该弹到通知栏上）。
+   * ★ 改那几句文案时要一起改这里，否则那一条会退回横幅（不会崩，但就不是通知了）。
+   */
+  function saveToPhoneNotice(message) {
+    var text = String(message)
+    if (text.indexOf('已交给手机保存') >= 0) return '正在下载'
+    if (text.indexOf('正在从电脑读取') >= 0) return '正在下载'
+    if (text.indexOf('正在从电脑取 Session 日志') >= 0) return '正在下载'
+    if (text.indexOf('已保存到') >= 0) return '已下载'
+    if (text.indexOf('保存失败') >= 0) return '下载失败'
+    if (text.indexOf('下载失败') >= 0) return '下载失败'
+    if (text.indexOf('导出失败') >= 0) return '下载失败'
+    if (text.indexOf('导出在手机上取不到') >= 0) return '下载失败'
+    if (text.indexOf('手机保存的结果看不懂') >= 0) return '下载失败'
+    if (text.indexOf('还没有「保存文件」这座桥') >= 0) return '下载失败'
+    return null
+  }
+
   function saveFeedback(text) {
     var message = String(text)
     try {
@@ -2290,7 +2471,14 @@
     } catch (error) {
       void error
     }
-    shellToast(message)
+    /**
+     * ★ 本轮 C：「存进手机」那条链改走**壳的系统通知**（见 downloadNotice），页面横幅那一份
+     *   不再发 —— 面板提示行（上面那行 `setNote`）与调试框**一个字没变**：面板开着时用户看的是它，
+     *   验收脚本读的也是它。
+     */
+    var notice = saveToPhoneNotice(message)
+    if (notice === null) shellToast(message)
+    else downloadNotice(notice, message)
     try {
       debugBoxLine('[save] ' + message)
     } catch (error) {
@@ -4516,6 +4704,21 @@
         seconds +
         ' 秒仍未成功，已停止自动重连。请点左侧栏那颗橙色提示手动重连。'
     if (isShellSurface()) {
+      /**
+       * ★★ 2026-10-05：这一处**刻意一个字都不改** ✗ —— 记下来免得下一轮又有人来"改成通知"✗。
+       *
+       * 起因：用户要求"这种中间跳的横幅也改成安卓的通知"✓，普查据此提出**删掉**下面这行
+       *   （理由：紧邻的下一行已经发了同样的系统通知 ⇒ 换成通知会变成**发两条**✗）。
+       * ★ 但删不得 ✗：`scripts/check-mobile-layout.mjs` 第 152-② 条（同文件 12066-12072 ✓）
+       *   断言的就是**这条提示条**里有「已停止自动重连」+「试满 5 次」+「手动重连」✓；
+       *   而这句话在 `boot.js` 里**只由**这一行写出去 ✓（`text` 的两个分支都只喂给它 ✓）
+       *   ⇒ 删掉 = 那条既有验收的唯一观测源没了 ⇒ 当场红 ✗。
+       *   同一节的第 152-④ 条又要求这一处 `notify` **恰好 1 次** ✓ ⇒ 两条都要留 ✓。
+       * ★ 而"发两条通知"这个真风险已经由**下面这行**自己承担 ✓：它**不走** `shellNotice`
+       *   （带客户端去重窗那条路 ✗）⇒ 恰好一条通知 ✓。
+       *   `packages/client/test/boot-surface.test.ts` 里那条守卫钉的就是这件事 ✓：
+       *   这一块**恰好一个 `shellNotify`、零个 `shellNotice`** ✓。
+       */
       shellToast(text)
       shellNotify('DSH 移动端：连接中断', text)
     }
@@ -4532,7 +4735,27 @@
 
   /** 用户手动重连失败：**原地**说清原因 ✓（保持可点 ⇒ 用户可再点 ✓）。 */
   Tunnel.prototype.reportManualReconnectFailure = function (reason) {
-    if (isShellSurface()) shellToast('手动重连失败：' + reason + '（可再点一次那颗橙色提示重试）')
+    /**
+     * ★★ 2026-10-05：这一条从**页面提示条**改走**系统通知** ✓ —— 用户原话
+     *   「那种中间跳的横幅 … 也改成安卓的通知」✓。
+     *
+     * ★ 无壳（或老壳没有 `notify` 桥 ✓）⇒ `shellNotice` 退 `shellToast` ✓，而且第三参数拼出来的
+     *   那一句与旧行为**逐字一致** ✓（标题 + `：` + 旧正文 = 原来那一句 ✓）——
+     *   `scripts/check-mobile-layout.mjs` 第 152-⑨ 条正是在**拆掉假壳之后**读这条提示条 ✓
+     *   （同文件 12173 那一步先 `removeFakeShell()` ✓，注释写明"手动那一下不需要壳"✓）。
+     * ★ 通知那句**把该做的动作放在最前** ✗（「可再点一次那颗橙色提示重试」✓）：真机上
+     *   `shortReason` 允许到 120 字 ✓ ⇒ 按旧语序拼、"点哪颗"那半句会被 72 字的上限切掉 ✗
+     *   （通知里就只剩一个光秃秃的原因、用户不知道该干什么 ✓）。
+     *   页面那句**保持旧语序** ✓（152-⑨ 与用户看到的那句话都一个字不改 ✓）。
+     * ★ `isShellSurface()` 那道闸照旧 ✗：桌面浏览器上没有壳、也不该弹提示条 ✓（旧行为一个字不改 ✓）。
+     */
+    if (isShellSurface()) {
+      shellNotice(
+        '手动重连失败',
+        '可再点一次那颗橙色提示重试。原因：' + String(reason),
+        String(reason) + '（可再点一次那颗橙色提示重试）',
+      )
+    }
     debugBoxLine('[tunnel] 手动重连失败：' + reason)
   }
 
@@ -9358,7 +9581,6 @@
       '}',
       '.dshm-skel i:nth-child(1) { width: 18px; height: 18px; border-radius: 6px; flex: 0 0 auto; }',
       '.dshm-skel i:nth-child(2) { flex: 1 1 auto; }',
-      '.dshm-skel i:nth-child(3) { width: 34px; flex: 0 0 auto; }',
       '@keyframes dshm-skel-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }',
       /* 大目录底部：统计 + 继续显示 */
       '.dshm-more {',
@@ -9381,8 +9603,56 @@
       '.dshm-file-head:active { opacity: .6; }',
       '.dshm-file-icon { flex: 0 0 auto; width: 22px; display: grid; place-items: center; color: var(--dsw-alias-label-tertiary, #7d858e); }',
       '.dshm-file-icon[data-kind="directory"] { color: var(--dsw-alias-state-business-primary, #6aa9ff); }',
-      '.dshm-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-      '.dshm-file-meta { flex: 0 0 auto; font-size: 11.5px; color: var(--dsw-alias-label-tertiary, #7d858e); font-variant-numeric: tabular-nums; }',
+      /* 类型分族的颜色：**只用主题里已有的语义色**（不新造配色 ✓）。
+         同族的字形也不一样（见 `fileFamilyIcon` ✓）⇒ 色弱 / 主题色偏的时候靠形状也分得开 ✓。
+         `doc` 与 `other` 不回落到这里 ⇒ 用上面那条默认的 tertiary ✓。 */
+      '.dshm-file-icon[data-family="image"] { color: var(--dsw-alias-state-success-primary, #4cc38a); }',
+      '.dshm-file-icon[data-family="sheet"] { color: var(--dsw-alias-state-warn-primary, #e0a33e); }',
+      /* ★★ round 198：PDF **单独一族** ✓（用户原话："Markdown 和 PDF 还是分不开"✗、
+         "PDF 还是有必要单独分出来一类"✓）。颜色取主题里那颗**语义红** ✓ ——
+         `--dsw-alias-state-error-primary`（DSH 主题里它 = `var(--dsw-static-red-400)` 深色 /
+         `var(--dsw-static-red-600)` 浅色 ✓ ⇒ 两套主题各自都还是"红"✓，**不写死 hex** ✗）。 */
+      '.dshm-file-icon[data-family="pdf"] { color: var(--dsw-alias-state-error-primary, #ff6b6b); }',
+      '.dshm-file-icon[data-family="code"] { color: var(--dsw-alias-state-idle-primary, #9aa4b2); }',
+      '.dshm-file-icon[data-family="archive"] { color: var(--dsw-alias-label-secondary, #a9b0b8); }',
+      /* ★★ round 198：名字这一栏拆成**两个元素** —— 中段省略由 JS 算 ✓、尾部由结构保证 ✓，两条各管一段 ✓。
+         上一版为什么"有的行没保住后缀 ✗"：整串 `头…后缀` 是**一个**文本节点 ✓，而这一栏当时挂着
+         `text-overflow: ellipsis` ✓ ⇒ 只要真实渲染比 JS 的估算宽一点（估算见 `FILE_NAME_MAX_UNITS` ✓），
+         CSS 就从**尾部**补一刀 ✗（连中间那个省略号一起盖掉 ✗）⇒ 后缀第一个没 ✗。
+         现在：头部（`[data-dshm-fs-head]` ✓，可能自带 `…` ✓）是**唯一**允许收缩 +
+         `overflow: hidden` 的元素 ✓；后缀挂在 `[data-dshm-fs-ext]` 上、`flex: 0 0 auto` ✓
+         ⇒ **它在结构上不参与收缩** ⇒ 谁也剪不掉它 ✓。
+         ★ 这一栏自己**不留** `overflow: hidden` ✗：留着的话，极端窄的行会把"容器右边缘"当剪刀 ✗
+         ——而那正好落在外层缩不动、内层又剪得动的缝里 ✓；去掉之后最坏也只是"多出来一点点"✓。 */
+      '.dshm-file-name { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }',
+      '.dshm-file-name > [data-dshm-fs-head] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
+      '.dshm-file-name > [data-dshm-fs-ext] { flex: 0 0 auto; white-space: nowrap; }',
+      /* ★★ round 199：名字栏**右端**那颗标签 ✓ —— 文件行吃后缀 ✓、文件夹行吃「文件夹」✓。
+         它占的正是上一单删掉的「文件大小 / 目录」那一段位置 ✓（名字之后、`⋯` 之前 ✓）：
+
+           · `margin-left: auto` ⇒ 在第一行里被推到**最右**（紧挨着 `⋯` ✓）——
+             这就是用户说的"右侧那个位置"✓（原来写的是文件大小 ✓）；
+           · **淡**：`--dsw-alias-label-tertiary` ✓ —— 主题里那颗**次要文字**色 ✓（不新造颜色 ✗，
+             与上面 `.dshm-more-info` 用的是同一颗 ✓）；
+           · ★ **宽度上限 64px** ✓（11.5px 实测：`.PDF` = 25.8px ✓、`.DOCX` = 36.7px ✓、
+             `.NUMBERS` = 60.0px ✓、「文件夹」= 34.5px ✓；唯有最长那颗 `.MARKDOWN` = 73.2px ✗ ——
+             它在标签**自己内部**收尾 ✓，换来的是名字那一栏不被挤没 ✓）——
+             320px 视口下名字栏只有 **≈105px** ✓（算式见 `FILE_NAME_MAX_UNITS` 那段注释 ✓），
+             不设上限就是把名字挤没 ✗；
+           · `box-sizing: content-box` 是**故意**写的 ✓：让 `max-width` 只量文字那一段 ✓；
+             左边留 8px 内边距 = "名字与标签之间至少留一条缝"✓（不留的话两者会贴在一起 ✗）。
+             不写它的话，全局若有 `* { box-sizing: border-box }`，上限会被内边距悄悄吃掉 8px ✗；
+           · **不加** `letter-spacing` ✓：先写了 `.02em`，实测它把 `.NUMBERS`（60.0px）顶到 62px 上限外
+             一点点 ⇒ 一个**真实后缀**被自己的上限多剪一刀 ✗（上限这个数是拿实测换来的 ✓，不是拍脑袋 ✗）；
+           · `overflow: hidden` + `text-overflow: ellipsis` 只作用在**标签自己**身上 ✓ ——
+             比上限还长的后缀（如 `.markdown`）在标签内部收尾 ✓；**名字**永远是先被压的那一段 ✓
+             ⇒ 上一单"后缀剪不掉"那条保证这一轮**换到这颗标签上兑现** ✓（见测试里那段转移说明 ✓）。 */
+      '.dshm-file-name > .dshm-file-tag {',
+      '  box-sizing: content-box; flex: 0 0 auto; white-space: nowrap; margin-left: auto;',
+      '  max-width: 64px; padding-left: 8px; overflow: hidden; text-overflow: ellipsis;',
+      '  font-size: 11.5px; text-transform: uppercase;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
       '.dshm-file-more {',
       '  flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 9px;',
       '  background: transparent; cursor: pointer;',
@@ -10663,20 +10933,68 @@
       '  [data-presented-file] [data-open-target] { display: none !important; }',
 
       /**
-       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）：
-       *   尺寸与圆角照 DSH 原来那颗分体按钮 ✓（高 28 / 圆角 10 ✓），颜色一律走设计 token ✓。
+       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）。
+       *
+       * ★★ 本轮更正（用户：「预览跟手机下载其实有点丑，因为我记得我们之前是有那个空间的，
+       *   我不知道你为什么没有用」）—— 上一版（f17758d）这两颗是**手写**一套样式 ✗：
+       *   高 28 / 圆角 10 / 边框 l3 / 底色 button-floating-fill / 字号 12，照的是
+       *   **上一代** deliverables 那颗分体按钮（0.1.5 的 `nyYjTG_split` / `nyYjTG_open`）；
+       *   而**运行时**卡片里那一套是另外一份数（本轮从 DSH 应用包里逐条读出来的，不是猜的）：
+       *   出处 `ui-open-in-app/src/client/OpenTargetButton.module.css`（app.asar 内）：
+       *     _split{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);
+       *       border-radius:var(--dsw-radius-sm);height:24px;font-family:var(--dsw-font-family);
+       *       align-items:stretch;display:inline-flex;overflow:hidden}
+       *     _main,_chevron{color:var(--dsw-alias-label-primary);white-space:nowrap;cursor:pointer;
+       *       background:0 0;border:0;justify-content:center;align-items:center;font-size:11px;
+       *       line-height:16px;display:inline-flex}
+       *     _main{gap:4px;padding:3px 5px}
+       *     _chevron{border-left:.5px solid var(--dsw-alias-border-l4);
+       *       color:var(--dsw-alias-label-secondary);padding:3px 4px 3px 3px}
+       *   ★ 结构也不一样：它是**一个药丸** ✓（两颗之间那道 border-left 就是分隔 ✓），
+       *   我们的是「两颗各自整圈边框的小胶囊 + gap:6px」✗ —— 这正是「没用到那套」的地方。
+       *
+       * ★ 复用分两路（见 installDeliverablesCardBridge 的 nativeCardSkin）：
+       *   · 原生控件在场 ⇒ 把它的类名（装动作的容器 `_actions` + 药丸 `_split` +
+       *     两颗 `_main` / `_chevron`）**原样抄过来** ⇒ 下面这段一个字都不生效
+       *     （同一个 class、同一套 CSS 变量）；
+       *   · 不在场（手机上就是：0.2.0 的 FileOpenTarget 在 desktop !== true 时 render null）
+       *     ⇒ 走下面 `data-dshm-skin="fallback"` 这一路：**逐条对齐**上面那份原生 CSS
+       *     （不是自己另调一套审美 ✗）。两路必须分开 ⇒ 我们的 `[data-dshm-card-actions]`
+       *     选择器比原生那条更具体，不分开写就会把原生样式压掉 ✗。
+       *
+       * ★ 触摸屏把那**一行用满**：卡片 `_file` 实测高 60px、上下内边距 8px ⇒ 内容盒正好 44px，
+       *   而旧版原生那颗分体按钮自己就写着
+       *   `@media (pointer:coarse){_split{min-height:44px};_open,_chevron{min-width:44px}}`
+       *   （出处：0.1.5 的 dsh-client-ui-deliverables）—— 用户那句「我们之前是有那个空间的」。
+       *
        *   `pointer-events: auto` 是必需的 ✓ —— 卡片正文那层 `_fileBody` 是 `pointer-events:none` ✓，
        *   而铺满整张卡的 `_cardPreview` 覆盖层在它下面（z-index 1 ✓）⇒ 不写这一条就点不到 ✗。
        */
       '  [data-dshm-card-actions] {',
-      '    pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px;',
+      '    pointer-events: auto; flex: none; display: inline-flex;',
       '  }',
-      '  [data-dshm-card-actions] button {',
-      '    height: 28px; padding: 0 10px; border-radius: 10px; font: inherit; font-size: 12px;',
-      '    line-height: 18px; white-space: nowrap; cursor: pointer; color: var(--dsw-alias-label-primary);',
-      '    border: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-floating-fill);',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] {',
+      '    box-sizing: border-box; border: .5px solid var(--dsw-alias-border-l4);',
+      '    border-radius: var(--dsw-radius-sm); height: 24px; font-family: var(--dsw-font-family);',
+      '    align-items: stretch; overflow: hidden;',
       '  }',
-      '  [data-dshm-card-actions] button:active { background: var(--dsw-alias-interactive-bg-hover); }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button {',
+      '    color: var(--dsw-alias-label-primary); white-space: nowrap; cursor: pointer;',
+      '    background: 0 0; border: 0; justify-content: center; align-items: center;',
+      '    font-size: 11px; line-height: 16px; padding: 3px 5px; gap: 4px; display: inline-flex;',
+      '  }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button + button {',
+      '    border-left: .5px solid var(--dsw-alias-border-l4); color: var(--dsw-alias-label-secondary);',
+      '    padding: 3px 4px 3px 3px;',
+      '  }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button:hover,',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button:focus-visible {',
+      '    background: var(--dsw-alias-interactive-bg-hover);',
+      '  }',
+      '  @media (pointer: coarse) {',
+      '    [data-dshm-card-actions][data-dshm-skin="fallback"] { min-height: 44px; }',
+      '    [data-dshm-card-actions][data-dshm-skin="fallback"] > button { min-width: 44px; }',
+      '  }',
 
       /**
        * ★★ 本轮 B/C（用户原话：「呃，你的**选择卡**跟**审批通知**，它能不能**稍微宽一点**？」✓）
@@ -18404,6 +18722,13 @@
       if (card === null) return null
       var button = node.closest('button')
       if (button === null) return null
+      /**
+       * ★ 本轮 A：我们自己注入的那两颗（`data-dshm-card-act`）不许被当成 DSH 自己的控件 ——
+       *   它们会**抄原生类名**（`_main` / `_chevron`）⇒ 下面那条后缀判据会把「手机下载」
+       *   错认成 DSH 那颗 v（pointerup 那一路会因此直接 return，把这一下让给
+       *   「DSH 自己的菜单」⇒ 点了没反应）。
+       */
+      if (button.closest('[data-dshm-card-act]') !== null) return null
       if (!classHasSuffix(button, 'chevron') && !classHasSuffix(button, 'open')) return null
       if (!card.contains(button)) return null
       return { card: card, button: button }
@@ -18960,7 +19285,58 @@
       return card.querySelector('div[class*="actions"]')
     }
 
-    /** 一颗动作按钮 ✓（动作名写在属性上 ✓ ⇒ 一条委托监听就能认 ✓）。 */
+    /** 一个节点身上的 class 原样读出来（抄的是**运行时**拿到的类名，不是写死的哈希）。 */
+    function classTextOf(node) {
+      if (node === null || node === undefined || typeof node.getAttribute !== 'function') return ''
+      var raw = node.getAttribute('class')
+      return raw === null || raw === undefined ? '' : String(raw).trim()
+    }
+
+    /**
+     * ★★ 本轮 A：把卡片里**原生那套控件**的类名原样抄出来（同一个 class = 同一套 CSS）。
+     *
+     * 判据只用**语义属性 + 类名后缀**：`[data-open-target]`（插件打的稳定属性）+ `_split` /
+     * `_main` / `_chevron` 后缀。前缀（运行时是 `dwRWCG_` / `iq4beG_` 这种）是**构建哈希**，
+     * 一个字都不写进源码（本仓因写死哈希类名静默失效过多次）。
+     *
+     * @returns `{actions, split, main, chevron}`；这一版卡片里没有原生控件时返回 null
+     *          —— 手机上就是这一支：0.2.0 的 FileOpenTarget 在 `desktop !== true` 时
+     *          `render null`（本轮从 app.asar 里读出来的），此时调用方走
+     *          `data-dshm-skin="fallback"` 那套逐条对齐的样式。
+     */
+    function nativeCardSkin(card) {
+      var native = card.querySelector('[data-open-target]')
+      if (native === null) return null
+      var buttons = native.querySelectorAll('button')
+      var main = null
+      var chevron = null
+      for (var i = 0; i < buttons.length; i++) {
+        if (classHasSuffix(buttons[i], 'chevron')) {
+          chevron = buttons[i]
+          continue
+        }
+        /**
+         * ★ 只认 `_main`（新插件那一版）——**不认** `_open`（上一代 deliverables 那个类名）：
+         *   `[data-open-target]` 本身就是新插件才打的属性，所以走到这里时那颗一定是 `_main`；
+         *   而 `_open` 会被下面 cardActionOf 那条老判据认成「卡片打开」⇒ 两处一起接管同一颗
+         *   按钮 ⇒ 轻点一下**开两次预览**。
+         */
+        if (main === null && classHasSuffix(buttons[i], 'main')) main = buttons[i]
+      }
+      if (main === null || chevron === null) return null
+      var host = native.parentElement
+      return {
+        actions: host === null ? '' : classTextOf(host),
+        split: classTextOf(native),
+        main: classTextOf(main),
+        chevron: classTextOf(chevron),
+      }
+    }
+
+    /**
+     * 一颗动作按钮（动作名写在属性上 ⇒ 一条委托监听就能认）。
+     * 类名由调用方在抄到原生皮肤之后补上（`data-dshm-skin="native"` 时）。
+     */
     function cardActionButton(act, label) {
       var button = document.createElement('button')
       button.type = 'button'
@@ -18983,10 +19359,32 @@
         if (card.querySelector('[data-dshm-card-actions]') !== null) continue
         var host = cardActionsHost(card)
         if (host === null) continue
+        /**
+         * ★ 本轮 A：皮肤分两路（见 nativeCardSkin）——
+         *   抄到原生类名 ⇒ `native`（同一个 class、同一套 CSS 变量）；抄不到 ⇒ `fallback`
+         *   （CSS 里那段逐条对齐原生的）。两路必须互斥：我们的 `[data-dshm-card-actions]`
+         *   选择器比原生那条更具体，两个都套会把原生样式压掉。
+         */
+        var skin = nativeCardSkin(card)
         var group = document.createElement('div')
         group.setAttribute('data-dshm-card-actions', '1')
+        group.setAttribute('data-dshm-skin', skin === null ? 'fallback' : 'native')
         group.appendChild(cardActionButton('preview', '预览'))
         group.appendChild(cardActionButton('download', '手机下载'))
+        /**
+         * ★ 本轮 A：原生控件的类名**原样抄过来**（不写死哈希）。组这一层同时是 DSH 自己
+         *   那个装动作的容器（`_actions`）与那个药丸（`_split`）；两颗分别拿 `_main` /
+         *   `_chevron`（后者带那道 `border-left` 分隔 —— 用户说的「那个空间」就是它）。
+         */
+        if (skin !== null) {
+          var adopted = (skin.actions + ' ' + skin.split).trim()
+          if (adopted !== '') group.setAttribute('class', adopted)
+          var halves = group.children
+          if (halves.length === 2) {
+            if (skin.main !== '') halves[0].setAttribute('class', skin.main)
+            if (skin.chevron !== '') halves[1].setAttribute('class', skin.chevron)
+          }
+        }
         host.appendChild(group)
         changed += 1
       }
@@ -20224,7 +20622,9 @@
       var row = document.createElement('div')
       row.className = 'dshm-skel'
       row.setAttribute('aria-hidden', 'true')
-      for (var j = 0; j < 3; j++) row.appendChild(document.createElement('i'))
+      // 两根灰条 = 图标 + 名字 ✓（大小那一段删了 ✗ ⇒ 这里的第三根也一起删 ✓，
+      // 否则骨架比真实行多一截，大目录加载完会"跳"一下 ✗）
+      for (var j = 0; j < 2; j++) row.appendChild(document.createElement('i'))
       box.appendChild(row)
     }
     host.appendChild(box)
@@ -20655,10 +21055,242 @@
   }
 
   /**
-   * 一个条目：图标 + 名称 + 大小/时间；点一下展开它的操作。
+   * ★★ 文件名显示多长、怎么截（用户原话："**文件目录会显示不全文件的名字**，
+   * 导致有的我**无法判断它的后缀是什么**"✗）。
+   *
+   * ## 为什么不能用 CSS 的 `text-overflow: ellipsis`
+   *
+   * 它截的是**尾部** ✗ —— 而尾部（扩展名）恰恰是用户要认的那一段 ✓
+   * （与 `shortPath` 那条同一个道理 ✓，见上面那段注释 ✓）。
+   * 于是显示文本**在代码里**做成 `头 + '…' + 尾` ✓，尾**就是扩展名本身** ✓。
+   *
+   * ## 三条退化路都不许崩 ✗（每一条都有断言 ✓）
+   *
+   *   · 没有扩展名（`README` / `.bashrc` / `a.` / `..` / `...`）⇒ 退化成**普通尾部省略**（留头 ✓）；
+   *   · 本来就不长 ⇒ **原样返回** ✓（一个字节都不动 ✓ —— 短名字永远是全名 ✓）；
+   *   · `name` 是 undefined / null / 空串 ⇒ 返回空串 ✓（绝不吐 `undefined` ✗）。
+   *
+   * ## 宽度为什么按"单位"算而不是写死字符数
+   *
+   * 手机上同一个名字，中文与英文占的宽度差一倍 ✓ ⇒ 全角按 2 个单位、其余按 1 个单位 ✓
+   * （宁可算宽 ✓：算宽只是早一点省略 ✓；算窄会溢出 ⇒ 交给 CSS 再切一次 ✗）。
+   */
+
+  /**
+   * 一个字符串占多少个**半角单位**（全角 / CJK 算 2 ✓）。
+   *
+   * ★ 必须**按码点**数 ✗、不能按 `charCodeAt` 数：emoji（`🐳` = 一个码点、两个 UTF-16 单元）
+   *   用 `charCodeAt` 会数成 **4** 个单位 ✗，而 `fileNameHead` 那边按码点只算 **2** ✓
+   *   ⇒ 两边口径不一致时"截出来的宽度"与"算出来的宽度"对不上 ✓
+   *   （本仓实测：`🐳`×20 + `.md` 在 22 个单位的预算下会截出 40 个单位 ✗ —— 断言逮住的就是它 ✓）。
+   */
+  function fileNameUnits(text) {
+    var units = 0
+    for (var i = 0; i < text.length; i++) {
+      // 0x2e80 起是 CJK 与全角标点那一片 ✓（粗判足够 —— 这里只要"别把中文当半角"✗）
+      var code = text.codePointAt(i)
+      units += code >= 0x2e80 ? 2 : 1
+      // 代理对：`codePointAt` 一次念走了两个 UTF-16 单元 ⇒ 指针也跟着跳一格 ✓
+      if (code > 0xffff) i += 1
+    }
+    return units
+  }
+
+  /**
+   * 从**头部**取一段，最多 `units` 个单位 ✓ —— 不切半个代理对 ✗（手机上有 emoji 文件名 ✓）。
+   * 一个完整字符都放不下时返回空串 ✓（调用方自己补省略号 ✓）。
+   */
+  function fileNameHead(text, units) {
+    var used = 0
+    var out = ''
+    for (var i = 0; i < text.length; i += 1) {
+      var code = text.codePointAt(i)
+      var width = code >= 0x2e80 ? 2 : 1
+      if (used + width > units) break
+      out += String.fromCodePoint(code)
+      used += width
+      // 代理对：`codePointAt` 一次念走了两个 UTF-16 单元 ⇒ 指针也要跟着跳一格 ✓
+      if (code > 0xffff) i += 1
+    }
+    return out
+  }
+
+  /**
+   * 扩展名（**含那个点** ✓）；没有扩展名时返回空串 ✓。
+   *
+   * 判据三条（都不满足就当没有 ✓ —— 宁可当没有 ✗：当成有会把"头"切得更短）：
+   *   · 点不在开头 ⇒ `.bashrc` 那种隐藏文件**没有**扩展名 ✓；
+   *   · 点不在结尾 ⇒ `a.` / `..` 没有 ✓；
+   *   · 长不超过 12 个单位 ⇒ 再长多半不是后缀 ✓。
+   */
+  function fileNameExt(text) {
+    var dot = text.lastIndexOf('.')
+    if (dot <= 0 || dot >= text.length - 1) return ''
+    var ext = text.slice(dot)
+    return fileNameUnits(ext) > 12 ? '' : ext
+  }
+
+  /**
+   * ★★ 一行文件名拆成**两段**（纯函数 ✓ —— 判据直接打在它身上 ✓）：
+   *   · `head`：**允许被压**的那一段 ✓（名字放得下时 = 去掉后缀的名字 ✓；放不下时带中段省略号 ✓）；
+   *   · `ext`：**认得出来的扩展名** ✓（含那个点 ✓；认不出 ⇒ 空串 ✓）。
+   *
+   * ★ 为什么必须**分成两段**（而不是像上一版那样返回一整串 ✗）：
+   *   显示层要把 `ext` 挂到一个 `flex: 0 0 auto` 的**独立元素**上 ✓ ——
+   *   同一个可收缩元素里的文本，CSS 会从**尾部**切 ✗，而后缀正是尾部 ✗。
+   *   ⇒ "保住后缀"不能只靠预算估算 ✓，得靠**结构** ✓（见 `.dshm-file-name > [data-dshm-fs-ext]` ✓）。
+   *
+   * ★★ round 199：多了一个 `asFolder` ✓ —— **目录名不许拆后缀** ✗。
+   *   为什么非要有它 ✗：目录右侧那颗标签是固定的「文件夹」✓，名字本身要**完整** ✓；
+   *   而像 `v1.2` / `dsh-mobile.old` 这种目录名，按文件那条路会被拆出一个假后缀 ✗
+   *   （`.2` / `.old` ✗）⇒ 名字平白短一截 ✓，右侧还可能冒出一颗莫名其妙的标签 ✗。
+   *   （上一版没有这个开关 ✓，只是因为那时目录行的右侧压根没有标签 ✓ —— 这一轮才暴露出来 ✓。）
+   *
+   * @param name - 完整文件名（目录名也走这里 ✓）。
+   * @param maxUnits - 允许占多少个半角单位（省略时用 `FILE_NAME_MAX_UNITS` ✓）。
+   * @param asFolder - `true` ⇒ 当成目录名：**不认后缀** ✓（`ext` 一定是空串 ✓）。
+   */
+  function fitFileNameParts(name, maxUnits, asFolder) {
+    var text = String(name === undefined || name === null ? '' : name)
+    var limit = Number(maxUnits) > 0 ? Number(maxUnits) : FILE_NAME_MAX_UNITS
+    if (text === '') return { head: '', ext: '' }
+    // ★ round 199：目录名不认后缀 ⇒ 走下面"没有扩展名"那条路（尾部省略、留头 ✓）
+    var ext = asFolder === true ? '' : fileNameExt(text)
+    var stem = ext === '' ? text : text.slice(0, text.length - ext.length)
+    // 放得下 ⇒ 原样显示；但后缀**照样单独挂** ✓ —— 短名字也不给 CSS 任何剪尾巴的机会 ✓
+    if (fileNameUnits(text) <= limit) return { head: stem, ext: ext }
+    // 没有扩展名 ⇒ 普通尾部省略（留头 ✓）—— 这是"退化"那条路 ✓
+    if (ext === '') return { head: fileNameHead(text, limit - 1) + '\u2026', ext: '' }
+    var room = limit - 1 - fileNameUnits(ext)
+    // 后缀自己就快占满整行 ⇒ 至少留一个字 ✓（宁可这一行挤一点 ✓，也**绝不**把后缀丢掉 ✓）
+    if (room < 1) room = 1
+    return { head: fileNameHead(stem, room) + '\u2026', ext: ext }
+  }
+
+  /**
+   * 一行文件名**真正显示**的文本 ✓（= `fitFileNameParts` 两段接起来 ✓）——
+   * 上一单的判据打的就是它 ✓（"有扩展名 ⇒ 显示的必须以扩展名结尾"✓），这个入口继续留着 ✓。
+   */
+  function fitFileName(name, maxUnits) {
+    var parts = fitFileNameParts(name, maxUnits)
+    return parts.head + parts.ext
+  }
+
+  /**
+   * 名字**头部**那一栏大约放得下多少个**半角单位** ✓ —— 由 CSS 的实际尺寸推出来 ✓，不是拍的 ✗：
+   *
+   *   · 面板宽 = `--dshm-files-w` = `min(64vw, 264px)` ✓ —— ★ 264 只是**上限** ✗：
+   *     视口只要小于 412.5px（375 / 360 / 320 都比它小 ✓），`64vw` 先到 ⇒ 面板更窄 ✓；
+   *   · ★ round 198 补上上一版漏掉的一项：`#dsh-mobile-sheet-body` 的 `padding: 10px 10px` ✓ = **20** ✓
+   *     （上一版只算了 `.dshm-file-head` 的 4 ✓ ⇒ 预算系统性偏大 ✓）；
+   *   · 一行里除名字外还占掉：左右内边距 4 + 图标 22 + 两个 gap 22 + 「⋯」32 = 80 ✓；
+   *   · 名字字号 14px ⇒ 上一版按"一个半角单位 ≈ 7px"估 ✓ —— ★ 实测这颗系数偏小 ✗：
+   *     SF Pro 14px 下 22 个数字 = **187px**（按 7px/单位只有 154px ✗）⇒ 它只能算个保守近似 ✓。
+   *   ⇒ (264 - 100) / 7 ≈ 23 个单位，再乘保守系数 ⇒ **22** ✓。
+   *
+   * ★★ 这一版最关键的变化：**这个数字不再决定后缀的生死** ✓。
+   *   它只决定"中段省略从哪里开始" ✓ —— 后缀挂在 `flex: 0 0 auto` 的独立元素上 ✓，
+   *   所以就算它偏大（真实渲染更宽 ✓），被 CSS 剪掉的也只是**头部**那一段的尾巴 ✓，
+   *   永远剪不到后缀 ✓（上一版正是"估算偏大 ⇒ CSS 从尾部补刀 ⇒ 后缀第一个没"✗）。
+   */
+  var FILE_NAME_MAX_UNITS = 22
+
+  /**
+   * 类型图标（按扩展名分族 ✓）：形状 + 颜色各管一半 ✓（颜色见 CSS 那几条 `data-family` ✓）。
+   * 统一 24 网格 / 1.7 线宽 / `currentColor` ✓ —— 与面板里其它图标同一套 ✓。
+   */
+  var ICON_FILE_IMAGE = svgIcon('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-6 6"/>', 18)
+  var ICON_FILE_SHEET = svgIcon('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 9v12"/>', 18)
+  var ICON_FILE_CODE = svgIcon('<path d="M9 7l-5 5 5 5"/><path d="M15 7l5 5-5 5"/>', 18)
+  var ICON_FILE_ARCHIVE = svgIcon('<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>', 18)
+  /**
+   * ★ round 198：PDF 单独一族用的字形 ✓ —— 与其它族**长得不一样**才谈得上"分得开" ✓：
+   *   `doc` / `other` 是**没有字的一页纸** ✓，这一颗是"一页纸带两行" ✓。
+   *   同网格（24 ✓）/ 同线宽（1.7 ✓）/ `currentColor` ✓ —— 与上面那一排同一套 ✓。
+   */
+  var ICON_FILE_PDF = svgIcon('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M8.5 14h7"/><path d="M8.5 17.5h7"/>', 18)
+
+  /**
+   * 扩展名 → 族 ✓（图 / 表 / **PDF** / 码 / 压缩 / 文 ✓；不在表里的都是 `other` ✓）。
+   *
+   * ★★ round 198 两处调整（都由用户原话决定 ✓）：
+   *   · `.pdf` **单独一族** ✓（"PDF 还是有必要单独分出来一类"✓）—— 颜色见 CSS 那颗语义红 ✓；
+   *   · `.md` / `.markdown` 从 `doc` **挪进 `code`** ✓（"Markdown 和 PDF 还是分不开"✗）——
+   *     为什么不另起一族 ✗：主题里能用的语义色就那么几颗 ✓，再切一族只能跟别人撞色 ✓
+   *     （那就不成"图标 ↔ 颜色一一对应"了 ✗）；Markdown 本来就是**纯文本源码** ✓，
+   *     与 `txt` / `docx` 那种"成品文档"分开、跟 `<>` 一族反而更贴 ✓。
+   *   ★ `sheet`（Excel ✓）用户明确说"可以明确看出来，很不错"✓ ⇒ **一个字都不动** ✗。
+   */
+  var FILE_FAMILY_EXT = {
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif', 'avif', 'tif', 'tiff', 'ico'],
+    sheet: ['csv', 'tsv', 'xls', 'xlsx', 'ods', 'numbers'],
+    pdf: ['pdf'],
+    code: [
+      'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'json', 'css', 'scss', 'less', 'html', 'htm', 'xml',
+      'py', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'go', 'rs', 'rb', 'php',
+      'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'sql', 'swift', 'dart', 'lua', 'vue',
+      'svelte', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'gradle',
+      'md', 'markdown',
+    ],
+    archive: ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', '7z', 'rar', 'jar', 'war', 'apk', 'ipa', 'dmg', 'iso', 'pkg', 'deb', 'rpm'],
+    doc: ['txt', 'doc', 'docx', 'rtf', 'odt', 'pages', 'tex', 'log', 'epub'],
+  }
+
+  /** 一个名字属于哪一族 ✓（没有扩展名 / 认不出 ⇒ `other` ✓）。 */
+  function fileNameFamily(name) {
+    var ext = fileNameExt(String(name === undefined || name === null ? '' : name))
+    if (ext === '') return 'other'
+    var key = ext.slice(1).toLowerCase()
+    var families = ['image', 'sheet', 'pdf', 'code', 'archive', 'doc']
+    for (var i = 0; i < families.length; i++) {
+      if (FILE_FAMILY_EXT[families[i]].indexOf(key) >= 0) return families[i]
+    }
+    return 'other'
+  }
+
+  /** 族 → 字形 ✓（`doc` / `other` 用原来那颗文件图标 ✓ —— 不做没必要的花哨 ✗）。 */
+  function fileFamilyIcon(family) {
+    if (family === 'image') return ICON_FILE_IMAGE
+    if (family === 'sheet') return ICON_FILE_SHEET
+    // ★ round 198：PDF 单独一颗 ✓（"带两行的一页纸"✓ —— `doc` / `other` 是无字的那一页 ✓）
+    if (family === 'pdf') return ICON_FILE_PDF
+    if (family === 'code') return ICON_FILE_CODE
+    if (family === 'archive') return ICON_FILE_ARCHIVE
+    return ICON_FILE
+  }
+
+  /**
+   * ★★ round 199：目录行**右端那颗标签**的文案（纯函数 ✓ —— 判据直接打在它身上 ✓）。
+   *
+   * 用户原话："我记得之前我们**文件夹会标注出类型**"✓ + "**只有名字这一块可能需要改一改**"✓。
+   * 上一单把「目录」那一段连同文件大小一起删掉了 ✗ —— 这一轮让它**回来** ✓，
+   * 文案按用户嘴里的那个词写成「**文件夹**」✓（不再写「目录」✓）。
+   *
+   * ★ 为什么把这一句单拎成函数 ✗：它是**唯一**一处决定这个字符串的地方 ✓ ——
+   *   单拎出来，判据才能打在**生产**代码上 ✓（打在测试里另抄一份的复制品上就是假断言 ✗）。
+   *   文件那一侧**不在这里** ✓：文件行右侧吃的是 `fitFileNameParts` 吐出来的 `ext` ✓
+   *   （后缀认不认得出来由 `fileNameExt` 说了算 ✓，两处合起来才叫"右侧标签"✓）。
+   */
+  function dirTagText(entry) {
+    if (entry === null || entry === undefined) return ''
+    return entry.type === 'directory' ? '文件夹' : ''
+  }
+
+  /**
+   * 一个条目：类型图标 + 名称（中段省略）+ **右端那颗标签**（后缀 / 「文件夹」✓）；点一下进目录 / 预览。
    *
    * 用"就地展开操作"而不是弹菜单：手机上弹菜单要么太小要么挡住列表，
    * 就地展开还能让用户看清自己操作的是哪一项。
+   *
+   * ★ 文件**大小**那一段**已按用户要求删掉** ✗（原话："我们现在还会显示一个文件的大小，
+   *   这个感觉没必要，你把这个去掉的话，空间可能会更大一点"✓）—— 省下来的宽度全部给了名字 ✓。
+   *
+   * ★★ round 199：用户接着说"**或许把文件的大小直接替换为文件名后缀**就好了"✓ ⇒
+   *   那**同一段位置**（名字之后、`⋯` 之前 ✓）现在装的是：
+   *     · 目录 ⇒ 「文件夹」✓（"以前文件夹会标注出类型"✓ —— 上一单删掉的那条**回来**了 ✓）；
+   *     · 文件 ⇒ 后缀 ✓（`fitFileNameParts` 认出来的那一段 ✓）；
+   *     · 没后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
+   *   ★ 图标（图 / 表 / PDF / 码 / 压缩 / 文 / 其它 + 颜色 ✓）用户点名"改的很好"✓ ⇒ **一个字没动** ✓。
    */
   function entryRow(sheet, state, entry) {
     var wrapper = document.createElement('div')
@@ -20668,6 +21300,12 @@
     wrapper.setAttribute('data-dshm-fs-entry', '1')
     wrapper.setAttribute('data-dshm-fs-kind', entry.type === 'directory' ? 'dir' : 'file')
     wrapper.setAttribute('data-dshm-path', entry.path)
+    /**
+     * ★ 完整名字（**没被截过** ✓ —— 屏幕上那一行可能是 `头…后缀` ✓）。
+     * 「打开所在目录」指名的落点、与工具定位一行，一律看它 ✓：
+     * 拿显示文本去认名字，遇到长名字必然认不出来 ✗。
+     */
+    wrapper.setAttribute('data-dshm-fs-name', entry.name)
     wrapper.dataset.selecting = state.selecting === true ? '1' : '0'
     wrapper.dataset.selected = state.selected[entry.path] === undefined ? '0' : '1'
 
@@ -20682,21 +21320,113 @@
     check.setAttribute('aria-hidden', 'true')
     head.appendChild(check)
 
+    var isDir = entry.type === 'directory'
+    var family = isDir ? 'directory' : entry.type === 'symlink' ? 'link' : fileNameFamily(entry.name)
     var icon = document.createElement('span')
     icon.className = 'dshm-file-icon'
-    icon.dataset.kind = entry.type === 'directory' ? 'directory' : 'file'
-    icon.innerHTML = entry.type === 'directory' ? ICON_FOLDER_SM : entry.type === 'symlink' ? ICON_LINK : ICON_FILE
+    icon.dataset.kind = isDir ? 'directory' : 'file'
+    // ★ 类型分族（图 / 文 / 表 / 码 / 压缩 / 其它 ✓）：颜色由 CSS 按 `data-family` 给 ✓，
+    //   字形由 `fileFamilyIcon` 给 ✓ —— 两条一起才在窄栏里一眼分得开 ✓。
+    icon.dataset.family = family
+    icon.innerHTML =
+      isDir ? ICON_FOLDER_SM : entry.type === 'symlink' ? ICON_LINK : fileFamilyIcon(family)
     head.appendChild(icon)
 
     var name = document.createElement('span')
     name.className = 'dshm-file-name'
-    name.textContent = entry.name
+    /**
+     * ★ round 199：第三个参数 `isDir` ✓ —— 目录名**不许拆后缀** ✗（目录右侧那颗标签固定是
+     *   「文件夹」✓，名字要完整 ✓；不传它的话 `v1.2` 这种目录会被拆出一个假后缀 `.2` ✗）。
+     */
+    var shownName = fitFileNameParts(entry.name, FILE_NAME_MAX_UNITS, isDir)
+    /**
+     * ★★ round 198：后缀渲染成**独立元素**（`[data-dshm-fs-ext]` ✓）——
+     *   CSS 给它 `flex: 0 0 auto` ✓ ⇒ 它**在结构上不参与收缩** ⇒ 谁也剪不掉它 ✓。
+     *   上一版是把 `头…后缀` 整串塞进**同一个**可收缩元素里 ✗ ⇒ 估算一旦偏小，
+     *   CSS 就从尾部补一刀 ✗（后缀第一个没 ✗）—— 这正是用户那条反馈 ✓。
+     * 头部（`[data-dshm-fs-head]` ✓）才是允许收缩 + `overflow: hidden` 的那一个 ✓：
+     *   中段省略由 JS 算 ✓、尾部由 CSS 保证 ✓，两条各管一段 ✓。
+     * ★★ round 199：名字那一段现在**只显示 `head`** ✓（= 去掉后缀的那一截 ✓）——
+     *   后缀不再跟着名字走 ✓，它单独出现在下面那颗右端标签上 ✓ ⇒ 整行里后缀**只出现一次** ✓
+     *   （用户："避免重复显示"✓）。
+     */
+    var nameHead = document.createElement('span')
+    nameHead.setAttribute('data-dshm-fs-head', '1')
+    nameHead.textContent = shownName.head
+    name.appendChild(nameHead)
+    /**
+     * ★★ round 199：**右端那颗标签** ✓ —— 用户原话："或许把**文件的大小直接替换为文件名后缀**就好了"✓。
+     *   位置就是上一单删掉的「大小 / 目录」那一段 ✓（CSS 里 `margin-left: auto` 把它推到名字栏最右 ✓）。
+     *   · 目录 ⇒ 「文件夹」✓（文案来自 `dirTagText` ✓ —— 那是**唯一**一处生产它的地方 ✓）；
+     *   · 文件 ⇒ 后缀 ✓（`shownName.ext` ✓，就是 `fileNameExt` 认出来的那一段 ✓）；
+     *   · 没有后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
+     * ★ "后缀必须看得见"这条保证，这一轮从**名字那一栏**转移到这颗标签上 ✓：
+     *   它照样是 `flex: 0 0 auto` + `nowrap` ✓（CSS 里那条 `[data-dshm-fs-ext]` 规则**一个字没改** ✓），
+     *   加上 `margin-left: auto` 与 64px 上限 ⇒ 被压的永远只有名字那一段 ✓。
+     */
+    if (isDir) {
+      var dirTag = document.createElement('span')
+      dirTag.className = 'dshm-file-tag'
+      dirTag.setAttribute('data-dshm-fs-tag', '1')
+      dirTag.textContent = dirTagText(entry)
+      name.appendChild(dirTag)
+    } else if (shownName.ext !== '') {
+      var nameExt = document.createElement('span')
+      nameExt.className = 'dshm-file-tag'
+      nameExt.setAttribute('data-dshm-fs-ext', '1')
+      nameExt.textContent = shownName.ext
+      name.appendChild(nameExt)
+    }
+    /**
+     * 完整名字同时留在 `title` 与 `data-dshm-fs-name` 上 ✓：
+     *   · 长按看全名、桌面悬停看全名 ✓；
+     *   · 验收脚本 / 工具按**真名**定位那一行 ✓（拿被截过的文本反推真名必然错 ✗）。
+     */
+    name.title = String(entry.name === undefined || entry.name === null ? '' : entry.name)
     head.appendChild(name)
 
-    var meta = document.createElement('span')
-    meta.className = 'dshm-file-meta'
-    meta.textContent = entry.type === 'directory' ? '目录' : formatSize(entry.size)
-    head.appendChild(meta)
+    /**
+     * ★ 长按看全名（用户要求保留这个入口 ✓ —— 截断之后它就是"我到底在点哪个"的兜底 ✓）。
+     *
+     * 为什么用 pointer 事件 + 计时器而不是 `contextmenu` ✗：WebView 的长按菜单会盖住
+     * 我们自己那行提示 ✓（用户点不到、也读不到 ✓）；`contextmenu` 在部分 WebView 里干脆不来 ✗。
+     *
+     * ★ 移动**不能**一律取消 ✗：手指按住不动时 WebView 照样会吐一串 1–2px 的 `pointermove`
+     *   ⇒ 一移动就取消的话，长按在真机上几乎永远按不出来 ✓（这也是"点了没反应"的经典来源 ✓）。
+     *   所以给一个 **10px 的抖动阈值** ✓，超过才算"这是在滑动/滚动"⇒ 取消 ✓。
+     *   另外三个取消口（抬起 / 取消 / 移出）一个都不能少 ✓。
+     * 长按命中之后**吞掉那一次 click** ✓：否则"看完名字"顺手又进了目录 / 开了预览 ✗。
+     */
+    var pressTimer = null
+    var pressFired = false
+    var pressFrom = null
+    var cancelPress = function () {
+      pressFrom = null
+      if (pressTimer === null) return
+      clearTimeout(pressTimer)
+      pressTimer = null
+    }
+    head.addEventListener('pointerdown', function (event) {
+      pressFired = false
+      cancelPress()
+      pressFrom = { x: Number(event && event.clientX) || 0, y: Number(event && event.clientY) || 0 }
+      pressTimer = setTimeout(function () {
+        pressTimer = null
+        pressFired = true
+        // 提示行走 `#dsh-mobile-sheet-note` ✓（它 `user-select: text` ✓ ⇒ 还能顺手选中复制 ✓）
+        setNote('完整名称：' + String(entry.name) + '（' + entry.path + '）')
+      }, 550)
+    })
+    head.addEventListener('pointerup', cancelPress)
+    head.addEventListener('pointercancel', cancelPress)
+    head.addEventListener('pointerleave', cancelPress)
+    head.addEventListener('pointermove', function (event) {
+      if (pressFrom === null) return
+      var dx = (Number(event && event.clientX) || 0) - pressFrom.x
+      var dy = (Number(event && event.clientY) || 0) - pressFrom.y
+      // 抖动阈值 10px ✓（真机上按住不动也会有 1–2px 的 move ✓，不能据此取消 ✗）
+      if (dx * dx + dy * dy > 100) cancelPress()
+    })
 
     var actions = document.createElement('div')
     actions.className = 'dshm-file-actions'
@@ -20716,6 +21446,11 @@
       updateSelectUI(sheet, state)
     }
     head.addEventListener('click', function () {
+      // 刚刚是"长按看全名" ⇒ 那一次点击**不算**（否则看完名字顺手又进了目录 / 开了预览 ✗）
+      if (pressFired === true) {
+        pressFired = false
+        return
+      }
       if (state.selecting === true) {
         toggleSelection()
         return
@@ -21401,6 +22136,17 @@
    *   用户既不知道为什么失败，也没有别的办法把那串路径弄出来。
    */
   async function copyText(text) {
+    /**
+     * ★★ 剪贴板原生桥（2026-10-05）：**先问壳** ✓ —— APK 里唯一"不需要用户手势"的那条路 ✓（`shellClipboard` ✓）。
+     *
+     * 顺序是刻意的 ✗：网页那两条路在**轮询触发**（无手势 ✓）时**必然失败** ✓，
+     * 先试它们只会先把失败走一遍 ✓（用户看到的现象就是那句降级横幅 ✓）。
+     * ★ 只认 `'ok'` ✓：壳说 `empty`/`too-long`/`untrusted`/`error`、或压根没有桥（`null` ✓）
+     *   ⇒ **继续往下走网页路** ✓（行为与今天逐字一致 ✓，绝不因为壳摇头就放弃 ✗）。
+     */
+    var native = shellClipboard(text)
+    if (native === 'ok') return 'shell-clipboard'
+    if (native !== null) log('[clipboard] 壳说 ' + native + ' ⇒ 继续走网页那两条路')
     try {
       if (navigator.clipboard !== undefined && navigator.clipboard.writeText !== undefined) {
         await navigator.clipboard.writeText(text)
@@ -21479,8 +22225,13 @@
     state.focusName = ''
     var rows = sheet.body.querySelectorAll('[data-dshm-path]')
     for (var i = 0; i < rows.length; i++) {
-      var nameEl = rows[i].querySelector('.dshm-file-name')
-      if (nameEl === null || String(nameEl.textContent || '') !== name) continue
+      /**
+       * ★ 认名字要用 `data-dshm-fs-name`（**完整名字** ✓）——
+       * 屏幕上那串已经过 `fitFileName` ✓（长名字是 `头…后缀` ✗）⇒
+       * 拿显示文本对比，长名字**永远认不出来** ✗（点了「打开所在目录」就不高亮 ✗）。
+       */
+      var shown = rows[i].getAttribute('data-dshm-fs-name')
+      if (shown === null || String(shown) !== name) continue
       rows[i].dataset.dshmFocus = '1'
       try {
         rows[i].scrollIntoView({ block: 'center' })
@@ -22461,6 +23212,25 @@
       return frameDesyncAt
     },
     ReplayWindow: ReplayWindow,
+    /**
+     * ★★ 2026-10-05：**隧道构造器本身** ✓ —— 让测试能直接造一个 Tunnel、只调它的
+     *   `reportManualReconnectFailure` / `giveUpAutoReconnect` ✓，而不必起一条假 WebSocket ✓。
+     *
+     * 为什么可以露出 ✗：`__DSH_MOBILE_BOOT__.tunnel` **本来就把活的 Tunnel 实例露出去了** ✓
+     *   （`scripts/check-mobile-layout.mjs` 全篇在改它的 `autoPaused` / `failStreak` ✓），
+     *   而 `__DSH_MOBILE_INTERNALS__` 这一格本来就是"测试与排障"用的 ✓ ⇒ 不新增任何暴露面 ✓。
+     * ★ 构造函数是**纯记账**（没有 socket、没有 DOM ✓）⇒ 造出来不会有副作用 ✓。
+     */
+    Tunnel: Tunnel,
+    /**
+     * ★★ 2026-10-05：**系统通知的去重判据本身** ✓（纯的：`now` 由调用方给 ✓）。
+     *
+     * 为什么必须露出来 ✗：这是本轮新加的唯一一处"**看不见的**"逻辑 ✓ —— 它在真机上的
+     * 正确性表现为"同一条不会被响两次"✓，而这件事在页面这一侧**没有别的读数** ✗。
+     * 露出这个纯函数之后，"窗口**正好**是 10 秒"可以**注入时钟**量 ✓
+     * （不必让测试真等 10 秒 ✗，也不必只对着常量写一条正则 ✓）。
+     */
+    shellNoticeDeduped: shellNoticeDeduped,
     transcriptHash: transcriptHash,
     fingerprintOf: fingerprintOf,
     formatFingerprint: formatFingerprint,
@@ -22469,6 +23239,24 @@
     FrameFlags: FrameFlags,
     /** ★ 交付那一段（帧 → multipart `Response` ✓）：测试直接调它 ✓（纯函数，不需要浏览器 ✓）。 */
     buildBinaryResponse: buildBinaryResponse,
+    /**
+     * ★ 文件名那一行**拆两段**的那个纯函数 ✓（`head` 允许被压 ✓ / `ext` 绝不 ✗）——
+     *   判据直接打在它身上 ✓（见 `packages/client/test/boot-surface.test.ts` ✓），
+     *   而不是打在测试里另抄一份的复制品上 ✗。
+     */
+    fitFileNameParts: fitFileNameParts,
+    /** ★ 一行文件名**真正显示**的文本 ✓（= 上面两段接起来 ✓；上一单那条判据仍打它 ✓）。 */
+    fitFileName: fitFileName,
+    /**
+     * ★★ round 199：目录行右端那颗标签的文案 ✓ —— 判据直接打在它身上 ✓
+     *   （目录 ⇒ 「文件夹」✓ / 其它 ⇒ 空串 ✓；文件的标签文案走 `fitFileNameParts` 的 `ext` ✓）。
+     */
+    dirTagText: dirTagText,
+    fileNameFamily: fileNameFamily,
+    fileFamilyIcon: fileFamilyIcon,
+    fileNameExt: fileNameExt,
+    fileNameUnits: fileNameUnits,
+    FILE_NAME_MAX_UNITS: FILE_NAME_MAX_UNITS,
   }
 
   /**
@@ -22856,7 +23644,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1005072031'
+    var BOOT_STAMP = 'BUILD-1005173155'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -23703,8 +24491,18 @@
            * ⇒ 走壳的桥发**系统通知** ✓（`shellNotify` 早就有了 ✓，只是没人调它 ✗）；
            *   桥不在（例如用手机浏览器打开，而不是 App）⇒ 退回**页面横幅** ✓，绝不静默 ✗。
            */
+          /**
+           * ★ 标题**由电脑给**（`callInfo.title` ✓，形如「Mac-mini-2024 需要你确认」✓）：
+           *   只有电脑知道自己叫什么 ✓（它读的是与本机 manifest.machineName 同一个口 ✓）
+           *   ⇒ 通知栏里的名字与面板行名不会分叉 ✓。
+           * ★ 拿不到这个字段（老宿主 / agent 工具 `phone_notify` ✓）⇒ 退回原来那三个字 ✓
+           *   —— 行为与今天逐字一致 ✓，绝不因为缺字段就弹一条没有标题的通知 ✗。
+           */
+          var callTitle = typeof callInfo.title === 'string' && callInfo.title.length > 0
+            ? callInfo.title
+            : '需要你确认'
           // ★ 会话 id 一起透传（老页面/老壳都没有它 ⇒ 退回"只打开 App" ✓）
-          var posted = shellNotify('需要你确认', text, callInfo.sessionId)
+          var posted = shellNotify(callTitle, text, callInfo.sessionId)
           if (posted === null) {
             drawBar('info', text, [], false)
             detail = 'banner-no-bridge'
@@ -23714,18 +24512,59 @@
           buzz()
           ok = true
         } else if (callInfo.capability === 'clipboard') {
-          // 三条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
-          // 复制成功就完事；失败就把文本摆到横幅上让用户长按复制 —— **绝不静默失败**。
+          // 多条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
+          // ★ 剪贴板原生桥（2026-10-05）：**先问壳**（原生 `ClipboardManager` ✓，不需要用户手势 ✓，见 copyText ✓），
+          //   壳不可用 / 摇头才退回网页那两条路 ✓；全都失败就把正文摆到横幅上让用户长按复制 ——
+          //   **绝不静默失败** ✗（但也**绝不**把它说成成功 ✗，见下面那句 ok ✓）。
           var how = await copyText(text)
           if (how === undefined) {
-            drawBar('info', '电脑想放进剪贴板，但浏览器不允许自动复制。长按选中下面这段：\n' + text, [], false)
+            /**
+             * ★ 正文必须**单独一个元素** ✓（并且显式可选中 ✓）。
+             *
+             * 起因（用户价值 ✓）：原来"前缀说明 + 正文"塞在**同一个 div** 里 ✗ ⇒
+             * 用户长按全选并把正文复制出来时，那句「电脑想放进剪贴板，但浏览器不允许自动复制。
+             * 长按选中下面这段：」会**一起被带走** ✗ —— 粘到别处就是一段混着说明的脏文本 ✓。
+             * 拆成两块之后，长按正文这一块选中/复制就是**干净的正文** ✓
+             * （`user-select:text` 是显式的 ✗ —— 别赌某个祖先节点有没有关掉选中 ✗）。
+             */
+            var clipBar = drawBar('info', '电脑想放进剪贴板，但浏览器不允许自动复制。长按选中下面这段：', [], false)
+            if (clipBar !== null && clipBar !== undefined) {
+              var clipBody = document.createElement('div')
+              clipBody.setAttribute('data-dshm-clipboard-text', '1')
+              clipBody.textContent = String(text)
+              clipBody.style.cssText =
+                'margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,.3);' +
+                'user-select:text;-webkit-user-select:text;word-break:break-all'
+              clipBar.appendChild(clipBody)
+            }
             detail = 'banner-manual'
           } else {
-            drawBar('info', '已放进手机剪贴板（' + String(text).slice(0, 60) + '）', [], false)
+            /**
+             * ★★ 2026-10-05：这一条从**蓝色横幅**改走**系统通知** ✓ —— 用户原话
+             *   「把我们的蓝色横幅都改成安卓的通知」✓。
+             *
+             * ★ 无壳（手机浏览器打开 / 老壳没有 `notify` 桥 ✓）⇒ `shellNotice` 自己退
+             *   **页面提示条** ✓，**绝不**退回蓝横幅 ✗（退回去等于没改 ✓）。
+             * ★ `detail` 与下面那句 `ok = how !== undefined` **一个字都不改** ✗ ——
+             *   宿主与验收脚本认的就是 `copied:` 那个口径 ✓（见 `check-device-channel.mjs` ⑥a/⑥b ✓）。
+             */
+            shellNotice('已放进剪贴板', String(text))
             detail = 'copied:' + how
           }
           buzz()
-          ok = true
+          /**
+           * ★★ 剪贴板原生桥（2026-10-05）：`ok` 必须**等于"真的写进去了没有"** ✓。
+           *
+           * 原来这里写死 `ok = true` ✗ ⇒ 降级（把文本摆出来请用户手动长按）也被回报成
+           * **执行成功** ✓ —— 宿主那边于是永远看不到 clipboard 的端侧失败 ✗
+           * （`banner-manual` 只在 `detail` 里 ✓，而"已放进剪贴板"这句话是假的 ✗），
+           * 而用户手机上确实什么都没进剪贴板 ✓。这就是本轮要根除的**假成功** ✗。
+           *
+           * `how` 就是"用上了哪条路"✓（`shell-clipboard` / `clipboard` / `execCommand` ✓）——
+           * 它有值 ⇔ 真写进去了 ✓；`undefined` ⇔ 降级到长按 ✓ ⇒ `ok=false` ✓
+           * （`detail` 仍是 `banner-manual` ✓ —— 那是宿主与 agent 认的口径 ✓）。
+           */
+          ok = how !== undefined
         } else if (callInfo.capability === 'vibrate') {
           // text 是毫秒数。夹在 50..2000：太短感觉不到，太长像故障。
           var ms = Number(String(text).trim())

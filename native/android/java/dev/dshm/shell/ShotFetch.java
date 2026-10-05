@@ -288,7 +288,14 @@ final class ShotFetch {
         return out.toByteArray();
     }
 
-    /** 与 {@link ManifestProbe} 同一套：只验链、不查 hostname ✓。 */
+    /**
+     * 与 {@link ManifestProbe} 同一套：只验链、不查 hostname ✓。
+     *
+     * ★★ 这一份是**历史遗留的重复** ✗（2026-10-04 核对 ✓）：{@link ManifestProbe#CHAIN_ONLY}
+     * 现在是**包内可见**的 ✓ ⇒ 本类其实可以直接引用那一个 ✓ —— 但本轮（会话清单那单）
+     * **不许碰**取图那半的文件 ✗ ⇒ 只把「判据在哪」写清楚 ✓，合并留给专单 ✓。
+     * 无论如何：**两处的语义必须逐字相同** ✓（都只 `return true` ✓、都不读 hostname / session ✓）。
+     */
     static final HostnameVerifier CHAIN_ONLY = new HostnameVerifier() {
         @Override
         public boolean verify(String hostname, SSLSession session) {

@@ -52,6 +52,16 @@ export interface DeviceCall {
      * ★ 可选字段：旧调用不传 ⇒ 行为同今天（点通知只打开 App ✓）。
      */
     readonly sessionId?: string;
+    /**
+     * ★ 2026-10-05：**系统通知的标题** ✓（形如 `Mac-mini-2024 需要你确认` ✓）。
+     *
+     * 为什么标题要电脑给而不是手机自己拼 ✗✗：只有电脑知道自己叫什么 ✓
+     * （它读的是与本机 `manifest.machineName` 同一个取值口 ✓）——
+     * 手机自己拼的话，两个来源迟早分叉 ✗，而用户在通知栏里看到的就是那个分叉的名字 ✗。
+     * ★ 可选字段：旧调用（例如 agent 工具 `phone_notify` ✓）不传 ⇒ 手机退回旧标题 ✓
+     *   （行为同今天 ✓）。
+     */
+    readonly title?: string;
     /** 已投递给手机的时间；undefined 表示尚未投递。 */
     readonly deliveredAt?: number;
 }
@@ -141,12 +151,40 @@ export declare class DeviceCallQueue {
      */
     setEnabled(deviceId: string, capability: string, enabled: boolean): string[];
     /**
+     * ★ 2026-10-05：用**持久化**的逐项同意给内存态授权**播种**。
+     *
+     * ## 修的是哪个窗口
+     *
+     * 授权原先是**纯内存**的（就是上面那个 `enabled`）⇒ DSH 一重启就清空 ✗。
+     * 手机侧确实会拿自己的 localStorage 跟宿主对账、缺什么补报什么 ✓，
+     * 但那前提是「手机此刻连着**这台**电脑」✗ —— 用户实测的窄窗口恰恰是
+     * **宿主刚重启 + 手机切到了另一台电脑**：补报发给了另一台 ✓，本机永远是空的 ✗
+     * ⇒ 提权推送被判 `not enabled` ⇒ **静默丢掉** ✗。
+     *
+     * 所以宿主启动时用 `devices.json` 里那份逐项允许记录把内存态填回来 ✓。
+     *
+     * ## 三条纪律
+     *
+     * 1. **只读**：播种不写文件 ✗ —— 记录里的内容照旧由 `mobile/device/enable` 那条路由改 ✓；
+     * 2. **只加不减（且只加记得的）**：记录里没有的设备/能力，播种之后仍然是**默认全禁** ✓；
+     * 3. **陌生名字跳过**：能力名不在 `DEVICE_CAPABILITIES` 里就忽略 ✓ ——
+     *    `devices.json` 是用户可见、可手改的明文文件，不能因为它多了一个陌生名字
+     *    就让**整个宿主**起不来 ✗（这是「启动路径上没有抛错」那类硬要求 ✓）。
+     *
+     * @param capabilities 该设备已持久化的能力名（通常是 `DeviceRecord.deviceCallGrants` ✓）。
+     * @returns 播种后该设备被记住的能力（按传入顺序，重复项与陌生名字已剔除 ✓）。
+     */
+    seedEnabled(deviceId: string, capabilities: readonly string[]): string[];
+    /**
      * 入队一次请求。
      *
      * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，
      *         让它知道"请求没发出去"，而不是以为发出去在等手机。
+     *
+     * ★ 2026-10-05追加 `title`（可选 ✓，通知标题 ✓）：位置参数排在最后 ✓ ——
+     *   既有调用一处都不用改 ✓（不传就是"手机按旧标题显示"✓，行为同今天 ✓）。
      */
-    enqueue(deviceId: string, capability: DeviceCapability, text: string, sessionId?: string): DeviceCall;
+    enqueue(deviceId: string, capability: DeviceCapability, text: string, sessionId?: string, title?: string): DeviceCall;
     /**
      * 取走该设备**尚未投递**的请求（取走即标记为已投递，保证只执行一次）。
      */

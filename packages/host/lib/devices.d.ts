@@ -67,6 +67,27 @@ export declare class DeviceStore {
     upsert(record: DeviceRecord): DeviceRecord;
     /** 更新授权与能力位。返回更新后的记录；设备不存在时返回 undefined。 */
     updateAuthorization(deviceId: string, update: AuthorizationUpdate): DeviceRecord | undefined;
+    /**
+     * ★ 2026-10-05：**端侧能力**（电脑 → 手机：`show` / `notify` / …）的逐项允许记录落盘。
+     *
+     * 由 `index.ts` 的 `mobile/device/enable` 路由调用 —— 也就是**手机点「允许」/「取消允许」**
+     * 的那一次 ✓。修的是用户实测过的一个窄窗口：**宿主刚重启 + 手机在另一台电脑上**时，
+     * 内存态的授权是空的 ⇒ 提权推送被判 `not enabled` ⇒ 静默丢掉 ✗
+     * （手机侧的「缺什么补报什么」要求它此刻连着**本机** ✗，那正是这个窗口里不成立的前提 ✓）。
+     *
+     * ## 为什么是「整份覆盖写」而不是「加一项 / 减一项」
+     *
+     * 判据的唯一来源是内存态队列 ✓：`DeviceCallQueue.setEnabled` 改完之后会返回
+     * **该设备当前允许的完整集合** ✓，直接把它落盘 ⇒ 两边天然一致 ✓。
+     * 若改成按项加减，迟早会出现「文件里有、内存里没有」（重启后凭空放开 ✗）
+     * 或者反过来（重启后悄悄失效 ✗）那种对不上的状态。
+     *
+     * ★ **默认全禁**不受影响：没调用过这个方法 ⇒ 记录里没有这个键 ⇒ 空 ⇒ 什么都不允许 ✓。
+     *
+     * @returns 落盘后的清单（去重、保持传入顺序）；**设备不存在时返回 `undefined`**，
+     *          不凭空造一条记录 ✗。
+     */
+    setDeviceCallGrants(deviceId: string, capabilities: readonly string[]): string[] | undefined;
     /** 改显示名。 */
     rename(deviceId: string, name: string): DeviceRecord | undefined;
     /** 记录一次成功连接时间。 */

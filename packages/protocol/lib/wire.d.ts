@@ -191,6 +191,26 @@ export interface DeviceRecord {
     readonly lastSeenAt?: string;
     readonly authorization: AuthorizationMode;
     readonly capabilities: DeviceCapabilities;
+    /**
+     * ★ 2026-10-05：**端侧能力**（电脑 → 手机：`show` / `notify` / `clipboard` /
+     * `vibrate` / `open`，见 `device-calls.ts` 的 `DEVICE_CAPABILITIES`）的**逐项允许记录**——
+     * 只放手机点过「允许」的那些 ✓，没记录过的一律仍按「不允许」处理 ✓。
+     *
+     * ## 为什么必须落盘
+     *
+     * 授权原先只活在宿主**内存**里（`DeviceCallQueue.enabled`）⇒ DSH 一重启就清空 ✗。
+     * 手机侧虽然会拿自己的 localStorage 跟宿主对账、缺什么补报什么 ✓，
+     * 但那要求「手机**此刻连着这台电脑**」✗ —— 用户实测的那个窄窗口恰恰是
+     * **宿主刚重启 + 手机切到了另一台电脑**：补报发给了另一台 ✓，本机永远是空的 ✗
+     * ⇒ 提权推送被判 `not enabled` ⇒ **静默丢掉** ✗。
+     *
+     * ★ 与 `capabilities` 是**两套不同的东西**，别合并 ✗：`capabilities` 管的是
+     *   「手机能对电脑做什么」（`fsRead` / `fsShell`…），本字段管的是
+     *   「电脑能指挥这台手机做什么」 —— 授权方向相反，判据各自独立 ✓。
+     *
+     * ★ 语义上**默认全禁**：缺省（老 `devices.json` 里没有这个键）⇒ 空 ⇒ 什么都不允许 ✓。
+     */
+    readonly deviceCallGrants?: readonly string[];
     /** 授权到期时间（ISO 8601），缺省为永不过期。 */
     readonly expiresAt?: string;
 }

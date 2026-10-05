@@ -20,6 +20,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from './protocol/index.js';
+import { createClientSourceRegistry, promptRefOfTunnelCall, } from "./client-source.js";
 import { DeviceStore } from "./devices.js";
 import { imageMimeOf, resolveWallpaper, wallpaperSize } from "./wallpaper.js";
 import { DeviceCallQueue, DEVICE_CAPABILITIES, selectDeliveryTargets, } from "./device-calls.js";
@@ -171,12 +172,37 @@ function parseEndpoint(endpoint) {
 export function createMobileHost(options) {
     const config = { ...DEFAULT_CONFIG, ...options.config };
     const store = options.store;
+    /**
+     * ★ 客户端来源登记表（「谁在跟我说话」的唯一事实来源）。
+     *
+     * **只登记 DSH 真收下的手机提交**（网关调用成功之后才写 ✓）——
+     * 登记早了会把「手机上点了发送但 DSH 拒了」的消息也算成手机发的 ✗。
+     * ★ 只活在内存里（宿主重启即空）：那时旧消息会答 `computer` + `heuristic`，
+     *   于是**不会**把电脑消息错报成手机，但也确实不准（见 client-source.ts 的已知缺口）。
+     */
+    const clientSources = createClientSourceRegistry();
     const ceiling = options.capabilityCeiling ?? DEFAULT_CAPABILITIES;
     const pendingByCode = new Map();
     const pendingByTicket = new Map();
     const sessions = new Map();
     /** 端侧请求队列（电脑 → 手机；见 device-calls.ts 的四条不变量）。 */
     const deviceCalls = new DeviceCallQueue();
+    /**
+     * ★ 2026-10-05：**启动时用落盘的逐项同意给队列播种**（用户实测的窄窗口：
+     * **宿主刚重启 + 手机在另一台电脑上**）。
+     *
+     * 授权原先只活在 `DeviceCallQueue.enabled` 这个内存 `Map` 里 ⇒ DSH 一重启就清空 ✗。
+     * 手机侧虽然有「跟宿主对账、缺什么补报什么」的机制 ✓（见 `boot.js` 的
+     * `[enable] 电脑侧没有 … 的授权，重新声明一次`），但那要求**手机此刻连着本机** ✗ ——
+     * 手机切到另一台电脑时，补报是发给**那一台**的 ✓，本机永远是空的 ✗
+     * ⇒ 提权推送被判 `not enabled` ⇒ 在源头被丢掉 ✗。
+     *
+     * 所以这里把 `devices.json` 里那份逐项允许记录填回内存 ✓。
+     * ★ 播种**只读**、**只加记得的** ⇒ 没记录过的设备/能力照旧默认全禁 ✓（见 `seedEnabled`）。
+     */
+    for (const device of store.list()) {
+        deviceCalls.seedEnabled(device.deviceId, device.deviceCallGrants ?? []);
+    }
     /**
      * ── 信任判据（本插件那道闸）─────────────────────────────────────────────
      *
@@ -582,6 +608,35 @@ export function createMobileHost(options) {
                     //   而 `invokeGatewayEndpoint` **一个字没动** ✓（聊天桥依赖它的契约 ✓）。
                     const value = (await invokeGatewayEnvelope(options.gateway, request.endpoint, request.payload, signal)).envelope;
                     /**
+                     * ★★★ 「这条消息来自手机」的**唯一登记处**（手机 DSH 外壳那条路）。
+                     *
+                     * ## 为什么必须在**网关调用成功之后**（位置不是随手放的 ✗）
+                     *
+                     * 登记表是工具回答「手机还是电脑」的**事实来源** ⇒ 它只能记**DSH 真收下的提交** ✓。
+                     * 放到调用**之前**：手机上点了发送、而 DSH 因为内容/权限/附件把这条拒了 ✗
+                     * ⇒ 表里多一条"从没存在过的手机消息" ✓，工具会拿它给 agent 一个假结论 ✗。
+                     * 现在的位置（`await` 成功之后、`return` 之前）与下面那条 `ok: true` 审计同一条原则 ✓。
+                     *
+                     * ## 为什么是这一处（覆盖率）
+                     *
+                     * 手机外壳的**全部**业务流量都走隧道 ⇒ 每一帧都经过这个闭包 ✓；
+                     * 而电脑上的 DSH 页面不走隧道 ⇒ 电脑消息**一个都不会**被登记 ✓（正是我们想要的判据）。
+                     * 认形状的那一步在 `promptRefOfTunnelCall` 里（只认 `session/prompt`，
+                     * 认不出就返回 undefined ⇒ 照原样转发 ⇒ 最多"这次答不上来"，绝不改调用形状 ✓）。
+                     */
+                    const promptRef = promptRefOfTunnelCall(request.endpoint, request.payload);
+                    if (promptRef !== undefined) {
+                        clientSources.record({
+                            rpcId: promptRef.rpcId,
+                            sessionId: promptRef.sessionId,
+                            deviceId: device.deviceId,
+                            deviceName: device.name,
+                            ...device.model === undefined || device.model.length === 0 ? {} : { deviceModel: device.model },
+                            at: Date.now(),
+                            via: 'session/prompt',
+                        });
+                    }
+                    /**
                      * ★★★ 只读诊断（再次加回 ✓）：回答"信封里到底有没有 attachments"。
                      *   · 不改任何逻辑 ✓；结果出现在自检页 diagnostics 里（tag=attachments-probe ✓）。
                      *   · 三种读数对应三种结论 ✗：n=0 ⇒ 有附件表但是空的；n>0 ⇒ **有字节**（那就是客户端没装上）；
@@ -681,6 +736,32 @@ export function createMobileHost(options) {
         session.hostId = options.identity.hostId;
         session.hostSigningKey = options.identity.signingKey;
         return session;
+    }
+    /**
+     * 登记一次「手机提交」（`mobile/dsh/send` 那条路专用）。
+     *
+     * ★ 为什么这条路单独登记：它是**插件自己**的提交入口 ✓ —— 手机经它调
+     *   `session/prompt` ✓，但那条 RPC 是宿主（插件）发出去的 ✓，**不经过隧道帧**
+     *   ⇒ 上面 invoke 闭包里那处登记**看不到它** ✗（这正是"两条路都要记"的原因 ✓）。
+     *
+     * ★ 依赖调用方**在网关成功之后**才调它（见 `dsh-chat-bridge.ts` 里那行注释）。
+     *   这里是**记一笔**，不是发起 —— 谁调谁负责"成功才调"这条纪律。
+     *
+     * @param device 这次隧道调用**已认证**的那台设备（调用点手里就有 ✓）。
+     *   拿不到（隧道断了/设备被删）⇒ **不记**（见上面 currentDevice 那段）。
+     */
+    function recordPrompt(ref, via, device) {
+        if (device === undefined)
+            return;
+        clientSources.record({
+            rpcId: ref.rpcId,
+            sessionId: ref.sessionId,
+            deviceId: device.deviceId,
+            deviceName: device.name,
+            ...device.model === undefined || device.model.length === 0 ? {} : { deviceModel: device.model },
+            at: Date.now(),
+            via,
+        });
     }
     /** 入站路径：手机连进来的那条 WebSocket 上跑一个会话。 */
     function attachSession(connection) {
@@ -902,6 +983,13 @@ export function createMobileHost(options) {
             pairedAt: previous?.pairedAt ?? new Date().toISOString(),
             authorization: 'persistent',
             capabilities: previous?.capabilities ?? { ...DEFAULT_CAPABILITIES },
+            /**
+             * ★ 2026-10-05：端侧能力的**逐项同意**同样沿用 ✓（理由与上面那行 `capabilities` 一模一样：
+             * 设备换了密钥不等于用户在手机上重新表过态 ✓）。
+             * 少了这一句，重新配对会**静默清掉**「手机点过的那一次允许」✗ ——
+             * 那正是本单要修掉的那类「同意被悄悄丢掉」✓。
+             */
+            ...(previous?.deviceCallGrants === undefined ? {} : { deviceCallGrants: previous.deviceCallGrants }),
         };
         store.upsert(record);
         store.record({ deviceId: claim.deviceId, kind, detail, ok: true });
@@ -962,7 +1050,13 @@ export function createMobileHost(options) {
      * ★ "当前连接"这个概念**没有**被拆掉 ✗：它照旧存在于 `sessions` / 会话页那条链上 ✓，
      *   只是**不再参与"发给谁"的判定** ✓。
      */
-    function deviceCall(capability, text, deviceId, sessionId) {
+    function deviceCall(capability, text, deviceId, sessionId, 
+    /**
+     * ★ 2026-10-05：系统通知的标题（可选 ✓，只有 `notify` 用得上 ✓）。
+     *   排在最后 ⇒ 既有调用（HTTP 路由 / agent 工具）一处都不用改 ✓，
+     *   不传就是"手机按旧标题显示"✓（行为同今天 ✓）。
+     */
+    title) {
         if (!DEVICE_CAPABILITIES.includes(capability)) {
             return { ok: false, reason: `未知的端侧能力：${capability}` };
         }
@@ -994,7 +1088,9 @@ export function createMobileHost(options) {
         const ids = [];
         for (const target of selection.targets) {
             try {
-                const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500), sessionId);
+                const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500), sessionId, 
+                // ★ 标题也夹在同一道上限里（它比正文短得多，但形状上不留"无限长"的口子 ✗）
+                title === undefined ? undefined : String(title).slice(0, 120));
                 store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true });
                 ids.push(call.id);
             }
@@ -1015,6 +1111,15 @@ export function createMobileHost(options) {
         // ★ 只回第一个 id（调用方按它查结果 ✓）：广播时其余设备各自的 id 暂不对外暴露 ✗
         //   —— 见交付报告的「不确定的 / 没做的」那一段。
         return { ok: true, id: first };
+    }
+    /**
+     * ★ 2026-10-05：端侧执行结果的**只读**查询（见 `MobileHostService.deviceCallResult`）。
+     *
+     * 纯委托，一行判定都不加（"等多久""超时算什么"由调用方决定 ✓）：
+     * agent 工具有界等待的就是它；HTTP 路由 `/mobile/device/status` 读的是同一个队列。
+     */
+    function deviceCallResult(id) {
+        return deviceCalls.getResult(String(id)) ?? null;
     }
     /** agent 工具注册结果（由 cordis.ts 在注册完成后写入）。 */
     let agentTool = 'pending';
@@ -1074,6 +1179,11 @@ export function createMobileHost(options) {
     }
     const service = {
         store,
+        /**
+         * ★ 与 `store` 并排挂上（同一条规矩：服务面是这个插件对内的**唯一**门面）。
+         *   工具（`client_source`）与适配器（`cordis.ts`）都从这里取登记表 ✓。
+         */
+        clientSources,
         createPairing() {
             purgeExpired();
             /**
@@ -1212,6 +1322,11 @@ export function createMobileHost(options) {
             return result;
         },
         deviceCall,
+        /**
+         * ★ 2026-10-05：端侧执行结果（手机回报的那份）—— agent 工具据此把"真结果"带回，
+         *   而不是把"已入队"当成功。实现见上面 `deviceCallResult`（纯委托 ✓）。
+         */
+        deviceCallResult,
         recordDiagnostic: (tag, detail) => {
             store.record({ deviceId: '(host)', kind: 'rpc', target: tag, detail, ok: true });
         },
@@ -1794,6 +1909,15 @@ export function createMobileHost(options) {
             const { handleDshChatEndpoint } = await import("./dsh-chat-bridge.js");
             return handleDshChatEndpoint({
                 call: (target, payload, bridgeSignal) => invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
+                /**
+                 * ★ 「手机经 `mobile/dsh/send` 提交」的登记入口（第二条手机通道）。
+                 *
+                 * 桥在**网关成功之后**才调它（那次 `deps.call('session/prompt', …)`
+                 * 已经 resolve ✓），所以这里不会记下一条 DSH 其实没收下的提交 ✓。
+                 * 设备用**这次隧道调用自己认证出来的那台**（`device` 形参 ✓）——
+                 * 不从别处猜 ✗（猜错就是给 agent 一个假来源）。
+                 */
+                recordPrompt: (ref, via) => recordPrompt(ref, via, device),
             }, endpoint, payload, signal);
         }
         if (endpoint === 'mobile/openInApp/apps') {
@@ -1833,9 +1957,27 @@ export function createMobileHost(options) {
             const args = readLocalArgs(payload);
             switch (endpoint) {
                 case 'mobile/device/enable':
-                    return {
-                        capabilities: deviceCalls.setEnabled(device.deviceId, String(args['capability'] ?? ''), args['enabled'] !== false),
-                    };
+                    {
+                        /**
+                         * ★ 2026-10-05：**手机点「允许」/「取消允许」的那一刻就落盘** ✓。
+                         *
+                         * 顺序是关键：先 `setEnabled`（它顺带校验能力名，陌生名字在这里抛错 ✓），
+                         * 拿到**该设备当前允许的完整集合**，再整份写进 `DeviceRecord` ✓ ——
+                         * 于是「内存态」与「重启后的播种来源」永远是同一份东西 ✓，
+                         * 也不需要在这里分辨「这次是加还是减」✗（覆盖写天然把撤销也覆盖掉 ✓）。
+                         */
+                        const capability = String(args['capability'] ?? '');
+                        const capabilities = deviceCalls.setEnabled(device.deviceId, capability, args['enabled'] !== false);
+                        store.setDeviceCallGrants(device.deviceId, capabilities);
+                        store.record({
+                            deviceId: device.deviceId,
+                            kind: 'capability',
+                            target: 'mobile/device/enable',
+                            detail: `${capability}=${args['enabled'] !== false ? 'on' : 'off'} granted=[${capabilities.join(',')}]`,
+                            ok: true,
+                        });
+                        return { capabilities };
+                    }
                 /**
                  * 手机**自己**解除配对（安全规范 §7："撤销即时生效"）。
                  *

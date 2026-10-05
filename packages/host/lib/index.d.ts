@@ -18,7 +18,9 @@ import type { KeyObject } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { type DeviceCapabilities, type DeviceRecord, type MobileManifest, type PairingTicket } from './protocol/index.js';
+import { type ClientSourceRegistry } from './client-source.ts';
 import { DeviceStore, type AuditEntry } from './devices.ts';
+import { type DeviceCallResult } from './device-calls.ts';
 import { type NetworkInterfacesReader } from './lan-trust.ts';
 import { type DshFrontendProbe } from './dsh-probe.ts';
 import { type LanListenerStatus } from './lan-listener.ts';
@@ -303,14 +305,46 @@ export interface MobileHostService {
      */
     deviceCall(capability: string, text: string, deviceId?: string, 
     /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
-    sessionId?: string): {
+    sessionId?: string, 
+    /** ★ 2026-10-05：系统通知的标题（可选；形如 `Mac-mini-2024 需要你确认`）。 */
+    title?: string): {
         ok: true;
         id: string;
     } | {
         ok: false;
         reason: string;
     };
+    /**
+     * **只读**查询一次端侧请求的**执行结果**（手机回报的，不是"已入队"）。
+     *
+     * 为什么必须把它暴露到服务面上：`deviceCall` 只回答"请求发出去没有"，
+     * 而"手机上到底执行成功没有"只有手机自己回报才知道 —— 结果其实**早就收下了**
+     * （`mobile/device/result` ⇒ `DeviceCallQueue.recordResult` ⇒ `/mobile/device/status`
+     * 的 `result` 字段就是读它），只是 agent 工具**够不着**：
+     * `MobileHostService` 上没有这个方法，工具手里只有一个 `{ok:true, id}`，
+     * 于是只能把"已入队"当成"已成功"讲给用户听。
+     *
+     * 于是就有了那类最难查的故障：工具回 `ok:true`、用户手机上什么都没发生
+     * （剪贴板写入失败就是实例）。这个方法把"查结果"这件事从**结构上做不到**变成做得到。
+     *
+     * 返回 `null` 表示**还没有回报**（调用方自己决定等多久）；
+     * 返回对象里的 `ok` 才是**端侧**的结论（`detail` 是端侧原话，例如
+     * `copied:execCommand` / `banner-manual` / `notified:ok`）。
+     *
+     * ★ 可见性与 `deviceCall` 同一条规矩：id 是本次调用自己拿到的 ✓，
+     *   接口只对插件内部开放（不挂 HTTP 路由 ✗）⇒ 不新增对外读结果的口子 ✓。
+     */
+    deviceCallResult(id: string): DeviceCallResult | null;
     readonly store: DeviceStore;
+    /**
+     * 「这条人类消息是手机还是电脑发来的」的**事实来源**（登记表）。
+     *
+     * ★ 为什么挂到服务面上：`client_source` 工具（`cordis.ts` 注册）要用它，
+     *   而工具手里只有 `mobileHost` 这个对象 ⇒ 没有这个字段，工具就只能回到
+     *   「看工具表里有没有 phone_send」那种猜法（那正是这一单要消灭的东西）。
+     * ★ 判据与边界（内存表 / 电脑浏览器误判 / 三态）写在 `client-source.ts` 的文件注释里。
+     */
+    readonly clientSources: ClientSourceRegistry;
     createPairing(): {
         ticket: PairingTicket;
         qrPayload: string;

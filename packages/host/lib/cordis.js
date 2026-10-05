@@ -26,7 +26,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateP256KeyPair } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
-import { notifyTextFor, shouldNotifyEvent } from "./notify-text.js";
+import { machineDisplayName, notifyTextFor, questionTextFor, shouldNotifyEvent } from "./notify-text.js";
+import { localMachineName } from "./lan-trust.js";
 import { resolveDshRuntimeVersion } from "./dsh-version.js";
 import { detectLanIp, isAddressPresent, listLanCandidates } from "./lan.js";
 import { createLanListener, DEFAULT_PLAIN_LISTEN, DEFAULT_TLS_LISTEN } from "./lan-listener.js";
@@ -678,31 +679,86 @@ export function apply(ctx, config = {}) {
      */
     function installApprovalPush() {
         /**
-         * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓ ——
-         *   选择卡的事件类型名还没取证到 ✓（取证办法见 40 号文档，诊断已经能在手机上读到 ✓），
-         *   拿到之后**只改那个清单一行** ✓，通道与"点击落到会话"都已共用 ✓。
+         * ★ 第 52 轮：触发类型与文案都收进 `notify-text.ts` ✓。
+         * ★ 2026-10-05 取证后的更正 ✗✗：原先这里写着"选择卡的事件类型名还没取证到、
+         *   拿到之后只改那个清单一行" —— 那个前提**是错的**：
+         *   选择卡**没有**对应的会话事件类型（DSH 的 `SessionEventMap` 里以 `/asked` 结尾的
+         *   只有 `approval/asked` ✓），它落下来是一条 `tool/call`（`name === 'ask_user_question'` ✓）。
+         *   ⇒ 所以它在下面那条订阅里走**按工具名**的独立分支（`notifyQuestion` ✓），
+         *     而不是往事件类型清单里加一行 ✗（事件清单 vs 工具名，语义不混 ✓）。
          */
+        /**
+         * 选择卡通知道**独立入口**（不是 `shouldNotifyEvent` 的入口 ✗）：
+         * 它按**工具名**判定，不按事件类型 —— 证据与理由见 `notify-text.ts` 文件头那条更正 ✓。
+         * 文案仍是 `notifyTextFor` 的中性分支拼的（这一点由 `questionTextFor` 保证 ✓）。
+         */
+        const notifyQuestion = (argumentsText, sessionId) => {
+            try {
+                const composed = questionTextFor(argumentsText, machineDisplayName(localMachineName()), sessionId);
+                /** 解析不出内容 ⇒ **不推** ✗（宁可少一条，也不推一条无信息的通知 ✓）。 */
+                if (composed === undefined)
+                    return;
+                try {
+                    mobileHost.recordDiagnostic('selection-card-push', composed.title + '｜' + composed.body.replace(/\s+/g, ' ').slice(0, 80));
+                }
+                catch (error) {
+                    void error;
+                }
+                const first = mobileHost.deviceCall('notify', composed.body, undefined, sessionId, composed.title);
+                if (!first.ok)
+                    mobileHost.deviceCall('show', composed.body, undefined, sessionId, composed.title);
+            }
+            catch (error) {
+                console.warn('[dsh-mobile] 选择卡推送失败（不影响其余功能）：', error);
+            }
+        };
         const notify = (type, payload) => {
             try {
                 const record = (payload ?? {});
-                const text = notifyTextFor(type, record).body;
+                /**
+                 * ★ 2026-10-05（用户真机抱怨"标题没说清是哪台电脑"✓）：机器名从**本机**取 ✓，
+                 *   取值口与 `manifest.machineName` 是同一个（`localMachineName()` ✓
+                 *   —— `os.hostname()` 那一套 ✓）⇒ 通知标题里的名字与手机面板行名**一定一致** ✓。
+                 * ★ 现算而不是安装时算一次 ✗：macOS 上用户改机器名是常事 ✓，
+                 *   算一次就等于"改名必须重启 DSH"✗（这是本项目反复吃过的那类亏 ✓）。
+                 * ★ 拿不到 ⇒ 空串 ⇒ 标题退回「需要你确认」✓（**绝不编一个名字** ✗）。
+                 */
+                const machineName = machineDisplayName(localMachineName());
+                const composed = notifyTextFor(type, record, machineName);
+                const text = composed.body;
                 // ★ 先**落审计**再推送：这样"钩子到底有没有被触发"有据可查 ✓
                 //   （原先只打 console —— 而 DSH 可能跑在后台终端里，用户看不到 ✗；
                 //    于是"审批没通知"到底是"钩子没响"还是"通知发不出"完全分不清 ✗）
                 try {
-                    mobileHost.recordDiagnostic('approval-push', text.slice(0, 80));
+                    // ★ 标题一起落审计 ✗：真机上"通知栏里到底写了什么"只有这一条能回答 ✓
+                    //   （推送返回 ok 只说明"发出去了" ✓）。正文压成一行 —— 审计是一条一行 ✓。
+                    /**
+                     * ★ 2026-10-05 第三轮：通知栏里**只有那一句** ✗ ⇒ **原始细节改落这里** ✓
+                     *   （`composed.detail` ✓，60 字截断 ✓）—— 用户看不到那串原始英文了 ✓，
+                     *   但自检页 / 审计里照样查得到"当时到底要批准什么" ✓（可追溯这条不许丢 ✗）。
+                     * ★ 只在"命中关键词"时才两者不同 ✓（没命中时正文本身就是原始细节 ⇒ 不重复写一遍 ✗）。
+                     * ★ 上限从 80 放到 200 ✓：标题 + 正文 + `｜原文 ` + 60 字细节要放得下 ✓。
+                     */
+                    const audited = [
+                        composed.title,
+                        text,
+                        composed.detail.length > 0 && composed.detail !== text ? '原文 ' + composed.detail : '',
+                    ]
+                        .filter((part) => part.length > 0)
+                        .join('｜');
+                    mobileHost.recordDiagnostic('approval-push', audited.replace(/\s+/g, ' ').slice(0, 200));
                 }
                 catch (error) {
                     void error;
                 }
                 // 先通知（后台也能提醒），没启用就退成页面横幅
                 // ★ 会话 id 一起带上（取不到就是 undefined ⇒ 手机退回"只打开 App"✓）
-                const sessionId = typeof record.sessionId === 'string'
-                    ? String(record.sessionId)
-                    : undefined;
-                const first = mobileHost.deviceCall('notify', text, undefined, sessionId);
+                const sessionId = typeof record.sessionId === 'string' ? String(record.sessionId) : undefined;
+                // ★ 标题也交给电脑定 ✗✗：只有电脑知道自己叫什么 ✓；
+                //   手机那边拿不到这个字段（老宿主 ✓）就退回旧标题 ✓（见 boot.js 的 notify 分支 ✓）
+                const first = mobileHost.deviceCall('notify', text, undefined, sessionId, composed.title);
                 if (!first.ok)
-                    mobileHost.deviceCall('show', text, undefined, sessionId);
+                    mobileHost.deviceCall('show', text, undefined, sessionId, composed.title);
             }
             catch (error) {
                 console.warn('[dsh-mobile] 审批推送失败（不影响审批本身）：', error);
@@ -737,6 +793,15 @@ export function apply(ctx, config = {}) {
                     }
                     return undefined;
                 };
+                /**
+                 * ★ 选择卡去重：`tool/call` 的 `callId` 是天然主键 ✓。
+                 *   为什么需要 ✗：同一条 `tool/call` 会**再送一次** —— 断线重连 / 会话重放
+                 *   （`agent/inbox/spliced` 那条链路）时事件是重新发的 ✓ ⇒ 没有它就会连推两条 ✗。
+                 *   上限 256 条滚动（先来先出 ✓）—— 只用来挡"刚刚才推过的那些"，
+                 *   不是历史账本，所以不必精确 ✓。
+                 */
+                const notifiedQuestionCalls = new Set();
+                const NOTIFY_QUESTION_CALL_MAX = 256;
                 const onSessionEvent = (_session, event) => {
                     const record = (event ?? {});
                     const kind = String(record.type ?? '');
@@ -748,6 +813,29 @@ export function apply(ctx, config = {}) {
                     }
                     catch (error) {
                         void error;
+                    }
+                    /**
+                     * ★ 选择卡：DSH 里它**不是**会话事件类型，而是一条普通 `tool/call`
+                     *   （`name === 'ask_user_question'`，负载在 `data.arguments` 的 JSON 里 ✓）。
+                     *   ⇒ 所以这条判据按**工具名**，放在 `shouldNotifyEvent`（按事件类型）**之前** ✓，
+                     *     两者语义不混 ✓（别把工具名塞进 `NOTIFY_EVENT_SUFFIXES` ✗）。
+                     * ★ 为什么必须在 `tool/call` 这一刻推 ✗✗：本机实测 `ask_user_question` 是
+                     *   **非 timed** 模式（`request/header` 里它的参数只有 `['questions']`、没有 `timeout` ✓）
+                     *   ⇒ `ctx.userQuestions.ask()` 会**阻塞等待**解答 ✓ ⇒ 等 `tool/result` 就是"答完才通知"✗。
+                     */
+                    if (kind === 'tool/call' &&
+                        String(record.data?.name ?? '') === 'ask_user_question') {
+                        const callId = String(record.data?.callId ?? '');
+                        if (callId.length > 0 && !notifiedQuestionCalls.has(callId)) {
+                            notifiedQuestionCalls.add(callId);
+                            if (notifiedQuestionCalls.size > NOTIFY_QUESTION_CALL_MAX) {
+                                const oldest = notifiedQuestionCalls.values().next().value;
+                                if (typeof oldest === 'string')
+                                    notifiedQuestionCalls.delete(oldest);
+                            }
+                            notifyQuestion(record.data?.arguments, sessionIdOf(_session, event));
+                        }
+                        return;
                     }
                     if (!shouldNotifyEvent(kind))
                         return;
@@ -774,7 +862,13 @@ export function apply(ctx, config = {}) {
         }
     }
     void import(__rewriteRelativeImportExtension(TOOLS_MODULE))
-        .then((module) => {
+        /**
+         * ★ 这个回调是 `async`（为了注册 `client_source` 前要动态 import 一个模块 ✓）——
+         *   **异常仍被下面同一个 `.catch` 兜住** ✓：`async` 函数返回 Promise，
+         *   它里面抛出的异常会让整条链 reject ⇒ 落到那个 `.catch` ⇒ 只打一行警告 ✓
+         *   （绝不能让"少一个工具"变成"插件加载失败" ✗ —— 这是这个 catch 一开始就存在的理由）。
+         */
+        .then(async (module) => {
         const defineTool = module.defineTool;
         // ★ 用 `ctx.get('tools')` 而**不是** `ctx.tools`，也不往 `inject` 里加它：
         //   `ctx.tools` 需要先在 `inject` 里声明；而声明一个"某个 DSH 版本可能没有"的服务，
@@ -782,71 +876,45 @@ export function apply(ctx, config = {}) {
         //   `ctx.get()` 取不到就返回 undefined，失败**留在原地**（仍被下面的 catch 兜住）。
         const tools = ctx.get?.('tools');
         if (typeof defineTool !== 'function' || tools?.register === undefined) {
-            console.warn('[dsh-mobile] 当前 DSH 未提供工具注册能力，phone_notify 未注册（其余功能不受影响）');
+            console.warn('[dsh-mobile] 当前 DSH 未提供工具注册能力，agent 工具（phone_notify / phone_send / client_source）未注册（其余功能不受影响）');
             mobileHost.setAgentToolStatus('skipped');
             return;
         }
-        tools.register(defineTool({
-            name: 'phone_notify',
-            description: '给已配对的手机发一条系统通知（手机需先在 DSH 移动端允许 notify 能力）。' +
-                '适用于需要用户离开电脑时也能看到的提醒；失败会返回原因。',
-            parameters: {
-                text: { type: 'string', required: true, description: '通知正文（会显示在手机通知栏）' },
-            },
-            output: {
-                schema: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                        ok: { type: 'boolean', required: true },
-                        id: { type: 'string' },
-                        reason: { type: 'string' },
-                    },
-                },
-                render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-            },
-            async execute(args) {
-                const outcome = mobileHost.deviceCall('notify', String(args?.text ?? ''));
-                return outcome.ok ? { ok: true, id: outcome.id } : { ok: false, reason: outcome.reason };
-            },
-        }));
-        // ★ 通用端侧动作工具。`phone_notify` 保留（文档与验收都在用它），
-        //   但它只能发通知；而端侧通道现在有 5 个能力（提醒 / 通知 / 剪贴板 / 震动 / 打开链接），
-        //   一个一个做成工具会让工具表迅速膨胀，所以给一个带 `capability` 的通用入口。
-        //   能力名与白名单由宿主 `deviceCall` 校验，未知能力会**带着可用清单**返回原因 ✓。
-        tools.register(defineTool({
-            name: 'phone_send',
-            description: '对已配对的手机执行一个端侧动作。capability 取值：' +
-                'show=页面横幅（不需要权限）、notify=系统通知（需通知权限）、' +
-                'clipboard=把 text 放进手机剪贴板、vibrate=让手机震动（text 是毫秒数）、' +
-                'open=把 text 当作链接推到手机上（用户在横幅里点一下才打开，浏览器不允许无手势开新窗口）。' +
-                '手机需先在移动端逐项允许该能力，否则返回原因而不是抛错。',
-            parameters: {
-                capability: { type: 'string', required: true, description: 'show | notify | clipboard | vibrate | open' },
-                text: { type: 'string', required: true, description: '内容：文本 / 毫秒数 / 链接' },
-            },
-            output: {
-                schema: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                        ok: { type: 'boolean', required: true },
-                        id: { type: 'string' },
-                        reason: { type: 'string' },
-                    },
-                },
-                render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-            },
-            async execute(args) {
-                const outcome = mobileHost.deviceCall(String(args?.capability ?? ''), String(args?.text ?? ''));
-                return outcome.ok ? { ok: true, id: outcome.id } : { ok: false, reason: outcome.reason };
-            },
-        }));
+        /**
+         * ★ 2026-10-05 端侧回执闭环：工具定义搬进 `buildPhoneTools`（就在本文件上面 ✓）。
+         *   搬出去的原因不是洁癖 ✗：这两个工具现在要**等端侧回执**，
+         *   而"等到了/超时了/端侧说失败"三种结局必须能被单测直接钉住 ✓
+         *   （内联在 `apply` 里就只能靠跑真插件 + 真时间，等于测不了 ✗）。
+         *   这里的调用面**一个字都没变**：还是 `tools.register(defineTool({...}))` ✓。
+         */
+        for (const tool of buildPhoneTools(mobileHost, {
+            recordDiagnostic: (tag, detail) => mobileHost.recordDiagnostic(tag, detail),
+        })) {
+            tools.register(defineTool(tool));
+        }
+        /**
+         * ★★★ `client_source`：agent 靠它**问**「此刻在跟我说话的是手机还是电脑」。
+         *
+         * ## 为什么是**动态** import（不是文件顶部的静态 import ✗）
+         *
+         * `cordis.ts` 顶部那一段是**并发热点** ✗（另有单在同一条链上改）——
+         * 往那里插一行就把两单搅进同一次改动里 ✓。动态 import 由模块系统自己缓存，
+         * 只加载一次，代价可以忽略 ✓（`mobile/dsh/*` 当初也是同一个理由 ✓）。
+         *
+         * ## 为什么注册失败**不许**影响上面那两个工具
+         *
+         * 工具定义在 `client-source.ts`（零依赖 ✓，可被单测直接打 ✓），这里只包一层 `defineTool` ✓。
+         * 万一这一步炸了，异常会 reject 整条链 ⇒ 落到 `.catch` ⇒ 记 `failed` ✓
+         * —— 那时两个手机工具**已经注册上去了**（上面那个循环跑在它之前 ✓），
+         * 所以"少一个来源工具"不会顺手把"给手机发通知"也弄没 ✗（有单测钉这一条 ✓）。
+         */
+        const { buildClientSourceTool } = await import("./client-source.js");
+        tools.register(defineTool(buildClientSourceTool({ registry: mobileHost.clientSources })));
         mobileHost.setAgentToolStatus('registered');
-        console.log('[dsh-mobile] 已注册 agent 工具：phone_notify / phone_send（端侧动作，5 个能力）');
+        console.log('[dsh-mobile] 已注册 agent 工具：phone_notify / phone_send（端侧动作，5 个能力）+ client_source（消息来源）');
     })
         .catch((error) => {
-        console.warn('[dsh-mobile] 注册 phone_notify 失败（其余功能不受影响）：', error);
+        console.warn('[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）：', error);
         mobileHost.setAgentToolStatus('failed');
     });
     // 审批推送到手机（与工具注册无关，独立挂载；失败只影响这一条通知）
@@ -1097,5 +1165,212 @@ export function apply(ctx, config = {}) {
     if (setupPatchFile !== undefined && readCurrentConfig(setupPatchFile) === null) {
         console.log(setupStartupHint(readWebServerPort(ctx.webServer)));
     }
+}
+/**
+ * 端侧回执闭环：把"已入队"与"端侧真的执行成功"分开。
+ *
+ * ## 为什么要有这一段
+ *
+ * `phone_send` / `phone_notify` 原先拿到 `deviceCall` 的 `{ok:true, id}` 就返回
+ * `{ok:true, id}` —— 而那个 `ok` 只证明"请求进了队列"，**完全不证明手机执行成功**✗。
+ * 于是出现了最难查的一类故障：工具回成功、用户手机上什么都没发生
+ * （剪贴板写入失败就是实例：端侧如实回报了降级，agent 侧却把它讲成"已经放到你手机上了"）。
+ *
+ * 端侧的回执其实**一直都有**，只是没人查：手机每 4 秒一轮，执行完就回报
+ * `mobile/device/result {id, ok, detail}`，宿主 `recordResult` 收下，
+ * 现在也能通过 `MobileHostService.deviceCallResult(id)` 读回来。
+ *
+ * ## 语义（定稿，工具描述里逐字写着同一套）
+ *
+ * - 在预算内读到回执 ⇒ 工具返回**端侧的原话**：端侧的 `ok` 为真就 `ok:true` ✓；
+ *   端侧说失败/降级（`ok:false`）⇒ `ok:false` + `reason` + `detail`
+ *   —— **绝不再回 `ok:true`**✗；
+ * - 预算用完还没回执 ⇒ **如实**说"已投递，但 N 秒内没有端侧回报"：
+ *   `ok:false` + `timedOut:true` + `reason`（**没有** `detail`，因为端侧压根没说话）。
+ *   为什么超时也算 `ok:false`：`ok:true` 的语义只有一种 —— "端侧回报执行成功"；
+ *   把"没回报"说成成功，正是这次要根除的那类假成功。
+ *   不过"没有回报"与"端侧说失败"必须能分开：靠 `timedOut:true` 与
+ *   `deviceReport:'none'`（有回报时是 `'received'`）区分。
+ *
+ * ★ 语义注记（**当前端侧实现下唯一做不到"端侧报失败"的能力**）：`clipboard` 的端侧分支
+ *   把"浏览器不允许自动复制、于是把文本摆到横幅上让你长按"也回报成 `ok:true`
+ *   （`detail = banner-manual`，页面侧 `ok = how !== undefined`）。
+ *   也就是说 ★ **2026-10-05 起已修正**：降级（`banner-manual`）时页面会**如实回 `ok:false`** ✓，且**先问壳**（`copied:shell-clipboard`，壳原生 `ClipboardManager`，不需要手势 ✓） —— 它只会"成功"或"超时"。
+ *   宿主这一轮**不改** `boot.js`（那是第二版的事），但 agent 侧照旧能靠 `detail`
+ *   把"真写进剪贴板了"与"降级成让你手动长按"分开。
+ *
+ * ## 为什么用"有界轮询"而不是事件回调
+ *
+ * 端侧是**主动来取**的通道（手机每 4 秒问一次 `mobile/device/pending`），
+ * 宿主没有任何"结果到了"的事件可挂；查询口 `deviceCallResult` 本身是同步读内存 ✓。
+ * 所以就是"每 `intervalMs` 问一次，最多问到 `totalMs`"——
+ * 时钟与 sleep 都可注入（`options.clock` / `options.sleep`）⇒ 单测毫秒级跑完，
+ * **绝不真的睡 6 秒**。
+ */
+/** 默认等待上限（毫秒）。手机一轮 4 秒 ⇒ 6 秒 = 通常能覆盖 1 轮多的回报。 */
+export const DEVICE_RESULT_WAIT_MS = 6000;
+/** 默认轮询间隔（毫秒）。24 次 ≈ 6 秒。 */
+export const DEVICE_RESULT_POLL_MS = 250;
+/** 真正干活的那一次 `await`：每 `intervalMs` 问一次，最多问到 `totalMs`。 */
+async function pollDeviceResult(host, id, options, startedAt) {
+    const totalMs = options.totalMs ?? DEVICE_RESULT_WAIT_MS;
+    const intervalMs = options.intervalMs ?? DEVICE_RESULT_POLL_MS;
+    const clock = options.clock ?? (() => Date.now());
+    const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const deadline = startedAt + totalMs;
+    for (;;) {
+        const report = host.deviceCallResult(id);
+        if (report !== null && report !== undefined)
+            return report;
+        // ★ 先问再等：端侧已经回报过的情形**一次 sleep 都不做** ✓（单测因此毫秒级 ✓）
+        if (clock() >= deadline)
+            return null;
+        await sleep(intervalMs);
+    }
+}
+/**
+ * 投递一次端侧动作并**有界等待**端侧回执。
+ *
+ * 入队失败（能力没启用 / 未知能力 / 没有目标设备）⇒ 直接返回，不等
+ * （请求压根没出去，等下去只会白等一轮预算）。
+ */
+export async function dispatchToDevice(host, capability, text, options) {
+    const clock = options.clock ?? (() => Date.now());
+    const startedAt = clock();
+    const queued = host.deviceCall(capability, text);
+    options.recordDiagnostic(`${capability} ${text}`, queued.ok ? `queued ${queued.id}` : `not-queued ${queued.reason}`);
+    if (!queued.ok)
+        return { ok: false, reason: queued.reason };
+    const result = await pollDeviceResult(host, queued.id, options, startedAt);
+    const waitedMs = clock() - startedAt;
+    options.recordDiagnostic(`${capability} ${text}`, result === null ? `timeout ${waitedMs}ms` : `result ok=${String(result.ok)} detail=${result.detail}`);
+    return formatDeviceOutcome(queued.id, result, waitedMs);
+}
+/**
+ * 把结局写成工具的返回值（**语义定稿的地方**）。
+ *
+ * 抽成纯函数是为了让它可被单测直接钉住：三种情形各一条断言，
+ * 变异验证（把"等回执"去掉、把"端侧失败"当成功）必须**恰好**让对应断言变红。
+ */
+export function formatDeviceOutcome(id, result, waitedMs) {
+    if (result === null) {
+        return {
+            ok: false,
+            id,
+            timedOut: true,
+            deviceReport: 'none',
+            // ★ 如实：投递出去了，但没有端侧回报 —— 不许说成功，也不许说失败
+            reason: `已投递到手机，但 ${Math.round(waitedMs / 1000)} 秒内没有端侧回报（手机可能没在轮询、或回报没回来）`,
+        };
+    }
+    if (result.ok) {
+        return { ok: true, id, detail: result.detail, deviceReport: 'received' };
+    }
+    return {
+        ok: false,
+        id,
+        reason: `端侧回报失败：${result.detail}`,
+        detail: result.detail,
+        deviceReport: 'received',
+    };
+}
+/**
+ * 两个 agent 工具（`phone_notify` / `phone_send`）的定义。
+ *
+ * 抽成工厂而不是在 `apply` 里内联，是为了让"**等端侧回执**"这件事可被单测直接执行：
+ * 假宿主 + 注入时钟即可覆盖"等到回执 / 超时 / 端侧报失败"三种情形，
+ * 不需要起插件、不需要 webServer / typertGateway、不碰真实时间。
+ */
+export function buildPhoneTools(mobileHost, options) {
+    /**
+     * ★ 两条工具描述里**必须逐字写清** `ok:true` 的新语义 ——
+     *   agent 只读描述与 schema ⇒ 描述含糊，agent 就还会把"已投递"讲成"已成功"。
+     */
+    const semantics = '★ ok:true 只表示**端侧回报执行成功**（不是"已投递/已入队"）。' +
+        '返回里 deviceReport 为 received 时 detail 是端侧原话（例如 copied:execCommand / banner-manual / notified:ok / displayed）。' +
+        '返回 ok:false 且 timedOut:true 表示**已投递到手机、但等待期内没有收到端侧回报**——' +
+        '这时**不许**对用户说"已经放到你手机上了"，只能说"已投递，你那边收到了吗"。' +
+        '返回 ok:false 且 deviceReport 为 received（reason 里带端侧原话）表示端侧**回报了失败或降级**，把原话转述给用户。' +
+        /**
+         * ★★★ 止损那一句（这一单的**另一半价值** ✓）。
+         *
+         * 为什么必须写进**描述**里 ✗：agent 现在唯一的线索就是"工具表里有手机工具"，
+         * 于是它拿这个当"用户此刻在手机上"的证据 —— 而这两个工具
+         * **在所有会话里都可用**（用户坐在电脑前也有）✗ ⇒ 那是个坏信号源 ✓。
+         * 不把这句话写进它每次都读得到的描述里，它会**继续**那样猜 ✗
+         * （`client_source` 工具再准，agent 想不起来调也白搭 ✓）。
+         *
+         * ★ `semantics` 由 `phone_notify` 与 `phone_send` **共用** ⇒ 两个工具各自带上这一句 ✓。
+         */
+        '★ 这两个工具在所有会话里都可用 —— 它们的出现不代表这条消息来自手机，要用 client_source 判定。';
+    return [
+        {
+            name: 'phone_notify',
+            description: '给已配对的手机发一条系统通知（手机需先在 DSH 移动端允许 notify 能力）。' +
+                '适用于需要用户离开电脑时也能看到的提醒；失败会返回原因。' +
+                semantics,
+            parameters: {
+                text: { type: 'string', required: true, description: '通知正文（会显示在手机通知栏）' },
+            },
+            output: {
+                schema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        ok: { type: 'boolean', required: true },
+                        id: { type: 'string' },
+                        detail: { type: 'string' },
+                        reason: { type: 'string' },
+                        timedOut: { type: 'boolean' },
+                        deviceReport: { type: 'string', enum: ['received', 'none'] },
+                    },
+                },
+                render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+            },
+            async execute(args) {
+                return dispatchToDevice(mobileHost, 'notify', String(args?.text ?? ''), options);
+            },
+        },
+        /**
+         * ★ 通用端侧动作工具。`phone_notify` 保留（文档与验收都在用它），
+         *   但它只能发通知；而端侧通道现在有 5 个能力（提醒 / 通知 / 剪贴板 / 震动 / 打开链接），
+         *   一个一个做成工具会让工具表迅速膨胀，所以给一个带 `capability` 的通用入口。
+         *   能力名与白名单由宿主 `deviceCall` 校验，未知能力会**带着可用清单**返回原因 ✓。
+         */
+        {
+            name: 'phone_send',
+            description: '对已配对的手机执行一个端侧动作。capability 取值：' +
+                'show=页面横幅（不需要权限）、notify=系统通知（需通知权限）、' +
+                'clipboard=把 text 放进手机剪贴板、vibrate=让手机震动（text 是毫秒数）、' +
+                'open=把 text 当作链接推到手机上（用户在横幅里点一下才打开，浏览器不允许无手势开新窗口）。' +
+                '手机需先在移动端逐项允许该能力，否则返回原因而不是抛错。' +
+                '★ clipboard 要特别留意 detail=banner-manual：那是**降级**（浏览器不允许自动复制，' +
+                '端侧只把文本摆到横幅上让用户长按），不是"已经放进剪贴板了"；★ 此时 **ok 也是 false** ✓（2026-10-05 起）。' +
+                '★ vibrate 的 detail=vibrate-unsupported 同理（端侧没有震动能力）。' +
+                semantics,
+            parameters: {
+                capability: { type: 'string', required: true, description: 'show | notify | clipboard | vibrate | open' },
+                text: { type: 'string', required: true, description: '内容：文本 / 毫秒数 / 链接' },
+            },
+            output: {
+                schema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        ok: { type: 'boolean', required: true },
+                        id: { type: 'string' },
+                        detail: { type: 'string' },
+                        reason: { type: 'string' },
+                        timedOut: { type: 'boolean' },
+                        deviceReport: { type: 'string', enum: ['received', 'none'] },
+                    },
+                },
+                render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+            },
+            async execute(args) {
+                return dispatchToDevice(mobileHost, String(args?.capability ?? ''), String(args?.text ?? ''), options);
+            },
+        },
+    ];
 }
 //# sourceMappingURL=cordis.js.map

@@ -283,4 +283,114 @@ export declare function readProfileContextName(ctx: Context): string | undefined
 export declare function readProfileContextInstallAnchor(ctx: Context): string | undefined;
 /** 插件主体。 */
 export declare function apply(ctx: Context, config?: Config): void;
+/**
+ * 端侧回执闭环：把"已入队"与"端侧真的执行成功"分开。
+ *
+ * ## 为什么要有这一段
+ *
+ * `phone_send` / `phone_notify` 原先拿到 `deviceCall` 的 `{ok:true, id}` 就返回
+ * `{ok:true, id}` —— 而那个 `ok` 只证明"请求进了队列"，**完全不证明手机执行成功**✗。
+ * 于是出现了最难查的一类故障：工具回成功、用户手机上什么都没发生
+ * （剪贴板写入失败就是实例：端侧如实回报了降级，agent 侧却把它讲成"已经放到你手机上了"）。
+ *
+ * 端侧的回执其实**一直都有**，只是没人查：手机每 4 秒一轮，执行完就回报
+ * `mobile/device/result {id, ok, detail}`，宿主 `recordResult` 收下，
+ * 现在也能通过 `MobileHostService.deviceCallResult(id)` 读回来。
+ *
+ * ## 语义（定稿，工具描述里逐字写着同一套）
+ *
+ * - 在预算内读到回执 ⇒ 工具返回**端侧的原话**：端侧的 `ok` 为真就 `ok:true` ✓；
+ *   端侧说失败/降级（`ok:false`）⇒ `ok:false` + `reason` + `detail`
+ *   —— **绝不再回 `ok:true`**✗；
+ * - 预算用完还没回执 ⇒ **如实**说"已投递，但 N 秒内没有端侧回报"：
+ *   `ok:false` + `timedOut:true` + `reason`（**没有** `detail`，因为端侧压根没说话）。
+ *   为什么超时也算 `ok:false`：`ok:true` 的语义只有一种 —— "端侧回报执行成功"；
+ *   把"没回报"说成成功，正是这次要根除的那类假成功。
+ *   不过"没有回报"与"端侧说失败"必须能分开：靠 `timedOut:true` 与
+ *   `deviceReport:'none'`（有回报时是 `'received'`）区分。
+ *
+ * ★ 语义注记（**当前端侧实现下唯一做不到"端侧报失败"的能力**）：`clipboard` 的端侧分支
+ *   把"浏览器不允许自动复制、于是把文本摆到横幅上让你长按"也回报成 `ok:true`
+ *   （`detail = banner-manual`，页面侧 `ok = how !== undefined`）。
+ *   也就是说 ★ **2026-10-05 起已修正**：降级（`banner-manual`）时页面会**如实回 `ok:false`** ✓，且**先问壳**（`copied:shell-clipboard`，壳原生 `ClipboardManager`，不需要手势 ✓） —— 它只会"成功"或"超时"。
+ *   宿主这一轮**不改** `boot.js`（那是第二版的事），但 agent 侧照旧能靠 `detail`
+ *   把"真写进剪贴板了"与"降级成让你手动长按"分开。
+ *
+ * ## 为什么用"有界轮询"而不是事件回调
+ *
+ * 端侧是**主动来取**的通道（手机每 4 秒问一次 `mobile/device/pending`），
+ * 宿主没有任何"结果到了"的事件可挂；查询口 `deviceCallResult` 本身是同步读内存 ✓。
+ * 所以就是"每 `intervalMs` 问一次，最多问到 `totalMs`"——
+ * 时钟与 sleep 都可注入（`options.clock` / `options.sleep`）⇒ 单测毫秒级跑完，
+ * **绝不真的睡 6 秒**。
+ */
+/** 默认等待上限（毫秒）。手机一轮 4 秒 ⇒ 6 秒 = 通常能覆盖 1 轮多的回报。 */
+export declare const DEVICE_RESULT_WAIT_MS = 6000;
+/** 默认轮询间隔（毫秒）。24 次 ≈ 6 秒。 */
+export declare const DEVICE_RESULT_POLL_MS = 250;
+/** 端侧回执（宿主查到的形状，见 `DeviceCallResult`）。 */
+export interface DeviceCallResultView {
+    readonly ok: boolean;
+    /** 端侧原话（例如 `copied:execCommand` / `banner-manual` / `notified:ok`）。 */
+    readonly detail: string;
+}
+/**
+ * 工具需要的最小宿主面。
+ *
+ * 只声明用到的两个成员（而不是整个 `MobileHost`）⇒ 单测给一个**假宿主**就能跑，
+ * 不必起插件、不必有 webServer / typertGateway。
+ */
+export interface DeviceDispatchHost {
+    deviceCall(capability: string, text: string): {
+        ok: true;
+        id: string;
+    } | {
+        ok: false;
+        reason: string;
+    };
+    /** 端侧执行结果；`null` = 还没回报。 */
+    deviceCallResult(id: string): DeviceCallResultView | null;
+}
+export interface DeviceDispatchOptions {
+    /** `${capability} ${text}` —— 落审计用（沿用 `recordDiagnostic(tag, detail)` 的既有格式）。 */
+    readonly recordDiagnostic: (tag: string, detail: string) => void;
+    readonly totalMs?: number;
+    readonly intervalMs?: number;
+    /** 注入时钟（默认 `Date.now`）—— 单测用。 */
+    readonly clock?: () => number;
+    /** 注入 sleep（默认 `setTimeout`）—— 单测用。 */
+    readonly sleep?: (ms: number) => Promise<void>;
+}
+/** 一次投递的工具返回值（`ok:true` = **端侧回报执行成功**）。 */
+interface DeviceToolOutcome {
+    readonly ok: boolean;
+    readonly id?: string;
+    readonly detail?: string;
+    readonly reason?: string;
+    readonly timedOut?: boolean;
+    readonly deviceReport?: 'received' | 'none';
+}
+/**
+ * 投递一次端侧动作并**有界等待**端侧回执。
+ *
+ * 入队失败（能力没启用 / 未知能力 / 没有目标设备）⇒ 直接返回，不等
+ * （请求压根没出去，等下去只会白等一轮预算）。
+ */
+export declare function dispatchToDevice(host: DeviceDispatchHost, capability: string, text: string, options: DeviceDispatchOptions): Promise<DeviceToolOutcome>;
+/**
+ * 把结局写成工具的返回值（**语义定稿的地方**）。
+ *
+ * 抽成纯函数是为了让它可被单测直接钉住：三种情形各一条断言，
+ * 变异验证（把"等回执"去掉、把"端侧失败"当成功）必须**恰好**让对应断言变红。
+ */
+export declare function formatDeviceOutcome(id: string, result: DeviceCallResultView | null, waitedMs: number): DeviceToolOutcome;
+/**
+ * 两个 agent 工具（`phone_notify` / `phone_send`）的定义。
+ *
+ * 抽成工厂而不是在 `apply` 里内联，是为了让"**等端侧回执**"这件事可被单测直接执行：
+ * 假宿主 + 注入时钟即可覆盖"等到回执 / 超时 / 端侧报失败"三种情形，
+ * 不需要起插件、不需要 webServer / typertGateway、不碰真实时间。
+ */
+export declare function buildPhoneTools(mobileHost: DeviceDispatchHost, options: DeviceDispatchOptions): unknown[];
+export {};
 //# sourceMappingURL=cordis.d.ts.map

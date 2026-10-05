@@ -15,7 +15,9 @@
  * `$schema` 编解码器。已核实的部分：
  *
  * ```
- * session/list    参数 _request（**空请求**即可）；返回 { sessions | items: [...] }
+ * session/list    参数 _request（**空请求**即可）；返回 { items: SessionSummary[] } ✓
+ *                 （★ 真形状只有 items ✓ —— 从 `dsh-api-session-controller` 的 typert 描述符读的 ✓；
+ *                   `sessions` 是我们为老式替身留的**回退** ✓，不是真形状 ✗）
  * session/page    参数 request = { address:{kind:"session",sessionId} | {kind:"subagent",…},
  *                                  throughSeq / beforeSeq / maxMessages / turnWindow / … }
  *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore, asOfSeq,
@@ -39,6 +41,7 @@
  * 与 `mobile/codex/*` 一样放在**能力门禁之前** ✓（设备身份已由隧道握手保证 ✓）。
  */
 import { ErrorCode } from './protocol/index.js';
+import { readHostRpcResult } from "./gateway-rpc.js";
 /** 我们自己的路径 ✓（手机只认这三个 ✓）。 */
 export const DSH_CHAT_PATHS = {
     sessions: 'mobile/dsh/sessions',
@@ -90,6 +93,24 @@ async function sendPrompt(deps, args, signal) {
         content: [{ type: 'text', text }],
     };
     const value = unwrap(await deps.call('session/prompt', { args: { request } }, signal));
+    /**
+     * ★★★ 登记「这条消息是手机经 `mobile/dsh/send` 提交的」。
+     *
+     * ## 为什么在这一行（`await` 之后 ✓）
+     *
+     * 登记表是 `client_source` 工具回答"手机还是电脑"的**事实来源** ⇒
+     * 只能记 **DSH 真收下的提交** ✓。放在 `call` 之前：手机上点了发送、而 DSH 把这条拒了 ✗
+     * ⇒ 表里多一条从没存在过的手机消息 ⇒ 工具给 agent 一个假结论 ✗（这一类错误没人看得出来）。
+     *
+     * ## 为什么 `requestId` 就是查得回来的那个键
+     *
+     * DSH 把 `session/prompt` 的 `requestId` 原样存进用户消息的来源元数据
+     * （`source = { kind: 'user', rpcId: request.requestId }`，见 `dsh-api-session-controller`
+     * 的 `prompt()` ✓）—— `client_source` 工具查的就是这个值 ✓。
+     *
+     * ★ `recordPrompt` 没注入时**什么都不做** ✓（回调是可选的 ⇒ 不弄红既有 `{ call }` 构造 ✓）。
+     */
+    deps.recordPrompt?.({ sessionId, rpcId: requestId }, 'mobile/dsh/send');
     return { ok: true, requestId, mode, sessionId, value: value === undefined ? null : value };
 }
 /**
@@ -123,34 +144,91 @@ async function createSession(deps, args, signal) {
 }
 // ────────────────────────────── 归一化（都是纯函数 ✓，单测直接打 ✓）──────────────────────────────
 /**
+ * 读一个字符串字段 ✓（真形状里 `title` 是 `string | null` ⇒ 非字符串一律当空串 ✓）。
+ *
+ * @param key 纯 ASCII 键名 ✓（`sessionId` / `title` 是真形状的键 ✓，`id` 是**老式兼容**键 ✓）。
+ */
+function stringField(source, key) {
+    const value = source[key];
+    return typeof value === 'string' ? value : '';
+}
+/**
+ * ★ 取投影值（`projections.values` ✓ —— `title` 的**真身在这里** ✓）。
+ *
+ * 真形状（`SessionListValue` 的 zod 描述符 ✓，从 `app.asar` 的
+ * `dsh-api-session-controller/lib/typert.host.js` 读的 ✓）里，`SessionSummary` 的顶层字段只有
+ * `agentAvailable` / `sessionId` / `updatedAt` / `running` / `blank` ✗ ——
+ * **没有顶层的 `title`** ✗：会话标题是**投影**，挂在 `projections.values.title` ✓
+ * （同层还有 `todos` / `inbox` / `agentPreset` / `title` ✓）。
+ * 认不出投影就返回空表 ✓（**不猜** ✗）。
+ */
+function projectionValues(record) {
+    const projections = record['projections'];
+    if (projections === null || typeof projections !== 'object')
+        return {};
+    const values = projections['values'];
+    return values !== null && typeof values === 'object' ? values : {};
+}
+/**
  * `session/list` 的返回 ⇒ 我们那套会话条目 ✓。
  *
- * 宽进：`value.sessions` 与 `value.items` 两种都认（手机那边本来就在两个名字之间试 ✓ ——
- * 与其让每台手机各猜一遍，不如在这里认下来 ✓）。
+ * ## 容器：`value.items` 是真形状 ✓、`value.sessions` 是**历史写法** ✓
+ *
+ * 真 DSH（`0.2.0-rc.2` ✓）的 `SessionListValue` 就是 `{ items: SessionSummary[] }` ✓。
+ * `sessions` 一并认下来 ✓ —— 手机那边本来就在两个名字之间试 ✓，
+ * 与其让每台手机各猜一遍，不如在这里认下来 ✓。
+ *
+ * ## ★★ 条目 id：**`sessionId` 是真名** ✗ ✗（第 108 轮的真机故障 ✓）
+ *
+ * `SessionSummary` 里**没有 `id`** ✗ —— 它叫 `sessionId` ✓（同上的 typert 描述符 ✓）。
+ * 改前只认 `record['id']` ⇒ 真机上**每一条都被 `continue` 丢掉** ✓ ⇒
+ * `GET /mobile/chat/sessions` 恒为 `{"ok":true,"sessions":[]}` ✓（实测 ✓），
+ * 而 `~/.dsh/sessions` 里**6 个工作区、378 个会话目录** ✓ —— 空表是**被过滤的** ✗，不是没有 ✓。
+ *
+ * ⇒ 这里读 **`sessionId` 优先** ✓（与真形状一致 ✓）、`id` 作**老式回退** ✓。
+ *   ★ 我们**对外的** `id` 键名不变 ✓（前端与壳都按 `id` 读 ✓ —— 见模块注释"不发明契约"✓）。
+ *
+ * ## ★ 其余字段与真形状的对照（第 108 轮逐条核过 ✓）
+ *
+ * | 我们用到的 | 真名 / 位置 | 处置 |
+ * |---|---|---|
+ * | `id` | **`sessionId`**（顶层 ✓ 必需 ✓） | 改前只认 `id` ✗ ⇒ 改成 `sessionId` 优先 + `id` 回退 ✓ |
+ * | `title` | **`projections.values.title`** ✓（`string \| null` ✓，**顶层没有** ✗） | 改前只读顶层 ✗ ⇒ 改成投影优先 + 顶层回退 ✓ |
+ * | `updatedAt` | `updatedAt` ✓（顶层 ✓ `number` ✓） | 名对 ✓，不变 ✓ |
+ * | `running` | `running` ✓（顶层 ✓ `boolean` ✓） | 名对 ✓；`busy` 只作老式回退 ✓ |
+ * | `blank` | **`blank`** ✓（顶层 ✓ `boolean` ✓） | 改前**没读** ✗ ⇒ 补上 ✓ |
+ * | `status` | **不存在** ✗（`SessionSummary` 里没有这个字段 ✗） | 保留为老式回退 ⇒ 真机上恒为空串 ✓（**不编** ✗） |
+ * | `awaitingApproval` | **不存在** ✗（同上 ✗） | 保留为老式回退 ⇒ 真机上恒为 `false` ✓（**不编** ✗） |
+ * | `current` | **不存在** ✗（"当前会话"是**客户端**拿 `tunnel.sessionId` 比出来的 ✓，见 `boot.js` ✓） | 保留为老式回退 ✓（真机上不由网关给 ✓） |
  */
 export function normalizeSessions(value) {
     const container = value !== null && typeof value === 'object' ? value : {};
-    const raw = Array.isArray(container['sessions'])
-        ? container['sessions']
-        : Array.isArray(container['items'])
-            ? container['items']
+    const raw = Array.isArray(container['items'])
+        ? container['items']
+        : Array.isArray(container['sessions'])
+            ? container['sessions']
             : [];
     const out = [];
     for (const item of raw) {
         if (item === null || typeof item !== 'object')
             continue;
         const record = item;
-        const id = typeof record['id'] === 'string' ? record['id'] : '';
+        // ★ `sessionId` 优先 ✓（真形状 ✓），`id` 回退 ✓（老式样本 / 我们的测试替身 ✓）
+        const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id');
         if (id.length === 0)
-            continue; // 没有 id 的条目对界面没有意义（点不动）⇒ 丢掉
+            continue; // 两个都没有的条目对界面没有意义（点不动）⇒ 丢掉
+        const values = projectionValues(record);
+        const projectionTitle = stringField(values, 'title');
         out.push({
             id,
-            title: typeof record['title'] === 'string' ? record['title'] : '',
-            status: typeof record['status'] === 'string' ? record['status'] : '',
+            // ★ 标题的真身在投影里 ✓；顶层那个只作老式回退 ✓
+            title: projectionTitle.length > 0 ? projectionTitle : stringField(record, 'title'),
+            status: stringField(record, 'status'), // ★ 真形状里**没有** status ✗ ⇒ 恒为空串 ✓
             running: record['running'] === true || record['busy'] === true,
             awaitingApproval: record['awaitingApproval'] === true || record['awaiting'] === true,
             current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
             updatedAt: typeof record['updatedAt'] === 'number' ? record['updatedAt'] : null,
+            blank: record['blank'] === true,
         });
     }
     return out;
@@ -236,16 +314,25 @@ function readArgs(payload) {
     return args !== null && typeof args === 'object' ? args : {};
 }
 /**
- * 拆网关返回的那层信封 ✓（`{ ok:true, value }` ✓）。
+ * 拆网关返回的那一层 ✓ —— **宽容两种真实形状** ✓（判据只有一处 ✓：`gateway-rpc.ts` 的
+ * `readHostRpcResult` ✓，这里**不许**再写第二套 ✗）。
  *
- * ★ 这个形状是**实测**来的：手机那边一直是 `response.result.ok` / `.value` 两层 ✓
- *   （`boot.js` 取 `session/list` / `session/modelCatalog` 都这样 ✓）
- *   ⇒ 网关端点本身的返回值就是 `{ok,value}` ✓。
+ * ## ★ 为什么必须宽容（第 106 轮的真机故障 ✗，已复现 ✓）
+ *
+ * 这一层的 `deps.call` 在生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓（`index.ts` 两处 ✓：
+ * 隧道那条 ✓ + `/mobile/chat/sessions` 那条 HTTP 路由 ✓），而它对 `session/*` 走的是
+ * `gateway.invoke(…)` ✓ —— 真 DSH 里 `invoke` 返回的是**裸业务值** ✓（`session/list` ⇒ `{sessions:[…]}` ✓，
+ * **没有 `ok` 字段** ✓）；只有 `dispatchRpc` 才返回 `{ok,value}` 信封 ✓（两者形状不同是**设计如此** ✓）。
+ *
+ * ⇒ 原先"只认信封"的写法拿裸值去查 `ok` ⇒ `undefined !== true` ⇒ 抛「网关拒绝了这次调用」✗
+ *   ⇒ `GET /mobile/chat/sessions` = **502** ✓（真机读数 ✓），
+ *     `sessions / read / send / create` **四个端点全坏** ✗
+ *   —— 而单测一直全绿 ✓，根因是**假网关两个形状都跟真 DSH 反了** ✗（已在本轮改真 ✓）。
+ *
+ * ★ 输出契约**没变** ✓：调用方看到的仍然是"业务值 or 抛错" ✓。
  */
 function unwrap(result) {
-    if (result === null || typeof result !== 'object')
-        return undefined;
-    const envelope = result;
+    const { envelope } = readHostRpcResult(result);
     if (envelope.ok !== true) {
         const error = envelope.error;
         const message = typeof error?.message === 'string' ? error.message : '网关拒绝了这次调用';
