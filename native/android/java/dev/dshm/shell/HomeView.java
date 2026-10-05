@@ -257,6 +257,15 @@ final class HomeView extends FrameLayout {
      *   之后仍由数据说了算 ✓（两者不一致时也不会长期打架 ✓）。
      */
     private String currentAuthorityNow = null;
+    /**
+     * ★ 2026-10-05（用户实测第二次）：**本机上有没有任一实例能与 {@code currentAuthorityNow} 逐字对上**。
+     * ★ 为什么需要它：同一台机器**同一个端口挂在多个主机名下**
+     *   （例如 `10.34.255.229:3091`（局域网）与 `100.123.136.82:3091`（Tailscale））
+     *   ⇒ 若无条件按端口兑底 ✗，**兄弟行也会亮** ✗（用户：“我在 tail 环境下，
+     *   但局域网那个对应的端口智能体也会提示正在用，过一段时间会刷没”✓）。
+     * ⇒ 只有“**没有任何一条能逐字对上**”（= 快照还旧）时，才允许端口兑底 ✓。
+     */
+    private boolean currentAuthorityMatchedExactly = false;
 
     /**
      * 用户刚点进去的那台机器（机器键）。比按地址去猜可靠得多：地址匹配依赖
@@ -293,6 +302,25 @@ final class HomeView extends FrameLayout {
      * ★ 判据是"**这台电脑身上有没有那条地址**"✓（`Machine` 本身没有 authority 字段 ✓ ——
      *   它由 instances → addresses 组成 ✓）—— 这也顺带把"同一台机器的多个地址"一起认了 ✓。
      */
+    /** ★ 本机（这一台 Machine）上有没有任一条地址能与 {@code currentAuthorityNow} **逐字对上** ✓。
+     * ★ 先例外一律吞掉（这个函数在请求/绘制路径上 ✗，不能抛）。
+     */
+    private boolean authorityMatchedExactlyNow(HomeModel.Machine owner) {
+        if (owner == null || currentAuthorityNow == null) return false;
+        try {
+            for (int i = 0; i < owner.instances.size(); i += 1) {
+                HomeModel.Instance candidate = owner.instances.get(i);
+                for (int j = 0; j < candidate.addresses.size(); j += 1) {
+                    String authority = candidate.addresses.get(j).authority;
+                    if (authority != null && authority.equals(currentAuthorityNow)) return true;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+        return false;
+    }
+
     private boolean isCurrent(HomeModel.Machine machine) {
         if (currentMachineKeyNow != null) return currentMachineKeyNow.equals(machine.key);
         if (currentAuthorityNow == null) return machine.current;
@@ -332,6 +360,8 @@ final class HomeView extends FrameLayout {
      */
     private boolean isCurrentInstance(HomeModel.Machine owner, HomeModel.Instance instance) {
         if (instance == null) return false;
+        // ★ 懒重算 ✓（实例数极小、幂等 ✓）⇒ 不需要在 markCurrentMachine/setCurrentAuthorityNow/setSnapshot 处接线 ✗
+        currentAuthorityMatchedExactly = authorityMatchedExactlyNow(owner);
         try {
             if (currentMachineKeyNow != null && (owner == null || !currentMachineKeyNow.equals(owner.key))) return false;
             if (currentAuthorityNow == null) return instance.current;
@@ -347,12 +377,16 @@ final class HomeView extends FrameLayout {
              *   用它判“是哪一个”不会误判 ✓；而“主机”那半很容易不同 ✗
              *   （Tailscale IP／局域网 IP／主机名 ✓ 同一台机器有多种写法 ✓）。
              */
-            String wantedPort = portOfAuthority(currentAuthorityNow);
-            if (wantedPort.length() > 0) {
-                for (int i = 0; i < instance.addresses.size(); i += 1) {
-                    HomeModel.Address address = instance.addresses.get(i);
-                    if (address == null) continue;
-                    if (wantedPort.equals(portOfAuthority(address.authority))) return true;
+            // ★ 只有“本机没有任何一条能逐字对上”（= 快照还旧 ✓）时，才允许按端口兜底 ✓
+            // （否则同一端口挂在多个主机名下时，兄弟行也会亮 ✗）。
+            if (!currentAuthorityMatchedExactly) {
+                String wantedPort = portOfAuthority(currentAuthorityNow);
+                if (wantedPort.length() > 0) {
+                    for (int i = 0; i < instance.addresses.size(); i += 1) {
+                        HomeModel.Address address = instance.addresses.get(i);
+                        if (address == null) continue;
+                        if (wantedPort.equals(portOfAuthority(address.authority))) return true;
+                    }
                 }
             }
             return false;
