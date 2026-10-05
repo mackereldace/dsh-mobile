@@ -10641,6 +10641,81 @@
       '    color: var(--dsw-alias-label-secondary, #a9b0b8); cursor: pointer;',
       '  }',
 
+      /**
+       * ★★ 本轮 A（0.2.0 ✓）：交付卡片右侧那套「用 XXX 打开 / 更多打开方式」**收起** ✓。
+       *
+       * 取证（不是猜 ✗）：0.2.0 起卡片右侧的控件**已经不在 deliverables 里**了 ✗ ——
+       *   它由新插件 `@deepseek-ai/dsh-client-ui-open-in-app` 经插槽
+       *   `deliverables.file.actions` 渲染 ✓（它自己那段注释写着 FileRouteAction 经
+       *   `deliverables.file.actions` 提供交付卡片的控件 ✓）。它打的是**稳定属性** ✓：
+       *   `div[data-open-target="file"][data-size=…][data-state=…]` → `button.main`
+       *   （`aria-label` = 「用 {app} 打开」✓）/ `button.chevron`（`aria-label` = 「更多打开方式」✓）。
+       *   ★ 判据**不用哈希类名** ✗ —— 卡片自己的类名已经从 `nyYjTG_` 换成 `dwRWCG_` ✓，
+       *   而 `data-open-target` 是语义属性 ✓。
+       *
+       * 命中面**只有交付卡片** ✓（多一个 `[data-presented-file]` 祖先条件 ✓）——
+       *   会话头部 / 侧边栏 / 文档预览里那些同款 open-in-app 控件**一个字都不动** ✓。
+       *
+       * 用户原话：「手机上我**不关心它用什么默认应用打开**，只需要保留**预览**与**手机下载**」✓
+       *   ⇒ 位置由我们自己的两个动作顶上 ✓（`[data-dshm-card-actions]` ✓，
+       *   见 installDeliverablesCardBridge 的 tuneCardControls ✓）。
+       */
+      '  [data-presented-file] [data-open-target] { display: none !important; }',
+
+      /**
+       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）：
+       *   尺寸与圆角照 DSH 原来那颗分体按钮 ✓（高 28 / 圆角 10 ✓），颜色一律走设计 token ✓。
+       *   `pointer-events: auto` 是必需的 ✓ —— 卡片正文那层 `_fileBody` 是 `pointer-events:none` ✓，
+       *   而铺满整张卡的 `_cardPreview` 覆盖层在它下面（z-index 1 ✓）⇒ 不写这一条就点不到 ✗。
+       */
+      '  [data-dshm-card-actions] {',
+      '    pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px;',
+      '  }',
+      '  [data-dshm-card-actions] button {',
+      '    height: 28px; padding: 0 10px; border-radius: 10px; font: inherit; font-size: 12px;',
+      '    line-height: 18px; white-space: nowrap; cursor: pointer; color: var(--dsw-alias-label-primary);',
+      '    border: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-floating-fill);',
+      '  }',
+      '  [data-dshm-card-actions] button:active { background: var(--dsw-alias-interactive-bg-hover); }',
+
+      /**
+       * ★★ 本轮 B/C（用户原话：「呃，你的**选择卡**跟**审批通知**，它能不能**稍微宽一点**？」✓）
+       *
+       * ## 先把宽度链量出来 ✓（0.2.0 产物里读的 ✓，不是猜 ✗）
+       *
+       * 两张卡的结构同形 ✓：一个**外壳**（管内边距）+ 一张**卡**（管上限）——
+       *   · 选择卡：`div[data-question-key]` → `section._card` ✓
+       *     （`ui-user-questions` 的 QuestionComposer ✓）；
+       *   · 审批卡：`div[data-approval-key]` → `div._card` ✓（`ui-approval` 的 ApprovalPanel ✓）。
+       * 两者的卡都写着 `width:100%; max-width: var(--dsh-chat-content-width)` ✓，而
+       *   `--dsh-chat-content-width = var(--dsh-chat-user-width, clamp(680px, 列宽 * .64, 920px))` ✓
+       *   ⇒ 手机上（约 412px）这个上限是 **680px** ✓ ⇒ **它根本不是限宽的那一环** ✗。
+       * ★ 真正把卡挤窄的是**外壳那圈内边距** ✓：
+       *   `padding: 6px calc(var(--dsh-composer-side-clearance) + 16px) 10px` ✓，
+       *   而 `--dsh-composer-side-clearance: 16px` ✓ ⇒ 左右各 32px ⇒ 412 − 64 = **348px** ✓。
+       *
+       * ## 所以放宽要动两处 ✓（只改上限是无效的 ✗）
+       *
+       * ① 外壳的左右内边距收到 8px ✓（上下那两档 6px / 10px 一个字不动 ✓）；
+       * ② 给卡一个"**上限 + 视口百分比**"的天花板 ✓：`min(560px, 94vw)` ✓
+       *    —— **不写死 px** ✗（本仓在窄屏上栽过"写死宽度"的坑 ✓；窄屏靠 94vw 自适应 ✓，
+       *    大屏靠 560px 封顶 ✓，不会在平板上变成一条巨幅横条 ✗）。
+       *
+       * ## 判据全是 DSH 自己打的**语义属性** ✓（不是哈希类名 ✗）
+       *
+       * 那两套类名 `y21zpG_` / `gOeFyG_` 都是**构建哈希** ✓（改名就静默失效 ✗，本仓栽过多次），
+       * 而 `data-question-key` / `data-approval-key` 是语义属性 ✓ ⇒ 只命中那两张卡 ✓。
+       * ★ `div[data-approval-key] > div` 指的是它那张唯一的卡 ✓（`ui-approval` 的 root 里就一个 div 子节点 ✓）；
+       *   同一族的「计划审批卡」`div[data-plan-review-key]` **没动** ✗（用户没点名 ✓，要并进来加一行即可 ✓）。
+       * ★ 这段样式**只随 installShell 装** ✓ ⇒ 电脑端一个字都不变 ✓（与上面 hostStatus 那条同一条路子 ✓）。
+       */
+      '  div[data-question-key], div[data-approval-key] {',
+      '    padding-left: 8px !important; padding-right: 8px !important;',
+      '  }',
+      '  div[data-question-key] > section, div[data-approval-key] > div {',
+      '    max-width: min(560px, 94vw) !important;',
+      '  }',
+
       /* ⑦ iOS 聚焦输入框时不允许自动放大 */
       '  textarea, input[type="text"] { font-size: 16px !important; }',
 
@@ -18840,10 +18915,117 @@
      *  ⇒ 那一下正好就是"菜单刚渲染出来"的时刻 ✓ ⇒ 顺手把两项的文案改准 ✓。
      * 回调里只在真的改了东西时才再补一次 ✓（第二轮因为标记已在，返回 0 ✓，不会自激 ✓）。
      */
+    /**
+     * ★★ 本轮 A（0.2.0 ✓）：交付卡片右侧**只留「预览」与「手机下载」两颗** ✓。
+     *
+     * ## 为什么必须新做这一层（取证 ✓，不是猜 ✗）
+     *
+     * round 130 那套（`PRESENTED_NATIVE_LABELS` ✓）认的是**卡片内部**那颗 v 的下拉菜单：
+     *   `[data-presented-file] button[class*="_chevron"]` + `div[role="menu"]` 里
+     *   文案为「用默认应用打开」/「打开所在文件夹」的两项 ✓。
+     * ★ 但 0.2.0 起这两样**都不在了** ✗（实据都是产物里读出来的 ✓，不是推断）：
+     *   ① deliverables 的类名表里**已经没有** chevron / open / split 三项 ✓
+     *      （0.2.0 只剩 root / presented / file / cardPreview / fileBody / details / fileName /
+     *       description / actions / toggle … ✓）⇒ `cardActionOf` 与那条 CSS 全部落空 ✗；
+     *   ② 卡片右侧那排控件改由**新插件** `@deepseek-ai/dsh-client-ui-open-in-app` 经插槽
+     *      `deliverables.file.actions` 渲染 ✓（`PresentedFileCard` 现在只渲染一个 `div._actions`，
+     *      内容来自 `renderSlot("deliverables.file.actions", …)` ✓）；
+     *   ③ 它的文案也换了 ✓（0.2.0 的 deliverables 词典里 `presented.defaultApp` 与
+     *      `presented.directory` **两个键都没了** ✓）⇒ 按文案匹配**永远命中不了** ✗。
+     * ⇒ 于是"我们那版"在这张卡上**静默失效** ✓：屏幕上留下的就是 DSH 自己那套 ✓
+     *   （`div[data-open-target="file"]` + `button.main`「用 {app} 打开」+ `button.chevron`「更多打开方式」✓）。
+     *
+     * ## 做法（只加我们这一层 ✓，复用既有能力 ✗不重写）
+     *
+     * ① 外观：那条 `[data-presented-file] [data-open-target]{display:none}` 把 DSH 那套收起来 ✓；
+     * ② 位置：两个按钮插进 **DSH 自己放那个控件的容器** ✓（`[data-open-target]` 的父节点 ✓，
+     *    也就是 `div._actions` ✓ —— 它 `pointer-events:auto` ✓、又在 `cardPreview` 覆盖层之上 ✓
+     *    ⇒ 不用碰 React 的类名、也不用另找位置 ✓）；
+     * ③ 动作：**全部复用 round 128 就做好的两条路** ✓ —— 一个字都没重写 ✗：
+     *    「预览」→ `openCard`（同一条 DSH 预览桥 ✓，路径仍取自 `cardPreview` 的 title ✓）；
+     *    「手机下载」→ `runCardDownload`（同一条 `readRemoteFileBytes` + 壳的「下载」目录桥 ✓）。
+     * ④ 点击用**一条 document 捕获委托** ✓（不逐卡片挂监听 ✓ —— 卡片被 DSH 重渲染也不会留下旧监听 ✓）。
+     *
+     * ## 幂等与不自激（与 relabelNativeItems 同一条手法 ✓）
+     *
+     * `tuneCardControls` 只在"卡片里还没有我们那组"时才插 ✓ ⇒ 插完那一轮观察者会再进来一次，
+     * 这一轮**返回 0** ✓、不再写 DOM ✓ ⇒ 不会自激 ✗。
+     */
+    /** 我们的两颗按钮要插进哪儿 ✓：DSH 放 open-in-app 控件那个容器 ✓（找不到就如实返回 null ✓）。 */
+    function cardActionsHost(card) {
+      var native = card.querySelector('[data-open-target]')
+      if (native !== null && native.parentElement !== null) return native.parentElement
+      var marked = card.querySelector('[data-dshm-card-actions]')
+      if (marked !== null && marked.parentElement !== null) return marked.parentElement
+      return card.querySelector('div[class*="actions"]')
+    }
+
+    /** 一颗动作按钮 ✓（动作名写在属性上 ✓ ⇒ 一条委托监听就能认 ✓）。 */
+    function cardActionButton(act, label) {
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('data-dshm-card-act', act)
+      button.setAttribute('aria-label', label)
+      button.textContent = label
+      return button
+    }
+
+    /**
+     * 缺了就补、有了就不动 ✓（幂等 ✓）。
+     * @returns 这一轮补了几张卡片 ✓（0 = 观察者不用再排一轮 ✓）。
+     */
+    function tuneCardControls() {
+      if (document.querySelector('[data-presented-file]') === null) return 0
+      var cards = document.querySelectorAll('[data-presented-file]')
+      var changed = 0
+      for (var i = 0; i < cards.length; i++) {
+        var card = cards[i]
+        if (card.querySelector('[data-dshm-card-actions]') !== null) continue
+        var host = cardActionsHost(card)
+        if (host === null) continue
+        var group = document.createElement('div')
+        group.setAttribute('data-dshm-card-actions', '1')
+        group.appendChild(cardActionButton('preview', '预览'))
+        group.appendChild(cardActionButton('download', '手机下载'))
+        host.appendChild(group)
+        changed += 1
+      }
+      return changed
+    }
+
+    /**
+     * 两颗按钮的点击在**捕获阶段**认下来 ✓：
+     * 铺满整张卡的 `cardPreview` 覆盖层是我们的**兄弟节点**（不是祖先 ✓）⇒ 抢不走这两颗 ✓；
+     * 仍然 preventDefault + stopPropagation ✓（别顺带触发 DSH 自己那层 ✓）。
+     */
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null) return
+          var node = event.target
+          if (node === null || node === undefined || typeof node.closest !== 'function') return
+          var button = node.closest('[data-dshm-card-act]')
+          if (button === null) return
+          var card = button.closest('[data-presented-file]')
+          if (card === null) return
+          event.preventDefault()
+          event.stopPropagation()
+          if (String(button.getAttribute('data-dshm-card-act') || '') === 'download') runCardDownload(card)
+          else openCard(card, '卡片「预览」')
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+
+    tuneCardControls()
     relabelNativeItems()
     try {
       var menuObserver = new MutationObserver(function () {
         try {
+          tuneCardControls()
           if (relabelNativeItems() > 0) relabelNativeItems()
         } catch (error) {
           void error
