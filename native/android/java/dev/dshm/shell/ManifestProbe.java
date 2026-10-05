@@ -92,8 +92,13 @@ public final class ManifestProbe {
     /**
      * ★ **不查 hostname** ✓ —— 与 `MainActivity.pinCa()` 逐字同一条口径 ✓。
      * 原因见类注释（按 authority 钉住的 CA 才是判据 ✓）。**别顺手改成严格校验** ✗。
+     *
+     * ★★ 刻意**不加 `private`** ✗（2026-10-04 ✓）：同包里的 {@link ShotFetch}、
+     * {@link ChatSessions} 都要用**同一个**校验器 ✓ —— 让它们**引用这一个** ✓，
+     * 而不是各自再写一个匿名类 ✗（多一份就多一处会飘的口径 ✓；
+     * 而这条口径一旦飘了，手机上的症状正是「证书对不上」那种**看起来像证书、其实不是**的错 ✗）。
      */
-    private static final HostnameVerifier CHAIN_ONLY = new HostnameVerifier() {
+    static final HostnameVerifier CHAIN_ONLY = new HostnameVerifier() {
         @Override
         public boolean verify(String hostname, SSLSession session) {
             return true;

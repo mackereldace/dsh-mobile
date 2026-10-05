@@ -113,6 +113,39 @@ public final class HomeLabels {
         return value.isEmpty() ? "（没标题的会话）" : value;
     }
 
+    /**
+     * ★★ 标题：**没有 `title` 就用 `cwd` 的最后一段** ✓（真形状里没有 `title` ✗ —— 见 `ChatSessions` 的说明 ✓）。
+     *
+     * ## 为什么是这条口径 ✗（不是我随手定的 ✓）
+     *
+     * `docs/protocol.md` §12.38 写死了会话标题的**唯一稳定来源**：
+     * `SessionSummary` 里**没有 `title`** ✗（标题是会话日志里的 `session/title` 事件 ✓），
+     * 所以 DSH 自己渲染会话列表时用的是 `displayTitleOf(title, cwd, id)`：
+     * **durable title → `cwd` 的目录名 → id** ✓ —— 这里与它同一套顺序 ✓。
+     * ★ 只差最后那一步：真取不到时我们仍如实写「（没标题的会话）」✓（**不许**编一个题目 ✗）。
+     *
+     * ## 为什么单独一个重载、而不是把老那个改掉 ✗
+     *
+     * 老那个只有 `title` 一个入参 ✓、行为（空 ⇒ 如实说 ✓）已经被断言钉住了 ✓ ——
+     * 把它的签名改掉等于顺手改掉一批绿着的断言 ✗（本仓的老账就是这么来的 ✓）。
+     */
+    public static String sessionTitle(String title, String cwd) {
+        String value = title == null ? "" : title.trim();
+        if (!value.isEmpty()) return value;
+        String fromCwd = leafName(cwd);
+        return fromCwd.isEmpty() ? "（没标题的会话）" : fromCwd;
+    }
+
+    /** `cwd` 的最后一段 ✓（`/a/b` ⇒ `b` ✓；空 / 只有分隔符 ⇒ 空串 ✓，**不猜** ✗）。 */
+    private static String leafName(String path) {
+        String value = path == null ? "" : path.trim();
+        while (value.endsWith("/") || value.endsWith("\\")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        int cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+        return cut >= 0 ? value.substring(cut + 1) : value;
+    }
+
     public static String sessionState(boolean running, boolean awaiting, boolean current) {
         StringBuilder text = new StringBuilder();
         if (running) text.append("正在跑");

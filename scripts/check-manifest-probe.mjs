@@ -13,7 +13,7 @@
  * · ★ 取图那条（`ShotFetch`）：**壁纸路由**（`/mobile/desktop/wallpaper` ✓）的三种真实返回都要判对 ✓ ——
  *   真图（PNG ✓ / JPEG ✓）收下 ✓、502 + `{message}` 的正文要**读出那句人话** ✓、
  *   700KB 的合法图**收下** ✓ 而真超过 8MB 的**拒** ✓；
- * · ★ 超时**真的按给定的毫秒数结束** ✓（"界面会不会被吊住"的那条命门 ✓）。
+ * · ★ 超时**真的按给定的毫秒数结束** ✓（「界面会不会被吊住」的那条命门 ✓）。
  *
  * ## 环境是临时且隔离的
  *
@@ -68,7 +68,7 @@ const SHOT_PNG = Buffer.concat([
 /**
  * ★ 夹具那张 **JPEG** ✓（三字节魔数 `FF D8 FF` ✓）——
  * 用户那台 Windows 的壁纸极可能就是 jpg ✓，而旧口径"只收 PNG"会把它拒掉 ✓
- * ⇒ 这条夹具就是给"认图放宽"那条断言用的 ✓。
+ * ⇒ 这条夹具就是给「认图放宽」那条断言用的 ✓。
  */
 const SHOT_JPEG = Buffer.concat([
   Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
@@ -84,6 +84,34 @@ const WALLPAPER_UNAVAILABLE = JSON.stringify({
   code: 'mobile/internal',
   message: '这台 Mac 读不到壁纸的文件路径（现在多是系统动态壁纸，本身没有图片文件）',
   details: {},
+})
+
+/**
+ * ★★ **会话清单**的真形状 ✓（`SessionListValue` ✓）—— 给 `ChatSessionsTlsTest` 用 ✓。
+ *
+ * 字段与真 DSH 的 `$schema` **逐字一致** ✓（`items` / `sessionId` / `updatedAt` / `running` /
+ * `blank` / `cwd` ✓），值换成一眼认得出的测试值 ✓。
+ * ★ **故意不带** `id` / `sessions` / `title` ✗ —— 带上就变成「只认老名字也能过」的假绿 ✗
+ *   （2026-10-04 的事故正是"只认 id ⇒ 真形状里一条都认不出"✓）。
+ */
+const CHAT_SESSIONS = JSON.stringify({
+  items: [
+    {
+      agentAvailable: true,
+      sessionId: 's-tls-1',
+      updatedAt: 1759500000000,
+      running: true,
+      blank: false,
+      cwd: '/tmp/dshm-chat-tls',
+    },
+    {
+      agentAvailable: false,
+      sessionId: 's-tls-2',
+      updatedAt: 1759400000000,
+      running: false,
+      blank: true,
+    },
+  ],
 })
 
 const servers = []
@@ -124,6 +152,45 @@ const handler = (request, response) => {
     response.end('<!doctype html><html><body>我是别的服务</body></html>')
     return
   }
+  /**
+   * ★★ 会话清单那条只读路由 ✓（真形状 ✓）—— `ChatSessionsTlsTest` 的**主样本** ✓。
+   * ★ 这几条**必须放在 `/not-a-manifest` 之后、通用 404 之前** ✓（顺序写错就变成"每条都 404"✗，
+   *   而那时「必须失败」的断言照样全绿 ✗ —— 那种假绿本轮特意用正向断言堵住 ✓）。
+   */
+  if (url === '/mobile/chat/sessions') {
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    response.end(CHAT_SESSIONS)
+    return
+  }
+  if (url === '/mobile/chat/sessions-empty') {
+    // 一台电脑还没有会话时 DSH 会回的东西 ✓（空 items ✓，不是错误 ✓）
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ items: [] }))
+    return
+  }
+  if (url === '/mobile/chat/sessions-html') {
+    // 200，但回的是错误页 —— "把 HTML 当清单"那种情形 ✓
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end('<html><body>这不是清单</body></html>')
+    return
+  }
+  if (url === '/mobile/chat/sessions-boom') {
+    // 宿主那条路由失败时是真 502 + `{code,message}` ✓（这里用 500，只要非 200 就该走「人话」那条 ✓）
+    response.writeHead(500, { 'content-type': 'text/plain' })
+    response.end('boom')
+    return
+  }
+  if (url === '/mobile/chat/sessions-slow') {
+    setTimeout(() => {
+      try {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(CHAT_SESSIONS)
+      } catch (error) {
+        void error
+      }
+    }, 2000)
+    return
+  }
   if (url === '/boom') {
     response.writeHead(500, { 'content-type': 'text/plain' })
     response.end('boom')
@@ -148,7 +215,7 @@ const handler = (request, response) => {
   if (url === '/mobile/desktop/shot') {
     /**
      * ★ 回**真 PNG** ✓（八字节魔数 + 一点内容 ✓）—— 夹具里不能图省事回 "PNG" 三个字母 ✗：
-     *   那样"逐字节比"与"认魔数"两条都会变得没有承重 ✓。
+     *   那样「逐字节比」与「认魔数」两条都会变得没有承重 ✓。
      */
     response.writeHead(200, { 'content-type': 'image/png' })
     response.end(SHOT_PNG)
@@ -175,7 +242,7 @@ const handler = (request, response) => {
   if (url === '/wallpaper-under-cap') {
     /**
      * ★★ 700KB 的**合法**图 ✓ —— 旧上限是 512KB ✓ ⇒ 这一条在旧口径下必被拒 ✓，
-     *   现在必须**取到** ✓（"上限抬到与宿主同口径"那条才不是空话 ✓）。
+     *   现在必须**取到** ✓（「上限抬到与宿主同口径」那条才不是空话 ✓）。
      */
     response.writeHead(200, { 'content-type': 'image/png' })
     response.end(Buffer.concat([SHOT_PNG, Buffer.alloc(700 * 1024, 7)]))
@@ -191,7 +258,7 @@ const handler = (request, response) => {
     return
   }
   if (url === '/not-an-image') {
-    // ★ 200，但回的是 HTML —— 就是"错误页当成图"那种情形 ✓
+    // ★ 200，但回的是 HTML —— 就是「错误页当成图」那种情形 ✓
     response.writeHead(200, { 'content-type': 'text/html' })
     response.end('<html><body>这不是图</body></html>')
     return
@@ -210,8 +277,8 @@ const handler = (request, response) => {
   if (url === '/big') {
     /**
      * ★ 这里必须回**一个合法 manifest + 大量空白** ✗ —— 不能回一坨垃圾 ✗。
-     *   回垃圾时"超上限 ⇒ 不可用"这条即使把体积上限删掉也照样绿（垃圾本来就不是 manifest ✓）
-     *   ⇒ 那条断言就没有承重 ✓。回"合法 manifest 但超大"才真正逼问体积上限在不在 ✓。
+     *   回垃圾时「超上限 ⇒ 不可用」这条即使把体积上限删掉也照样绿（垃圾本来就不是 manifest ✓）
+     *   ⇒ 那条断言就没有承重 ✓。回「合法 manifest 但超大」才真正逼问体积上限在不在 ✓。
      */
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(MANIFEST + ' '.repeat(200 * 1024))
@@ -250,17 +317,17 @@ const run = async () => {
    *
    * 为什么必须有：这一组里**大多数断言是"必须失败"**（500 / 404 / 重定向 / 超时 / 错 CA ✓）。
    * 服务没起来、或证书没配好时，它们**照样全绿** ✗ —— 那是最坏的一种假绿
-   * （"验过了"其实什么都没验 ✓）。所以先用 Node 自己打一次：
+   * （「验过了」其实什么都没验 ✓）。所以先用 Node 自己打一次：
    * good 服务必须回 200 + 正确的 manifest ✓，nosan 服务也必须回 200 ✓。
    */
-  const selfCheck = async (port, caFile) => {
+  const selfCheck = async (port, caFile, path = '/mobile/manifest') => {
     const { request } = await import('node:https')
     return await new Promise((resolve) => {
       const req = request(
         {
           host: '127.0.0.1',
           port,
-          path: '/mobile/manifest',
+          path,
           ca: readFileSync(caFile),
           // 与壳里 `pinCa()` 同一条口径：只验链、不查 hostname ✓（否则 nosan 那台必被拒 ✓）
           checkServerIdentity: () => undefined,
@@ -282,12 +349,22 @@ const run = async () => {
   const goodCheck = await selfCheck(portGood, good.ca)
   const noSanCheck = await selfCheck(portNoSan, noSan.ca)
   if (goodCheck.status !== 200 || goodCheck.body.indexOf('host-probe-test') < 0) {
-    fail(`good 服务自检没过（status=${goodCheck.status} body=${String(goodCheck.body).slice(0, 200)}）—— 那样下面所有"必须失败"的断言都是假绿 ✗`)
+    fail(`good 服务自检没过（status=${goodCheck.status} body=${String(goodCheck.body).slice(0, 200)}）—— 那样下面所有「必须失败」的断言都是假绿 ✗`)
   }
   if (noSanCheck.status !== 200) {
     fail(`nosan 服务自检没过（status=${noSanCheck.status} body=${String(noSanCheck.body).slice(0, 200)}）`)
   }
-  console.log('[check-manifest-probe] 夹具自检 ✓（两个 HTTPS 服务都真能应答 ⇒ 后面那些"必须失败"才有意义）')
+  /**
+   * ★★ 会话清单那条也要自检 ✓ —— 它是 `ChatSessionsTlsTest` 的**唯一**依据 ✓
+   *   （"经 SAN 里没有的地址也能取到"那条 ✓）。这条要是没人先证明"服务真能应答"✓，
+   *   Java 侧那几条看起来「必须成功」的断言就会变成**什么都验不到的绿** ✗
+   *   （接不上时 `fetch` 只回一句人话 ✓、永不抛 ✓ —— 判据一软就全绿 ✓）。
+   */
+  const chatCheck = await selfCheck(portNoSan, noSan.ca, '/mobile/chat/sessions')
+  if (chatCheck.status !== 200 || chatCheck.body.indexOf('s-tls-1') < 0) {
+    fail(`会话清单夹具自检没过（status=${chatCheck.status} body=${String(chatCheck.body).slice(0, 200)}）—— 那样「取到列表」那几条是假绿 ✗`)
+  }
+  console.log('[check-manifest-probe] 夹具自检 ✓（两个 HTTPS 服务 + 会话清单路由都真能应答 ⇒ 后面那些「必须失败」才有意义）')
 
   // ② 编译（用的是**仓库里那份**原文 ✓，与 build-apk 同一套参数 ✓）
   const sources = [
@@ -296,8 +373,15 @@ const run = async () => {
     join(sourceDir, 'dev', 'dshm', 'shell', 'HomeManifest.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'ManifestProbe.java'),
     join(sourceDir, 'dev', 'dshm', 'shell', 'ShotFetch.java'),
+    /**
+     * ★ 会话清单那两条 ✓（`ChatSessions` 零 android 依赖 ✓，但 `describe` 用到
+     * `HomeLabels` ✓ ⇒ 两个都要编 ✓ —— 只编 `ChatSessions` 会报"找不到符号 HomeLabels"✓）。
+     */
+    join(sourceDir, 'dev', 'dshm', 'shell', 'HomeLabels.java'),
+    join(sourceDir, 'dev', 'dshm', 'shell', 'ChatSessions.java'),
     join(testDir, 'dev', 'dshm', 'shell', 'ManifestProbeTest.java'),
     join(testDir, 'dev', 'dshm', 'shell', 'ShotFetchTest.java'),
+    join(testDir, 'dev', 'dshm', 'shell', 'ChatSessionsTlsTest.java'),
   ]
   try {
     execFileSync('javac', ['--release', '11', '-d', classDir, ...sources], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -314,12 +398,12 @@ const run = async () => {
    *   （2026-10-03 当场栽在这上面 ✓，记下来）：
    *   夹具的 HTTPS 服务**就跑在本进程里** ✓，而 `execFileSync` 会**阻塞 Node 的事件循环** ✗
    *   ⇒ 服务根本没机会应答 ⇒ Java 端全部卡在 TLS 握手上（`SocketTimeoutException` ✓）。
-   *   症状极具欺骗性：**那一片"必须失败"的断言全绿** ✓（连不上当然什么都验不出来 ✓），
-   *   只有"必须成功"那条红 ✓ —— 如果这组里没有正向断言，这次验收会 100% 全绿而**什么都没验** ✗。
+   *   症状极具欺骗性：**那一片「必须失败」的断言全绿** ✓（连不上当然什么都验不出来 ✓），
+   *   只有「必须成功」那条红 ✓ —— 如果这组里没有正向断言，这次验收会 100% 全绿而**什么都没验** ✗。
    *   （本例的教训写进了 `10-交接文档` §4.1bg ✓：**正向断言是假绿的唯一解药** ✓。）
    */
   /**
-   * ★ 把夹具那张 PNG 落成一个文件 ✓ —— 它是 Java 侧"逐字节比"的依据 ✓。
+   * ★ 把夹具那张 PNG 落成一个文件 ✓ —— 它是 Java 侧「逐字节比」的依据 ✓。
    *   （**同一份字节**来自 `SHOT_PNG` ✓，不是另写一份 ✗。）
    */
   const shotExpected = join(workDir, 'expected-shot.png')
@@ -329,7 +413,7 @@ const run = async () => {
    * ★★ 每个测试类**各起一次 java** ✗ ——
    *   我第一版把两个类名一起写在命令末尾 ✓：`java` 只把**第一个**当主类 ✗，
    *   第二个是**当参数**递进去的 ✓ ⇒ `ShotFetchTest` 的十几条断言**一条都没跑** ✓，
-   *   而脚本照样报"29 ✓"、退出码 0 ✓ —— 那次"绿"是假的 ✓。
+   *   而脚本照样报"29 ✓"、退出码 0 ✓ —— 那次「绿」是假的 ✓。
    *   ⇒ 一个类一次调用 ✓，并且**断言每个类的汇总真的出现过** ✓（否则不算跑过 ✓）。
    */
   const baseJavaArgs = [
@@ -341,18 +425,31 @@ const run = async () => {
     `-Ddshm.probe.nosan.base=https://127.0.0.1:${portNoSan}`,
     `-Ddshm.probe.nosan.ca=${noSan.ca}`,
     `-Ddshm.probe.plain.base=http://127.0.0.1:${portPlain}`,
-    // 想看"为什么这条不可用"时加上这个 ✓（`ManifestProbe` 里那个排查开关 ✓）：
+    // 想看「为什么这条不可用」时加上这个 ✓（`ManifestProbe` 里那个排查开关 ✓）：
     // '-Ddshm.probe.debug=1',
     `-Ddshm.shot.base=https://127.0.0.1:${portGood}`,
     `-Ddshm.shot.ca=${good.ca}`,
     `-Ddshm.shot.wrongCa=${noSan.ca}`,
     `-Ddshm.shot.plain=http://127.0.0.1:${portPlain}`,
     `-Ddshm.shot.expected=${shotExpected}`,
+    /**
+     * ★★ 会话清单那几条 ✓ —— `nosan` 那台专门用来验"**证书 SAN 里没有这个地址也照样认**"✓
+     *   （2026-10-04 事故的形状 ✓：手机走 Tailscale 地址、证书里只有局域网 IP ✓）。
+     *   ★ 两个 base 都指 **127.0.0.1** ✓，而 nosan 的证书 SAN 里**只有 `10.99.99.99`** ✓
+     *   ⇒ hostname 校验器一旦缺位，那次握手必失败 ✓。
+     */
+    `-Ddshm.chat.base=https://127.0.0.1:${portGood}`,
+    `-Ddshm.chat.ca=${good.ca}`,
+    `-Ddshm.chat.wrongCa=${noSan.ca}`,
+    `-Ddshm.chat.nosanBase=https://127.0.0.1:${portNoSan}`,
+    `-Ddshm.chat.nosanCa=${noSan.ca}`,
+    `-Ddshm.chat.plain=http://127.0.0.1:${portPlain}`,
   ]
 
   const classes = [
     ['dev.dshm.shell.ManifestProbeTest', '── check-manifest-probe'],
     ['dev.dshm.shell.ShotFetchTest', '── check-shot-fetch'],
+    ['dev.dshm.shell.ChatSessionsTlsTest', '── check-chat-sessions-tls'],
   ]
   let allOutput = ''
   let exitCode = 0
@@ -361,7 +458,7 @@ const run = async () => {
     allOutput += result.stdout
     if (result.code !== 0) exitCode = result.code
     if (!result.stdout.includes(label)) {
-      console.log(`✗ 没看到 ${label} 的汇总 —— 这个测试类根本没跑起来（那样"全绿"是假的 ✗）`)
+      console.log(`✗ 没看到 ${label} 的汇总 —— 这个测试类根本没跑起来（那样「全绿」是假的 ✗）`)
       exitCode = 1
     }
   }

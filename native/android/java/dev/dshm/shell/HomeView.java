@@ -1771,7 +1771,11 @@ final class HomeView extends FrameLayout {
         row.setPadding(dp(14), dp(12), dp(14), dp(12));
         row.setBackground(pressedState(theme.surface));
 
-        TextView title = text(HomeLabels.sessionTitle(session.title), 15, theme.ink, session.running);
+        /**
+         * ★ 标题按**真形状**取 ✓：`SessionSummary` 里没有 `title` ✗ ⇒ 退到 `cwd` 的目录名 ✓
+         *   （与 DSH 自己的 `displayTitleOf(title, cwd, id)` 同一套顺序 ✓，见 `HomeLabels.sessionTitle` ✓）。
+         */
+        TextView title = text(HomeLabels.sessionTitle(session.title, session.cwd), 15, theme.ink, session.running);
         row.addView(title);
         TextView state = text(HomeLabels.sessionState(session.running, session.awaiting, session.current), 12, theme.ink3, false);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
