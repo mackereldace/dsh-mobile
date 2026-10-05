@@ -267,23 +267,156 @@ try {
     }
   }
   ok(clipboardEnabled, '端侧新能力经"对账补报"同步到宿主（无需人工再点一次）', clipboardEnabled ? 'ok' : '未同步')
-  const callClip = await post('/mobile/device/call', { capability: 'clipboard', text: '来自电脑的一段文字' })
-  ok(callClip && typeof callClip.id === 'string', '电脑侧发起 clipboard 成功', callClip ? callClip.id : '-')
-  let resClip = null
-  for (let i = 0; i < 14; i++) {
-    await sleep(1500)
-    const s = await get(`/mobile/device/status?id=${callClip ? callClip.id : ''}`)
-    resClip = s && s.result
-    if (resClip && resClip.ok) break
+  /**
+   * ── ★★ 剪贴板原生桥（2026-10-05）：clipboard 的**三条路分别如实回报** ──────────────────────
+   *
+   * ## 这一节换掉了什么（旧口径是**假成功**）
+   *
+   * 旧断言是 `resClip.ok === true && /copied:|banner-manual/` ✗ ——
+   * 而端侧那半边（`boot.js` 的 clipboard 分支）当时**无条件** `ok = true` ✗
+   * ⇒ 只要手机回了一句话就算通过 ✓，哪怕那句是"浏览器不允许自动复制，请长按手动复制"✗。
+   * 于是"**电脑说放进去了、用户手机上什么都没有**"这件事在验收里**永远是绿的** ✗
+   * （那正是用户真机报的那一条 ✓）。本轮把口径换成"**ok 必须等于真的写进去了**"✓：
+   *   · `ok:true` 只认 `copied:shell-clipboard`（原生壳真的写了 ✓）与 `copied:clipboard`
+   *     （网页那条真的写了 ✓）；
+   *   · 降级（`banner-manual`）必须 `ok:false` ✓ —— 它是**请用户手动复制**，
+   *     不是"已放进剪贴板" ✗。
+   *
+   * ## 为什么三条路都在这里验（而不是只验一条）
+   *
+   * 无头 Chrome 里**没有原生壳** ✗，而"有壳"那条正是本轮的**真身** ✓
+   * ⇒ 用**假壳**冒充（接口与 `MainActivity.ShellBridge` 一致 ✓，与 ④b 同一种做法 ✓）。
+   * 网页那两条路则用**打桩**把它钉成确定的两态（可用 ✓ / 不可用 ✓）——
+   * 真机上"网页路到底行不行"取决于手势与焦点 ✓（不可复现 ✗），
+   * 但"端侧对这两态的**回报**对不对"是**可判定**的 ✓ ⇒ 只验后者 ✓。
+   *
+   * ★ 三条都验的是**端侧的原话**（`detail` + `ok` ✓，从 `/mobile/device/status?id=` 读 ✓）——
+   *   也就是宿主与 agent 真正拿到的那两个字段 ✓（不是页面上另算一份 ✓）。
+   */
+  /** 发一条 clipboard 调用，等它的**端侧回执** ✓（等"有结果"而不是等"结果成功"✗ —— 降级那条本来就是 ok=false ✓）。 */
+  const clipboardRound = async (text) => {
+    const sent = await post('/mobile/device/call', { capability: 'clipboard', text })
+    let res = null
+    for (let i = 0; i < 14; i++) {
+      await sleep(1500)
+      const s = await get(`/mobile/device/status?id=${sent ? sent.id : ''}`)
+      res = s && s.result
+      if (res) break
+    }
+    return { sent, res }
   }
-  const detailClip = resClip ? String(resClip.detail) : ''
-  // 无头 Chrome 里剪贴板可能不可用 → 端侧会退回"把文本摆到横幅上让用户长按复制"，
-  // 两条都算成功；**唯独不接受静默失败**（那正是这个能力最容易出的问题）。
+
+  // ── ① 有壳（假壳）：必须走**原生**那条路，而且正文原样交给桥 ──
+  console.log('\n【⑥a clipboard：有壳 ⇒ 必须走原生壳】')
+  const fakeClipShell = await ev(`(function(){
+    globalThis.__dshmShellClipboard = [];
+    globalThis.DshmShell = {
+      version: function(){ return '0.1.0+BUILD-VERIFY' },
+      insets: function(){ return JSON.stringify({seen:true,top:24,bottom:0,ime:0,density:3,edgeToEdge:true}) },
+      platform: function(){ return JSON.stringify({sdk:35,android:'15',model:'verify',version:'0.1.0+BUILD-VERIFY',edgeToEdge:true}) },
+      notificationPermission: function(){ return 'granted' },
+      requestNotificationPermission: function(){},
+      notify: function(){ return 'ok' },
+      changeAddress: function(){},
+      log: function(){},
+      setClipboard: function(t){ globalThis.__dshmShellClipboard.push(String(t)); return 'ok' }
+    };
+    return 'ok';
+  })()`)
+  ok(fakeClipShell === 'ok', '装上假的原生壳桥（含 setClipboard ✓ —— 接口与 MainActivity.ShellBridge 一致）', String(fakeClipShell).slice(0, 40))
+  const shellText = '壳剪贴板：来自电脑的一段文字'
+  const shellRound = await clipboardRound(shellText)
+  const shellDetail = shellRound.res ? String(shellRound.res.detail) : ''
   ok(
-    resClip && resClip.ok === true && /copied:|banner-manual/.test(detailClip),
-    '手机执行 clipboard 并如实回报走了哪条路（成功复制或降级成可长按的横幅）',
-    detailClip || '未拿到',
+    shellRound.res && shellRound.res.ok === true && shellDetail === 'copied:shell-clipboard',
+    '★ 有壳时 clipboard 走**原生**那条路（detail=copied:shell-clipboard ✓ —— 不再被无手势的网页路挡在门外 ✗）',
+    shellDetail || '未拿到',
   )
+  const shellSeen = String(await ev('JSON.stringify(globalThis.__dshmShellClipboard||[])'))
+  ok(
+    shellSeen.includes(shellText),
+    '桥确实收到了要复制的**正文原文**（不是"以为复制了"✗）',
+    shellSeen.slice(0, 70),
+  )
+  await ev("delete globalThis.DshmShell; 'ok'")
+
+  // ── ② 没壳 + 网页那条路可用（打桩成"真的写进去了"）：照旧能成功，且回报 copied:clipboard ──
+  console.log('\n【⑥b clipboard：没壳 ⇒ 退回网页那条路（照旧能成功）】')
+  const webStub = await ev(`(function(){
+    globalThis.__dshmWebClipboard = null;
+    var okStub = true;
+    try {
+      navigator.clipboard.writeText = function(t){ globalThis.__dshmWebClipboard = String(t); return Promise.resolve() };
+    } catch (e) { okStub = false }
+    return okStub ? 'ok' : 'EXC';
+  })()`)
+  ok(webStub === 'ok', '把网页那条路打桩成"可用"（为了把两态都钉住 —— 真机上它取决于手势/焦点 ✗）', String(webStub).slice(0, 40))
+  const webText = '网页剪贴板：来自电脑的一段文字'
+  const webRound = await clipboardRound(webText)
+  const webDetail = webRound.res ? String(webRound.res.detail) : ''
+  ok(
+    webRound.res && webRound.res.ok === true && webDetail === 'copied:clipboard',
+    '没有壳时照旧退回网页那条路并如实回报 copied:clipboard（老 APK 的行为一个字没改 ✓）',
+    webDetail || '未拿到',
+  )
+  ok(
+    String(await ev('String(globalThis.__dshmWebClipboard)')) === webText,
+    '网页那条路真的拿到了正文（打桩只改"能不能用"，不改正文 ✓）',
+    String(await ev('String(globalThis.__dshmWebClipboard)')).slice(0, 50),
+  )
+
+  // ── ③ 没壳 + 网页两条路都不可用：**必须** ok=false + banner-manual（降级不再算成功）──
+  console.log('\n【⑥c clipboard：两条路都不行 ⇒ 降级必须诚实（ok=false）】')
+  const failStub = await ev(`(function(){
+    try {
+      navigator.clipboard.writeText = function(){ return Promise.reject(new Error('打桩：没有用户手势')) };
+    } catch (e) {}
+    try { document.execCommand = function(){ return false }; } catch (e) {}
+    return 'ok';
+  })()`)
+  ok(failStub === 'ok', '把网页两条路都打桩成"不可用"（模拟真机上的无手势轮询 ✓）', String(failStub).slice(0, 40))
+  const failText = '降级正文：来自电脑的一段文字'
+  const failRound = await clipboardRound(failText)
+  const failDetail = failRound.res ? String(failRound.res.detail) : ''
+  /**
+   * ★ 这一条就是"**降级不再算成功**"的守卫 ✓（旧口径在这里是绿的 ✗）。
+   * 怎么把它打红：把 `boot.js` 里那句 `ok = how !== undefined` 改回 `ok = true`
+   * ⇒ 这条立刻红（ok 变成 true ✓），而 ⑥a / ⑥b 两条仍绿 ✓。
+   */
+  ok(
+    failRound.res && failRound.res.ok === false && failDetail === 'banner-manual',
+    '★ 两条路都不行时：ok=**false** + detail=banner-manual（降级是"请你手动复制"✗，绝不是"已放进剪贴板"✗）',
+    failRound.res ? `ok=${String(failRound.res.ok)} detail=${failDetail}` : '未拿到',
+  )
+  /**
+   * ★ 用户价值那一条（本轮附带要求 ✓）：降级横幅里**前缀说明**与**正文**必须是**两个元素** ✓ ——
+   *   原来它们塞在同一个 div 里 ✗ ⇒ 用户长按全选会把那句说明一起复制走 ✗。
+   * 怎么把它打红：把 clipBody 那几行去掉、退回 `drawBar('info', '…：\n' + text, …)`
+   * ⇒ 这条立刻红（`body` 变成 null ✓），其余全绿 ✓。
+   */
+  const clipSplit = String(await ev(`(function(){
+    var b = document.querySelector('[data-dshm-banner=info]')
+    if (!b) return '(没有横幅)'
+    var t = b.querySelector('[data-dshm-clipboard-text]')
+    return JSON.stringify({
+      count: b.children.length,
+      prefix: b.children[0] ? String(b.children[0].textContent) : '',
+      body: t ? String(t.textContent) : null,
+      css: t ? String(t.style.cssText) : '',
+    })
+  })()`))
+  let clipSplitSeen = {}
+  try { clipSplitSeen = JSON.parse(clipSplit) } catch (e) { clipSplitSeen = {} }
+  ok(
+    clipSplitSeen.body === failText &&
+      clipSplitSeen.count >= 2 &&
+      !String(clipSplitSeen.prefix).includes(failText) &&
+      /user-select:text/.test(String(clipSplitSeen.css)),
+    '★ 降级横幅里**正文单独一个元素**且可选中（长按复制到的就是干净正文 ✓ —— 不带那句前缀说明 ✗）',
+    clipSplit.slice(0, 110),
+  )
+  // 打桩收回（后面的动线不许被这一节的桩影响 ✓）
+  await ev("try{delete navigator.clipboard.writeText}catch(e){};try{delete document.execCommand}catch(e){};'ok'")
 
 
   // ── ⑦ 文件面板：多选批量删除 / 移动（破坏性，但只动 /tmp 里的演示工作区）──

@@ -122,6 +122,15 @@ interface Surface {
   }
   /** ★ round 185 追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
   storage: Map<string, string>
+  /**
+   * ★★ 剪贴板原生桥追加：当前**提醒横幅**（`[data-dshm-banner=info]`）的**子元素快照** ✓。
+   *
+   * 为什么要这么一个口子 ✗：假 DOM 没有选择器引擎 ✓（`document.querySelector` 恒为 null ✓），
+   * 所以"横幅里正文是不是**单独一个元素**"这件事，只能顺着 `body.children` 找 ✓。
+   * 每条 = `{ attrs, text, css }` ✓（`css` 读的是 `style.cssText` ✓ ——
+   * 生产代码是**整体赋值** cssText 的 ✓，不是逐条 setProperty ✓）。
+   */
+  infoBanner: () => Array<{ attrs: Record<string, string>; text: string; css: string }>
 }
 
 /** ★★ R5：`identityDiagnostics()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
@@ -191,7 +200,18 @@ function bootOnSurface(options: {
       className: '',
       children: [],
       textContent: '',
-      setAttribute: () => {},
+      /**
+       * ★ 剪贴板原生桥追加：把 `setAttribute` 写下的东西**记下来** ✓（原先是个空函数 ✗）。
+       *   为什么现在要 ✗：本轮的降级横幅要靠 `data-dshm-clipboard-text` 把"正文那一块"
+       *   认出来 ✓（见 `packages/client/src/boot.js` 的 clipboard 分支 ✓），
+       *   而假 DOM 没有选择器引擎 ✗ —— 不记属性就没有任何办法从测试这一侧指认它 ✗。
+       *   `FakeElement` 接口里本来就声明了 `attrs` ✓（只是最小夹具没建它 ✓），
+       *   这里补上等于**把夹具对齐到它自己的接口** ✓，对既有用例零影响 ✓（它们都不读属性 ✓）。
+       */
+      attrs: {},
+      setAttribute: (name: string, value: unknown) => {
+        ;(element['attrs'] as Record<string, string>)[String(name)] = String(value)
+      },
       removeAttribute: () => {},
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -351,6 +371,16 @@ function bootOnSurface(options: {
     internals: sandbox['__DSH_MOBILE_INTERNALS__'] as Surface['internals'],
     boot: sandbox['__DSH_MOBILE_BOOT__'] as Surface['boot'],
     storage: store,
+    infoBanner: () =>
+      (body['children'] as Array<Record<string, unknown>>)
+        .filter((bar) => (bar['attrs'] as Record<string, string>)['data-dshm-banner'] === 'info')
+        .flatMap((bar) =>
+          (bar['children'] as Array<Record<string, unknown>>).map((child) => ({
+            attrs: (child['attrs'] ?? {}) as Record<string, string>,
+            text: String(child['textContent'] ?? ''),
+            css: String(((child['style'] ?? {}) as Record<string, unknown>)['cssText'] ?? ''),
+          })),
+        ),
   }
 }
 
@@ -502,6 +532,11 @@ function readLog(surface: Surface): DeviceCallLogEntry[] {
 /** 一条通知投递 ✓（本轮故障的那一种 ✓）。 */
 function notifyCall(id: string): Record<string, unknown> {
   return { id, capability: 'notify', text: '批准：需要你点一下' }
+}
+
+/** 一条剪贴板投递 ✓（剪贴板原生桥的真身 ✓ —— 端侧必须如实回报"到底写进去了没有"✓）。 */
+function clipboardCall(id: string, text: string): Record<string, unknown> {
+  return { id, capability: 'clipboard', text }
 }
 
 /** 照 scripts/check-device-channel.mjs 那份假壳 ✓（接口与 MainActivity.ShellBridge 一致 ✓）。 */
@@ -741,6 +776,117 @@ test('★ 2026-10-05：系统通知的标题来自宿主（`callInfo.title`）�
   oldSurface.intervals[0]?.()
   await settle()
   assert.deepEqual(seenOld, ['需要你确认'], '没有 title 字段时必须退回原来那三个字（绝不弹一条没标题的通知）')
+})
+
+/**
+ * ════════════════════════════════════════════════════════════════════════════
+ * ★★ 剪贴板原生桥（2026-10-05）：**clipboard 必须能真的写进去**（先问壳 ✓），而且**降级不再算成功** ✗
+ *
+ * ## 真机现场（用户原话）
+ *   「电脑想放进剪贴板，但浏览器不允许自动复制」✗
+ *
+ * ## 根因
+ * 触发时机是**每 4 秒一轮的轮询** ✓ ⇒ **没有任何用户手势** ✗ ——
+ * 而 `navigator.clipboard.writeText`（还要安全上下文 ✓）与 `document.execCommand('copy')`
+ * 两条都要手势 ✗ ⇒ 必然被拒 ✓，页面于是落到"长按手动复制"的降级横幅 ✓。
+ * 壳那边的原生 `ClipboardManager` **不要求手势** ✓ ⇒ 这就是本轮加那条桥的理由 ✓。
+ *
+ * ## 这一组用例钉住两件事（各有一条"怎么把它打红" ✓）
+ *   ① **有壳 ⇒ 走壳** ✓（否则加这条桥等于白加 ✗）；
+ *   ② **两条路都不行 ⇒ `ok=false`** ✗（旧口径在这里写死 `ok = true` ✓ ——
+ *      "电脑说放进去了、手机上没有" ✗，那正是**假成功** ✗）。
+ * ════════════════════════════════════════════════════════════════════════════
+ */
+
+test('★ 剪贴板原生桥：有壳时 clipboard 走原生壳（copied:shell-clipboard，ok=true）', async () => {
+  /** 接住壳真正收到的正文 ✓（真机上它就是剪贴板里那一段 ✓）。 */
+  const clipSeen: string[] = []
+  const shell = makeFakeShell('ok')
+  shell['setClipboard'] = (text: unknown) => {
+    clipSeen.push(String(text))
+    return 'ok'
+  }
+  const fake = makeDeviceTransport({ rounds: [[clipboardCall('call-clip-shell', '要复制的正文')]] })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    shell,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 copyText 开头那两行（`var native = shellClipboard(text)` 与
+  //   `if (native === 'ok') return 'shell-clipboard'`）删掉 ⇒ 下面每一条立刻红 ✓
+  //   （`clipSeen` 空 ⇒ 桥压根没被问 ✓；detail 退回 `banner-manual` ✓）——
+  //   而本文件其余用例一条都不红 ✓（它们都不带壳或不用 clipboard ✓）。
+  assert.deepEqual(clipSeen, ['要复制的正文'], `壳必须收到正文原文（实际：${JSON.stringify(clipSeen)}）`)
+  const log = readLog(surface)
+  assert.equal(log[2]?.outcome, 'ok', `exec-end 要记 ok（实际：${JSON.stringify(log)}）`)
+  assert.match(String(log[2]?.detail), /copied:shell-clipboard/, 'detail 要说清走的是**壳**那条路 ✓')
+  // ★ 回报给宿主的那两个字段才是宿主/agent 真正看到的东西 ✓（必须与日志一致 ✓）
+  assert.match(fake.reportBodies[0] ?? '', /"ok":true/, '回报里 ok 必须是 true ✓')
+  assert.match(fake.reportBodies[0] ?? '', /copied:shell-clipboard/, '回报里要带上端侧原话 ✓')
+})
+
+test('★ 剪贴板原生桥：两条路都不行 ⇒ ok=false + banner-manual（降级不再算成功）', async () => {
+  /**
+   * 本沙箱的 `navigator` **没有** `clipboard` ✓、`document` **没有** `execCommand` ✓
+   * ⇒ `copyText` 的两条网页路都走不通 ✓ —— 这正是真机上"无手势轮询"的等价物 ✓。
+   */
+  const fake = makeDeviceTransport({ rounds: [[clipboardCall('call-clip-fail', '这段文字没能进剪贴板')]] })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 clipboard 分支里那句 `ok = how !== undefined` 改回 `ok = true`
+  // ⇒ 下面 outcome / `"ok":false` 两条立刻红 ✓（本用例是唯一钉"降级要记失败"的 ✓，
+  //   所以红的恰好是它 ✓ —— "有壳"那条与"正文分块"那条仍绿 ✓）。
+  const log = readLog(surface)
+  assert.equal(log[2]?.outcome, 'error', `★ 降级要记成 error（实际：${JSON.stringify(log)}）`)
+  assert.match(String(log[2]?.detail), /banner-manual/, 'detail 仍是 banner-manual（宿主认的就是这个口径 ✓）')
+  assert.match(
+    fake.reportBodies[0] ?? '',
+    /"ok":false/,
+    '★ 回报给宿主的必须是 ok=false —— 旧口径在这里是 true ✗（那正是"假成功"✗）',
+  )
+})
+
+test('★ 剪贴板原生桥：降级横幅里**正文单独一个元素**（长按复制到的就是干净正文）', async () => {
+  /**
+   * 用户价值那一条 ✓：原来"前缀说明 + 正文"塞在同一个 div 里 ✗ ⇒
+   * 用户长按全选会把那句说明一起复制走 ✗（粘出来是一段混着说明的脏文本 ✓）。
+   */
+  const fake = makeDeviceTransport({ rounds: [[clipboardCall('call-clip-split', '这段文字没能进剪贴板')]] })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 clipboard 分支里造 `clipBody` 那几行去掉、退回
+  //   `drawBar('info', '…长按选中下面这段：\n' + text, [], false)`
+  // ⇒ `clipBody` 变成 undefined（`body` 那条立刻红 ✓），
+  //   而"ok=false"那条仍绿 ✓（那一句 `ok = how !== undefined` 一个字没动 ✓）。
+  const kids = surface.infoBanner()
+  const clipBody = kids.find((element) => element.attrs['data-dshm-clipboard-text'] === '1')
+  assert.ok(clipBody !== undefined, `降级横幅里应当有专门的正文元素（实际子元素：${JSON.stringify(kids)}）`)
+  assert.equal(clipBody.text, '这段文字没能进剪贴板', '正文元素里放的就是**正文原文** ✓')
+  assert.match(clipBody.css, /user-select:text/, '正文那一块必须显式可选中 ✓（别赌祖先节点有没有关掉 ✓）')
+  assert.ok(kids.length >= 2, `前缀说明与正文必须是**两个**元素（实际：${JSON.stringify(kids)}）`)
+  assert.ok(
+    !(kids[0]?.text ?? '').includes('这段文字没能进剪贴板'),
+    '★ 前缀那一块**不许夹带正文**（否则长按选中还是会把说明一起带走 ✗）',
+  )
 })
 
 test('★ 取证：环形上限 12 条（连记 20 轮 ⇒ 只剩 12 条，且留的是**最新**那 12 条）', async () => {

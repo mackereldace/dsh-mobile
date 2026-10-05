@@ -2255,6 +2255,40 @@
   }
 
   /**
+   * ★★ 剪贴板原生桥（2026-10-05）：**把文本交给壳的原生剪贴板** ✓（`DshmShell.setClipboard` ✓）。
+   *
+   * ## 为什么必须有一条原生的路 ✗
+   *
+   * 用户真机上看到的那句是「电脑想放进剪贴板，但浏览器不允许自动复制」✗ ——
+   * 触发时机是**每 4 秒一轮的轮询** ✓ ⇒ **没有任何用户手势** ✗，而网页那两条路都要手势：
+   * `navigator.clipboard.writeText` ✓（还要安全上下文 ✓）与 `document.execCommand('copy')` ✓
+   * ⇒ 两条**必然被拒** ✓。壳那边用的是原生 `ClipboardManager` ✓ —— **不需要手势** ✓。
+   *
+   * ## 契约（与 `shellNotify` 逐条对齐 ✓）
+   *
+   * · **没有壳 / 桥没这个方法 ⇒ `null`** ✓ —— 调用方据此**原样退回**网页那两条路 ✓
+   *   （旧 APK 没有这条桥时，行为与今天**逐字一致** ✓）；
+   * · 桥**同步**返回一个短字符串状态 ✓（`ok` / `empty` / `too-long` / `untrusted` / `error` ✓，
+   *   见 `MainActivity.ShellBridge#setClipboard` ✓）——
+   *   ★ 所以页面**能**据它说真话 ✓：`ok` 就是"系统收下了"✓；
+   * · 桥抛了 ⇒ 回 `'error'` ✓（**绝不**把异常往上扔 ✗ —— 那会让整条投递链看起来像"执行失败"✗，
+   *   而我们其实还有网页那两条路可以试 ✓）。
+   *
+   * ★ 只认 `'ok'` 作为成功 ✗（**不是**"有桥就算成功"✓）：
+   *   `empty` / `too-long` / `untrusted` / `error` 一律**继续走网页路** ✓ ——
+   *   多一条路就多一次机会 ✓，绝不因为壳摇头就放弃 ✗。
+   */
+  function shellClipboard(text) {
+    var bridge = shellBridge()
+    if (bridge === undefined || typeof bridge.setClipboard !== 'function') return null
+    try {
+      return String(bridge.setClipboard(String(text === undefined || text === null ? '' : text)))
+    } catch (error) {
+      return 'error'
+    }
+  }
+
+  /**
    * ★★ 把文件**存到手机上**（round 128 ✓）—— 修的是用户真机反馈的那句
    *   "手机上下载提示成功但文件没到手机" ✗。
    *
@@ -21904,6 +21938,17 @@
    *   用户既不知道为什么失败，也没有别的办法把那串路径弄出来。
    */
   async function copyText(text) {
+    /**
+     * ★★ 剪贴板原生桥（2026-10-05）：**先问壳** ✓ —— APK 里唯一"不需要用户手势"的那条路 ✓（`shellClipboard` ✓）。
+     *
+     * 顺序是刻意的 ✗：网页那两条路在**轮询触发**（无手势 ✓）时**必然失败** ✓，
+     * 先试它们只会先把失败走一遍 ✓（用户看到的现象就是那句降级横幅 ✓）。
+     * ★ 只认 `'ok'` ✓：壳说 `empty`/`too-long`/`untrusted`/`error`、或压根没有桥（`null` ✓）
+     *   ⇒ **继续往下走网页路** ✓（行为与今天逐字一致 ✓，绝不因为壳摇头就放弃 ✗）。
+     */
+    var native = shellClipboard(text)
+    if (native === 'ok') return 'shell-clipboard'
+    if (native !== null) log('[clipboard] 壳说 ' + native + ' ⇒ 继续走网页那两条路')
     try {
       if (navigator.clipboard !== undefined && navigator.clipboard.writeText !== undefined) {
         await navigator.clipboard.writeText(text)
@@ -24245,18 +24290,50 @@
           buzz()
           ok = true
         } else if (callInfo.capability === 'clipboard') {
-          // 三条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
-          // 复制成功就完事；失败就把文本摆到横幅上让用户长按复制 —— **绝不静默失败**。
+          // 多条路依次降级，与文件面板的「复制路径」共用同一个 copyText：
+          // ★ 剪贴板原生桥（2026-10-05）：**先问壳**（原生 `ClipboardManager` ✓，不需要用户手势 ✓，见 copyText ✓），
+          //   壳不可用 / 摇头才退回网页那两条路 ✓；全都失败就把正文摆到横幅上让用户长按复制 ——
+          //   **绝不静默失败** ✗（但也**绝不**把它说成成功 ✗，见下面那句 ok ✓）。
           var how = await copyText(text)
           if (how === undefined) {
-            drawBar('info', '电脑想放进剪贴板，但浏览器不允许自动复制。长按选中下面这段：\n' + text, [], false)
+            /**
+             * ★ 正文必须**单独一个元素** ✓（并且显式可选中 ✓）。
+             *
+             * 起因（用户价值 ✓）：原来"前缀说明 + 正文"塞在**同一个 div** 里 ✗ ⇒
+             * 用户长按全选并把正文复制出来时，那句「电脑想放进剪贴板，但浏览器不允许自动复制。
+             * 长按选中下面这段：」会**一起被带走** ✗ —— 粘到别处就是一段混着说明的脏文本 ✓。
+             * 拆成两块之后，长按正文这一块选中/复制就是**干净的正文** ✓
+             * （`user-select:text` 是显式的 ✗ —— 别赌某个祖先节点有没有关掉选中 ✗）。
+             */
+            var clipBar = drawBar('info', '电脑想放进剪贴板，但浏览器不允许自动复制。长按选中下面这段：', [], false)
+            if (clipBar !== null && clipBar !== undefined) {
+              var clipBody = document.createElement('div')
+              clipBody.setAttribute('data-dshm-clipboard-text', '1')
+              clipBody.textContent = String(text)
+              clipBody.style.cssText =
+                'margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,.3);' +
+                'user-select:text;-webkit-user-select:text;word-break:break-all'
+              clipBar.appendChild(clipBody)
+            }
             detail = 'banner-manual'
           } else {
             drawBar('info', '已放进手机剪贴板（' + String(text).slice(0, 60) + '）', [], false)
             detail = 'copied:' + how
           }
           buzz()
-          ok = true
+          /**
+           * ★★ 剪贴板原生桥（2026-10-05）：`ok` 必须**等于"真的写进去了没有"** ✓。
+           *
+           * 原来这里写死 `ok = true` ✗ ⇒ 降级（把文本摆出来请用户手动长按）也被回报成
+           * **执行成功** ✓ —— 宿主那边于是永远看不到 clipboard 的端侧失败 ✗
+           * （`banner-manual` 只在 `detail` 里 ✓，而"已放进剪贴板"这句话是假的 ✗），
+           * 而用户手机上确实什么都没进剪贴板 ✓。这就是本轮要根除的**假成功** ✗。
+           *
+           * `how` 就是"用上了哪条路"✓（`shell-clipboard` / `clipboard` / `execCommand` ✓）——
+           * 它有值 ⇔ 真写进去了 ✓；`undefined` ⇔ 降级到长按 ✓ ⇒ `ok=false` ✓
+           * （`detail` 仍是 `banner-manual` ✓ —— 那是宿主与 agent 认的口径 ✓）。
+           */
+          ok = how !== undefined
         } else if (callInfo.capability === 'vibrate') {
           // text 是毫秒数。夹在 50..2000：太短感觉不到，太长像故障。
           var ms = Number(String(text).trim())

@@ -6,6 +6,8 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
@@ -62,6 +64,9 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
@@ -136,6 +141,12 @@ import org.json.JSONObject;
  *    现在"空路径 / `/` ⇒ 补 `/mobile/app`"这条规则**只有一份**
  *    （{@link MobileUrl#normalize} ✓），「改地址」框与网页那条切换桥**共用**它 ✗
  *    （见 {@link #loadHostUrl} ✓ —— 两份实现迟早漂成"一个地址两条路进得去、进不去"✗）。
+ *
+ * 10. ★★ 剪贴板原生桥（2026-10-05）：**把文本放进手机剪贴板**（{@link ShellBridge#setClipboard} ✓）——
+ *     起因在用户原话：「电脑想放进剪贴板，但浏览器不允许自动复制」✗：
+ *     触发时机是**每 4 秒一轮的轮询** ✓ ⇒ 没有用户手势 ✗ ⇒ 网页那两条路必然被拒 ✗。
+ *     原生的 `ClipboardManager` **不需要手势** ✓ —— 这一条桥就是缺的那一环 ✓。
+ *     ★ 这条桥**不动权限白名单** ✓（写剪贴板不需要任何权限 ✓，见方法注释 ✓）。
  *
  * ## 复用而不是重写
  *
@@ -363,6 +374,27 @@ public class MainActivity extends android.app.Activity {
      * 网页侧 `SHELL_SAVE_LIMIT_BYTES` 必须与它**同值** ✓（两边都不许偷偷放宽 ✗）。
      */
     private static final int SAVE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+
+    /**
+     * ★★ 剪贴板原生桥（2026-10-05）：那条桥的**长度上限**（字符数 ✓）与主线程等待上限（毫秒 ✓）。
+     *
+     * 为什么必须有长度上限 ✗：网页把要复制的文本**整段**送过来 ✓，而这个能力是
+     * **每 4 秒一轮的轮询**触发的 ✓ —— 一个几 MB 的字符串会**同步**穿过 JS 桥 ✓
+     * （`setClipboard` 是同步返回的 ✓，见 {@link ShellBridge#setClipboard} ✓），
+     * 当场卡住界面 ✓，而写进剪贴板本身也毫无意义（用户不会去粘贴 3 MB ✗）。
+     * 超了**明确拒绝** ✓（同步返回 `too-long` ✓）—— **不截断** ✗：
+     * 截断之后网页仍会报"已放进剪贴板"✗，那是**假成功** ✓，正是本轮要消灭的东西 ✗。
+     *
+     * 4096 是"够用"与"不卡"之间的取中 ✓：这个能力实际搬的是路径、链接、短文本 ✓
+     * （命令、审批摘要 ✓）。★ 网页侧**没有**对应的常量 ✗（`copyText` 原样把文本交给桥 ✓）——
+     * 也就是说"太长了"这件事**只有壳知道** ✓，页面只会看到返回值不是 `ok` ✓，
+     * 于是它照旧退回"长按手动复制"✓ 并如实回报失败 ✓（这条链是刻意的 ✓）。
+     */
+    private static final int CLIPBOARD_MAX_CHARS = 4096;
+    /** 写剪贴板排到主线程之后，最多等多久（正常一帧之内就回来 ✓；见 {@link ShellBridge#setClipboard} ✓）。 */
+    private static final int CLIPBOARD_UI_TIMEOUT_MS = 1500;
+    /** 剪贴板条目的显示名（安卓在"剪贴板浮窗"里会给它一个来源标签 ✓ —— 用 ASCII ✓）。 */
+    private static final String CLIPBOARD_LABEL = "DSH";
 
     /**
      * 默认地址：**机器名**优先 ✓ —— IP 变了它不变 ✓。
@@ -1218,6 +1250,98 @@ public class MainActivity extends android.app.Activity {
             String state = notificationPermissionState();
             Log.w(TAG, "通知未发出（权限=" + state + "）");
             return state;
+        }
+
+        /**
+         * ★★ 剪贴板原生桥（2026-10-05）：**把一段文本放进手机剪贴板** ✓ —— APK 里唯一"不需要用户手势"的那条路 ✓。
+         *
+         * ## 起因（用户原话：「电脑想放进剪贴板，但浏览器不允许自动复制」✗）
+         *
+         * 触发时机是**每 4 秒一轮的轮询** ✓ ⇒ **没有任何用户手势** ✗ —— 而网页那两条路都要手势：
+         * `navigator.clipboard.writeText`（还要安全上下文 ✓）与 `document.execCommand('copy')` ✓
+         * ⇒ 两条**必然被拒** ✓，页面于是落到"长按手动复制"的降级横幅 ✓（`detail=banner-manual` ✓）。
+         * 壳这边的 `ClipboardManager` **不要求手势** ✓ —— 这就是这一条桥的全部理由 ✓。
+         *
+         * ## 契约（与 {@link #notify} / {@link #scanPair} **同一个形状** ✓：**同步**返回短字符串 ✓）
+         *
+         * 返回值报的就是"写进去了没有"本身 ✓（**不是**"请求已受理"✗ —— 网页要靠它说真话 ✓）：
+         *   · `ok` ✓ 已调用 `setPrimaryClip` 且**没有抛** ✓；
+         *   · `empty` ✓ 空串（**不写** ✗ —— 写一个空剪贴板会把用户原来那份抹掉 ✗）；
+         *   · `too-long` ✓ 超过 {@link #CLIPBOARD_MAX_CHARS}（**不写** ✗，理由同上 ✓，也**不截断** ✗）；
+         *   · `untrusted` ✓ 不是我们那台电脑的页面（与 {@link #notify} 同一条守卫 ✓）；
+         *   · `error` ✓ 拿不到服务 / 抛了 / 主线程超时没轮到 ✓。
+         * 旧 APK 没有这条桥时网页**原样退回网页那两条路** ✓（见 `packages/client/src/boot.js` 的 `copyText` ✓）。
+         *
+         * ## 为什么在**主线程**上写，而且要把结果**同步**等回来
+         *
+         * 两个要求都要满足 ✓，所以用"投到主线程 + 计数闸门等一小会儿"这个形状 ✓：
+         *   · `@JavascriptInterface` 的方法跑在 WebView 的 **JavaBridge 线程**上 ✗（不是主线程 ✓）——
+         *     `ClipboardManager` 属于"在有 Looper 的线程上用更稳妥"的那类系统服务 ✓
+         *     ⇒ 一律**投到主线程**执行 ✓；
+         *   · 而网页要靠返回值决定"报成功还是报失败"✓ ⇒ 必须**同步**拿到结果 ✓ ——
+         *     `runOnUiThread` 是**异步**的 ✗（"点了没反应"就是那类坑 ✓，见 {@link #scanPair} ✓）。
+         *
+         * ★ 兜底：{@link #CLIPBOARD_UI_TIMEOUT_MS} 内没轮到就把那个 Runnable **撤掉** ✓ 并回 `error` ✓
+         *   —— 撤掉之后"没写"与"报失败"是**一致**的 ✓（绝不报失败却偷偷写进去 ✗）。
+         *   被阻塞的是 JavaBridge 那一条线程 ✓（**不是**主线程 ✓）：真机上正常一帧之内就回来 ✓，
+         *   只有主线程被别的东西堵住时才会走到这个超时 ✓（那时网页拿到 `error` ⇒ 如实报失败 ✓）。
+         *
+         * ★ 与 {@link #saveFile} 那条"先回 `ok`、再异步报结果"**刻意不同** ✗：
+         *   存文件是**长活**（几十 MB 的字节 ✓，只能异步 ✓）；写剪贴板是**一次系统调用** ✓，
+         *   结果当场就有 ✓ ⇒ 同步说真话 ✓。
+         *
+         * ★★ 老实说清这一条的边界 ✗：Android 10+ 对剪贴板有**焦点**限制 ✓ ——
+         *   App 不在前台时，这一次写入**仍可能被系统丢掉** ✗（`setPrimaryClip` 不抛错、却什么也没发生 ✓）。
+         *   ⇒ 这里回的 `ok` 只等于"系统收下了"✓，**不等于**"用户一定粘贴得出来"✗；
+         *   真正的闭环必须是**回执 + 用户在手机上的确认** ✓（那是另一条单的事 ✓，不在这条桥里 ✓）。
+         */
+        @JavascriptInterface
+        public String setClipboard(String text) {
+            if (!isTrustedPage()) return "untrusted";
+            if (text == null || text.isEmpty()) return "empty";
+            if (text.length() > CLIPBOARD_MAX_CHARS) return "too-long";
+            final String payload = text;
+            final String[] outcome = new String[] { "error" };
+            final CountDownLatch done = new CountDownLatch(1);
+            final Handler main = new Handler(Looper.getMainLooper());
+            /** 这一次 Runnable 有没有**真的开始跑** ✓ —— 超时那条路上要靠它区分"撤销了"与"可能已经写进去了"✓。 */
+            final AtomicBoolean started = new AtomicBoolean(false);
+            final Runnable job = () -> {
+                started.set(true);
+                try {
+                    ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (manager == null) {
+                        Log.w(TAG, "写剪贴板：拿不到 ClipboardManager ✗");
+                        return;
+                    }
+                    manager.setPrimaryClip(ClipData.newPlainText(CLIPBOARD_LABEL, payload));
+                    outcome[0] = "ok";
+                } catch (Throwable t) {
+                    Log.w(TAG, "写剪贴板失败（回 error ✓ —— 绝不假装写进去了 ✗）", t);
+                } finally {
+                    done.countDown();
+                }
+            };
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                job.run();
+                return outcome[0];
+            }
+            main.post(job);
+            try {
+                if (!done.await(CLIPBOARD_UI_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    main.removeCallbacks(job);
+                    if (started.get()) {
+                        Log.w(TAG, "写剪贴板：等主线程超时，而它已经开始跑了（结果可能已经写进去了 ✓）");
+                    } else {
+                        Log.w(TAG, "写剪贴板：主线程 " + CLIPBOARD_UI_TIMEOUT_MS + " ms 没轮到（已请求撤销这一次 ✓）");
+                    }
+                    return "error";
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return "error";
+            }
+            return outcome[0];
         }
 
         /**
