@@ -351,7 +351,7 @@ final class HomeView extends FrameLayout {
          *
          * ⇒ **在这里按同一条判据把它认回来** ✓（逐字优先 ✓、认不出再按端口 ✓ ——
          *   与画的时候**同源** ✗：两处各写一份判据，早晚飘，所以抽成
-         *   {@link #ownerKeyOfAuthority} ✓ 与 {@link #machineHasAuthority} 共用 ✓）。
+         *   {@link #ownerKeyOfAuthority} ✓（它下面那三个小判据与画的时候用的是同一把钥匙 ✓）。
          * ★ 认不出来（快照里还没有这台）⇒ **保持原值** ✓（不猜 ✗；行为与本轮之前一模一样 ✓）。
          */
         String owner = ownerKeyOfAuthority(currentAuthorityNow);
@@ -461,15 +461,23 @@ final class HomeView extends FrameLayout {
      *   三个小判据就住在这里 ✓，画那边（{@link #isCurrentInstance}）用的是端口那一条 ✓。
      */
     private String ownerKeyOfAuthority(String authority) {
-        if (authority == null || authority.length() == 0 || snapshot == null) return "";
+        return ownerKeyOfAuthority(snapshot, authority);
+    }
+
+    /**
+     * 同上 ✓，但**指定用哪一份快照** ✗ —— `setSnapshot` 判定"谈成了吗"时必须用**新来的那一份** ✓
+     * （那一刻字段 `snapshot` 还是旧的 ✗ ⇒ 拿旧数据去认领新地址，正好会认错 ✗）。
+     */
+    private static String ownerKeyOfAuthority(HomeModel.Snapshot from, String authority) {
+        if (authority == null || authority.length() == 0 || from == null) return "";
         String host = hostOfAuthority(authority);
         String port = portOfAuthority(authority);
         String byHost = "";
         int byHostCount = 0;
         String byPort = "";
         int byPortCount = 0;
-        for (int i = 0; i < snapshot.machines.size(); i += 1) {
-            HomeModel.Machine machine = snapshot.machines.get(i);
+        for (int i = 0; i < from.machines.size(); i += 1) {
+            HomeModel.Machine machine = from.machines.get(i);
             if (machine == null || machine.key == null) continue;
             if (machineHasAuthorityExactly(machine, authority)) return machine.key;
             if (host.length() > 0 && machineHasHost(machine, host)) {
@@ -553,9 +561,18 @@ final class HomeView extends FrameLayout {
      *    于是又退回"等下一趟探测"✗ ⇒ 只逐字比最稳 ✓）；
      * · 没有覆盖值 ⇒ 才用机器键比 ✓（与原来那句同口径 ✓）。
      */
-    private boolean currentChoiceConfirmedBy(HomeModel.Machine fromData) {
+    private boolean currentChoiceConfirmedBy(HomeModel.Snapshot from, HomeModel.Machine fromData) {
         if (fromData == null) return false;
-        if (currentAuthorityNow != null) return machineHasAuthorityExactly(fromData, currentAuthorityNow);
+        if (currentAuthorityNow != null) {
+            /**
+             * ★ 与 {@link #ownerKeyOfAuthority} **同一把钥匙** ✗（认领与交还各写一套，早晚飘 ✓）：
+             *   数据里"当前那台"就是这条 authority 认领的那台 ⇒ 谈成了 ✓。
+             * ★ **不许**退化成"按端口比" ✗：跨机器同端口时，旧快照会冒充"谈成了"✓
+             *   ⇒ 又退回"等下一趟探测"✗（正是这一轮要治的病 ✓）。
+             */
+            String owner = ownerKeyOfAuthority(from, currentAuthorityNow);
+            return owner.length() > 0 && owner.equals(fromData.key);
+        }
         if (currentMachineKeyNow != null) return currentMachineKeyNow.equals(fromData.key);
         return false;
     }
@@ -581,7 +598,7 @@ final class HomeView extends FrameLayout {
          *   不一致 ⇒ **留着** ✓（本仓那条老规矩：**自动行为不许盖掉用户刚做的事** ✓）。
          */
         HomeModel.Machine fromData = next == null ? null : next.currentMachine();
-        if (fromData != null && currentChoiceConfirmedBy(fromData)) {
+        if (fromData != null && currentChoiceConfirmedBy(next, fromData)) {
             currentMachineKeyNow = null;
             currentAuthorityNow = null;
         }
