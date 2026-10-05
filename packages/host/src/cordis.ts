@@ -1030,7 +1030,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   void import(TOOLS_MODULE)
-    .then((module) => {
+    /**
+     * ★ 这个回调是 `async`（为了注册 `client_source` 前要动态 import 一个模块 ✓）——
+     *   **异常仍被下面同一个 `.catch` 兜住** ✓：`async` 函数返回 Promise，
+     *   它里面抛出的异常会让整条链 reject ⇒ 落到那个 `.catch` ⇒ 只打一行警告 ✓
+     *   （绝不能让"少一个工具"变成"插件加载失败" ✗ —— 这是这个 catch 一开始就存在的理由）。
+     */
+    .then(async (module) => {
       const defineTool = (module as { defineTool?: (options: unknown) => unknown }).defineTool
       // ★ 用 `ctx.get('tools')` 而**不是** `ctx.tools`，也不往 `inject` 里加它：
       //   `ctx.tools` 需要先在 `inject` 里声明；而声明一个"某个 DSH 版本可能没有"的服务，
@@ -1040,7 +1046,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         'tools',
       )
       if (typeof defineTool !== 'function' || tools?.register === undefined) {
-        console.warn('[dsh-mobile] 当前 DSH 未提供工具注册能力，phone_notify 未注册（其余功能不受影响）')
+        console.warn('[dsh-mobile] 当前 DSH 未提供工具注册能力，agent 工具（phone_notify / phone_send / client_source）未注册（其余功能不受影响）')
         mobileHost.setAgentToolStatus('skipped')
         return
       }
@@ -1056,11 +1062,29 @@ export function apply(ctx: Context, config: Config = {}): void {
       })) {
         tools.register(defineTool(tool))
       }
+      /**
+       * ★★★ `client_source`：agent 靠它**问**「此刻在跟我说话的是手机还是电脑」。
+       *
+       * ## 为什么是**动态** import（不是文件顶部的静态 import ✗）
+       *
+       * `cordis.ts` 顶部那一段是**并发热点** ✗（另有单在同一条链上改）——
+       * 往那里插一行就把两单搅进同一次改动里 ✓。动态 import 由模块系统自己缓存，
+       * 只加载一次，代价可以忽略 ✓（`mobile/dsh/*` 当初也是同一个理由 ✓）。
+       *
+       * ## 为什么注册失败**不许**影响上面那两个工具
+       *
+       * 工具定义在 `client-source.ts`（零依赖 ✓，可被单测直接打 ✓），这里只包一层 `defineTool` ✓。
+       * 万一这一步炸了，异常会 reject 整条链 ⇒ 落到 `.catch` ⇒ 记 `failed` ✓
+       * —— 那时两个手机工具**已经注册上去了**（上面那个循环跑在它之前 ✓），
+       * 所以"少一个来源工具"不会顺手把"给手机发通知"也弄没 ✗（有单测钉这一条 ✓）。
+       */
+      const { buildClientSourceTool } = await import('./client-source.ts')
+      tools.register(defineTool(buildClientSourceTool({ registry: mobileHost.clientSources })))
       mobileHost.setAgentToolStatus('registered')
-      console.log('[dsh-mobile] 已注册 agent 工具：phone_notify / phone_send（端侧动作，5 个能力）')
+      console.log('[dsh-mobile] 已注册 agent 工具：phone_notify / phone_send（端侧动作，5 个能力）+ client_source（消息来源）')
     })
     .catch((error: unknown) => {
-      console.warn('[dsh-mobile] 注册 phone_notify 失败（其余功能不受影响）：', error)
+      console.warn('[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）：', error)
       mobileHost.setAgentToolStatus('failed')
     })
 
@@ -1520,7 +1544,19 @@ export function buildPhoneTools(mobileHost: DeviceDispatchHost, options: DeviceD
     '返回里 deviceReport 为 received 时 detail 是端侧原话（例如 copied:execCommand / banner-manual / notified:ok / displayed）。' +
     '返回 ok:false 且 timedOut:true 表示**已投递到手机、但等待期内没有收到端侧回报**——' +
     '这时**不许**对用户说"已经放到你手机上了"，只能说"已投递，你那边收到了吗"。' +
-    '返回 ok:false 且 deviceReport 为 received（reason 里带端侧原话）表示端侧**回报了失败或降级**，把原话转述给用户。'
+    '返回 ok:false 且 deviceReport 为 received（reason 里带端侧原话）表示端侧**回报了失败或降级**，把原话转述给用户。' +
+    /**
+     * ★★★ 止损那一句（这一单的**另一半价值** ✓）。
+     *
+     * 为什么必须写进**描述**里 ✗：agent 现在唯一的线索就是"工具表里有手机工具"，
+     * 于是它拿这个当"用户此刻在手机上"的证据 —— 而这两个工具
+     * **在所有会话里都可用**（用户坐在电脑前也有）✗ ⇒ 那是个坏信号源 ✓。
+     * 不把这句话写进它每次都读得到的描述里，它会**继续**那样猜 ✗
+     * （`client_source` 工具再准，agent 想不起来调也白搭 ✓）。
+     *
+     * ★ `semantics` 由 `phone_notify` 与 `phone_send` **共用** ⇒ 两个工具各自带上这一句 ✓。
+     */
+    '★ 这两个工具在所有会话里都可用 —— 它们的出现不代表这条消息来自手机，要用 client_source 判定。'
   return [
     {
       name: 'phone_notify',

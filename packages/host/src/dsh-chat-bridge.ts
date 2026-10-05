@@ -55,6 +55,20 @@ export const DSH_CHAT_PATHS = {
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
   readonly call: GatewayCaller
+  /**
+   * 「这条消息是**手机**经这条路提交的」登记回调（本次 `session/prompt` 的 `requestId`）。
+   *
+   * ★ **必须可选** ✗：既有测试与调用方是 `{ call }` 构造 deps 的 ✓，
+   *   改成必填会一次性弄红它们 ✓ —— 而这一层要的只是"能记一笔"，
+   *   不是"必须记"（没注入 ⇒ 少一条手机登记 ⇒ 工具退回 heuristic，**不会错报** ✓）。
+   *
+   * ★ 调用纪律（写在调用点旁边）：**网关成功之后**才调 ✓ ——
+   *   记早了会把"手机上点了发送、但 DSH 拒了"的消息也算成手机发的 ✗。
+   */
+  readonly recordPrompt?: (
+    ref: { readonly sessionId: string; readonly rpcId: string },
+    via: 'session/prompt' | 'mobile/dsh/send',
+  ) => void
 }
 
 /**
@@ -105,6 +119,24 @@ async function sendPrompt(deps: DshChatDeps, args: Record<string, unknown>, sign
     content: [{ type: 'text', text }],
   }
   const value = unwrap(await deps.call('session/prompt', { args: { request } }, signal))
+  /**
+   * ★★★ 登记「这条消息是手机经 `mobile/dsh/send` 提交的」。
+   *
+   * ## 为什么在这一行（`await` 之后 ✓）
+   *
+   * 登记表是 `client_source` 工具回答"手机还是电脑"的**事实来源** ⇒
+   * 只能记 **DSH 真收下的提交** ✓。放在 `call` 之前：手机上点了发送、而 DSH 把这条拒了 ✗
+   * ⇒ 表里多一条从没存在过的手机消息 ⇒ 工具给 agent 一个假结论 ✗（这一类错误没人看得出来）。
+   *
+   * ## 为什么 `requestId` 就是查得回来的那个键
+   *
+   * DSH 把 `session/prompt` 的 `requestId` 原样存进用户消息的来源元数据
+   * （`source = { kind: 'user', rpcId: request.requestId }`，见 `dsh-api-session-controller`
+   * 的 `prompt()` ✓）—— `client_source` 工具查的就是这个值 ✓。
+   *
+   * ★ `recordPrompt` 没注入时**什么都不做** ✓（回调是可选的 ⇒ 不弄红既有 `{ call }` 构造 ✓）。
+   */
+  deps.recordPrompt?.({ sessionId, rpcId: requestId }, 'mobile/dsh/send')
   return { ok: true, requestId, mode, sessionId, value: value === undefined ? null : value }
 }
 

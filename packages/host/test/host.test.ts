@@ -38,6 +38,7 @@ import {
 } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from '../src/devices.ts'
+import { buildClientSourceTool } from '../src/client-source.ts'
 import { isLoopbackRequest } from '../src/index.ts'
 import { createMobileHost, type MobileHost, type RemoteGateway } from '../src/index.ts'
 
@@ -424,15 +425,20 @@ async function setup(
 
   const calls: { namespace: string; method: string; args: Record<string, unknown> }[] = []
   const gateway: RemoteGateway = {
+    /**
+     * ★★ 替身要**像真 DSH**：返回的是**信封** `{ok, value}` ✓，不是裸值 ✗。
+     *
+     * 为什么这条重要（2026-10-05 新增 `client_source` 接线用例时踩到 ✗）：
+     * 生产里 `dsh-chat-bridge.ts` 的 `unwrap()` 拿到的就是**信封** ✓
+     * （`invokeGatewayEndpoint` 把 `gateway.invoke(…)` 的结果**原样**往上传 ✓，
+     * 见 index.ts 那段"`invokeGatewayEndpoint` **必须保持原样**"✗）。
+     * 替身返回裸值 ⇒ `unwrap()` 抛「网关拒绝了这次调用」✗ ⇒
+     * `mobile/dsh/send` 那条路在**测试里**必然红 ✓，而那是**替身的形状错** ✗
+     * —— 后来的人会顺着它去查一个根本不存在的实现故障 ✓。
+     */
     async invoke(request) {
       calls.push({ namespace: request.namespace, method: request.method, args: request.args as Record<string, unknown> })
-      if (request.namespace === 'session' && request.method === 'create') {
-        return { sessionId: 'session-created-by-mobile', workspace: request.args['cwd'] ?? '/tmp' }
-      }
-      if (request.namespace === 'workspaceFiles' && request.method === 'write') {
-        return { written: true }
-      }
-      return { echo: request.args }
+      return { ok: true, value: bareValue(request) }
     },
     async stream(request) {
       calls.push({ namespace: request.namespace, method: request.method, args: request.args as Record<string, unknown> })
@@ -441,6 +447,17 @@ async function setup(
         yield { seq: 2, text: '第二页' }
       })()
     },
+  }
+
+  /** 业务值本身（裸值 ⇒ 由 `invoke` 包成信封 ✓，与真 DSH 一致 ✓）。 */
+  function bareValue(request: { namespace: string; method: string; args: Record<string, unknown> }): unknown {
+    if (request.namespace === 'session' && request.method === 'create') {
+      return { sessionId: 'session-created-by-mobile', workspace: request.args['cwd'] ?? '/tmp' }
+    }
+    if (request.namespace === 'workspaceFiles' && request.method === 'write') {
+      return { written: true }
+    }
+    return { echo: request.args }
   }
 
   /**
@@ -464,6 +481,15 @@ async function setup(
      * ★ 上一版对**所有**端点返回哨兵 `{dispatched:true}` ✗ ⇒ 替身不像真的 ⇒
      *   一旦实现改成"优先 dispatchRpc"就**误报红** ✗（第 102 轮就是这么被绊住的 ✓）。
      *   ⇒ 先把替身改真、且**不改实现**跑一遍 ✓：应当仍然全绿 ✓（两件事分开验证 ✓）。
+     *
+     * ★★★ 2026-10-05 又逮到一处"替身不像真的"（新增 `client_source` 接线用例时）✗：
+     *   业务端点这里原先返回的是**裸值**（`gateway.invoke(…)` 的结果 ✓，没有 `ok` 字段 ✓）——
+     *   而 `dsh-chat-bridge.ts` 的 `unwrap()` 是按**信封**写的 ✗
+     *   （`envelope.ok !== true ⇒ 抛「网关拒绝了这次调用」`✓，见 `gateway-rpc.ts` 第 101 轮
+     *   那段"真实 DSH 就是这样"的注释 ✓）。
+     *   ⇒ 裸值替身会让 `mobile/dsh/send` 那条路**必然**报错 ✓ ——
+     *     那是替身的形状错 ✗，不是实现的故障 ✗（会把后来的人引到完全错的方向 ✓）。
+     *   ⇒ 现在按真实形状包成信封 ✓（与 `$events/result` 那条一致 ✓）。
      */
     if (endpoint === '$events/result') return { ok: true, value: { dispatched: true } }
     const cut = endpoint.indexOf('/')
@@ -472,7 +498,27 @@ async function setup(
     const maybeArgs = payload !== null && typeof payload === 'object'
       ? (payload as { args?: Record<string, unknown> }).args
       : undefined
-    return { ok: true, value: await gateway.invoke({ namespace, method, args: maybeArgs ?? {} }) }
+    /**
+     * ★★★ 业务端点返回**裸值**（不是 `{ok,value}` 信封 ✓）—— 2026-10-05 新增
+     *   `client_source` 接线用例时把这条形状钉住的 ✓。
+     *
+     * 为什么必须是裸值（推理链，三处都有据可查 ✓）：
+     * · `invokeGatewayEnvelope`（隧道那条路 ✓）把 `dispatchRpc` 的返回值**直接当信封** ✓
+     *   ⇒ 这里要是包成 `{ok:true,value:…}` ⇒ 会变成**双层信封** ✗
+     *   ⇒ `session/create` 等既有用例立刻红 ✓（实测 ✓）。
+     * · `session/list` / `session/page`（会话页数据面 ✓）走的是**另一条**路
+     *   `invokeGatewayEndpoint` ⇒ `gateway.invoke(…)` ✓，也就是上面那个**返回信封**的替身 ✓
+     *   —— 而 `dsh-chat-bridge.ts` 的 `unwrap()` 正好按信封写 ✓（两者自洽 ✓）。
+     * ⇒ 所以本替身现在是：`invoke` 返回信封 ✓、`dispatchRpc` 返回裸值 ✓，两条路各自自洽 ✓。
+     *
+     * ★ 顺带记一处**尚未查清**的疑问 ✗（别当成已解决 ✗）：
+     *   `invokeGatewayEndpoint` 与 `invokeGatewayEnvelope` 对 `dispatchRpc` 的处理**不一样** ✓
+     *   （前者取 `.value` ✓、后者把返回值当信封 ✓）—— 真实 DSH 里 `dispatchRpc` 到底返回哪个形状，
+     *   我**没有在真机上验** ✗。如果它返回**信封** ✓，那么 `mobile/dsh/send` 那条桥在真机上
+     *   就会拿到一个"少一层"的值 ⇒ `unwrap` 抛「网关拒绝了这次调用」✗。
+     *   ⇒ 这一条写进了本轮交付报告的「不确定」一节 ✓，**不要**在没验之前当成结论 ✗。
+     */
+    return await gateway.invoke({ namespace, method, args: maybeArgs ?? {} })
   }
 
   const host: MobileHost = createMobileHost({
@@ -657,6 +703,116 @@ async function callHost(
   for (let i = 0; i < 50 && status === 0; i++) await new Promise((resolve) => setTimeout(resolve, 2))
   assert.notEqual(status, 0, `${method} ${path} 未产生响应`)
   return JSON.parse(payload) as unknown
+}
+
+test('★ 端到端：经隧道提交的 session/prompt 被登记成「手机发来的」（client_source 的地基）', async () => {
+  /**
+   * 为什么非有不可 ✗：`client-source.ts` 的纯逻辑全绿**证明不了**接线成立 ✓ ——
+   * 登记那一步要是没接上（或者接在网关**失败**那一侧 ✗），工具照样回一个漂亮的
+   * `source: 'computer'` ✓，而用户体验是错的（对着电脑说话被当成在手机上，或反过来）。
+   *
+   * ★ 这一条走**真**协议：配对 → 握手 → 加密隧道 → `session/prompt` ✓，
+   *   登记的 rpcId 就是 DSH 会存进消息 `source.rpcId` 的那个 `request.requestId` ✓。
+   * ★ 变异判据：把 `index.ts` 里那处 `clientSources.record({…})` 删掉 ⇒ **恰好**本用例变红 ✓。
+   */
+  const env = await setup()
+  try {
+    await env.pair()
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+
+    // ① 隧道来的 session/prompt：requestId 必须**原样**进登记表（不是另编一个 ✓）
+    const requestId = 'dshm-e2e-prompt-1'
+    const sent = await mobile.call('session/prompt', {
+      request: { requestId, sessionId: 'session-e2e-1', mode: 'queue', content: [{ type: 'text', text: '在手机上打的' }] },
+    })
+    assert.equal(sent.ok, true, '这条提交应当被网关收下')
+
+    const recorded = env.host.clientSources.lookup(requestId)
+    assert.ok(recorded !== undefined, '★ 隧道来的 session/prompt 必须被登记（否则工具只能靠猜）')
+    assert.equal(recorded.rpcId, requestId)
+    assert.equal(recorded.sessionId, 'session-e2e-1')
+    assert.equal(recorded.deviceId, env.deviceId)
+    // ★ 设备名一起给（"电脑自己装过手机外壳"的误判只能靠它被人看出来 ✓）
+    assert.equal(recorded.deviceName, '测试手机')
+    assert.equal(recorded.deviceModel, 'Pixel-Test')
+    assert.equal(recorded.via, 'session/prompt')
+    assert.equal(env.host.clientSources.size, 1, '只该有一笔登记（别的隧道调用不许被记进来）')
+
+    /**
+     * ② 其它隧道调用（列表 / 读页 / 建会话）**不许**被当成人类消息登记 ✗ ——
+     *    记进去的话，工具会拿"最后一次 RPC"当成"最后一条人话" ⇒ 假来源 ✗。
+     */
+    await mobile.call('session/list', { _request: {} })
+    assert.equal(env.host.clientSources.size, 1, '非 session/prompt 的隧道调用不许新增登记')
+
+    // ③ 登记的 rpcId ⇒ 工具答 mobile + 设备名（三态里的第一态，走真登记表）
+    const answer = await toolAnswer(env.host, [{ role: 'user', source: { kind: 'user', rpcId: requestId } }])
+    assert.equal(answer['source'], 'mobile')
+    assert.equal(answer['confidence'], 'exact')
+    assert.equal(answer['deviceName'], '测试手机')
+
+    // ④ 电脑那条路（rpcId 有、登记表里没有）⇒ computer + heuristic，**不许**说成 mobile
+    const desk = await toolAnswer(env.host, [{ role: 'user', source: { kind: 'user', rpcId: 'r-from-desktop' } }])
+    assert.equal(desk['source'], 'computer')
+    assert.equal(desk['confidence'], 'heuristic')
+
+    // ⑤ 没有 rpcId（宿主注入的消息）⇒ unknown：**不许**退成 computer ✗
+    const injected = await toolAnswer(env.host, [{ role: 'user', source: { kind: 'time-context', form: 'snapshot' } }])
+    assert.equal(injected['source'], 'unknown')
+    assert.equal(injected['confidence'], 'none')
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('★ 端到端：mobile/dsh/send 那条路也登记（它是插件自己的提交入口，不经隧道帧）', async () => {
+  /**
+   * ★ 为什么单独一条：`mobile/dsh/send` 是**插件自己**替手机去调 `session/prompt` ✓
+   *   ⇒ 那一帧**不经过隧道**、`invoke` 闭包里那处登记看不到它 ✗。
+   *   不接这条线，从插件会话页发出去的消息会被答成 `computer` ✗（方向反了）。
+   */
+  const env = await setup()
+  try {
+    await env.pair()
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+
+    /**
+     * ★ 两层信封是**隧道契约**，不是多余 ✗：`mobile.call` 回的是隧道那一层
+     *   `{ok, value}` ✓，`value` 才是桥自己的返回值 ✓（本地端点被包成 `{ok:true, value}` ✓，
+     *   见 `index.ts` 的 `invoke` 里那句"本地端点返回的是**值**"✓）。
+     */
+    const envelope = (await mobile.call('mobile/dsh/send', { sessionId: 's-bridge-1', text: '从会话页发的' })) as {
+      ok: boolean
+      value?: { ok?: boolean; requestId?: string; sessionId?: string }
+    }
+    assert.equal(envelope.ok, true, '桥应当照常把这条提交转发给网关')
+    const result = envelope.value
+    assert.ok(result !== undefined, '本地端点必须回一个值')
+    assert.equal(result.ok, true, '桥自己的返回值应当是 ok:true')
+    assert.ok(typeof result.requestId === 'string' && result.requestId.length > 0, '桥必须回一个 requestId')
+
+    const recorded = env.host.clientSources.lookup(String(result.requestId))
+    assert.ok(recorded !== undefined, '★ 经 mobile/dsh/send 的提交也必须被登记')
+    assert.equal(recorded.via, 'mobile/dsh/send')
+    assert.equal(recorded.sessionId, 's-bridge-1')
+    assert.equal(recorded.deviceName, '测试手机')
+
+    // 登记表确实能把它答成 mobile（走真登记表，不是纯函数）
+    const answer = await toolAnswer(env.host, [
+      { role: 'user', source: { kind: 'user', rpcId: String(result.requestId) } },
+    ])
+    assert.equal(answer['source'], 'mobile')
+  } finally {
+    env.cleanup()
+  }
+})
+
+/** 直接问一次 `client_source` 工具（用宿主自己的登记表 ⇒ 验的是"接线过的"那一张）。 */
+async function toolAnswer(host: MobileHost, messages: readonly unknown[]): Promise<Record<string, unknown>> {
+  const tool = buildClientSourceTool({ registry: host.clientSources }) as {
+    execute: (args: unknown, exec: unknown) => Promise<Record<string, unknown>>
+  }
+  return tool.execute({}, { agent: { session: { deriveMessages: () => messages } } })
 }
 
 /**

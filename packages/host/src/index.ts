@@ -42,6 +42,13 @@ import {
   type PairingTicket,
 } from '@dsh-mobile/protocol'
 
+import {
+  createClientSourceRegistry,
+  promptRefOfTunnelCall,
+  type ClientSourceEntry,
+  type ClientSourceRegistry,
+  type PromptRef,
+} from './client-source.ts'
 import { DeviceStore, type AuditEntry } from './devices.ts'
 import { imageMimeOf, resolveWallpaper, wallpaperSize } from './wallpaper.ts'
 import {
@@ -468,6 +475,15 @@ export interface MobileHostService {
   deviceCallResult(id: string): DeviceCallResult | null
 
   readonly store: DeviceStore
+  /**
+   * 「这条人类消息是手机还是电脑发来的」的**事实来源**（登记表）。
+   *
+   * ★ 为什么挂到服务面上：`client_source` 工具（`cordis.ts` 注册）要用它，
+   *   而工具手里只有 `mobileHost` 这个对象 ⇒ 没有这个字段，工具就只能回到
+   *   「看工具表里有没有 phone_send」那种猜法（那正是这一单要消灭的东西）。
+   * ★ 判据与边界（内存表 / 电脑浏览器误判 / 三态）写在 `client-source.ts` 的文件注释里。
+   */
+  readonly clientSources: ClientSourceRegistry
   createPairing(): { ticket: PairingTicket; qrPayload: string; expiresAt: string }
   /** 列出待确认的配对（供电脑端界面展示指纹并确认）。 */
   listPendingPairings(): {
@@ -640,6 +656,15 @@ export function createMobileHost(options: {
 }): MobileHost {
   const config: MobileHostConfig = { ...DEFAULT_CONFIG, ...options.config }
   const store = options.store
+  /**
+   * ★ 客户端来源登记表（「谁在跟我说话」的唯一事实来源）。
+   *
+   * **只登记 DSH 真收下的手机提交**（网关调用成功之后才写 ✓）——
+   * 登记早了会把「手机上点了发送但 DSH 拒了」的消息也算成手机发的 ✗。
+   * ★ 只活在内存里（宿主重启即空）：那时旧消息会答 `computer` + `heuristic`，
+   *   于是**不会**把电脑消息错报成手机，但也确实不准（见 client-source.ts 的已知缺口）。
+   */
+  const clientSources = createClientSourceRegistry()
   const ceiling: DeviceCapabilities = options.capabilityCeiling ?? DEFAULT_CAPABILITIES
   const pendingByCode = new Map<string, PendingPairing>()
   const pendingByTicket = new Map<string, PendingPairing>()
@@ -1111,6 +1136,36 @@ export function createMobileHost(options: {
             //   而 `invokeGatewayEndpoint` **一个字没动** ✓（聊天桥依赖它的契约 ✓）。
             const value = (await invokeGatewayEnvelope(options.gateway, request.endpoint, request.payload, signal)).envelope
             /**
+             * ★★★ 「这条消息来自手机」的**唯一登记处**（手机 DSH 外壳那条路）。
+             *
+             * ## 为什么必须在**网关调用成功之后**（位置不是随手放的 ✗）
+             *
+             * 登记表是工具回答「手机还是电脑」的**事实来源** ⇒ 它只能记**DSH 真收下的提交** ✓。
+             * 放到调用**之前**：手机上点了发送、而 DSH 因为内容/权限/附件把这条拒了 ✗
+             * ⇒ 表里多一条"从没存在过的手机消息" ✓，工具会拿它给 agent 一个假结论 ✗。
+             * 现在的位置（`await` 成功之后、`return` 之前）与下面那条 `ok: true` 审计同一条原则 ✓。
+             *
+             * ## 为什么是这一处（覆盖率）
+             *
+             * 手机外壳的**全部**业务流量都走隧道 ⇒ 每一帧都经过这个闭包 ✓；
+             * 而电脑上的 DSH 页面不走隧道 ⇒ 电脑消息**一个都不会**被登记 ✓（正是我们想要的判据）。
+             * 认形状的那一步在 `promptRefOfTunnelCall` 里（只认 `session/prompt`，
+             * 认不出就返回 undefined ⇒ 照原样转发 ⇒ 最多"这次答不上来"，绝不改调用形状 ✓）。
+             */
+            const promptRef = promptRefOfTunnelCall(request.endpoint, request.payload)
+            if (promptRef !== undefined) {
+              clientSources.record({
+                rpcId: promptRef.rpcId,
+                sessionId: promptRef.sessionId,
+                deviceId: device.deviceId,
+                deviceName: device.name,
+                ...device.model === undefined || device.model.length === 0 ? {} : { deviceModel: device.model },
+                at: Date.now(),
+                via: 'session/prompt',
+              })
+            }
+
+            /**
              * ★★★ 只读诊断（再次加回 ✓）：回答"信封里到底有没有 attachments"。
              *   · 不改任何逻辑 ✓；结果出现在自检页 diagnostics 里（tag=attachments-probe ✓）。
              *   · 三种读数对应三种结论 ✗：n=0 ⇒ 有附件表但是空的；n>0 ⇒ **有字节**（那就是客户端没装上）；
@@ -1209,6 +1264,32 @@ export function createMobileHost(options: {
     session.hostId = options.identity.hostId
     session.hostSigningKey = options.identity.signingKey
     return session
+  }
+
+  /**
+   * 登记一次「手机提交」（`mobile/dsh/send` 那条路专用）。
+   *
+   * ★ 为什么这条路单独登记：它是**插件自己**的提交入口 ✓ —— 手机经它调
+   *   `session/prompt` ✓，但那条 RPC 是宿主（插件）发出去的 ✓，**不经过隧道帧**
+   *   ⇒ 上面 invoke 闭包里那处登记**看不到它** ✗（这正是"两条路都要记"的原因 ✓）。
+   *
+   * ★ 依赖调用方**在网关成功之后**才调它（见 `dsh-chat-bridge.ts` 里那行注释）。
+   *   这里是**记一笔**，不是发起 —— 谁调谁负责"成功才调"这条纪律。
+   *
+   * @param device 这次隧道调用**已认证**的那台设备（调用点手里就有 ✓）。
+   *   拿不到（隧道断了/设备被删）⇒ **不记**（见上面 currentDevice 那段）。
+   */
+  function recordPrompt(ref: PromptRef, via: ClientSourceEntry['via'], device: DeviceRecord | undefined): void {
+    if (device === undefined) return
+    clientSources.record({
+      rpcId: ref.rpcId,
+      sessionId: ref.sessionId,
+      deviceId: device.deviceId,
+      deviceName: device.name,
+      ...device.model === undefined || device.model.length === 0 ? {} : { deviceModel: device.model },
+      at: Date.now(),
+      via,
+    })
   }
 
   /** 入站路径：手机连进来的那条 WebSocket 上跑一个会话。 */
@@ -1653,6 +1734,11 @@ export function createMobileHost(options: {
 
   const service: MobileHostService = {
     store,
+    /**
+     * ★ 与 `store` 并排挂上（同一条规矩：服务面是这个插件对内的**唯一**门面）。
+     *   工具（`client_source`）与适配器（`cordis.ts`）都从这里取登记表 ✓。
+     */
+    clientSources,
 
     createPairing() {
       purgeExpired()
@@ -2415,6 +2501,15 @@ export function createMobileHost(options: {
         {
           call: (target, payload, bridgeSignal) =>
             invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
+          /**
+           * ★ 「手机经 `mobile/dsh/send` 提交」的登记入口（第二条手机通道）。
+           *
+           * 桥在**网关成功之后**才调它（那次 `deps.call('session/prompt', …)`
+           * 已经 resolve ✓），所以这里不会记下一条 DSH 其实没收下的提交 ✓。
+           * 设备用**这次隧道调用自己认证出来的那台**（`device` 形参 ✓）——
+           * 不从别处猜 ✗（猜错就是给 agent 一个假来源）。
+           */
+          recordPrompt: (ref, via) => recordPrompt(ref, via, device),
         },
         endpoint,
         payload,
