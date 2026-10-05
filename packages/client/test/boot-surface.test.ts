@@ -679,6 +679,70 @@ test('★ 取证：桥返回的原文被记下来（denied / error / 没有桥�
   assert.equal(bridgeNoShell[0]?.outcome, 'no-bridge')
 })
 
+/**
+ * ★ 2026-10-05（用户真机抱怨"通知标题没说清是哪台电脑"）：
+ * 标题要**由宿主给**（`callInfo.title` ✓），手机这一侧只负责透传给壳 ✓。
+ *
+ * 为什么必须在这一层钉 ✗：`notify-text.ts` 那边全绿只证明"宿主拼得对"✓ ——
+ * 而手机这一侧原来把标题**写死**成「需要你确认」✗ ⇒ 宿主拼什么都会被丢掉 ✗，
+ * 在电脑端完全看不出来（推送照样返回 ok ✓）。这里用**假壳**把真正交给
+ * `bridge.notify(title, body, link)` 的那三个参数接住 ✓（真机上就是它们进了通知栏 ✓）。
+ */
+test('★ 2026-10-05：系统通知的标题来自宿主（`callInfo.title`），缺了才退回旧标题', async () => {
+  /** 接住壳真正收到的那三个参数 ✓（真机上通知栏显示的就是 title / body ✓）。 */
+  const seen: Array<{ title: string; body: string; link: string }> = []
+  const shell = makeFakeShell('ok')
+  shell['notify'] = (title: unknown, body: unknown, link: unknown) => {
+    seen.push({ title: String(title), body: String(body), link: String(link) })
+    return 'ok'
+  }
+  const withTitle = makeDeviceTransport({
+    rounds: [[{
+      id: 'call-title',
+      capability: 'notify',
+      text: '允许一次提权到 danger-full-access\nbash escalate sandbox to danger-full-access: 提权演练…',
+      title: 'Mac-mini-2024 需要你确认',
+      sessionId: 'sess-42',
+    }]],
+  })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: withTitle.transport,
+    shell,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 shellNotify 的第一个实参换回写死的 '需要你确认'
+  // ⇒ 下面第一条立刻红 ✓（其余用例照旧全绿 ✓）。
+  assert.equal(seen.length, 1, `壳应当收到一条通知（实际：${JSON.stringify(seen)}）`)
+  assert.equal(seen[0]?.title, 'Mac-mini-2024 需要你确认', '标题必须原样透传，不许在手机这侧改写')
+  assert.match(seen[0]?.body ?? '', /允许一次提权到 danger-full-access/, '正文照旧透传（一个字不改 ✓）')
+  assert.equal(seen[0]?.link, 'sess-42', '会话仍然透传（点通知落到那个会话 ✓）')
+
+  // ★ 老宿主 / agent 工具 `phone_notify` 不给 title ⇒ 逐字退回旧标题 ✓（行为同今天 ✓）
+  const seenOld: string[] = []
+  const shellOld = makeFakeShell('ok')
+  shellOld['notify'] = (title: unknown) => {
+    seenOld.push(String(title))
+    return 'ok'
+  }
+  const withoutTitle = makeDeviceTransport({ rounds: [[notifyCall('call-old')]] })
+  const oldSurface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: withoutTitle.transport,
+    shell: shellOld,
+    unrefTimers: true,
+  })
+  oldSurface.intervals[0]?.()
+  await settle()
+  assert.deepEqual(seenOld, ['需要你确认'], '没有 title 字段时必须退回原来那三个字（绝不弹一条没标题的通知）')
+})
+
 test('★ 取证：环形上限 12 条（连记 20 轮 ⇒ 只剩 12 条，且留的是**最新**那 12 条）', async () => {
   const rounds: Array<Array<Record<string, unknown>>> = []
   // ★ 一层 = 一轮，里面是该轮要投的 calls ✓（写两层会把"call 本身"变成一个数组 ✗ ——
@@ -1829,4 +1893,141 @@ test('★ 结构性：R5 那组身份读数必须挂在「端侧诊断」那一�
     inside.includes("settingsGroup('端侧诊断')"),
     '而且必须画在「端侧诊断」这一组里 ✓（别的地方用户找不到 ✗）',
   )
+})
+
+/**
+ * ★★ round 197：文件列表"名字显示不全 ⇒ 认不出后缀"那个反馈的回归守卫。
+ *
+ * 用户原话："我反馈一个**文件目录**相关的问题，因为我们那个是**窄栏**，然后文件目录会
+ * **显示不全文件的名字**，嗯，导致有的我**无法判断它的后缀是什么**。你有没有好的方案？"
+ * + "我们现在还会显示一个**文件的大小**，这个感觉**没必要**，你把这个**去掉**的话，
+ * 空间可能会更大一点"。
+ *
+ * ★ 这一组断言打的是**生产函数**（`__DSH_MOBILE_INTERNALS__.fitFileName` ✓），
+ *   不是测试里另抄一份的复制品 ✗ —— 判据（"显示的必须以原名那个扩展名结尾"✓）
+ *   正是本轮最值钱的一条 ✓。
+ *
+ * ★ 变异验证（怎么把它打红 ✓）：把 `fitFileName` 里那句
+ *   `return fileNameHead(head, room) + '\u2026' + ext`
+ *   改成 `return fileNameHead(text, limit - 1) + '\u2026'`（即"直接尾部省略"✗）
+ *   ⇒ 本组"必须以扩展名结尾"那几条**恰好**变红 ✓，其余全绿 ✓。
+ */
+interface FileNameInternals {
+  fitFileName: (name: unknown, maxUnits?: number) => string
+  fileNameFamily: (name: unknown) => string
+  fileNameExt: (text: string) => string
+  fileNameUnits: (text: string) => number
+  FILE_NAME_MAX_UNITS: number
+}
+
+/** 取一个"第 2 列函数"的整个函数体（与上面 `fillConnSettings` 那条同一个手法 ✓）。 */
+function functionBodyAtColumn2(source: string, name: string): string {
+  const lines = source.split('\n')
+  const start = lines.findIndex((line) => line.indexOf(`  function ${name}(`) === 0)
+  assert.ok(start >= 0, `boot.js 里应当有 ${name} ✓`)
+  let end = -1
+  for (let index = start + 1; index < lines.length; index++) {
+    if (lines[index] === '  }') {
+      end = index
+      break
+    }
+  }
+  assert.ok(end > start, `${name} 的结束大括号应当能在第 2 列找到 ✓`)
+  return lines.slice(start, end + 1).join('\n')
+}
+
+function fileNameInternals(): FileNameInternals {
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [] })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  const internals = surface.internals as unknown as FileNameInternals
+  assert.equal(typeof internals.fitFileName, 'function', 'boot.js 应装上 fitFileName ✓')
+  return internals
+}
+
+test('★ 长名字中段省略、**保住扩展名**（用户：认不出后缀 ✗）', () => {
+  const internals = fileNameInternals()
+  const budget = internals.FILE_NAME_MAX_UNITS
+  assert.ok(budget >= 12 && budget <= 40, `名字宽度预算应当是个可用的小数字（实际 ${budget}）`)
+  const cases = [
+    '一份很长的项目文档最终版.docx',
+    '这是我在手机上根本看不全的一份项目计划书最终版.xlsx',
+    `${'a'.repeat(60)}.png`,
+    '归档备份.tar.gz',
+    `${'🐳'.repeat(20)}.md`,
+    '.gitignore',
+    'README',
+    'a.',
+    '..',
+    '...',
+    '',
+  ]
+  for (const name of cases) {
+    for (const limit of [budget, 18, 12, 8]) {
+      const shown = internals.fitFileName(name, limit)
+      const where = `「${name}」@${limit} ⇒ 「${shown}」`
+      assert.equal(typeof shown, 'string', `必须返回字符串，不许 undefined：${where}`)
+      assert.ok(!shown.includes('undefined'), `不许把 undefined 显示出来：${where}`)
+      const units = internals.fileNameUnits(name)
+      const ext = internals.fileNameExt(name)
+      if (units <= limit) {
+        assert.equal(shown, name, `放得下就必须原样显示（短名字永远是全名 ✓）：${where}`)
+        continue
+      }
+      assert.ok(shown.length < name.length, `截断之后必须比原名短：${where}`)
+      if (ext !== '') {
+        // ★★ 本轮最值钱的一条：**任何**被截断的行，显示的仍以原名那个扩展名结尾 ✓
+        assert.ok(shown.endsWith(ext), `必须以扩展名「${ext}」结尾：${where}`)
+        assert.ok(!shown.endsWith('\u2026'), `有扩展名时不许以省略号收尾：${where}`)
+      } else {
+        // 没有扩展名 ⇒ 退化成**普通尾部省略**（留头 + 省略号 ✓），不许崩、不许空 ✗
+        assert.ok(shown.endsWith('\u2026'), `没有扩展名 ⇒ 普通尾部省略：${where}`)
+        assert.ok(shown.length > 1, `退化之后也得留下东西：${where}`)
+      }
+      if (ext === '' || internals.fileNameUnits(ext) + 2 <= limit) {
+        assert.ok(
+          internals.fileNameUnits(shown) <= limit,
+          `显示的宽度不许超出预算（${internals.fileNameUnits(shown)} > ${limit}）：${where}`,
+        )
+      }
+    }
+  }
+})
+
+test('★ 类型分族按扩展名认（图 / 表 / 码 / 压缩 / 文 / 其它，大小写不敏感）', () => {
+  const internals = fileNameInternals()
+  assert.equal(internals.fileNameFamily('截图.PNG'), 'image', '大写后缀也要认 ✓')
+  assert.equal(internals.fileNameFamily('预算.xlsx'), 'sheet')
+  assert.equal(internals.fileNameFamily('脚本.mjs'), 'code')
+  assert.equal(internals.fileNameFamily('备份.tar.gz'), 'archive', '看**最后**那个后缀 ✓')
+  assert.equal(internals.fileNameFamily('报告.docx'), 'doc')
+  assert.equal(internals.fileNameFamily('README'), 'other', '没有后缀 ⇒ 其它 ✓')
+  assert.equal(internals.fileNameFamily('神秘.xyz'), 'other', '认不出 ⇒ 其它 ✓')
+  assert.equal(internals.fileNameFamily(undefined), 'other', 'undefined 不许崩 ✓')
+  assert.equal(internals.fileNameFamily(null), 'other', 'null 不许崩 ✓')
+})
+
+test('★ 类型颜色只用主题变量（不许自创配色 ✗）', () => {
+  const rules = bootSource.match(/\.dshm-file-icon\[data-family="[a-z]+"\] \{ color: var\(--dsw-alias-[^)]*\); \}/g) ?? []
+  assert.ok(rules.length >= 4, `四种以上类型色应当有 CSS 规则（实际 ${rules.length} 条）`)
+  for (const rule of rules) {
+    assert.match(rule, /var\(--dsw-alias-label-|var\(--dsw-alias-state-/, `类型色必须取自主题变量：${rule}`)
+  }
+})
+
+test('★ 列表里不再显示文件大小（用户："这个感觉没必要" ✓）', () => {
+  assert.ok(
+    !bootSource.includes('dshm-file-meta'),
+    '大小那一段（`.dshm-file-meta`）应当整个消失，不留半拉子 ✗',
+  )
+  const body = functionBodyAtColumn2(bootSource, 'entryRow')
+  assert.ok(!body.includes('formatSize('), 'entryRow 里不许再算大小 ✗（省下来的宽度全给名字 ✓）')
+  assert.ok(body.includes('fitFileName(entry.name'), 'entryRow 必须走 fitFileName ✓')
+  assert.ok(body.includes('data-dshm-fs-name'), '完整名字必须留在 data-dshm-fs-name 上 ✓（工具靠它认行 ✓）')
+  assert.ok(body.includes('完整名称：'), '长按看全名的入口必须留着 ✓（截断之后它就是兜底 ✓）')
+  // 长按那套的四个口一个都不能少 ✓（少一个 = 真机上"按住不动也会被取消"或"看完名字又进了目录"✗）
+  for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'pointermove']) {
+    assert.ok(body.includes(`'${type}'`), `长按必须监听 ${type} ✓`)
+  }
+  // 交叉确认：`formatSize` 这个函数本身**不能**删 —— 预览那几处还在用 ✓
+  assert.ok(bootSource.includes('function formatSize('), 'formatSize 仍要被预览那几处用着 ✓')
 })

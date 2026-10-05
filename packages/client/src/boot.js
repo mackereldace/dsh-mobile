@@ -9430,7 +9430,6 @@
       '}',
       '.dshm-skel i:nth-child(1) { width: 18px; height: 18px; border-radius: 6px; flex: 0 0 auto; }',
       '.dshm-skel i:nth-child(2) { flex: 1 1 auto; }',
-      '.dshm-skel i:nth-child(3) { width: 34px; flex: 0 0 auto; }',
       '@keyframes dshm-skel-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }',
       /* 大目录底部：统计 + 继续显示 */
       '.dshm-more {',
@@ -9453,8 +9452,17 @@
       '.dshm-file-head:active { opacity: .6; }',
       '.dshm-file-icon { flex: 0 0 auto; width: 22px; display: grid; place-items: center; color: var(--dsw-alias-label-tertiary, #7d858e); }',
       '.dshm-file-icon[data-kind="directory"] { color: var(--dsw-alias-state-business-primary, #6aa9ff); }',
+      /* 类型分族的颜色：**只用主题里已有的语义色**（不新造配色 ✓）。
+         同族的字形也不一样（见 `fileFamilyIcon` ✓）⇒ 色弱 / 主题色偏的时候靠形状也分得开 ✓。
+         `doc` 与 `other` 不回落到这里 ⇒ 用上面那条默认的 tertiary ✓。 */
+      '.dshm-file-icon[data-family="image"] { color: var(--dsw-alias-state-success-primary, #4cc38a); }',
+      '.dshm-file-icon[data-family="sheet"] { color: var(--dsw-alias-state-warn-primary, #e0a33e); }',
+      '.dshm-file-icon[data-family="code"] { color: var(--dsw-alias-state-idle-primary, #9aa4b2); }',
+      '.dshm-file-icon[data-family="archive"] { color: var(--dsw-alias-label-secondary, #a9b0b8); }',
+      /* 名字这一栏是**唯一**要抢宽度的那一栏 ✓（大小那一段已按用户要求删掉 ✗ ⇒ 省下来的宽度全给它 ✓）。
+         这里的 `text-overflow: ellipsis` 只是**兜底** ✓ —— 保住后缀那件事由 `fitFileName` 在代码里做 ✓
+         （CSS 的省略号截的是尾部 ✗，后缀会第一个没 ✗）。 */
       '.dshm-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-      '.dshm-file-meta { flex: 0 0 auto; font-size: 11.5px; color: var(--dsw-alias-label-tertiary, #7d858e); font-variant-numeric: tabular-nums; }',
       '.dshm-file-more {',
       '  flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 9px;',
       '  background: transparent; cursor: pointer;',
@@ -20424,7 +20432,9 @@
       var row = document.createElement('div')
       row.className = 'dshm-skel'
       row.setAttribute('aria-hidden', 'true')
-      for (var j = 0; j < 3; j++) row.appendChild(document.createElement('i'))
+      // 两根灰条 = 图标 + 名字 ✓（大小那一段删了 ✗ ⇒ 这里的第三根也一起删 ✓，
+      // 否则骨架比真实行多一截，大目录加载完会"跳"一下 ✗）
+      for (var j = 0; j < 2; j++) row.appendChild(document.createElement('i'))
       box.appendChild(row)
     }
     host.appendChild(box)
@@ -20855,10 +20865,167 @@
   }
 
   /**
-   * 一个条目：图标 + 名称 + 大小/时间；点一下展开它的操作。
+   * ★★ 文件名显示多长、怎么截（用户原话："**文件目录会显示不全文件的名字**，
+   * 导致有的我**无法判断它的后缀是什么**"✗）。
+   *
+   * ## 为什么不能用 CSS 的 `text-overflow: ellipsis`
+   *
+   * 它截的是**尾部** ✗ —— 而尾部（扩展名）恰恰是用户要认的那一段 ✓
+   * （与 `shortPath` 那条同一个道理 ✓，见上面那段注释 ✓）。
+   * 于是显示文本**在代码里**做成 `头 + '…' + 尾` ✓，尾**就是扩展名本身** ✓。
+   *
+   * ## 三条退化路都不许崩 ✗（每一条都有断言 ✓）
+   *
+   *   · 没有扩展名（`README` / `.bashrc` / `a.` / `..` / `...`）⇒ 退化成**普通尾部省略**（留头 ✓）；
+   *   · 本来就不长 ⇒ **原样返回** ✓（一个字节都不动 ✓ —— 短名字永远是全名 ✓）；
+   *   · `name` 是 undefined / null / 空串 ⇒ 返回空串 ✓（绝不吐 `undefined` ✗）。
+   *
+   * ## 宽度为什么按"单位"算而不是写死字符数
+   *
+   * 手机上同一个名字，中文与英文占的宽度差一倍 ✓ ⇒ 全角按 2 个单位、其余按 1 个单位 ✓
+   * （宁可算宽 ✓：算宽只是早一点省略 ✓；算窄会溢出 ⇒ 交给 CSS 再切一次 ✗）。
+   */
+
+  /**
+   * 一个字符串占多少个**半角单位**（全角 / CJK 算 2 ✓）。
+   *
+   * ★ 必须**按码点**数 ✗、不能按 `charCodeAt` 数：emoji（`🐳` = 一个码点、两个 UTF-16 单元）
+   *   用 `charCodeAt` 会数成 **4** 个单位 ✗，而 `fileNameHead` 那边按码点只算 **2** ✓
+   *   ⇒ 两边口径不一致时"截出来的宽度"与"算出来的宽度"对不上 ✓
+   *   （本仓实测：`🐳`×20 + `.md` 在 22 个单位的预算下会截出 40 个单位 ✗ —— 断言逮住的就是它 ✓）。
+   */
+  function fileNameUnits(text) {
+    var units = 0
+    for (var i = 0; i < text.length; i++) {
+      // 0x2e80 起是 CJK 与全角标点那一片 ✓（粗判足够 —— 这里只要"别把中文当半角"✗）
+      var code = text.codePointAt(i)
+      units += code >= 0x2e80 ? 2 : 1
+      // 代理对：`codePointAt` 一次念走了两个 UTF-16 单元 ⇒ 指针也跟着跳一格 ✓
+      if (code > 0xffff) i += 1
+    }
+    return units
+  }
+
+  /**
+   * 从**头部**取一段，最多 `units` 个单位 ✓ —— 不切半个代理对 ✗（手机上有 emoji 文件名 ✓）。
+   * 一个完整字符都放不下时返回空串 ✓（调用方自己补省略号 ✓）。
+   */
+  function fileNameHead(text, units) {
+    var used = 0
+    var out = ''
+    for (var i = 0; i < text.length; i += 1) {
+      var code = text.codePointAt(i)
+      var width = code >= 0x2e80 ? 2 : 1
+      if (used + width > units) break
+      out += String.fromCodePoint(code)
+      used += width
+      // 代理对：`codePointAt` 一次念走了两个 UTF-16 单元 ⇒ 指针也要跟着跳一格 ✓
+      if (code > 0xffff) i += 1
+    }
+    return out
+  }
+
+  /**
+   * 扩展名（**含那个点** ✓）；没有扩展名时返回空串 ✓。
+   *
+   * 判据三条（都不满足就当没有 ✓ —— 宁可当没有 ✗：当成有会把"头"切得更短）：
+   *   · 点不在开头 ⇒ `.bashrc` 那种隐藏文件**没有**扩展名 ✓；
+   *   · 点不在结尾 ⇒ `a.` / `..` 没有 ✓；
+   *   · 长不超过 12 个单位 ⇒ 再长多半不是后缀 ✓。
+   */
+  function fileNameExt(text) {
+    var dot = text.lastIndexOf('.')
+    if (dot <= 0 || dot >= text.length - 1) return ''
+    var ext = text.slice(dot)
+    return fileNameUnits(ext) > 12 ? '' : ext
+  }
+
+  /**
+   * ★ 一行文件名**真正显示**的文本 ✓（纯函数 ✓ —— 判据直接打在它身上 ✓）。
+   *
+   * @param name - 完整文件名（目录名也走这里 ✓）。
+   * @param maxUnits - 允许占多少个半角单位（省略时用 `FILE_NAME_MAX_UNITS` ✓）。
+   */
+  function fitFileName(name, maxUnits) {
+    var text = String(name === undefined || name === null ? '' : name)
+    var limit = Number(maxUnits) > 0 ? Number(maxUnits) : FILE_NAME_MAX_UNITS
+    if (text === '' || fileNameUnits(text) <= limit) return text
+    var ext = fileNameExt(text)
+    // 没有扩展名 ⇒ 普通尾部省略（留头 ✓）—— 这是"退化"那条路 ✓
+    if (ext === '') return fileNameHead(text, limit - 1) + '\u2026'
+    var head = text.slice(0, text.length - ext.length)
+    var room = limit - 1 - fileNameUnits(ext)
+    // 后缀自己就快占满整行 ⇒ 至少留一个字 ✓（宁可这一行挤一点 ✓，也**绝不**把后缀丢掉 ✓）
+    if (room < 1) room = 1
+    return fileNameHead(head, room) + '\u2026' + ext
+  }
+
+  /**
+   * 名字那一栏大约放得下多少个**半角单位** ✓ —— 由 CSS 的实际尺寸推出来 ✓，不是拍的 ✗：
+   *
+   *   · 面板宽 = `--dshm-files-w` = `min(64vw, 264px)` ⇒ 取最窄的那一档 264 ✓；
+   *   · 一行里除名字外还占掉：左右内边距 4 + 图标 22 + 两个 gap 22 + 「⋯」32 = 80 ✓；
+   *   · 名字字号 14px（见 `.dshm-file-head` ✓）⇒ 一个半角单位 ≈ 7px ✓；
+   *   ⇒ (264 - 80) / 7 ≈ 26 个单位，再乘约 0.85 的保守系数 ⇒ **22** ✓。
+   *
+   * 估算只负责"别溢出太多" ✓ —— 真正兜底的是 `.dshm-file-name` 上那条 CSS 省略 ✓
+   * （估算偏小 = 早一点省略 ✓；偏大 = CSS 再切一次 ✗ ⇒ 所以宁小不大 ✓）。
+   */
+  var FILE_NAME_MAX_UNITS = 22
+
+  /**
+   * 类型图标（按扩展名分族 ✓）：形状 + 颜色各管一半 ✓（颜色见 CSS 那几条 `data-family` ✓）。
+   * 统一 24 网格 / 1.7 线宽 / `currentColor` ✓ —— 与面板里其它图标同一套 ✓。
+   */
+  var ICON_FILE_IMAGE = svgIcon('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-6 6"/>', 18)
+  var ICON_FILE_SHEET = svgIcon('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 9v12"/>', 18)
+  var ICON_FILE_CODE = svgIcon('<path d="M9 7l-5 5 5 5"/><path d="M15 7l5 5-5 5"/>', 18)
+  var ICON_FILE_ARCHIVE = svgIcon('<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>', 18)
+
+  /** 扩展名 → 族 ✓（图 / 文 / 表 / 码 / 压缩 ✓；不在表里的都是 `other` ✓）。 */
+  var FILE_FAMILY_EXT = {
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif', 'avif', 'tif', 'tiff', 'ico'],
+    sheet: ['csv', 'tsv', 'xls', 'xlsx', 'ods', 'numbers'],
+    code: [
+      'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'json', 'css', 'scss', 'less', 'html', 'htm', 'xml',
+      'py', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'go', 'rs', 'rb', 'php',
+      'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'sql', 'swift', 'dart', 'lua', 'vue',
+      'svelte', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'gradle',
+    ],
+    archive: ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', '7z', 'rar', 'jar', 'war', 'apk', 'ipa', 'dmg', 'iso', 'pkg', 'deb', 'rpm'],
+    doc: ['md', 'markdown', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'odt', 'pages', 'tex', 'log', 'epub'],
+  }
+
+  /** 一个名字属于哪一族 ✓（没有扩展名 / 认不出 ⇒ `other` ✓）。 */
+  function fileNameFamily(name) {
+    var ext = fileNameExt(String(name === undefined || name === null ? '' : name))
+    if (ext === '') return 'other'
+    var key = ext.slice(1).toLowerCase()
+    var families = ['image', 'sheet', 'code', 'archive', 'doc']
+    for (var i = 0; i < families.length; i++) {
+      if (FILE_FAMILY_EXT[families[i]].indexOf(key) >= 0) return families[i]
+    }
+    return 'other'
+  }
+
+  /** 族 → 字形 ✓（`doc` / `other` 用原来那颗文件图标 ✓ —— 不做没必要的花哨 ✗）。 */
+  function fileFamilyIcon(family) {
+    if (family === 'image') return ICON_FILE_IMAGE
+    if (family === 'sheet') return ICON_FILE_SHEET
+    if (family === 'code') return ICON_FILE_CODE
+    if (family === 'archive') return ICON_FILE_ARCHIVE
+    return ICON_FILE
+  }
+
+  /**
+   * 一个条目：类型图标 + 名称（中段省略、保住扩展名）；点一下进目录 / 预览。
    *
    * 用"就地展开操作"而不是弹菜单：手机上弹菜单要么太小要么挡住列表，
    * 就地展开还能让用户看清自己操作的是哪一项。
+   *
+   * ★ 大小那一段**已按用户要求删掉** ✗（原话："我们现在还会显示一个文件的大小，
+   *   这个感觉没必要，你把这个去掉的话，空间可能会更大一点"✓）——
+   *   省下来的宽度全部给了名字 ✓。
    */
   function entryRow(sheet, state, entry) {
     var wrapper = document.createElement('div')
@@ -20868,6 +21035,12 @@
     wrapper.setAttribute('data-dshm-fs-entry', '1')
     wrapper.setAttribute('data-dshm-fs-kind', entry.type === 'directory' ? 'dir' : 'file')
     wrapper.setAttribute('data-dshm-path', entry.path)
+    /**
+     * ★ 完整名字（**没被截过** ✓ —— 屏幕上那一行可能是 `头…后缀` ✓）。
+     * 「打开所在目录」指名的落点、与工具定位一行，一律看它 ✓：
+     * 拿显示文本去认名字，遇到长名字必然认不出来 ✗。
+     */
+    wrapper.setAttribute('data-dshm-fs-name', entry.name)
     wrapper.dataset.selecting = state.selecting === true ? '1' : '0'
     wrapper.dataset.selected = state.selected[entry.path] === undefined ? '0' : '1'
 
@@ -20882,21 +21055,73 @@
     check.setAttribute('aria-hidden', 'true')
     head.appendChild(check)
 
+    var isDir = entry.type === 'directory'
+    var family = isDir ? 'directory' : entry.type === 'symlink' ? 'link' : fileNameFamily(entry.name)
     var icon = document.createElement('span')
     icon.className = 'dshm-file-icon'
-    icon.dataset.kind = entry.type === 'directory' ? 'directory' : 'file'
-    icon.innerHTML = entry.type === 'directory' ? ICON_FOLDER_SM : entry.type === 'symlink' ? ICON_LINK : ICON_FILE
+    icon.dataset.kind = isDir ? 'directory' : 'file'
+    // ★ 类型分族（图 / 文 / 表 / 码 / 压缩 / 其它 ✓）：颜色由 CSS 按 `data-family` 给 ✓，
+    //   字形由 `fileFamilyIcon` 给 ✓ —— 两条一起才在窄栏里一眼分得开 ✓。
+    icon.dataset.family = family
+    icon.innerHTML =
+      isDir ? ICON_FOLDER_SM : entry.type === 'symlink' ? ICON_LINK : fileFamilyIcon(family)
     head.appendChild(icon)
 
     var name = document.createElement('span')
     name.className = 'dshm-file-name'
-    name.textContent = entry.name
+    /**
+     * ★ 显示文本走 `fitFileName`（**中段省略、保住扩展名** ✓）——
+     *   绝不用 CSS 的 `ellipsis` 硬凑 ✗：那种截的是尾部 ⇒ 后缀第一个没 ✗。
+     * 完整名字同时留在 `title` 与 `data-dshm-fs-name` 上 ✓：
+     *   · 长按看全名、桌面悬停看全名 ✓；
+     *   · 验收脚本 / 工具按**真名**定位那一行 ✓（拿被截过的文本反推真名必然错 ✗）。
+     */
+    name.textContent = fitFileName(entry.name, FILE_NAME_MAX_UNITS)
+    name.title = String(entry.name === undefined || entry.name === null ? '' : entry.name)
     head.appendChild(name)
 
-    var meta = document.createElement('span')
-    meta.className = 'dshm-file-meta'
-    meta.textContent = entry.type === 'directory' ? '目录' : formatSize(entry.size)
-    head.appendChild(meta)
+    /**
+     * ★ 长按看全名（用户要求保留这个入口 ✓ —— 截断之后它就是"我到底在点哪个"的兜底 ✓）。
+     *
+     * 为什么用 pointer 事件 + 计时器而不是 `contextmenu` ✗：WebView 的长按菜单会盖住
+     * 我们自己那行提示 ✓（用户点不到、也读不到 ✓）；`contextmenu` 在部分 WebView 里干脆不来 ✗。
+     *
+     * ★ 移动**不能**一律取消 ✗：手指按住不动时 WebView 照样会吐一串 1–2px 的 `pointermove`
+     *   ⇒ 一移动就取消的话，长按在真机上几乎永远按不出来 ✓（这也是"点了没反应"的经典来源 ✓）。
+     *   所以给一个 **10px 的抖动阈值** ✓，超过才算"这是在滑动/滚动"⇒ 取消 ✓。
+     *   另外三个取消口（抬起 / 取消 / 移出）一个都不能少 ✓。
+     * 长按命中之后**吞掉那一次 click** ✓：否则"看完名字"顺手又进了目录 / 开了预览 ✗。
+     */
+    var pressTimer = null
+    var pressFired = false
+    var pressFrom = null
+    var cancelPress = function () {
+      pressFrom = null
+      if (pressTimer === null) return
+      clearTimeout(pressTimer)
+      pressTimer = null
+    }
+    head.addEventListener('pointerdown', function (event) {
+      pressFired = false
+      cancelPress()
+      pressFrom = { x: Number(event && event.clientX) || 0, y: Number(event && event.clientY) || 0 }
+      pressTimer = setTimeout(function () {
+        pressTimer = null
+        pressFired = true
+        // 提示行走 `#dsh-mobile-sheet-note` ✓（它 `user-select: text` ✓ ⇒ 还能顺手选中复制 ✓）
+        setNote('完整名称：' + String(entry.name) + '（' + entry.path + '）')
+      }, 550)
+    })
+    head.addEventListener('pointerup', cancelPress)
+    head.addEventListener('pointercancel', cancelPress)
+    head.addEventListener('pointerleave', cancelPress)
+    head.addEventListener('pointermove', function (event) {
+      if (pressFrom === null) return
+      var dx = (Number(event && event.clientX) || 0) - pressFrom.x
+      var dy = (Number(event && event.clientY) || 0) - pressFrom.y
+      // 抖动阈值 10px ✓（真机上按住不动也会有 1–2px 的 move ✓，不能据此取消 ✗）
+      if (dx * dx + dy * dy > 100) cancelPress()
+    })
 
     var actions = document.createElement('div')
     actions.className = 'dshm-file-actions'
@@ -20916,6 +21141,11 @@
       updateSelectUI(sheet, state)
     }
     head.addEventListener('click', function () {
+      // 刚刚是"长按看全名" ⇒ 那一次点击**不算**（否则看完名字顺手又进了目录 / 开了预览 ✗）
+      if (pressFired === true) {
+        pressFired = false
+        return
+      }
       if (state.selecting === true) {
         toggleSelection()
         return
@@ -21679,8 +21909,13 @@
     state.focusName = ''
     var rows = sheet.body.querySelectorAll('[data-dshm-path]')
     for (var i = 0; i < rows.length; i++) {
-      var nameEl = rows[i].querySelector('.dshm-file-name')
-      if (nameEl === null || String(nameEl.textContent || '') !== name) continue
+      /**
+       * ★ 认名字要用 `data-dshm-fs-name`（**完整名字** ✓）——
+       * 屏幕上那串已经过 `fitFileName` ✓（长名字是 `头…后缀` ✗）⇒
+       * 拿显示文本对比，长名字**永远认不出来** ✗（点了「打开所在目录」就不高亮 ✗）。
+       */
+      var shown = rows[i].getAttribute('data-dshm-fs-name')
+      if (shown === null || String(shown) !== name) continue
       rows[i].dataset.dshmFocus = '1'
       try {
         rows[i].scrollIntoView({ block: 'center' })
@@ -22669,6 +22904,16 @@
     FrameFlags: FrameFlags,
     /** ★ 交付那一段（帧 → multipart `Response` ✓）：测试直接调它 ✓（纯函数，不需要浏览器 ✓）。 */
     buildBinaryResponse: buildBinaryResponse,
+    /**
+     * ★ 文件名那一行**显示什么** ✓（中段省略、保住扩展名 ✓）—— 纯函数 ✓，
+     *   判据直接打在它身上 ✓（见 `packages/client/test/boot-surface.test.ts` ✓），
+     *   而不是打在测试里另抄一份的复制品上 ✗。
+     */
+    fitFileName: fitFileName,
+    fileNameFamily: fileNameFamily,
+    fileNameExt: fileNameExt,
+    fileNameUnits: fileNameUnits,
+    FILE_NAME_MAX_UNITS: FILE_NAME_MAX_UNITS,
   }
 
   /**
