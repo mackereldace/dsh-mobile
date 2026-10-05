@@ -26,6 +26,7 @@ import { resolve } from 'node:path'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bootStamp, buildBootPayload } from './boot-payload.mjs'
+import { HOST_ASSETS_ROOT, copyRuntimeAssets } from './lib/runtime-assets.mjs'
 /**
  * ★★ 配置的**推导与读写只有一处实现** ✓（2026-09-29 搬进共用模块）：
  *   `packages/host/src/setup-config.ts` ✓ —— 电脑上 DSH 页面里的
@@ -327,6 +328,32 @@ function installPackages() {
     // 刻意不复制 src 与测试，避免把开发期文件带进生产 profile。
     cpSync(join(pkg.source, 'lib'), join(destination, 'lib'), { recursive: true })
     cpSync(join(pkg.source, 'package.json'), join(destination, 'package.json'))
+    /**
+     * ★★ 运行时 assets 必须**跟着 `lib/` 一起**进 profile ✓（2026-10-05，用户实测的真 bug ✓）。
+     *
+     * 症状 ✗：手机点通知 ⇒ 想开会话页 ⇒ 宿主回 `mobile/internal`
+     *   「会话页 HTML 未找到（assets/dsh-chat/page.html）」✓ ——
+     *   因为 `lib/` 里没有 `assets/` ✗（构建那一环当时也没拷 ✓），
+     *   而这个安装器又**只**拷 `lib/` 与 `package.json` ✗。
+     *
+     * ★ 这里从**源目录**拷 ✗（不是「指望 `lib/` 里已经有了」✓）：
+     *   安装器得能**自己保证**装出来的是能跑的包 ✓ ——
+     *   只跑安装器这条路少一步，用户手机上就是一个打不开的页面 ✗，
+     *   而电脑这边**什么都看不出来** ✗（`boot.js` 那次「构建做了、安装没做 ⇒
+     *   手机拿到的那份是坏的、而验收脚本全绿」就是这么来的 ✓）。
+     *
+     * ★ 目标仍然是 `<包>/lib/assets/` ✓ —— 运行时解析的第 1 条候选 ✓
+     *   （见 `packages/host/src/host-assets.ts` ✓），与构建产物**同一个位置** ✓：
+     *   不搞第二份布局 ✗（两份布局漂移正是本项目吃过亏的那类事 ✓）。
+     * ★ 清单与拷贝都只有一处实现 ✓（`scripts/lib/runtime-assets.mjs` ✓）。
+     */
+    if (pkg.name === '@dsh-mobile/host') {
+      const assetsCopied = copyRuntimeAssets(
+        join(repoRoot, HOST_ASSETS_ROOT),
+        join(destination, 'lib', 'assets'),
+      )
+      log(`已装入运行时 assets：${assetsCopied} 个文件 → ${join(destination, 'lib', 'assets')}（会话页 HTML 与 css/js ✓、codex 页脚本 ✓）`)
+    }
     log(`已安装 ${pkg.name} → ${destination}`)
   }
 

@@ -16,17 +16,25 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CAPABILITIES, ErrorCode, PROTOCOL_VERSION, TUNNEL_PATH, fingerprint, wireError, } from './protocol/index.js';
 import { DeviceStore } from "./devices.js";
 import { imageMimeOf, resolveWallpaper, wallpaperSize } from "./wallpaper.js";
-import { DeviceCallQueue, DEVICE_CAPABILITIES } from "./device-calls.js";
+import { DeviceCallQueue, DEVICE_CAPABILITIES, selectDeliveryTargets, } from "./device-calls.js";
 import { CodexBridge, handleCodexEndpoint } from "./codex/codex-bridge.js";
 import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from "./codex/codex-page.js";
 import { deriveLanTrust, isIpLiteralHostname, localMachineName, matchesDerivedTrust, } from "./lan-trust.js";
 import { probeDshFrontend } from "./dsh-probe.js";
+/**
+ * ★ 运行时磁盘资源（会话页 HTML 与 css/js ✓、codex 页脚本 ✓）的路径解析 ✓ ——
+ *   收敛到 `host-assets.ts` **一处** ✓（2026-10-05 ✓）。
+ *   原先这里与下面 codex 那处各写一份候选路径字面量 ✗
+ *   ⇒ 只能靠「真起宿主 + 真发请求」才验得到 ✓，而**「装到 profile 之后还在不在」
+ *     谁也没验** ✗（用户那条 `mobile/internal` 就是这么溜到手机上的 ✓）。
+ */
+import { hostAssetCandidates, readHostAsset, resolveHostAsset } from "./host-assets.js";
 import { unavailableLanListenerStatus } from "./lan-listener.js";
 import { PAIRING_PAGE_HTML } from "./pairing-page.js";
 import { TunnelSession } from "./tunnel.js";
@@ -935,24 +943,78 @@ export function createMobileHost(options) {
     /**
      * 发起一次端侧请求。成功返回请求 id；失败返回**原因字符串**而不是抛错——
      * 调用方（HTTP 路由 / agent 工具）都要把原因讲给用户或 agent 听。
+     *
+     * ★ 第 90 轮（真机 bug）：**目标不再按"此刻谁连着本机"来选** ✗✗。
+     *
+     * 改之前这里是这样挑目标的：
+     * ```
+     * const online = [...sessions.keys()]
+     * const target = deviceId ?? (online.length === 1 ? online[0]! : undefined)
+     * ```
+     * 于是**手机切到另一台电脑**时（它到本机的隧道就断了 ✓，审计里 connect/disconnect
+     * 与"切电脑"逐次对上 ✓）`online` 为空 ⇒ 直接回"目前没有设备在线"✗ ⇒
+     * 提权通知**根本没入队**（真机审计：同一次提权只有 `approval-push` ✓、
+     * 没有配套的 `mobile/device/call` ✗）⇒ 手机永远收不到 ✗。
+     *
+     * 现在：**选目标只看"设备可用 + 启用了这个能力"**（判定收在纯函数
+     * `selectDeliveryTargets` 里 ✓），不指定 deviceId 时写给**所有**这样的设备 ✓；
+     * 不在线只意味着"到它下次来取时才送达" ✓，而不是丢掉 ✗。
+     * ★ "当前连接"这个概念**没有**被拆掉 ✗：它照旧存在于 `sessions` / 会话页那条链上 ✓，
+     *   只是**不再参与"发给谁"的判定** ✓。
      */
     function deviceCall(capability, text, deviceId, sessionId) {
-        const online = [...sessions.keys()];
-        const target = deviceId ?? (online.length === 1 ? online[0] : undefined);
-        if (target === undefined) {
-            return { ok: false, reason: online.length === 0 ? '目前没有设备在线' : '有多台设备在线，请指定 deviceId' };
-        }
         if (!DEVICE_CAPABILITIES.includes(capability)) {
             return { ok: false, reason: `未知的端侧能力：${capability}` };
         }
-        try {
-            const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500), sessionId);
-            store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true });
-            return { ok: true, id: call.id };
+        /**
+         * ★ 这里只**收集事实**（谁配对过、谁可用、谁启用了这个能力、此刻在不在线 ✓），
+         *   判定本身一行都不在 ✗ —— 它收在 `selectDeliveryTargets` 里（可断言、可变异验证 ✓）。
+         * ★ 用 `store.list()` 而**不是** `sessions` 是关键 ✗✗：**已配对但此刻没连着**的设备
+         *   必须在候选里 ✓，否则老 bug 会原样复现 ✗。
+         */
+        const online = new Set(sessions.keys());
+        const selection = selectDeliveryTargets(deviceId, capability, store.list().map((device) => ({
+            deviceId: device.deviceId,
+            online: online.has(device.deviceId),
+            usable: store.resolveUsable(device.deviceId).ok,
+            enabled: deviceCalls.isEnabled(device.deviceId, capability),
+        })));
+        if (!selection.ok) {
+            // ★ 失败要看得见 ✗：否则"没送到"在审计里只剩一条 `approval-push`，
+            //   "没入队"与"入队了但没人取"分不清（用户这次实测就卡在这一点上 ✓）。
+            store.record({
+                deviceId: deviceId ?? '(host)',
+                kind: 'deny',
+                target: 'mobile/device/call',
+                detail: selection.reason,
+                ok: false,
+            });
+            return { ok: false, reason: selection.reason };
         }
-        catch (error) {
-            return { ok: false, reason: error.message };
+        const ids = [];
+        for (const target of selection.targets) {
+            try {
+                const call = deviceCalls.enqueue(target, capability, String(text ?? '').slice(0, 500), sessionId);
+                store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true });
+                ids.push(call.id);
+            }
+            catch (error) {
+                // 单台入队失败不影响其它目标（例如它正好在这一瞬间把能力停用了 ✓）
+                store.record({
+                    deviceId: target,
+                    kind: 'deny',
+                    target: 'mobile/device/call',
+                    detail: error.message,
+                    ok: false,
+                });
+            }
         }
+        const first = ids[0];
+        if (first === undefined)
+            return { ok: false, reason: '没有任何设备接受这次请求（能力可能刚被停用）' };
+        // ★ 只回第一个 id（调用方按它查结果 ✓）：广播时其余设备各自的 id 暂不对外暴露 ✗
+        //   —— 见交付报告的「不确定的 / 没做的」那一段。
+        return { ok: true, id: first };
     }
     /** agent 工具注册结果（由 cordis.ts 在注册完成后写入）。 */
     let agentTool = 'pending';
@@ -1521,8 +1583,11 @@ export function createMobileHost(options) {
          * 电脑侧发起一次端侧请求（让手机做一件事）。
          *
          * 只能从**电脑本机**调用（见 LOCAL_ONLY 名单）——否则同局域网的人就能指挥别人的手机。
-         * 目标设备可以显式指定 `deviceId`；不给时要求**恰好一台**在线，
-         * 而不是"随便挑一台"（发给谁必须是确定的）。
+         * 目标设备可以显式指定 `deviceId`；不给时就发给**所有**"可用且已启用该能力"的设备 ✓
+         * （★ 第 90 轮更正 ✗：原先写的是"不给时要求恰好一台**在线**"✓，
+         *   那正是"手机切到另一台电脑就收不到提权通知"的根因 —— 判定见 `deviceCall` ✓）。
+         * 发给谁始终是确定的 ✓：集合由"已配对 + 可用 + 已授权该能力"唯一决定 ✓，
+         * 与"此刻谁连着本机"无关 ✓。
          */
         if (req.method === 'POST' && url.pathname === '/mobile/device/call') {
             const body = await readJsonBody(req);
@@ -2745,12 +2810,18 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                     : undefined;
                 if (relative === undefined)
                     return undefined;
-                const candidates = [
-                    join(dirname(fileURLToPath(import.meta.url)), 'assets', 'dsh-chat', relative),
-                    join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'dsh-chat', relative),
-                ];
-                const found = candidates.find((candidate) => existsSync(candidate));
-                return found === undefined ? undefined : readFileSync(found);
+                /**
+                 * ★★ 路径解析收敛到 `host-assets.ts` **一处** ✓（2026-10-05）——
+                 *   原先这里是一对内联字面量候选 ✓，与 codex 那处各写一遍 ✗。
+                 *   它**相对插件自身** ✓、与 cwd 无关 ✓，现在还能被单测在
+                 *   **任意 cwd** 下钉住 ✓（`test/runtime-assets.test.ts` ✓）。
+                 *
+                 * ★ 但要说清病根 ✗：用户那条 `mobile/internal`
+                 *   （「会话页 HTML 未找到（assets/dsh-chat/page.html）」✓）
+                 *   **不是这段解析写错了** ✗ —— 是这个文件**从来没被装进 profile** ✗
+                 *   （构建与安装两处都补了 ✓：`scripts/lib/runtime-assets.mjs` ✓）。
+                 */
+                return readHostAsset(join('dsh-chat', relative));
             };
             if (req.method === 'GET' && (url.pathname === '/mobile/chat' || url.pathname === '/mobile/chat/')) {
                 const page = chatAsset('page.html');
@@ -2976,13 +3047,15 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
              * 为什么是文件而不是内联字符串：模板字符串转义把脚本截断过一次又一次 ✗（见 codex-page.ts 的说明）。
              */
             if (req.method === 'GET' && url.pathname === CODEX_PAGE_SCRIPT_PATH) {
-                const candidates = [
-                    join(dirname(fileURLToPath(import.meta.url)), 'assets', 'codex', 'ui.js'),
-                    join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'codex', 'ui.js'),
-                ];
-                const found = candidates.find((candidate) => existsSync(candidate));
+                /**
+                 * ★ 与上面会话页**同一份**解析实现 ✓（2026-10-05 收敛 ✓）——
+                 *   这里原先自己写了一份一样的候选数组 ✗。
+                 *   ★ 它同样**只**从磁盘读 ✓ ⇒ 「assets 装没装出去」这件事对 codex 页一样致命 ✗
+                 *     （codex/ 那棵树也在 `scripts/lib/runtime-assets.mjs` 的清单里 ✓）。
+                 */
+                const found = resolveHostAsset('codex/ui.js');
                 if (found === undefined) {
-                    respondJson(res, 404, wireError(ErrorCode.Internal, `codex ui.js 未找到（试过 ${candidates.join(' / ')}）`));
+                    respondJson(res, 404, wireError(ErrorCode.Internal, `codex ui.js 未找到（试过 ${hostAssetCandidates('codex/ui.js').join(' / ')}）`));
                     return true;
                 }
                 const body = readFileSync(found);

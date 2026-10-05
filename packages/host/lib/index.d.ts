@@ -297,6 +297,9 @@ export interface MobileHostService {
      *
      * **唯一入口**：HTTP 路由 `/mobile/device/call` 与（将来的）agent 工具都走它，
      * 于是"发给谁、能力是否已启用"的判定只有一处，两边不会走偏。
+     *
+     * ★ 目标语义（第 90 轮定稿 ✓）：`deviceId` 不给 ⇒ **所有"可用且已启用该能力"的设备** ✓
+     * （不再看"此刻谁连着本机"✗ —— 那会让"手机切到另一台电脑"时的提权通知丢掉 ✗）。
      */
     deviceCall(capability: string, text: string, deviceId?: string, 
     /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */

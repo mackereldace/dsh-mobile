@@ -21,6 +21,20 @@
  * 复用现有的「手机 → 电脑」请求通道（`mobile/device/pending`），
  * 于是**不需要新增任何协议**：隧道、加密、能力门禁、审计全部照旧。代价是几秒的延迟，
  * 而这一批能力的用途（提醒、审批、查看）本来就不要求即时。
+ *
+ * ## ★ 目标是谁：**不许**按"此刻谁连着本机"筛（第 90 轮，真机实测）
+ *
+ * 用户实测：「切到了另一个电脑的智能体上，然后我操纵这台电脑的智能体提权，
+ * 它会发通知，但是这个通知我在手机上是看不到的」。
+ *
+ * 根因就在"目标怎么选"这一步：手机**切到另一台电脑**时，它到**本机**的那条隧道就断了
+ * （审计里 connect/disconnect 与"切电脑"逐次对上 ✓），于是 `sessions` 表为空 ⇒
+ * 原先的实现直接把请求**丢掉**（`mobile/device/call` 一条都不落 ✗，
+ * 而同一次提权的 `approval-push` 诊断在案 ✓）—— 通知在**源头**就没了。
+ *
+ * 所以选目标只看两件事：**这台设备可用吗**（未撤销、未过期）+ **它启用了这个能力吗**。
+ * "在不在线"**不参与判定** ✗ —— 不在线只意味着"要到它下次来取时才送达" ✓。
+ * 判定收在下面的纯函数 `selectDeliveryTargets` 里（可断言、可变异验证 ✓）。
  */
 /** 端侧能力清单。新增能力必须同时在这里登记，并更新手机端的实现。 */
 export declare const DEVICE_CAPABILITIES: readonly ["show", "notify", "clipboard", "vibrate", "open"];
@@ -50,6 +64,58 @@ export interface DeviceCallResult {
 }
 /** 默认存活期：两分钟。 */
 export declare const DEFAULT_CALL_TTL_MS = 120000;
+/**
+ * 一次端侧请求的候选设备（宿主组装：谁配对过、谁可用、谁启用了这个能力）。
+ *
+ * ★ 它是**纯数据**：这个模块不认识 session、不认识隧道 ✓ —— 于是"目标怎么选"
+ *   可以在毫秒级单测里钉死，不必起隧道（本项目的老教训 ✓）。
+ */
+export interface DeliveryCandidate {
+    readonly deviceId: string;
+    /**
+     * ★ 这台设备**此刻**连着本机吗（即在本机的 `sessions` 表里）。
+     *
+     * ★★ 它**不参与判定** ✗✗ —— 只说清两件事：
+     *   · 为什么留这个字段 ✓：审计/诊断要能看出"发起那一刻它在不在线"（
+     *     否则"没送到"到底是"没入队"还是"入队了但没人取"永远分不清 ✗）；
+     *   · 为什么不用它筛 ✗：手机**切到另一台电脑**时本机这条隧道就断了 ✓
+     *     ⇒ 拿它做条件，提权通知会在源头被丢掉 ✗（用户实测就是这个 ✗）。
+     */
+    readonly online: boolean;
+    /** 设备记录可用（存在、未撤销、未过期）。 */
+    readonly usable: boolean;
+    /** 这台设备已启用**这次要用的那个能力**。 */
+    readonly enabled: boolean;
+}
+/** `selectDeliveryTargets` 的结果。 */
+export type DeliverySelection = {
+    readonly ok: true;
+    readonly targets: readonly string[];
+} | {
+    readonly ok: false;
+    readonly reason: string;
+};
+/**
+ * 选出这次端侧请求要写进**哪些设备**的队列。**纯函数**（不看时钟、不碰连接、不写文件）。
+ *
+ * ## 规则
+ *
+ * 1. **显式给了 `deviceId`** ⇒ 只发给它；不存在 / 已撤销 / 没启用，各自给一句能读懂的话；
+ * 2. **没给** ⇒ 发给**所有"可用且已启用该能力"的设备** ✓（顺序 = 传入顺序 = 配对时间顺序 ✓）。
+ *
+ * ## ★ 为什么不看"在线"
+ *
+ * 见模块头的实测那段：**在线 ≠ 该收到** ✗。
+ * 手机切到另一台电脑时本机没有它的隧道 ✓，可它仍然是"我的手机" ✓ ——
+ * 请求该在队列里等着，而不是被丢掉 ✓（回执/结果照样按设备隔离 ✓）。
+ *
+ * ## 为什么"多台在线"不再报错
+ *
+ * 原实现要求"恰好一台在线"，多台时回一句"请指定 deviceId"✗。
+ * 端侧请求的语义是"让我的设备做一件事"✓，不是"让此刻连着的那台做"✗ ——
+ * 广播给所有已授权设备既确定又不歧义 ✓。
+ */
+export declare function selectDeliveryTargets(requestedDeviceId: string | undefined, capability: string, candidates: readonly DeliveryCandidate[]): DeliverySelection;
 /**
  * 端侧请求队列。
  *

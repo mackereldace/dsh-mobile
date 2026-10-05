@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EEF0F4">
+<title>会话</title>
+<link rel="stylesheet" href="/mobile/chat/theme.css">
+</head>
+<body>
+<div class="app">
+  <div class="status">v1·2026-10-04</div>
+  <header>
+    <div>
+      <button id="title" class="title" type="button">会话</button>
+      <p class="sub" id="sub">正在读取…</p>
+    </div>
+    <span class="grow"></span>
+    <button id="refresh" class="icon" type="button" title="刷新">&#8635;</button>
+  </header>
+  <div id="status"></div>
+  <div id="sessions" hidden></div>
+  <main>
+    <div id="state" hidden></div>
+    <div id="messages"></div>
+  </main>
+  <form class="composer" id="composer">
+    <textarea id="input" placeholder="给 DSH 发一条消息…" rows="1"></textarea>
+    <button type="submit">发送</button>
+  </form>
+  <div class="homebar"></div>
+</div>
+<script>
+  // ★ 只装隧道、不装 DSH 的外壳 UI（顶栏/抽屉）—— 见 boot.js 里 __DSH_MOBILE_NO_SHELL__ 的说明 ✓
+  globalThis.__DSH_MOBILE_NO_SHELL__ = true
+  // 手机场景标记（boot.js 的 isShellSurface 认它；保留 ?pair= 票据）
+  (function () {
+    try {
+      var url = new URL(location.href)
+      if (url.searchParams.get('mobile') !== '1') {
+        url.searchParams.set('mobile', '1')
+        history.replaceState(null, '', url.toString())
+      }
+    } catch (error) { void error }
+  })()
+</script>
+<!-- ★ 这一行是**隧道**（`__DSH_MOBILE_BOOT__.tunnel`）—— 少了它页面能打开但永远连不上 ✗，
+     而且要排在 app.js 之前（经典脚本先跑，module 是 defer 的 ✓） -->
+<script src="/mobile/boot.js" data-dsh-mobile="1"></script>
+<script type="module" src="/mobile/chat/app.js"></script>
+</body>
+</html>

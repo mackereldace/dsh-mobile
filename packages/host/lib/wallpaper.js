@@ -64,6 +64,178 @@ export function imageMimeOf(path) {
     return undefined;
 }
 /**
+ * ★★★ 2026-10-05（按本机实测新增）：从**现代位置**取当前壁纸的**文件路径**。
+ * 来源：`~/Library/Application Support/com.apple.wallpaper/Store/Index.plist` ✓
+ * （先 `plutil -convert xml1 -o - <该文件>` 转 **XML** 再喂进来 ✓）。
+ * ★ 动态（航拍）壁纸**没有文件路径** ✓ ⇒ 返回 undefined ✓ ⇒ 上层给**人话失败** ✓
+ *   （绝不编路径 ✗、绝不退回截屏 ✗）。
+ *
+ * ## ★★★ 2026-10-05 第二次实测：**必须用 xml1，不能用 json** ✗
+ *
+ * 上一版这里是 `-convert json` + `JSON.parse` ✓，在**夹具上全绿** ✓ ——
+ * 但在我本机真数据上**当场报错** ✗：
+ *
+ * ```
+ * $ plutil -convert json -o - "$HOME/Library/Application Support/com.apple.wallpaper/Store/Index.plist"
+ * …Index.plist: Invalid object in plist for JSON format
+ * ```
+ *
+ * 原因：该 plist 里有 **`Data`（二进制）** 值 ✓（`Configuration`、`EncodedOptionValues` ✓）
+ * ⇒ **JSON 表示不了二进制** ✗ ⇒ `plutil` 直接失败（exit 非 0）⇒ 连解析的机会都没有 ✗。
+ * `xml1` 没这个问题 ✓（XML 用 `<data>base64</data>` 表示二进制 ✓，实测 exit 0 ✓）。
+ * ⇒ 教训：**只对着夹具验证 = 没验证** ✗（这条就是被真机抓出来的 ✓）。
+ *
+ * ## 这个解析器为什么这么"笨"（★ 故意的）
+ *
+ * ★ 不写完整 XML 解析器 ✗ —— 真实结构很规矩 ✓（本机实测）：
+ * `<key>Files</key>` 后面**紧跟**它的值 ✓，值是 `<array>`（空数组是自闭合的 `<array/>` ✓），
+ * 数组里就是 `<string>…</string>` 路径 ✓。所以只做三件事：
+ *
+ * 1. 找 `<key>Files</key>` ✓ ⇒ 取它后面**第一个** `<array>` 块 ✓（自闭合 ⇒ 空 ⇒ 跳过 ✓）；
+ * 2. ★ **优先 `AllSpacesAndDisplays` 那一段** ✓（先只在这一段里找 ✓，找到就返回 ✓；
+ *    这一段没有（或本就是空的动态壁纸 ✓）⇒ 再全文本扫 ✓）；
+ *    段的边界用 `<dict>` / `</dict>` 配平来切 ✓（**不看缩进** ✗：缩进是 plutil 的实现细节 ✓）；
+ * 3. 路径里可能有 XML 转义 ⇒ 做**最小反转义** ✓（`&amp; &lt; &gt; &quot; &apos;` ✓）。
+ *
+ * ★ 输出为空 / 不是 XML / 找不到 ⇒ 一律 `undefined` ✓（**绝不抛错** ✗：这个函数在请求路径上 ✓）。
+ */
+export function parseWallpaperStore(xml) {
+    if (typeof xml !== 'string')
+        return undefined;
+    const preferred = plistDictBody(xml, 'AllSpacesAndDisplays');
+    if (preferred !== undefined) {
+        const inPreferred = firstFilesPath(preferred);
+        if (inPreferred !== undefined)
+            return inPreferred;
+    }
+    return firstFilesPath(xml);
+}
+/** XML 最小反转义 ✓（`&amp;` 最后处理不了顺序问题 ⇒ 用单遍替换 ✓，只认这 5 个实体 ✓）。 */
+function unescapeXml(text) {
+    return text.replace(/&(amp|lt|gt|quot|apos);/g, (whole, name) => {
+        if (name === 'amp')
+            return '&';
+        if (name === 'lt')
+            return '<';
+        if (name === 'gt')
+            return '>';
+        if (name === 'quot')
+            return '"';
+        if (name === 'apos')
+            return "'";
+        return whole;
+    });
+}
+/**
+ * 取 `<key>{key}</key>` 那个 dict 的**内部文本** ✓（按 `<dict>`/`</dict>` 配平切 ✓）。
+ * 找不到 / 值不是 dict ⇒ `undefined` ✓。
+ */
+function plistDictBody(xml, key) {
+    const keyTag = `<key>${key}</key>`;
+    const keyAt = xml.indexOf(keyTag);
+    if (keyAt < 0)
+        return undefined;
+    const dictAt = xml.indexOf('<dict', keyAt + keyTag.length);
+    if (dictAt < 0)
+        return undefined;
+    const afterTag = dictAt + '<dict'.length;
+    // `<dict/>` ⇒ 空的段 ✓（没有路径可找，但段是"存在且为空"⇒ 返回空串 ✓）
+    if (xml[afterTag] === '/')
+        return '';
+    let depth = 1;
+    let cursor = afterTag;
+    while (cursor < xml.length) {
+        const nextOpen = xml.indexOf('<dict', cursor);
+        const nextClose = xml.indexOf('</dict>', cursor);
+        if (nextClose < 0)
+            return undefined;
+        if (nextOpen >= 0 && nextOpen < nextClose) {
+            const tagEnd = nextOpen + '<dict'.length;
+            if (xml[tagEnd] !== '/')
+                depth += 1;
+            cursor = tagEnd;
+            continue;
+        }
+        depth -= 1;
+        if (depth === 0)
+            return xml.slice(afterTag, nextClose);
+        cursor = nextClose + '</dict>'.length;
+    }
+    return undefined;
+}
+/**
+ * 在一段文本里按"**下一个 `<key>Files</key>` 之后第一个 `<array>` 块**"取路径 ✓。
+ * 空数组（`<array/>`）⇒ 继续看下一个 `Files` ✓（本机真数据里两处都是空的 ✓ ⇒ 最终 undefined ✓）。
+ */
+function firstFilesPath(region) {
+    const keyTag = '<key>Files</key>';
+    let index = 0;
+    while (index < region.length) {
+        const keyAt = region.indexOf(keyTag, index);
+        if (keyAt < 0)
+            return undefined;
+        const arrayAt = region.indexOf('<array', keyAt + keyTag.length);
+        if (arrayAt < 0)
+            return undefined;
+        // ★ 万一 `Files` 的值压根不是数组（两者之间插了别的 `<key>` ✓）⇒ 这不是我们要的，跳过 ✓
+        const nextKeyAt = region.indexOf('<key>', keyAt + keyTag.length);
+        if (nextKeyAt >= 0 && nextKeyAt < arrayAt) {
+            index = keyAt + keyTag.length;
+            continue;
+        }
+        const afterTag = arrayAt + '<array'.length;
+        if (region[afterTag] === '/') {
+            // ★ `<array/>` = 空数组 ✓（动态壁纸就是这样 ✓）⇒ 继续找下一个 Files ✓
+            index = afterTag;
+            continue;
+        }
+        const closeAt = arrayCloseIndex(region, afterTag);
+        if (closeAt < 0)
+            return undefined;
+        const values = stringValues(region.slice(afterTag, closeAt));
+        if (values.length > 0)
+            return values[0];
+        index = closeAt + '</array>'.length;
+    }
+    return undefined;
+}
+/** 从 `from`（已过 `<array>`）开始配平，返回对应 `</array>` 的下标 ✓（配不平 ⇒ -1 ✓）。 */
+function arrayCloseIndex(region, from) {
+    let depth = 1;
+    let cursor = from;
+    while (cursor < region.length) {
+        const nextOpen = region.indexOf('<array', cursor);
+        const nextClose = region.indexOf('</array>', cursor);
+        if (nextClose < 0)
+            return -1;
+        if (nextOpen >= 0 && nextOpen < nextClose) {
+            const tagEnd = nextOpen + '<array'.length;
+            if (region[tagEnd] !== '/')
+                depth += 1;
+            cursor = tagEnd;
+            continue;
+        }
+        depth -= 1;
+        if (depth === 0)
+            return nextClose;
+        cursor = nextClose + '</array>'.length;
+    }
+    return -1;
+}
+/** 一段数组体里的 `<string>` 值 ✓（反转义 + 去空白；空的不要 ✓）。 */
+function stringValues(body) {
+    const values = [];
+    const pattern = /<string>([\s\S]*?)<\/string>/g;
+    let match = pattern.exec(body);
+    while (match !== null) {
+        const value = unescapeXml(match[1] ?? '').trim();
+        if (value.length > 0)
+            values.push(value);
+        match = pattern.exec(body);
+    }
+    return values;
+}
+/**
  * 找壁纸 ✓。
  *
  * @param platform `process.platform` ✓（注入是为了断言 ✓）
@@ -120,6 +292,29 @@ export function resolveWallpaper(platform, run, exists = existsSync) {
         return check(parseWindowsWallpaper(result.stdout), '注册表');
     }
     if (platform === 'darwin') {
+        /**
+         * ★★★ 2026-10-05 实测：现代 macOS 的壁纸在上面那个 plist 里 ✓
+         *   （实测：`defaults read com.apple.desktop` 报「域不存在」✗、`desktoppicture.db` 不存在 ✗
+         *   ⇒ 下面两段旧尝试注定读不到 ✓，只留作老系统兜底 ✓）。
+         *   ★ 动态（航拍）壁纸没有文件路径 ⇒ 如实说原因 ✓（绝不编路径/绝不退回截屏 ✗）。
+         */
+        const home = process.env['HOME'] ?? '';
+        const store = `${home}/Library/Application Support/com.apple.wallpaper/Store/Index.plist`;
+        /**
+         * ★★★ 2026-10-05 第二次实测：这里**必须 xml1** ✗ 不能 json ✓ ——
+         *   该 plist 里有 `Data`（二进制）值 ✓ ⇒ `plutil -convert json` 直接报
+         *   `Invalid object in plist for JSON format` ✗（我本机真数据上就是这样 ✓）。
+         *   `xml1` 用 `<data>base64</data>` 表示二进制 ✓ ⇒ 实测 exit 0 ✓。
+         */
+        const asXml = run('plutil', ['-convert', 'xml1', '-o', '-', store], 4000);
+        if (asXml.ok) {
+            const fromStore = parseWallpaperStore(asXml.stdout);
+            if (fromStore !== undefined) {
+                const found = check(fromStore, '系统设置');
+                if (found.ok)
+                    return found;
+            }
+        }
         const legacy = run('defaults', ['read', 'com.apple.desktop', 'Background'], 4000);
         if (legacy.ok) {
             const found = check(parseMacWallpaper(legacy.stdout), '系统设置');
@@ -135,7 +330,7 @@ export function resolveWallpaper(platform, run, exists = existsSync) {
         }
         return {
             ok: false,
-            reason: '这台 Mac 没让我们读到壁纸（系统把壁纸存在自己的配置里，且自动化权限没给）',
+            reason: '这台 Mac 读不到壁纸的文件路径（现在多是系统动态壁纸，本身没有图片文件）',
         };
     }
     return { ok: false, reason: `这个系统（${platform}）还没支持读壁纸` };

@@ -5340,57 +5340,6 @@
       case FrameType.RpcResponse: {
         var response = decodeBinaryValue(JSON.parse(fromUtf8(body)))
         /**
-         * ★★★ 取证（文件预览一直报 expected Uint8Array，且宿主已确认是新版）：
-         *   把"这条响应里 data 到底是什么形状"念一行到调试框 ✓ —— 三种可能当场分开 ✗：
-         *   · 还是 `{$dshmBytes: …}` ⇒ 是**解码没生效**（我这边 ✗）；
-         *   · 是数字键对象（`{"0":137,…}`）⇒ 宿主**没编码**（上游还没打我那个标 ✗）；
-         *   · 是 base64 字符串 / 别的东西 ⇒ 那报错来自**另一层的类型约定** ✓（改法完全不同 ✓）。
-         * ★ 只读、只在可疑时打一行 ✓（不刷屏 ✓）。
-         */
-        try {
-          var probeName = ''
-          try {
-            probeName = (this.requestNames !== undefined && this.requestNames[response.rpcId] !== undefined)
-              ? String(this.requestNames[response.rpcId]) : ''
-            if (this.requestNames !== undefined) delete this.requestNames[response.rpcId]
-          } catch (error) {
-            void error
-          }
-          var probeValue = response && response.result && response.result.value
-          var data = probeValue && probeValue.data
-          /**
-           * ★★ 只对"我们关心的那几个方法"打一行 ✓（打太多会刷屏 ✓）——
-           *   这一行同时回答两个问题：① 这条调用**走不走我们隧道** ✓；② `data` 是什么形状 ✓。
-           */
-          if (probeName.indexOf('readBytes') >= 0 || probeName.indexOf('workspaceFiles') >= 0) {
-            var brief = 'undefined'
-            if (data !== null && data !== undefined) {
-              if (typeof Uint8Array === 'function' && data instanceof Uint8Array) brief = 'Uint8Array(len=' + data.length + ')'
-              else if (typeof data === 'string') brief = '字符串(len=' + data.length + ')'
-              else if (typeof data === 'object') {
-                var ks = Object.keys(data)
-                var numeric = ks.filter(function (k) { return /^[0-9]+$/.test(k) }).length
-                brief = '对象(键=' + ks.length + '，数字键=' + numeric + ')' + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
-              } else brief = typeof data
-            }
-            debugBoxLine('[rpc] ' + probeName + ' ⇒ data=' + brief)
-          }
-          if (data !== undefined && data !== null
-              && !(typeof Uint8Array === 'function' && data instanceof Uint8Array)) {
-            var shape = ''
-            if (typeof data === 'string') shape = '字符串(len=' + data.length + ')'
-            else if (typeof data === 'object') {
-              var keys = Object.keys(data)
-              var numeric = keys.filter(function (k) { return /^[0-9]+$/.test(k) }).length
-              shape = '对象(键=' + keys.length + '，其中数字键=' + numeric + ')'
-                + (data.$dshmBytes !== undefined ? ' ★有$dshmBytes标' : ' 无标')
-            } else shape = typeof data
-            debugBoxLine('[bytes] data 形状：' + shape)
-          }
-        } catch (error) {
-          void error
-        }
-        /**
          * ★★★ 第 111 轮（客户端那半）：按 DSH 自己的**附件表**把 `null` 占位换成真字节 ✓。
          *
          * 为什么在这儿 ✗：必须在 `entry.resolve(response)` **之前** ✓ ——
@@ -5644,21 +5593,6 @@
       // 两个都要存：只存 resolve 的话，链路一断这个 Promise 就永远既不 resolve
       // 也不 reject（见 failPending 的说明，这是"侧栏永远空的"的根因）。
       self.pending.set(rpcId, { resolve: resolve, reject: reject })
-      /**
-       * ★ 取证（文件预览一直报 expected Uint8Array，而形状诊断打不出来）：
-       *   把"这个 rpcId 是哪个方法"记下来 ✓ —— 响应回来时才知道要不要打那一行 ✓。
-       *   若连这一行都没打出来 ⇒ 说明**这条调用根本不走我们这条隧道** ✓（那答案就换方向了）。
-       * ★ 教训：这段**不能插进 `self .sendFrame(...)` 的链式调用中间** ✗
-       *   —— 我第一次就是那么插的，语法当场崩（`.sendFrame` 前面多了个 `}`）✓。
-       */
-      try {
-        if (self.requestNames === undefined) self.requestNames = {}
-        var m = message !== null && message !== undefined ? message : {}
-        var name = m.method !== undefined ? m.method : (m.target !== undefined ? m.target : m.name)
-        if (typeof name === 'string') self.requestNames[rpcId] = name
-      } catch (error) {
-        void error
-      }
       self
         .sendFrame(FrameType.RpcRequest, FrameFlags.Json, utf8(JSON.stringify(message)))
         .catch(reject)
@@ -10705,6 +10639,81 @@
        */
       '  [data-presented-file] button[class*="_chevron"]:disabled {',
       '    color: var(--dsw-alias-label-secondary, #a9b0b8); cursor: pointer;',
+      '  }',
+
+      /**
+       * ★★ 本轮 A（0.2.0 ✓）：交付卡片右侧那套「用 XXX 打开 / 更多打开方式」**收起** ✓。
+       *
+       * 取证（不是猜 ✗）：0.2.0 起卡片右侧的控件**已经不在 deliverables 里**了 ✗ ——
+       *   它由新插件 `@deepseek-ai/dsh-client-ui-open-in-app` 经插槽
+       *   `deliverables.file.actions` 渲染 ✓（它自己那段注释写着 FileRouteAction 经
+       *   `deliverables.file.actions` 提供交付卡片的控件 ✓）。它打的是**稳定属性** ✓：
+       *   `div[data-open-target="file"][data-size=…][data-state=…]` → `button.main`
+       *   （`aria-label` = 「用 {app} 打开」✓）/ `button.chevron`（`aria-label` = 「更多打开方式」✓）。
+       *   ★ 判据**不用哈希类名** ✗ —— 卡片自己的类名已经从 `nyYjTG_` 换成 `dwRWCG_` ✓，
+       *   而 `data-open-target` 是语义属性 ✓。
+       *
+       * 命中面**只有交付卡片** ✓（多一个 `[data-presented-file]` 祖先条件 ✓）——
+       *   会话头部 / 侧边栏 / 文档预览里那些同款 open-in-app 控件**一个字都不动** ✓。
+       *
+       * 用户原话：「手机上我**不关心它用什么默认应用打开**，只需要保留**预览**与**手机下载**」✓
+       *   ⇒ 位置由我们自己的两个动作顶上 ✓（`[data-dshm-card-actions]` ✓，
+       *   见 installDeliverablesCardBridge 的 tuneCardControls ✓）。
+       */
+      '  [data-presented-file] [data-open-target] { display: none !important; }',
+
+      /**
+       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）：
+       *   尺寸与圆角照 DSH 原来那颗分体按钮 ✓（高 28 / 圆角 10 ✓），颜色一律走设计 token ✓。
+       *   `pointer-events: auto` 是必需的 ✓ —— 卡片正文那层 `_fileBody` 是 `pointer-events:none` ✓，
+       *   而铺满整张卡的 `_cardPreview` 覆盖层在它下面（z-index 1 ✓）⇒ 不写这一条就点不到 ✗。
+       */
+      '  [data-dshm-card-actions] {',
+      '    pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px;',
+      '  }',
+      '  [data-dshm-card-actions] button {',
+      '    height: 28px; padding: 0 10px; border-radius: 10px; font: inherit; font-size: 12px;',
+      '    line-height: 18px; white-space: nowrap; cursor: pointer; color: var(--dsw-alias-label-primary);',
+      '    border: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-floating-fill);',
+      '  }',
+      '  [data-dshm-card-actions] button:active { background: var(--dsw-alias-interactive-bg-hover); }',
+
+      /**
+       * ★★ 本轮 B/C（用户原话：「呃，你的**选择卡**跟**审批通知**，它能不能**稍微宽一点**？」✓）
+       *
+       * ## 先把宽度链量出来 ✓（0.2.0 产物里读的 ✓，不是猜 ✗）
+       *
+       * 两张卡的结构同形 ✓：一个**外壳**（管内边距）+ 一张**卡**（管上限）——
+       *   · 选择卡：`div[data-question-key]` → `section._card` ✓
+       *     （`ui-user-questions` 的 QuestionComposer ✓）；
+       *   · 审批卡：`div[data-approval-key]` → `div._card` ✓（`ui-approval` 的 ApprovalPanel ✓）。
+       * 两者的卡都写着 `width:100%; max-width: var(--dsh-chat-content-width)` ✓，而
+       *   `--dsh-chat-content-width = var(--dsh-chat-user-width, clamp(680px, 列宽 * .64, 920px))` ✓
+       *   ⇒ 手机上（约 412px）这个上限是 **680px** ✓ ⇒ **它根本不是限宽的那一环** ✗。
+       * ★ 真正把卡挤窄的是**外壳那圈内边距** ✓：
+       *   `padding: 6px calc(var(--dsh-composer-side-clearance) + 16px) 10px` ✓，
+       *   而 `--dsh-composer-side-clearance: 16px` ✓ ⇒ 左右各 32px ⇒ 412 − 64 = **348px** ✓。
+       *
+       * ## 所以放宽要动两处 ✓（只改上限是无效的 ✗）
+       *
+       * ① 外壳的左右内边距收到 8px ✓（上下那两档 6px / 10px 一个字不动 ✓）；
+       * ② 给卡一个"**上限 + 视口百分比**"的天花板 ✓：`min(560px, 94vw)` ✓
+       *    —— **不写死 px** ✗（本仓在窄屏上栽过"写死宽度"的坑 ✓；窄屏靠 94vw 自适应 ✓，
+       *    大屏靠 560px 封顶 ✓，不会在平板上变成一条巨幅横条 ✗）。
+       *
+       * ## 判据全是 DSH 自己打的**语义属性** ✓（不是哈希类名 ✗）
+       *
+       * 那两套类名 `y21zpG_` / `gOeFyG_` 都是**构建哈希** ✓（改名就静默失效 ✗，本仓栽过多次），
+       * 而 `data-question-key` / `data-approval-key` 是语义属性 ✓ ⇒ 只命中那两张卡 ✓。
+       * ★ `div[data-approval-key] > div` 指的是它那张唯一的卡 ✓（`ui-approval` 的 root 里就一个 div 子节点 ✓）；
+       *   同一族的「计划审批卡」`div[data-plan-review-key]` **没动** ✗（用户没点名 ✓，要并进来加一行即可 ✓）。
+       * ★ 这段样式**只随 installShell 装** ✓ ⇒ 电脑端一个字都不变 ✓（与上面 hostStatus 那条同一条路子 ✓）。
+       */
+      '  div[data-question-key], div[data-approval-key] {',
+      '    padding-left: 8px !important; padding-right: 8px !important;',
+      '  }',
+      '  div[data-question-key] > section, div[data-approval-key] > div {',
+      '    max-width: min(560px, 94vw) !important;',
       '  }',
 
       /* ⑦ iOS 聚焦输入框时不允许自动放大 */
@@ -18906,10 +18915,117 @@
      *  ⇒ 那一下正好就是"菜单刚渲染出来"的时刻 ✓ ⇒ 顺手把两项的文案改准 ✓。
      * 回调里只在真的改了东西时才再补一次 ✓（第二轮因为标记已在，返回 0 ✓，不会自激 ✓）。
      */
+    /**
+     * ★★ 本轮 A（0.2.0 ✓）：交付卡片右侧**只留「预览」与「手机下载」两颗** ✓。
+     *
+     * ## 为什么必须新做这一层（取证 ✓，不是猜 ✗）
+     *
+     * round 130 那套（`PRESENTED_NATIVE_LABELS` ✓）认的是**卡片内部**那颗 v 的下拉菜单：
+     *   `[data-presented-file] button[class*="_chevron"]` + `div[role="menu"]` 里
+     *   文案为「用默认应用打开」/「打开所在文件夹」的两项 ✓。
+     * ★ 但 0.2.0 起这两样**都不在了** ✗（实据都是产物里读出来的 ✓，不是推断）：
+     *   ① deliverables 的类名表里**已经没有** chevron / open / split 三项 ✓
+     *      （0.2.0 只剩 root / presented / file / cardPreview / fileBody / details / fileName /
+     *       description / actions / toggle … ✓）⇒ `cardActionOf` 与那条 CSS 全部落空 ✗；
+     *   ② 卡片右侧那排控件改由**新插件** `@deepseek-ai/dsh-client-ui-open-in-app` 经插槽
+     *      `deliverables.file.actions` 渲染 ✓（`PresentedFileCard` 现在只渲染一个 `div._actions`，
+     *      内容来自 `renderSlot("deliverables.file.actions", …)` ✓）；
+     *   ③ 它的文案也换了 ✓（0.2.0 的 deliverables 词典里 `presented.defaultApp` 与
+     *      `presented.directory` **两个键都没了** ✓）⇒ 按文案匹配**永远命中不了** ✗。
+     * ⇒ 于是"我们那版"在这张卡上**静默失效** ✓：屏幕上留下的就是 DSH 自己那套 ✓
+     *   （`div[data-open-target="file"]` + `button.main`「用 {app} 打开」+ `button.chevron`「更多打开方式」✓）。
+     *
+     * ## 做法（只加我们这一层 ✓，复用既有能力 ✗不重写）
+     *
+     * ① 外观：那条 `[data-presented-file] [data-open-target]{display:none}` 把 DSH 那套收起来 ✓；
+     * ② 位置：两个按钮插进 **DSH 自己放那个控件的容器** ✓（`[data-open-target]` 的父节点 ✓，
+     *    也就是 `div._actions` ✓ —— 它 `pointer-events:auto` ✓、又在 `cardPreview` 覆盖层之上 ✓
+     *    ⇒ 不用碰 React 的类名、也不用另找位置 ✓）；
+     * ③ 动作：**全部复用 round 128 就做好的两条路** ✓ —— 一个字都没重写 ✗：
+     *    「预览」→ `openCard`（同一条 DSH 预览桥 ✓，路径仍取自 `cardPreview` 的 title ✓）；
+     *    「手机下载」→ `runCardDownload`（同一条 `readRemoteFileBytes` + 壳的「下载」目录桥 ✓）。
+     * ④ 点击用**一条 document 捕获委托** ✓（不逐卡片挂监听 ✓ —— 卡片被 DSH 重渲染也不会留下旧监听 ✓）。
+     *
+     * ## 幂等与不自激（与 relabelNativeItems 同一条手法 ✓）
+     *
+     * `tuneCardControls` 只在"卡片里还没有我们那组"时才插 ✓ ⇒ 插完那一轮观察者会再进来一次，
+     * 这一轮**返回 0** ✓、不再写 DOM ✓ ⇒ 不会自激 ✗。
+     */
+    /** 我们的两颗按钮要插进哪儿 ✓：DSH 放 open-in-app 控件那个容器 ✓（找不到就如实返回 null ✓）。 */
+    function cardActionsHost(card) {
+      var native = card.querySelector('[data-open-target]')
+      if (native !== null && native.parentElement !== null) return native.parentElement
+      var marked = card.querySelector('[data-dshm-card-actions]')
+      if (marked !== null && marked.parentElement !== null) return marked.parentElement
+      return card.querySelector('div[class*="actions"]')
+    }
+
+    /** 一颗动作按钮 ✓（动作名写在属性上 ✓ ⇒ 一条委托监听就能认 ✓）。 */
+    function cardActionButton(act, label) {
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('data-dshm-card-act', act)
+      button.setAttribute('aria-label', label)
+      button.textContent = label
+      return button
+    }
+
+    /**
+     * 缺了就补、有了就不动 ✓（幂等 ✓）。
+     * @returns 这一轮补了几张卡片 ✓（0 = 观察者不用再排一轮 ✓）。
+     */
+    function tuneCardControls() {
+      if (document.querySelector('[data-presented-file]') === null) return 0
+      var cards = document.querySelectorAll('[data-presented-file]')
+      var changed = 0
+      for (var i = 0; i < cards.length; i++) {
+        var card = cards[i]
+        if (card.querySelector('[data-dshm-card-actions]') !== null) continue
+        var host = cardActionsHost(card)
+        if (host === null) continue
+        var group = document.createElement('div')
+        group.setAttribute('data-dshm-card-actions', '1')
+        group.appendChild(cardActionButton('preview', '预览'))
+        group.appendChild(cardActionButton('download', '手机下载'))
+        host.appendChild(group)
+        changed += 1
+      }
+      return changed
+    }
+
+    /**
+     * 两颗按钮的点击在**捕获阶段**认下来 ✓：
+     * 铺满整张卡的 `cardPreview` 覆盖层是我们的**兄弟节点**（不是祖先 ✓）⇒ 抢不走这两颗 ✓；
+     * 仍然 preventDefault + stopPropagation ✓（别顺带触发 DSH 自己那层 ✓）。
+     */
+    document.addEventListener(
+      'click',
+      function (event) {
+        try {
+          if (event === undefined || event === null) return
+          var node = event.target
+          if (node === null || node === undefined || typeof node.closest !== 'function') return
+          var button = node.closest('[data-dshm-card-act]')
+          if (button === null) return
+          var card = button.closest('[data-presented-file]')
+          if (card === null) return
+          event.preventDefault()
+          event.stopPropagation()
+          if (String(button.getAttribute('data-dshm-card-act') || '') === 'download') runCardDownload(card)
+          else openCard(card, '卡片「预览」')
+        } catch (error) {
+          void error
+        }
+      },
+      true,
+    )
+
+    tuneCardControls()
     relabelNativeItems()
     try {
       var menuObserver = new MutationObserver(function () {
         try {
+          tuneCardControls()
           if (relabelNativeItems() > 0) relabelNativeItems()
         } catch (error) {
           void error
@@ -22234,6 +22350,24 @@
         if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {
           console.warn('[dsh-mobile] rpcId 不一致（会导致 DSH 拒绝该响应）：发出', envelope.rpcId, '收到', response.rpcId)
         }
+        /**
+         * ★★★ 2026-10-04 深夜：交付那一段 —— 有附件表就交**真正的 multipart `Response`** ✓。
+         *
+         * 为什么（一句话）：DSH 客户端**只按 `content-type` 分流** ✓，走 JSON 那条路时
+         * 它的 `parseConnectionResponse(await response.json())` 会把 `Uint8Array` 打回普通对象 ✗
+         * ⇒ 我们在内存里装好的字节到不了它的 zod 校验 ✓。
+         * 交 multipart ⇒ **它自己的** `parseBinaryResponse` 按附件表把 `null` 占位换成
+         * `Uint8Array` ✓ ⇒ 它校验时就已经是对的 ✓。详见 `buildBinaryResponse` 的长注释 ✓。
+         * ★ 抛错**不吞**（不退回 JSON ✓）：有附件表就说明这一帧**确实带字节** ✓，
+         *   退回 JSON 是**必然错**的那条路 ✗ —— 与其静默重演老毛病 ✓，不如当场说清 ✓。
+         */
+        try {
+          var binaryResponse = buildBinaryResponse(response)
+          if (binaryResponse !== undefined) return binaryResponse
+        } catch (error) {
+          debugBoxLine('[bytes] 交 multipart 失败：' + String(error && error.message ? error.message : error))
+          throw error
+        }
         return new Response(JSON.stringify(response), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -22333,6 +22467,8 @@
     verifyHostSignature: verifyHostSignature,
     FrameType: FrameType,
     FrameFlags: FrameFlags,
+    /** ★ 交付那一段（帧 → multipart `Response` ✓）：测试直接调它 ✓（纯函数，不需要浏览器 ✓）。 */
+    buildBinaryResponse: buildBinaryResponse,
   }
 
   /**
@@ -22350,6 +22486,129 @@
     return tunnelReady.promise.then(function () {
       return globalThis.__DSH_TRANSPORT__
     })
+  }
+
+  /**
+   * ★★★ 2026-10-04 深夜：「帧 → multipart `Response`」——把字节**活着**交到 DSH 校验的那一刻。
+   *
+   * ## 为什么非这样不可（根因，源码为证）
+   *
+   * DSH 的客户端拿到我们的响应后，只看 `content-type` 分流
+   * （`@deepseek-ai/dsh-client-connection/lib/client.js:1228` ✓）：
+   * · `multipart/form-data` ⇒ `parseBinaryResponse()`（同文件 `:1240`）——按附件表把 `null`
+   *   占位换成 `new Uint8Array(await blob.arrayBuffer())`（同文件 `:1271` ✓）；
+   * · 否则 ⇒ `parseConnectionResponse(await response.json())`——**任何一次 JSON 往返都会把
+   *   `Uint8Array` 打回普通对象** ✗。
+   *
+   * ⇒ 我们在内存里把值换成 `Uint8Array` 是**到不了**它的 zod 校验的 ✗（那条路必然再过一次 JSON ✓）。
+   *   唯一活路：交一枚**真正的 `Response`**，形状与 DSH 宿主自己的 `fullResponse` 逐字段一致
+   *   （`dsh-client-connection/lib/index.js:723` ✓：`metadata` 分片装信封 JSON ✓、
+   *   `bytes-<n>` 分片装原始字节 ✓、附件表三项 `{path, codec:"bytes", part}` ✓）。
+   *   这样**它自己的** `parseBinaryResponse` 会把占位换成 `Uint8Array` ✓ ⇒ 它校验时就已经是对的 ✓。
+   *   （它期待的形状见 `dsh-api-workspace-files/lib/typert.remote-client.js:69` 的
+   *   `'data': z.instanceof(Uint8Array)` ✓ —— 报错就出在这一格 ✓。）
+   *
+   * ## 分工（本仓忌「同一件事两份」✓ —— 两套还原各自负责哪一段）
+   *
+   * · **本函数（交付那一段 ✓）**：负责「交给 DSH 那一刻值是对的」✓ —— 只有它能救 zod 校验 ✓；
+   * · 帧处理器里那套「按附件表装回」（`FrameType.RpcResponse` 那一支 ✓）：只服务**不经 DSH
+   *   的 JSON 往返**的读取方（本页内部 `tunnel.rpc` · 调试框读数 ✓）✗ —— 它不再声称负责最后一步 ✓；
+   * · `decodeBinaryValue`（`$dshmBytes` 标记 ✓）：**两套都要用它** ✓ —— 附件表里的 `bytes` 在帧里
+   *   是我们自己的标记形式 ✓，先还原成真字节 ✓ 才谈得上交出去 ✓。
+   */
+  /**
+   * 这个页面交不交得了 multipart（缺任何一个能力都不能走这条路 ✗）。
+   *
+   * ★ 为什么要有这道闸：`parseBinaryResponse` 是**DSH 那边**调 `response.formData()` 的 ✓ ——
+   *   页面没有 `FormData` / `Response.prototype.formData` 时，交出去它照样解析不了 ✗
+   *   ⇒ 与其交一个必然抛错的响应 ✓，不如退回 JSON 并把这件事**念出来** ✓（不静默 ✗）。
+   */
+  function canBuildBinaryResponse() {
+    return typeof FormData === 'function'
+      && typeof Blob === 'function'
+      && typeof Response === 'function'
+      && typeof Response.prototype.formData === 'function'
+  }
+
+  /**
+   * 把附件落点**写回 `null` 占位** ✓（`path` 相对 `result.value` ✓，与 DSH 的
+   * `parseBinaryResponse` 同一套走法 ✓）。
+   *
+   * ★ 为什么必须显式写回 ✗：DSH 对占位有一条硬校验
+   *   （`Reflect.get(parent, key) !== null` ⇒ 抛 `invalid binary response placeholder` ✓），
+   *   而帧处理器那套「内存里装回」**可能已经把这个位置填成 `Uint8Array`** ✓
+   *   ⇒ 不写回，交出去的 metadata 会让 DSH 当场抛错 ✗（比原来更难查 ✓）。
+   * ★ 顺带补上缺键：占位若在宿主侧是 `undefined`，`JSON.stringify` 会把整个键**丢掉** ✗
+   *   ⇒ DSH 走到那一格会判「路径走不通」✓；这里显式补 `null` ✓。
+   */
+  function writeNullPlaceholder(root, path) {
+    var node = root
+    for (var i = 0; i < path.length - 1; i++) {
+      if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（中间不是对象）')
+      node = node[path[i]]
+    }
+    if (node === null || typeof node !== 'object') throw new Error('附件的路径走不通（父节点不是对象）')
+    node[path[path.length - 1]] = null
+  }
+
+  /**
+   * 把一帧「带附件表的 `server-response`」交成一枚 multipart `Response` ✓；
+   * **没有附件表**（或页面交不了 multipart）⇒ 返回 `undefined` ✓（调用方退回 JSON ✓）。
+   *
+   * 形状逐字段对齐 DSH 宿主自己的 `fullResponse`（`dsh-client-connection/lib/index.js:723` ✓）：
+   * ```
+   * metadata = { type, rpcId, result: { ok: true, value }, attachments: [{ path, codec: 'bytes', part }] }
+   * bytes-0  = 原始字节（Blob ✓）
+   * ```
+   * ★ `attachments` 在**信封顶层** ✗（不是 `result.attachments` ✓）—— DSH 读的是
+   *   `envelope.attachments` ✓，而我们隧道帧里的附件表在 `result.attachments` ✓
+   *   （那是 `encodeRpcResult` 的产物 ✓）⇒ 这一层必须**搬**上去 ✓。
+   * ★ `path` 原样透传 ✓（它相对 `result.value` ✓，DSH 的走法与我们这份一致 ✓）。
+   */
+  function buildBinaryResponse(response) {
+    var result = response === null || response === undefined ? undefined : response.result
+    if (result === null || result === undefined || typeof result !== 'object' || result.ok !== true) return undefined
+    var attachments = result.attachments
+    if (Object.prototype.toString.call(attachments) !== '[object Array]' || attachments.length === 0) return undefined
+    if (!canBuildBinaryResponse()) {
+      debugBoxLine('[bytes] 本页没有 FormData/Blob/Response.formData ⇒ 只能走 JSON（字节到不了 DSH 的校验）')
+      return undefined
+    }
+    var envelope = {
+      type: response.type,
+      rpcId: response.rpcId,
+      result: { ok: true, value: result.value },
+      attachments: [],
+    }
+    var form = new FormData()
+    for (var i = 0; i < attachments.length; i++) {
+      var attachment = attachments[i]
+      var path = attachment === null || attachment === undefined ? undefined : attachment.path
+      if (Object.prototype.toString.call(path) !== '[object Array]' || path.length === 0) {
+        throw new Error('附件路径为空，拒绝猜它该放到哪')
+      }
+      /**
+       * ★ 用 `ArrayBuffer.isView` 而不是 `instanceof Uint8Array` ✗：本文件也跑在 vm 沙箱里
+       *   （测试 ✓）、可能跑在 iframe 里 ✓，跨 realm 的 `instanceof` 会**假** ✓，
+       *   而 `ArrayBuffer.isView` 是按内部槽判的 ✓。`decodeBinaryValue` 那条路照旧保留 ✓。
+       */
+      var bytes = attachment.bytes
+      if (!ArrayBuffer.isView(bytes)) {
+        if (Object.prototype.toString.call(bytes) === '[object ArrayBuffer]') bytes = new Uint8Array(bytes)
+        else bytes = decodeBinaryValue(bytes)
+      }
+      if (!ArrayBuffer.isView(bytes)) throw new Error('附件的 bytes 不是字节（宿主那一端编码没生效？）')
+      var part = 'bytes-' + i
+      form.set(part, new Blob([bytes]))
+      envelope.attachments.push({ path: path.slice(), codec: 'bytes', part: part })
+      /**
+       * ★ 落点必须是 `null` 占位 ✓（DSH 的硬校验只认 `null` ✓）——
+       *   无论帧处理器那套内存还原有没有跑过 ✓，这里**一律写回 `null`** ✓。
+       */
+      writeNullPlaceholder(result.value, path)
+    }
+    form.set('metadata', JSON.stringify(envelope))
+    return new Response(form)
   }
 
   /**
@@ -22597,7 +22856,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1004155047'
+    var BOOT_STAMP = 'BUILD-1005072031'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

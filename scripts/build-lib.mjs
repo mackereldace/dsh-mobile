@@ -28,6 +28,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { bootStamp, buildBootPayload } from './boot-payload.mjs'
+import { HOST_ASSETS_ROOT, copyRuntimeAssets } from './lib/runtime-assets.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -146,6 +147,38 @@ try {
     rewriteProtocolImports(hostLib, '')
     console.log(
       `[build-lib] 已内联 protocol → packages/host/lib/protocol/（${copied} 个文件 ✓，改写 ${rewrote} 个文件的引用 ✓）`,
+    )
+  }
+
+  /**
+   * ★★ 把**运行时 assets** 拷进 `packages/host/lib/assets/` ✓（2026-10-05，用户实测的真 bug ✓）。
+   *
+   * ## 不拷会怎样 ✗（原话：「点击那个通知不能直接跳转到对话」✓）
+   *
+   * 手机上点通知 ⇒ 想开这台机器的会话页 ⇒ 宿主回 `mobile/internal`
+   * 「会话页 HTML 未找到（assets/dsh-chat/page.html）」✗。
+   * 那个 HTML 在 `packages/host/assets/` 里**明明有** ✓ ——
+   * 而**装出去的是 `lib/`** ✗，tsc 又只编 `.ts` ✓ ⇒ `lib/assets` 从来不存在 ✗。
+   *
+   * ★ 为什么放进 `lib/` 而不是包根 ✗（两个理由，都不是口味问题 ✓）：
+   *   1. `packages/host/package.json` 的 `files` 只声明了 `lib` ✓
+   *      ⇒ 包根那份在 npm 打包那条路上会被**丢掉** ✗；
+   *   2. 本项目已经有过同一条结论 ✓（`scripts/make-app-icons.mjs`：
+   *      「宿主插件装到 profile 里的是 lib/，运行时再去读仓库的 assets 会读不到」✓）。
+   *   ⇒ 于是运行时那两条候选路径的**第 1 条**（`<模块目录>/assets/…` ✓）就命中它 ✓
+   *     （见 `packages/host/src/host-assets.ts` ✓）。
+   *
+   * ★ 清单与拷贝都只有一处实现 ✓（`scripts/lib/runtime-assets.mjs` ✓）——
+   *   这里与安装器各自**调用**它 ✓；缺源文件就抛 ⇒ 构建失败并回滚 ✓
+   *   （不留「源码对、产物缺东西」的半成品 ✗）。
+   */
+  if (!checkOnly) {
+    const assetsCopied = copyRuntimeAssets(
+      join(repo, HOST_ASSETS_ROOT),
+      join(repo, 'packages', 'host', 'lib', 'assets'),
+    )
+    console.log(
+      `[build-lib] 已拷入运行时 assets → packages/host/lib/assets/（${assetsCopied} 个文件 ✓ —— 会话页与 codex 页的磁盘资源 ✓）`,
     )
   }
 
