@@ -2195,6 +2195,88 @@
   }
 
   /**
+   * ★★ 2026-10-05：**系统通知的统一出口** ✓ —— 蓝色横幅 / 页面提示条改用安卓通知时都走它 ✓。
+   *
+   * 用户原话：「把我们的蓝色横幅都改成安卓的通知」✓ +「那种中间跳的横幅（下载跳的那种）
+   * 也改成安卓的通知」✓。下载那条链早已改完（`downloadNotice` ✓），这里是**其余能换的**那两处 ✓。
+   *
+   * ## 为什么要有这一层 ✗（而不是各自直调 `shellNotify` ✓）
+   *
+   * 壳那条渠道是 `IMPORTANCE_HIGH` ✓、而且**没设** `onlyAlertOnce` ✗ ⇒ 同一条连着来几次
+   * 就**每次都会响** ✓（例如每 4 秒一轮的轮询连着投递同一条剪贴板正文 ✓）。
+   * ⇒ 去重窗必须加 ✓，而**只能加在客户端** ✓ —— 改壳侧要重打 APK、手机得覆盖安装 ✗，
+   *   而本轮的目标恰恰是"**不用装 APK**、刷新页面就生效"✓。
+   *
+   * ## 三条契约（与 `downloadNotice` / `shellClipboard` 同一套写法 ✓）
+   *
+   * · **长度**：通知里先截 ✓（标题 20 / 正文 72 —— 照 `downloadNotice` 那位先例 ✓；
+   *   壳自己还会再截一遍 40 / 220 / BigText 500 ✓）；超出加 `…` ✓；
+   * · **无壳退什么** ✗：`shellNotify` 返回 `null` ⇔ 没有壳 ✓ ⇒ 退 `shellToast` ✓（深色底部条 ✓）。
+   *   ★ **绝不退回 `drawBar`** ✗ —— 那正是本轮要消掉的蓝条 ✓，退回去等于白改 ✗；
+   *   ★ 退给提示条的正文**不按 72 截** ✗（见 `SHELL_NOTICE_PAGE_MAX` 那段证据 ✓）；
+   * · **去重**：10 秒内**同一条**（键 = 标题 + 正文 ✓）只发一次 ✓；重复那条**连提示条也不弹** ✓
+   *   —— 第一条那 12 秒的提示条本来就还在屏幕上 ✓（见 `shellToast` 的 12_000 ✓），用户什么都没少看见 ✓。
+   *
+   * @param title 通知标题 ✓（≤20 字 ✓）。
+   * @param body  **通知**里的正文 ✓（≤72 字 ✓）；退到提示条时也用它（截到 220 字 ✓）。
+   * @param pageText 只在"通知那 72 字"会切掉关键半句时才给 ✓（省略 ⇒ 与 `body` 同一句 ✓）：
+   *   提示条没有 72 字这个约束 ✓，于是"页面上那句"仍然可以与旧行为**逐字一致** ✓
+   *   （手动重连那条就是这种情形 ✓ —— 见调用点与 `SHELL_NOTICE_PAGE_MAX` ✓）。
+   * @returns `'notify'`（通知已发出 ✓）/ `'toast'`（退回页面提示条 ✓）/ `'dedup'`（窗口内重复 ⇒ 什么都没做 ✓）。
+   */
+  var SHELL_NOTICE_TITLE_MAX = 20
+  var SHELL_NOTICE_BODY_MAX = 72
+  /**
+   * ★ 退给**页面提示条**的正文上限 ✓ —— **必须**比 `shortReason` 的上限（120 ✓）加上那句
+   *   「（可再点一次那颗橙色提示重试）」（16 字 ✓）还宽 ✓：否则"点哪颗橙色提示"会被截掉 ✗
+   *   ⇒ `scripts/check-mobile-layout.mjs` 第 152-⑨ 条（它读的正是**无壳**时这条提示条 ✓）当场红 ✗。
+   *   取 220 = 壳自己给正文的上限（`MainActivity` 那条 ✓）⇒ 两条路说的信息量一致 ✓。
+   */
+  var SHELL_NOTICE_PAGE_MAX = 220
+  var SHELL_NOTICE_DEDUP_MS = 10_000
+  /** 同一条通知**上一次发出**的时刻表 ✓（键 = 标题 + 正文 ✓；每页一份 ✓）。 */
+  var shellNoticeSentAt = {}
+
+  /**
+   * 去重判据 ✓（**纯的**：`now` 由调用方给 ✓ —— 测试注入时钟即可，不必真等 10 秒 ✓）。
+   * 返回 true ⇔ 窗口内已经发过同一条 ✓（并在**第一次**返回 false 时把时刻记下 ✓）。
+   */
+  function shellNoticeDeduped(key, now) {
+    var at = shellNoticeSentAt[key]
+    if (at !== undefined && now - at < SHELL_NOTICE_DEDUP_MS) return true
+    shellNoticeSentAt[key] = now
+    return false
+  }
+
+  /** 截一段文本 ✓（只给**通知**那一侧用 ✓ —— 页面提示条用的是另一个上限 ✓，见上面 ✓）。 */
+  function shellNoticeShort(value, max) {
+    var text = String(value === undefined || value === null ? '' : value)
+    return text.length > max ? text.slice(0, max) + '…' : text
+  }
+
+  function shellNotice(title, body, pageText) {
+    var head = shellNoticeShort(title, SHELL_NOTICE_TITLE_MAX)
+    var notice = shellNoticeShort(body, SHELL_NOTICE_BODY_MAX)
+    if (shellNoticeDeduped(head + '\u0000' + notice, Date.now())) {
+      debugBoxLine('[notice] ' + String(SHELL_NOTICE_DEDUP_MS / 1000) + ' 秒内同一条不再重复发：' + head)
+      return 'dedup'
+    }
+    var result = shellNotify(head, notice, '')
+    if (result === 'ok') {
+      debugBoxLine('[notice] 系统通知已发出：' + head + '｜' + notice)
+      return 'notify'
+    }
+    /**
+     * ★ 退给提示条的是**没按 72 截过的**那一句（上限 `SHELL_NOTICE_PAGE_MAX` ✓）——
+     *   两份证据 ✓：① 与旧行为逐字一致 ✓（`shellClipboard` 那条契约的同一套写法 ✓）；
+     *   ② 上面那段：既有验收 152-⑨ 钉着它 ✓。
+     */
+    shellToast(head + '：' + shellNoticeShort(pageText === undefined ? body : pageText, SHELL_NOTICE_PAGE_MAX))
+    debugBoxLine('[notice] 系统通知没发出去（' + String(result) + '）⇒ 退回页面提示条：' + head)
+    return 'toast'
+  }
+
+  /**
    * ★ 发一条**原生**系统通知 ✓ —— APK 里唯一进得了通知栏的路 ✓。
    *
    * 为什么网页那套（`new Notification()` / `ServiceWorkerRegistration.showNotification()`）
@@ -4622,6 +4704,21 @@
         seconds +
         ' 秒仍未成功，已停止自动重连。请点左侧栏那颗橙色提示手动重连。'
     if (isShellSurface()) {
+      /**
+       * ★★ 2026-10-05：这一处**刻意一个字都不改** ✗ —— 记下来免得下一轮又有人来"改成通知"✗。
+       *
+       * 起因：用户要求"这种中间跳的横幅也改成安卓的通知"✓，普查据此提出**删掉**下面这行
+       *   （理由：紧邻的下一行已经发了同样的系统通知 ⇒ 换成通知会变成**发两条**✗）。
+       * ★ 但删不得 ✗：`scripts/check-mobile-layout.mjs` 第 152-② 条（同文件 12066-12072 ✓）
+       *   断言的就是**这条提示条**里有「已停止自动重连」+「试满 5 次」+「手动重连」✓；
+       *   而这句话在 `boot.js` 里**只由**这一行写出去 ✓（`text` 的两个分支都只喂给它 ✓）
+       *   ⇒ 删掉 = 那条既有验收的唯一观测源没了 ⇒ 当场红 ✗。
+       *   同一节的第 152-④ 条又要求这一处 `notify` **恰好 1 次** ✓ ⇒ 两条都要留 ✓。
+       * ★ 而"发两条通知"这个真风险已经由**下面这行**自己承担 ✓：它**不走** `shellNotice`
+       *   （带客户端去重窗那条路 ✗）⇒ 恰好一条通知 ✓。
+       *   `packages/client/test/boot-surface.test.ts` 里那条守卫钉的就是这件事 ✓：
+       *   这一块**恰好一个 `shellNotify`、零个 `shellNotice`** ✓。
+       */
       shellToast(text)
       shellNotify('DSH 移动端：连接中断', text)
     }
@@ -4638,7 +4735,27 @@
 
   /** 用户手动重连失败：**原地**说清原因 ✓（保持可点 ⇒ 用户可再点 ✓）。 */
   Tunnel.prototype.reportManualReconnectFailure = function (reason) {
-    if (isShellSurface()) shellToast('手动重连失败：' + reason + '（可再点一次那颗橙色提示重试）')
+    /**
+     * ★★ 2026-10-05：这一条从**页面提示条**改走**系统通知** ✓ —— 用户原话
+     *   「那种中间跳的横幅 … 也改成安卓的通知」✓。
+     *
+     * ★ 无壳（或老壳没有 `notify` 桥 ✓）⇒ `shellNotice` 退 `shellToast` ✓，而且第三参数拼出来的
+     *   那一句与旧行为**逐字一致** ✓（标题 + `：` + 旧正文 = 原来那一句 ✓）——
+     *   `scripts/check-mobile-layout.mjs` 第 152-⑨ 条正是在**拆掉假壳之后**读这条提示条 ✓
+     *   （同文件 12173 那一步先 `removeFakeShell()` ✓，注释写明"手动那一下不需要壳"✓）。
+     * ★ 通知那句**把该做的动作放在最前** ✗（「可再点一次那颗橙色提示重试」✓）：真机上
+     *   `shortReason` 允许到 120 字 ✓ ⇒ 按旧语序拼、"点哪颗"那半句会被 72 字的上限切掉 ✗
+     *   （通知里就只剩一个光秃秃的原因、用户不知道该干什么 ✓）。
+     *   页面那句**保持旧语序** ✓（152-⑨ 与用户看到的那句话都一个字不改 ✓）。
+     * ★ `isShellSurface()` 那道闸照旧 ✗：桌面浏览器上没有壳、也不该弹提示条 ✓（旧行为一个字不改 ✓）。
+     */
+    if (isShellSurface()) {
+      shellNotice(
+        '手动重连失败',
+        '可再点一次那颗橙色提示重试。原因：' + String(reason),
+        String(reason) + '（可再点一次那颗橙色提示重试）',
+      )
+    }
     debugBoxLine('[tunnel] 手动重连失败：' + reason)
   }
 
@@ -23095,6 +23212,25 @@
       return frameDesyncAt
     },
     ReplayWindow: ReplayWindow,
+    /**
+     * ★★ 2026-10-05：**隧道构造器本身** ✓ —— 让测试能直接造一个 Tunnel、只调它的
+     *   `reportManualReconnectFailure` / `giveUpAutoReconnect` ✓，而不必起一条假 WebSocket ✓。
+     *
+     * 为什么可以露出 ✗：`__DSH_MOBILE_BOOT__.tunnel` **本来就把活的 Tunnel 实例露出去了** ✓
+     *   （`scripts/check-mobile-layout.mjs` 全篇在改它的 `autoPaused` / `failStreak` ✓），
+     *   而 `__DSH_MOBILE_INTERNALS__` 这一格本来就是"测试与排障"用的 ✓ ⇒ 不新增任何暴露面 ✓。
+     * ★ 构造函数是**纯记账**（没有 socket、没有 DOM ✓）⇒ 造出来不会有副作用 ✓。
+     */
+    Tunnel: Tunnel,
+    /**
+     * ★★ 2026-10-05：**系统通知的去重判据本身** ✓（纯的：`now` 由调用方给 ✓）。
+     *
+     * 为什么必须露出来 ✗：这是本轮新加的唯一一处"**看不见的**"逻辑 ✓ —— 它在真机上的
+     * 正确性表现为"同一条不会被响两次"✓，而这件事在页面这一侧**没有别的读数** ✗。
+     * 露出这个纯函数之后，"窗口**正好**是 10 秒"可以**注入时钟**量 ✓
+     * （不必让测试真等 10 秒 ✗，也不必只对着常量写一条正则 ✓）。
+     */
+    shellNoticeDeduped: shellNoticeDeduped,
     transcriptHash: transcriptHash,
     fingerprintOf: fingerprintOf,
     formatFingerprint: formatFingerprint,
@@ -24403,7 +24539,16 @@
             }
             detail = 'banner-manual'
           } else {
-            drawBar('info', '已放进手机剪贴板（' + String(text).slice(0, 60) + '）', [], false)
+            /**
+             * ★★ 2026-10-05：这一条从**蓝色横幅**改走**系统通知** ✓ —— 用户原话
+             *   「把我们的蓝色横幅都改成安卓的通知」✓。
+             *
+             * ★ 无壳（手机浏览器打开 / 老壳没有 `notify` 桥 ✓）⇒ `shellNotice` 自己退
+             *   **页面提示条** ✓，**绝不**退回蓝横幅 ✗（退回去等于没改 ✓）。
+             * ★ `detail` 与下面那句 `ok = how !== undefined` **一个字都不改** ✗ ——
+             *   宿主与验收脚本认的就是 `copied:` 那个口径 ✓（见 `check-device-channel.mjs` ⑥a/⑥b ✓）。
+             */
+            shellNotice('已放进剪贴板', String(text))
             detail = 'copied:' + how
           }
           buzz()

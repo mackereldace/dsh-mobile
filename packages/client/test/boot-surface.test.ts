@@ -86,6 +86,23 @@ interface Surface {
   internals: {
     parseFrame: (bytes: Uint8Array, hasTag: boolean) => unknown
     frameDesyncAt: () => number
+    /**
+     * ★★ 本轮追加：**隧道构造器本身** ✓（生产类 ✓，不是复制品 ✓）—— 让"手动重连失败"与
+     *   "自动重连放弃"这两处不必起一条假 WebSocket 就能驱动 ✓（构造函数是纯记账 ✓，
+     *   见 `boot.js` 里那句 `Tunnel: Tunnel` 的说明 ✓）。
+     */
+    Tunnel: new (config: Record<string, unknown>) => {
+      reportManualReconnectFailure: (reason: string) => void
+      giveUpAutoReconnect: (reason: string) => void
+      autoPaused: boolean
+      failStreak: number
+    }
+    /**
+     * ★★ 本轮追加：**系统通知的去重判据本身** ✓（纯函数 ✓，`now` 由调用方给 ✓）。
+     *   为什么需要 ✗：行为那条只证明"**有**一个窗"✓ —— 窗户**多宽**只有它量得到 ✓
+     *   （注入时钟 ✓，不必真等 10 秒 ✗）。
+     */
+    shellNoticeDeduped: (key: string, now: number) => boolean
   }
   /**
    * ★ round 185 追加：`__DSH_MOBILE_BOOT__` ✓ —— 取证读数走它的 `.apk.deviceCallLog()` ✓
@@ -131,6 +148,15 @@ interface Surface {
    * 生产代码是**整体赋值** cssText 的 ✓，不是逐条 setProperty ✓）。
    */
   infoBanner: () => Array<{ attrs: Record<string, string>; text: string; css: string }>
+  /**
+   * ★★ 本轮追加：页面上那条深色提示条（`#dshm-shell-toast` ✓）**当前**的文案 ✓；
+   *   `null` ⇔ 生产代码**压根没造过**这个元素 ✓（"没弹"与"弹了别的"因此分得开 ✓）。
+   *
+   * 为什么要有这个口子 ✗：假 DOM 没有选择器引擎 ✓ ⇒ 只能顺着 `appendChild` 时登记的
+   *   那张 id → 元素表去取 ✓ —— 读的仍然是**生产代码自己造的那个元素** ✓（不是另抄一份 ✓）。
+   *   它证明的是"**没壳时退的是提示条、不是蓝横幅**"✓（本轮的核心契约之一 ✓）。
+   */
+  toastText: () => string | null
 }
 
 /** ★★ R5：`identityDiagnostics()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
@@ -185,6 +211,14 @@ function bootOnSurface(options: {
   storageThrowsForLog?: boolean
   /** ★ 追加：沙箱里的定时器 unref ✓ —— 免得 drawBar 那个 15 秒清理定时器把测试进程挂住 ✓。 */
   unrefTimers?: boolean
+  /**
+   * ★★ 本轮追加：把**网页那条剪贴板路**打桩成"可用"✓（默认不打桩 ⇒ 不传时与原来逐字一致 ✓）。
+   *
+   * 为什么需要 ✗：本沙箱的 `navigator` 原来**没有** `clipboard` ✓、`document` **没有**
+   * `execCommand` ✓ ⇒ "没壳 + 剪贴板真的写进去了"这一态在测试里**根本到不了** ✗
+   * （只能到"两条路都不行"的降级横幅 ✓），而本轮新加的那条"**无壳** ⇒ 退页面提示条"正好要它 ✓。
+   */
+  webClipboard?: boolean
 }): Surface {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
@@ -327,7 +361,16 @@ function bootOnSurface(options: {
       clear: () => store.clear(),
     },
     history: { replaceState: () => {}, pushState: () => {} },
-    navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 10; K)', vibrate: () => true },
+    /**
+     * ★★ 本轮追加：`webClipboard` 打开时给一条**能写进去**的网页剪贴板路 ✓
+     *   （`navigator.clipboard.writeText` ✓ —— 生产代码判的就是这个属性 ✓，见 `copyText` ✓）。
+     *   默认（不传）时这一个键**压根不存在** ✓ ⇒ 既有用例看到的东西与原来逐字一致 ✓。
+     */
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Linux; Android 10; K)',
+      vibrate: () => true,
+      ...(options.webClipboard === true ? { clipboard: { writeText: async () => undefined } } : {}),
+    },
     Notification: { permission: 'granted', requestPermission: async () => 'granted' },
     WebSocket: class {
       readyState = 0
@@ -381,6 +424,10 @@ function bootOnSurface(options: {
             css: String(((child['style'] ?? {}) as Record<string, unknown>)['cssText'] ?? ''),
           })),
         ),
+    toastText: () => {
+      const box = registry.get('dshm-shell-toast')
+      return box === undefined ? null : String(box['textContent'] ?? '')
+    },
   }
 }
 
@@ -886,6 +933,373 @@ test('★ 剪贴板原生桥：降级横幅里**正文单独一个元素**（长
   assert.ok(
     !(kids[0]?.text ?? '').includes('这段文字没能进剪贴板'),
     '★ 前缀那一块**不许夹带正文**（否则长按选中还是会把说明一起带走 ✗）',
+  )
+})
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ 2026-10-05：**蓝横幅 / 页面提示条 ⇒ 安卓系统通知**（用户原话）
+ *
+ *   「把我们的蓝色横幅都改成安卓的通知」✓ +
+ *   「那种中间跳的横幅 … 就像我之前跟你说的下载跳的那种横幅，也改成安卓的通知」✓
+ *
+ * ## 这一组钉住什么（每条都写了"怎么把它打红" ✓）
+ *   · 剪贴板**成功**那条蓝横幅 ⇒ 走 `shellNotify` ✓（有壳 ✓；**无壳退提示条** ✓，绝不回蓝横幅 ✗）；
+ *   · **手动重连失败**那条提示条 ⇒ 走 `shellNotify` ✓（无壳时文案与旧行为**逐字**一致 ✓）；
+ *   · **自动重连放弃**那一处 ⇒ **一个字都不许改** ✗（提示条 + **恰好一条**通知 ✓ ——
+ *     理由写在 `boot.js` 那一处自己的注释里 ✓，也是 `scripts/check-mobile-layout.mjs`
+ *     第 152-② / 152-④ 条钉着的东西 ✓）；
+ *   · **10 秒去重窗** ✓：行为一条（同一条第二次不再发 ✓ —— 真实时钟下两次只隔几十毫秒 ✓，
+ *     不必真等 ✓）+ **边界一条**（注入时钟 ✓：9.999 秒仍挡、10.001 秒放行 ✓）。
+ *
+ * ★ 断言全部打在**生产路径**上 ✓（真的驱动一轮端侧 poll ✓ / 真的构造生产 `Tunnel` ✓ /
+ *   读的是生产代码自己造的那个 DOM 元素 ✓），没有一条是"另抄一份再断言它"✗。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 假壳 + **把壳收到的每一条通知记下来** ✓（标题 / 正文 ✓）。
+ *
+ * 为什么必须记正文 ✗：`shellNotify` 那一句 `String(bridge.notify(...))` 只回一个**状态码** ✓，
+ * "壳到底收到了什么"在页面这一侧**只有**这个记录口看得见 ✓
+ * （`scripts/check-device-channel.mjs` 用的就是同一种做法 ✓）。
+ */
+function makeRecordingShell(notifyReturn: string): {
+  shell: Record<string, unknown>
+  notes: Array<{ title: string; body: string }>
+} {
+  const notes: Array<{ title: string; body: string }> = []
+  const shell = makeFakeShell(notifyReturn)
+  shell['notify'] = (title: unknown, body: unknown) => {
+    notes.push({ title: String(title), body: String(body) })
+    return notifyReturn
+  }
+  return { shell, notes }
+}
+
+/** 造一个**生产** `Tunnel` ✓（`__DSH_MOBILE_INTERNALS__.Tunnel` ✓ —— 构造是纯记账，不开 socket ✓）。 */
+function makeTunnel(surface: Surface): {
+  reportManualReconnectFailure: (reason: string) => void
+  giveUpAutoReconnect: (reason: string) => void
+} {
+  return new surface.internals.Tunnel({ tunnelUrl: 'wss://10.34.221.181:3443/mobile/ws' })
+}
+
+test('★ 蓝横幅改通知：剪贴板成功 ⇒ 走系统通知（蓝横幅消失 ✓）', async () => {
+  const { shell, notes } = makeRecordingShell('ok')
+  shell['setClipboard'] = () => 'ok'
+  const fake = makeDeviceTransport({ rounds: [[clipboardCall('call-notice-clip', '要复制的正文')]] })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    shell,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 clipboard 那条成功分支里的 `shellNotice('已放进剪贴板', String(text))`
+  //   改回 `drawBar('info', '已放进手机剪贴板（' + String(text).slice(0, 60) + '）', [], false)`
+  //   ⇒ 下面 notes 那两条立刻红（壳一条都没收到 ✓）且 infoBanner 那条也红（蓝横幅又回来了 ✓）；
+  //   本文件其余用例一条都不红 ✓。
+  assert.equal(notes.length, 1, `壳必须收到**恰好一条**通知（实际：${JSON.stringify(notes)}）`)
+  assert.equal(notes[0]?.title, '已放进剪贴板', '标题就是那六个字 ✓')
+  assert.equal(notes[0]?.body, '要复制的正文', '正文就是剪贴板正文本身 ✓')
+  assert.equal(surface.infoBanner().length, 0, '★ 蓝色横幅必须消失（用户要消掉的就是它 ✓）')
+  assert.equal(surface.toastText(), null, '通知已经发出去了 ⇒ 不该再弹页面提示条 ✓')
+  const log = readLog(surface)
+  assert.equal(log[2]?.outcome, 'ok', '★ `ok` 的口径一个字都不改（实际还是"真的写进去了"✓）')
+  assert.match(String(log[2]?.detail), /copied:shell-clipboard/, '`detail` 口径一个字都不改 ✓')
+  assert.match(fake.reportBodies[0] ?? '', /"ok":true/, '回报给宿主的仍是成功 ✓')
+})
+
+test('★ 蓝横幅改通知：**无壳**时剪贴板成功 ⇒ 退页面提示条（绝不退回蓝横幅 ✗）', async () => {
+  /**
+   * `webClipboard: true` ⇒ 网页那条路**真的写进去了** ✓（本沙箱原先两条网页路都不通 ✓，
+   * 于是"没壳 + 成功"这一态根本到不了 ✓）。**壳一个都不给** ✓ —— 这正是"手机浏览器打开"的样子 ✓。
+   */
+  const fake = makeDeviceTransport({ rounds: [[clipboardCall('call-notice-noshell', '无壳也要说清')]] })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    webClipboard: true,
+    unrefTimers: true,
+  })
+  surface.intervals[0]?.()
+  await settle()
+  // 怎么把它打红：把 `shellNotice` 里那句退路 `shellToast(...)` 换成
+  //   `drawBar('info', ...)` ⇒ 下面 infoBanner 那条与 toastText 那条立刻红 ✓
+  //   （"退回了正在被消掉的那种蓝条"✓ —— 那等于本轮白改 ✓）；
+  //   而"有壳那条"用例仍绿 ✓（它压根走不到退路 ✓）。
+  assert.equal(surface.infoBanner().length, 0, '★ 绝不许退回蓝横幅 ✓（这是本轮的核心契约 ✓）')
+  assert.match(
+    String(surface.toastText()),
+    /无壳也要说清/,
+    `无壳 ⇒ 深色提示条把同一件事说清（实际：${JSON.stringify(surface.toastText())}）`,
+  )
+  const log = readLog(surface)
+  assert.equal(log[2]?.outcome, 'ok', '无壳走网页那条路，照旧成功 ✓')
+  assert.match(String(log[2]?.detail), /copied:clipboard/, 'detail 照旧说清走的是网页那条路 ✓')
+})
+
+test('★ 去重窗：10 秒内**同一条**通知只发一次（第二条不再响，但请求照旧被执行）', async () => {
+  const { shell, notes } = makeRecordingShell('ok')
+  shell['setClipboard'] = () => 'ok'
+  // ★ 前两轮**同一句正文**（id 不同 ⇒ 这是两次投递 ✓，不是同一条被重放 ✓）；
+  //   第三轮换一句 ⇒ 它**必须**照发 ✓（去重是"同一条"✓，不是"这一段时间内什么都不发"✗）。
+  const fake = makeDeviceTransport({
+    rounds: [
+      [clipboardCall('call-dedup-1', '同一条正文')],
+      [clipboardCall('call-dedup-2', '同一条正文')],
+      [clipboardCall('call-dedup-3', '换了一句正文')],
+    ],
+  })
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    transport: fake.transport,
+    shell,
+    unrefTimers: true,
+  })
+  const onTick = surface.intervals[0]
+  assert.ok(onTick !== undefined, '端侧通道应至少注册一个轮询定时器')
+  onTick()
+  await settle()
+  onTick()
+  await settle()
+  onTick()
+  await settle()
+  // 怎么把它打红：把 `shellNotice` 里那句
+  //   `if (shellNoticeDeduped(...)) { ...; return 'dedup' }` 删掉（或把窗口改成 0）
+  //   ⇒ 下面 notes.length 变成 3 ⇒ 当场红 ✓（★ 三次调用相隔只有几十毫秒 ✓，
+  //   真实时钟下**必然**落在 10 秒窗内 ✓ —— 不用等、也不会偶发 ✓）。
+  assert.equal(notes.length, 2, `★ 10 秒内**同一条**只许发一次，换一句才发（实际发了 ${String(notes.length)} 条：${JSON.stringify(notes)}）`)
+  assert.equal(notes[1]?.body, '换了一句正文', '★ 换了一句就照发（去重不许变成"整段时间静音"✗）')
+  assert.match(
+    surface.boxText(),
+    /秒内同一条不再重复发/,
+    '★ 被挡下的那一条要**记账**说清（而不是看起来像"什么都没发生"✗ —— 那正是假绿的老路 ✓）',
+  )
+  // ★ 去重只挡通知 ✗，**绝不许**把这次投递本身吃掉 ✗（三次都要真的执行 + 真的回报 ✓）
+  const ends = readLog(surface).filter((entry) => entry.phase === 'exec-end')
+  assert.deepEqual(
+    ends.map((entry) => entry.detail),
+    ['detail=copied:shell-clipboard', 'detail=copied:shell-clipboard', 'detail=copied:shell-clipboard'],
+    `三条都要照旧执行完（实际：${JSON.stringify(ends)}）`,
+  )
+})
+
+test('★ 去重窗的**边界**：10 秒内算同一条、过了 10 秒就不算（注入时钟 ✓ 不睡 10 秒 ✗）', () => {
+  /**
+   * 行为那条只证明"**有**一个窗"✓；**窗户到底多宽**只有这个纯函数量得到 ✓。
+   * `now` 由调用方给 ✓（见 `boot.js` 里 `shellNoticeDeduped` 的说明 ✓，
+   * 与 `fitFileNameParts` 那几条判据同一种写法：打在**生产函数**上 ✓，不是复制品 ✓）。
+   */
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [] })
+  const deduped = surface.internals.shellNoticeDeduped
+  const key = '同一条标题\u0000同一条正文'
+  // 怎么把它打红：把 `SHELL_NOTICE_DEDUP_MS` 改成 30_000 ⇒ 第三条红（10.001 秒后本该放行 ✗）；
+  //   改成 1_000 ⇒ 第二条红（9.999 秒后本该仍然挡住 ✗）。
+  assert.equal(deduped(key, 1_000_000), false, '第一次 ⇒ 不算重复（并记账 ✓）')
+  assert.equal(deduped(key, 1_009_999), true, '9.999 秒后 ⇒ 仍算同一条 ✓（窗口不许被改小 ✗）')
+  assert.equal(deduped(key, 1_010_001), false, '过了 10 秒 ⇒ 重新算一条 ✓（窗口不许被改大 ✗）')
+  assert.equal(deduped(key, 1_020_000), true, '★ 上一步真的**重新记了账**（不是"一个键只算一次"✗）')
+  assert.equal(deduped(key + '（另一个键）', 1_020_000), false, '★ 键不同 ⇒ 互不影响（键 = 标题 + 正文 ✓）')
+})
+
+test('★ 提示条改通知：手动重连失败 ⇒ 有壳走系统通知，无壳退提示条且**文案逐字不变**', () => {
+  /**
+   * ★ 用一条**长原因**（真机上 `shortReason` 允许到 120 字 ✓）：94 字左右 ⇒
+   *   如果退路那条提示条也按通知的 72 字去截，"点哪颗橙色提示"那半句就会被切掉 ✗，
+   *   而 `scripts/check-mobile-layout.mjs` 第 152-⑨ 条**正是读这一句** ✓（它在
+   *   `removeFakeShell()` 之后跑 ⇒ 走的就是这条无壳退路 ✓）。
+   */
+  const longReason =
+    'wss://10.34.221.181:3443/mobile/ws → WebSocket 出错；wss://100.123.136.82:3443/mobile/ws → 候选端点超时（5 秒）'
+  assert.ok(longReason.length > 72, `这条原因必须长过通知正文的上限（实际 ${String(longReason.length)} 字）`)
+  const oldText = '手动重连失败：' + longReason + '（可再点一次那颗橙色提示重试）'
+
+  // ── ① 有壳 ⇒ 走系统通知（通知正文把"该做什么"放在最前 ⇒ 72 字那道上限切不掉它 ✓） ──
+  const { shell, notes } = makeRecordingShell('ok')
+  const withShell = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], shell, unrefTimers: true })
+  makeTunnel(withShell).reportManualReconnectFailure(longReason)
+  // 怎么把它打红：把这一处那句 `shellNotice('手动重连失败', …)` 改回
+  //   `shellToast('手动重连失败：' + reason + …)` ⇒ 下面 notes 两条立刻红（壳一条都没收到 ✓）；
+  //   而"无壳"那半条仍绿 ✓（它本来就走提示条 ✓）。
+  assert.equal(notes.length, 1, `壳必须收到恰好一条通知（实际：${JSON.stringify(notes)}）`)
+  assert.equal(notes[0]?.title, '手动重连失败', '标题就是这句话 ✓')
+  assert.ok(String(notes[0]?.body).startsWith('可再点一次那颗橙色提示重试'), `通知正文要先说该做什么（实际：${JSON.stringify(notes[0]?.body)}）`)
+  assert.ok(String(notes[0]?.body).length <= 73, `通知正文不超过 72 字 + 省略号（实际 ${String(String(notes[0]?.body).length)} 字）`)
+  assert.equal(withShell.toastText(), null, '通知发出去了 ⇒ 不该再弹提示条 ✓')
+  assert.equal(withShell.infoBanner().length, 0, '也绝不许退回蓝横幅 ✓')
+
+  // ── ② 无壳 ⇒ 退提示条，**与旧行为逐字一致**（152-⑨ 读的就是它 ✓） ──
+  const noShell = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], unrefTimers: true })
+  makeTunnel(noShell).reportManualReconnectFailure(longReason)
+  // 怎么把它打红：把退路那句改成按 72 字截（或改成 drawBar）⇒ 下面这条立刻红 ✓
+  //   （前者的实际文案会在"候选端点超时"处断掉并加省略号 ✓；后者连元素都换了 ✓）。
+  assert.equal(noShell.toastText(), oldText, '★ 无壳时那句提示条必须与旧行为**逐字一致**（152-⑨ 钉着它 ✓）')
+  assert.equal(noShell.infoBanner().length, 0, '★ 绝不退回蓝横幅 ✓')
+})
+
+test('★ 自动重连放弃那一处：**一个字都不许改**（提示条 + 恰好一条通知；不许再发第二条）', () => {
+  /**
+   * ## 为什么这一处**刻意不动** ✗（本轮唯一一处"说改而没改"的地方）
+   *
+   * 用户要求"中间跳的横幅也改成通知"✓，普查据此提出删掉那句 `shellToast(text)`
+   *   （理由：紧邻的下一行已经发了同样的通知 ⇒ 换成通知会变成**发两条**✗）。
+   * ★ 但 `scripts/check-mobile-layout.mjs` 第 152-② 条断言的就是**这条提示条**里
+   *   有「已停止自动重连」+「试满 5 次」+「手动重连」✓，而这句话在 `boot.js` 里
+   *   **只由那一行**写出去 ✓ ⇒ 删掉 = 那条既有验收的唯一观测源没了 ⇒ 当场红 ✗；
+   *   同一节的第 152-④ 条又要求这一处 `notify` **恰好 1 次** ✓ ⇒ **两条都要留** ✓。
+   *
+   * ⇒ 这个用例把"**恰好一个 `shellNotify`、零个 `shellNotice`、一个 `shellToast`**"
+   *   钉在**生产类的方法体**上 ✓：以后谁想把它换成 `shellNotice`（= 真发两条通知 ✗），
+   *   这里当场红 ✓。
+   */
+  const { shell, notes } = makeRecordingShell('ok')
+  const withShell = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], shell, unrefTimers: true })
+  const tunnel = makeTunnel(withShell)
+  // ★ 数满 5 轮那一支 ✓（`AUTO_RECONNECT_LIMIT` = 5 ✓ ⇒ 文案是"已试满 5 次…"✓
+  //   —— 与 `check-mobile-layout.mjs` 第 152-② 条读的三个子串**逐个对齐** ✓）
+  tunnel.failStreak = 5
+  tunnel.giveUpAutoReconnect('测试：网络不可达')
+  assert.equal(tunnel.autoPaused, true, '前置：确实走到了"放弃"这一支 ✓')
+  // 怎么把它打红：把这一处那句 `shellNotify('DSH 移动端：连接中断', text)` 删掉
+  //   ⇒ 下面 notes.length 立刻变 0 ⇒ 红 ✓（152-④ 要的正是这一条通知 ✓）。
+  assert.equal(notes.length, 1, `放弃时**恰好一条**通知 ✓（实际：${JSON.stringify(notes)}）`)
+  assert.equal(notes[0]?.title, 'DSH 移动端：连接中断', '标题照旧 ✓')
+  /**
+   * ★ 这三个子串就是 `scripts/check-mobile-layout.mjs` 第 152-② 条的全部内容 ✓
+   *   （同文件 12066-12072 ✓）—— 直接照抄过来 ✓，于是"删掉那句提示条会不会红"这件事
+   *   在**本仓的单元测试**里也量得到 ✓（不必等 5–7 分钟那套真机验收 ✓）。
+   */
+  for (const [what, wanted] of [
+    ['已停止自动重连', /已停止自动重连/],
+    ['试满 5 次', /5 次/],
+    ['到哪去手动重连', /手动重连/],
+  ] as const) {
+    assert.match(
+      String(withShell.toastText()),
+      wanted,
+      `★ 页面提示条**仍在**且说清了「${what}」（152-② 的唯一观测源 ✓ —— 它不许被"改成通知"顺手删掉 ✗）`,
+    )
+  }
+
+  // ── 无壳：通知那一路静默（`shellNotify` ⇒ null ✓），提示条照旧 ──
+  const noShell = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], unrefTimers: true })
+  const noShellTunnel = makeTunnel(noShell)
+  noShellTunnel.failStreak = 5
+  noShellTunnel.giveUpAutoReconnect('测试：网络不可达')
+  assert.match(String(noShell.toastText()), /已停止自动重连/, '★ 无壳时提示条同样要在（旧行为逐字不变 ✓）')
+})
+
+test('★ 结构性：这一轮只动那两处 —— 其余 8 处（蓝横幅 6 + 提示条 2）一个都没消失', () => {
+  /**
+   * 这一条量的是**代码形状**（和上面"反重放位图只有一个出生地"那条同一种写法 ✓）：
+   * 它防的是"顺手把别的横幅也删了"✗ —— 那 8 处各有硬理由（见 10-交接文档与
+   * `scripts/check-device-channel.mjs` / `check-mobile-layout.mjs` 各自的断言 ✓）。
+   * ★ 注释先被整行滤掉 ✓，所以下面匹配到的都是**可执行代码** ✓（不是注释里的字符串 ✓）。
+   */
+  const codeOnly = bootSource
+    .split('\n')
+    .filter((line) => {
+      const text = line.trim()
+      return !(text.startsWith('*') || text.startsWith('/*') || text.startsWith('//'))
+    })
+    .join('\n')
+  const slice = (marker: string, stop: string): string => {
+    const start = codeOnly.indexOf(marker)
+    assert.ok(start >= 0, `必须能在源码里找到：${marker}`)
+    const end = codeOnly.indexOf(stop, start + marker.length)
+    assert.ok(end > start, `必须能在源码里切出这一块：${marker}`)
+    return codeOnly.slice(start, end)
+  }
+
+  // ── ① show 能力：**必须仍是蓝横幅** ✓（`check-device-channel.mjs:151` 要渲染 [data-dshm-banner=info] ✓）
+  const showBranch = slice("if (callInfo.capability === 'show') {", "} else if (callInfo.capability === 'notify') {")
+  assert.ok(showBranch.includes("drawBar('info', text, [], false)"), '★ show 能力那条仍走 drawBar（兜底能力**本体** ✓，换掉等于用刚失败的那条路去兜底 ✗）')
+  assert.ok(!showBranch.includes('shellNotify('), 'show 那条不许被改成通知 ✓')
+
+  // ── ② notify + 没有壳：**必须仍是蓝横幅** ✓（没壳时通知那套根本不存在 ⇒ 换掉=静默失败 ✗）
+  const noBridge = slice('if (posted === null) {', '} else {')
+  assert.ok(noBridge.includes("drawBar('info', text, [], false)"), '★ notify 没壳那条仍是蓝横幅 ✓')
+  assert.ok(noBridge.includes("banner-no-bridge"), '★ 而且 detail 口径照旧 ✓')
+
+  // ── ③ clipboard 三条路全失败：**必须仍是蓝横幅** ✓（通知里没法长按选区 ✗）
+  const manualBar = slice("var clipBar = drawBar('info', '电脑想放进剪贴板", "detail = 'banner-manual'")
+  assert.ok(manualBar.includes("data-dshm-clipboard-text"), '★ 降级横幅里那块"可长按复制的正文"仍在 ✓')
+
+  // ── ④ open 能力：**必须仍是蓝横幅 + 可点链接** ✓（通知给不了"点链接"这个手势 ✗）
+  //    ★ 切片从**造那个 `<a>`** 开始 ✗（它在 `drawBar` **之前** ✓ —— 只从横幅那一行切
+  //      会把链接那几行漏掉 ✓，第一版就是这么写的 ⇒ 假红 ✓）。
+  const openBar = slice('link.textContent = target.length > 60', "detail = 'link-shown'")
+  assert.ok(openBar.includes("link.target = '_blank'"), '★ open 那条仍把链接摆出来让用户点 ✓')
+  assert.ok(openBar.includes("drawBar('info', '电脑推来一个链接"), '★ 而且它仍是一条蓝横幅 ✓')
+
+  // ── ⑤ notify 两条路都失败：**必须仍是蓝横幅 + 申请权限按钮** ✓（申请通知权限必须在用户手势里 ✗）
+  const notifyFail = slice('if (!notified) {', '} else {')
+  assert.ok(notifyFail.includes("drawBar("), '★ notify 全失败那条仍是蓝横幅 ✓')
+  assert.ok(notifyFail.includes('开启系统通知'), '★ 而且那颗"开启系统通知"按钮仍在（它是唯一的申请手势入口 ✓）')
+
+  // ── ⑥ askAbout 允许/不用：**必须仍是蓝横幅** ✓（通知做不到多选项；这是端侧通道唯一入口 ✓）
+  assert.ok(
+    codeOnly.includes("drawBar('info', '已设为「不用」"),
+    '★ askAbout「不用」那条仍是蓝横幅 ✓（check-device-channel.mjs:233 读的就是它 ✓）',
+  )
+
+  // ── ⑦ 下载退回：**必须仍是 shellToast** ✓（它本身就是"通知发不出去"的兜底 ✗，不能再套一层通知）
+  assert.ok(codeOnly.includes("shellToast(String(title) + '：' + short)"), '★ 下载那条退路仍是提示条 ✓')
+
+  // ── ⑧ 面板内反馈：**必须仍是 shellToast** ✓（原作者已判定这类不该弹通知栏 ✓）
+  assert.ok(codeOnly.includes('if (notice === null) shellToast(message)'), '★ 面板内反馈那条仍是提示条 ✓')
+
+  // ── ★ 反向：这一轮改的那两处必须是"通知 + 退提示条"，而且**绝不许退回 drawBar** ✗ ──
+  assert.ok(codeOnly.includes("shellNotice('已放进剪贴板', String(text))"), '剪贴板成功那条必须走统一通知出口 ✓')
+  assert.ok(!codeOnly.includes("drawBar('info', '已放进手机剪贴板"), '★ 剪贴板成功那条蓝横幅必须**彻底消失** ✓')
+  const reconnect = slice('Tunnel.prototype.reportManualReconnectFailure = function', 'Tunnel.prototype.')
+  assert.ok(reconnect.includes("shellNotice("), '手动重连失败必须走统一通知出口 ✓')
+  assert.ok(!reconnect.includes('shellToast('), '★ 这一处不该再有直发的提示条（退路在 shellNotice 里 ✓）')
+  assert.ok(!reconnect.includes('drawBar('), '★ 更不许退回蓝横幅 ✓')
+
+  // ── ★ 自动重连那一处：恰好一个 shellNotify、零个 shellNotice、一个 shellToast ──
+  const giveUp = slice('Tunnel.prototype.giveUpAutoReconnect = function', 'Tunnel.prototype.')
+  assert.equal(
+    giveUp.split('shellNotify(').length - 1,
+    1,
+    '★ 放弃时的系统通知必须**恰好一条**（152-④ 钉着它 ✓）',
+  )
+  assert.equal(giveUp.split('shellNotice(').length - 1, 0, '★ 不许在这里再套一层通知 ⇒ 那会真发两条 ✗')
+  assert.equal(giveUp.split('shellToast(').length - 1, 1, '★ 页面提示条必须仍在（152-② 钉着它 ✓）')
+
+  // ── ★ 统一出口本体：走壳的通知 + 无壳退提示条 + **绝不** drawBar + 去重窗 ──
+  const noticeBody = functionBodyAtColumn2(bootSource, 'shellNotice')
+  assert.ok(noticeBody.includes('shellNotify(head, notice'), '统一出口必须真的调壳的通知桥 ✓')
+  assert.ok(noticeBody.includes('shellToast('), '无壳 ⇒ 退提示条 ✓')
+  assert.ok(!noticeBody.includes('drawBar'), '★ 退路里**不许**出现 drawBar（那正是要消掉的蓝条 ✗）')
+  assert.ok(noticeBody.includes('shellNoticeDeduped('), '统一出口必须过一遍去重窗 ✓')
+  // ★ 长度：通知那一侧先截（标题 20 / 正文 72 ✓ —— 照 `downloadNotice` 那位先例 ✓）。
+  //   怎么把它打红：把这两句里的 `SHELL_NOTICE_*_MAX` 换成 `Number.MAX_SAFE_INTEGER`
+  //   （或不截）⇒ 下面两条立刻红 ✓（正文那条另有行为判据：'手动重连失败' 那个用例
+  //   量了正文长度 ≤ 73 ✓）。
+  assert.ok(
+    noticeBody.includes('shellNoticeShort(title, SHELL_NOTICE_TITLE_MAX)'),
+    '★ 通知标题必须先按上限截 ✓',
+  )
+  assert.ok(noticeBody.includes('shellNoticeShort(body, SHELL_NOTICE_BODY_MAX)'), '★ 通知正文必须先按上限截 ✓')
+  assert.ok(
+    /var SHELL_NOTICE_TITLE_MAX = 20/.test(codeOnly) && /var SHELL_NOTICE_BODY_MAX = 72/.test(codeOnly),
+    '★ 上限就是 20 / 72 ✓（不是随手换的数 ✓）',
+  )
+  assert.ok(
+    functionBodyAtColumn2(bootSource, 'shellNoticeDeduped').includes('SHELL_NOTICE_DEDUP_MS'),
+    '去重窗的时长必须是那个常量（不许写死一个数 ✓）',
+  )
+  assert.ok(
+    /var SHELL_NOTICE_DEDUP_MS = 10000|var SHELL_NOTICE_DEDUP_MS = 10_000/.test(codeOnly),
+    '★ 去重窗 = 10 秒 ✓（用户看到的是"同一条不会被响两次" ✓）',
   )
 })
 
