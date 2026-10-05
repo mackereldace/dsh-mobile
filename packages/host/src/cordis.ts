@@ -26,7 +26,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from './devices.ts'
-import { notifyTextFor, shouldNotifyEvent } from './notify-text.ts'
+import { machineDisplayName, notifyTextFor, shouldNotifyEvent } from './notify-text.ts'
+import { localMachineName } from './lan-trust.ts'
 import { resolveDshRuntimeVersion } from './dsh-version.ts'
 import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
 import { createLanListener, DEFAULT_PLAIN_LISTEN, DEFAULT_TLS_LISTEN, type LanListener } from './lan-listener.ts'
@@ -846,23 +847,44 @@ export function apply(ctx: Context, config: Config = {}): void {
      */
     const notify = (type: string, payload: unknown): void => {
       try {
-        const record = (payload ?? {}) as { toolName?: unknown; reason?: unknown; title?: unknown; summary?: unknown }
-        const text = notifyTextFor(type, record).body
+        const record = (payload ?? {}) as {
+          toolName?: unknown
+          reason?: unknown
+          title?: unknown
+          summary?: unknown
+          sessionId?: unknown
+        }
+        /**
+         * ★ 2026-10-05（用户真机抱怨"标题没说清是哪台电脑"✓）：机器名从**本机**取 ✓，
+         *   取值口与 `manifest.machineName` 是同一个（`localMachineName()` ✓
+         *   —— `os.hostname()` 那一套 ✓）⇒ 通知标题里的名字与手机面板行名**一定一致** ✓。
+         * ★ 现算而不是安装时算一次 ✗：macOS 上用户改机器名是常事 ✓，
+         *   算一次就等于"改名必须重启 DSH"✗（这是本项目反复吃过的那类亏 ✓）。
+         * ★ 拿不到 ⇒ 空串 ⇒ 标题退回「需要你确认」✓（**绝不编一个名字** ✗）。
+         */
+        const machineName = machineDisplayName(localMachineName())
+        const composed = notifyTextFor(type, record, machineName)
+        const text = composed.body
         // ★ 先**落审计**再推送：这样"钩子到底有没有被触发"有据可查 ✓
         //   （原先只打 console —— 而 DSH 可能跑在后台终端里，用户看不到 ✗；
         //    于是"审批没通知"到底是"钩子没响"还是"通知发不出"完全分不清 ✗）
         try {
-          mobileHost.recordDiagnostic('approval-push', text.slice(0, 80))
+          // ★ 标题一起落审计 ✗：真机上"通知栏里到底写了什么"只有这一条能回答 ✓
+          //   （推送返回 ok 只说明"发出去了" ✓）。正文压成一行 —— 审计是一条一行 ✓。
+          mobileHost.recordDiagnostic(
+            'approval-push',
+            composed.title + '｜' + text.replace(/\s+/g, ' ').slice(0, 80),
+          )
         } catch (error) {
           void error
         }
         // 先通知（后台也能提醒），没启用就退成页面横幅
         // ★ 会话 id 一起带上（取不到就是 undefined ⇒ 手机退回"只打开 App"✓）
-        const sessionId = typeof (record as { sessionId?: unknown }).sessionId === 'string'
-          ? String((record as { sessionId?: unknown }).sessionId)
-          : undefined
-        const first = mobileHost.deviceCall('notify', text, undefined, sessionId)
-        if (!first.ok) mobileHost.deviceCall('show', text, undefined, sessionId)
+        const sessionId = typeof record.sessionId === 'string' ? String(record.sessionId) : undefined
+        // ★ 标题也交给电脑定 ✗✗：只有电脑知道自己叫什么 ✓；
+        //   手机那边拿不到这个字段（老宿主 ✓）就退回旧标题 ✓（见 boot.js 的 notify 分支 ✓）
+        const first = mobileHost.deviceCall('notify', text, undefined, sessionId, composed.title)
+        if (!first.ok) mobileHost.deviceCall('show', text, undefined, sessionId, composed.title)
       } catch (error) {
         console.warn('[dsh-mobile] 审批推送失败（不影响审批本身）：', error)
       }

@@ -99,6 +99,16 @@ export interface DeviceCall {
    * ★ 可选字段：旧调用不传 ⇒ 行为同今天（点通知只打开 App ✓）。
    */
   readonly sessionId?: string
+  /**
+   * ★ 2026-10-05：**系统通知的标题** ✓（形如 `Mac-mini-2024 需要你确认` ✓）。
+   *
+   * 为什么标题要电脑给而不是手机自己拼 ✗✗：只有电脑知道自己叫什么 ✓
+   * （它读的是与本机 `manifest.machineName` 同一个取值口 ✓）——
+   * 手机自己拼的话，两个来源迟早分叉 ✗，而用户在通知栏里看到的就是那个分叉的名字 ✗。
+   * ★ 可选字段：旧调用（例如 agent 工具 `phone_notify` ✓）不传 ⇒ 手机退回旧标题 ✓
+   *   （行为同今天 ✓）。
+   */
+  readonly title?: string
   /** 已投递给手机的时间；undefined 表示尚未投递。 */
   readonly deliveredAt?: number
 }
@@ -206,6 +216,8 @@ interface QueuedCall {
   readonly text: string
   readonly createdAt: number
   readonly sessionId?: string
+  /** ★ 2026-10-05：系统通知的标题（可选 ⇒ 不传就由手机用旧标题 ✓）。 */
+  readonly title?: string
   readonly targetDeviceId: string
   deliveredAt?: number
 }
@@ -264,8 +276,17 @@ export class DeviceCallQueue {
    *
    * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，
    *         让它知道"请求没发出去"，而不是以为发出去在等手机。
+   *
+   * ★ 2026-10-05追加 `title`（可选 ✓，通知标题 ✓）：位置参数排在最后 ✓ ——
+   *   既有调用一处都不用改 ✓（不传就是"手机按旧标题显示"✓，行为同今天 ✓）。
    */
-  enqueue(deviceId: string, capability: DeviceCapability, text: string, sessionId?: string): DeviceCall {
+  enqueue(
+    deviceId: string,
+    capability: DeviceCapability,
+    text: string,
+    sessionId?: string,
+    title?: string,
+  ): DeviceCall {
     // ★ 先校验能力名本身。少这一步时，未知能力会走到下面的 `isEnabled` 分支，
     //   报出来的是"device capability not enabled: xxx（需要先在手机上允许）"——
     //   而真因是"根本没有这个能力"，用户会去手机上找一个不存在的开关（误导）。
@@ -282,6 +303,8 @@ export class DeviceCallQueue {
       capability,
       text,
       ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
+      // ★ 与 sessionId 同一套规矩 ✓：没给就不放这个键 ✗（`undefined` 会让形状凭空多一个键 ✗）
+      ...(title === undefined || title === '' ? {} : { title }),
       createdAt: Date.now(),
       targetDeviceId: deviceId,
     }

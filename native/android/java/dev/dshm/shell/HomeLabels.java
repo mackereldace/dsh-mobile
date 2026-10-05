@@ -51,6 +51,23 @@ public final class HomeLabels {
      * ★ 由纯逻辑拼（不碰 View ✓）⇒ 能在电脑上断言 ✓。
      */
     public static String machineInspect(HomeModel.Machine machine, String buildStamp) {
+        return machineInspect(machine, buildStamp, "");
+    }
+
+    /**
+     * ★★★ 2026-10-05 加 `shotHint` ✗ —— 「为什么这张卡上是示意屏，而不是壁纸」那一句 ✓。
+     *
+     * 起因（用户原话）："返回的**既不是截图，也不是壁纸**，是那个**最早版本的占位符**"✗，
+     * 而且「Mac 和 Windows 都是这样」✓。
+     * 那句原因**一直算得出来** ✓（`HomeShots` 递给 `HomeView` ✓），
+     * 却只被塞进一个没人读的字段 ✓ ⇒ 这里补上它的出口 ✓：
+     * 长按这张卡 ⇒ 这句能看见、能**选中复制** ✓（与卡上那行**同一句** ✓ ——
+     * 都不超过 40 字 ✓，上限在 `HomeShot.placeholderHint` ✓；宿主 `message` 的后半截
+     * 目前到不了手机上 ✓，要它就得连那个上限一起挪 ✓，不属这一轮 ✓）。
+     *
+     * ★ 没有原因（图好好的 ✓）就**不加这一行** ✗ —— 不编一句"一切正常"占地方 ✓。
+     */
+    public static String machineInspect(HomeModel.Machine machine, String buildStamp, String shotHint) {
         if (machine == null) return "（没有数据）";
         StringBuilder text = new StringBuilder();
         text.append("版本：").append(buildStamp == null || buildStamp.isEmpty() ? "（未知）" : buildStamp).append('\n');
@@ -60,6 +77,12 @@ public final class HomeLabels {
         text.append("状态：").append(machine.online ? "在线" : (machine.offline ? "离线" : "未知（还没探到）"));
         if (machine.current) text.append(" · 当前这台");
         text.append('\n');
+        /**
+         * ★ 紧跟"状态"这一行 ✗ —— 它俩回答的是同一个问题（"这台现在是什么样"✓），
+         *   而缩略图那一句正是"看图之前先要读到"的那句 ✓。
+         */
+        String note = shotHint == null ? "" : shotHint.trim();
+        if (!note.isEmpty()) text.append("缩略图：").append(note).append('\n');
         int addresses = 0;
         for (int i = 0; i < machine.instances.size(); i += 1) {
             addresses += machine.instances.get(i).addresses.size();

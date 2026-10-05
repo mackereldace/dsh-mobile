@@ -145,8 +145,27 @@ final class HomeView extends FrameLayout {
     private HomeShots shots;
     /** 这一轮建出来的缩略图视图 ✓（按缓存键 ✓）—— 图回来时直接落到那一张上 ✓，不整屏重画 ✗。 */
     private final java.util.Map<String, ThumbView> thumbs = new java.util.HashMap<String, ThumbView>();
-    /** ★ 图取不到时那句说明 ✓（**优先于**下面那行报告 ✓ —— 它是"为什么没有图"的唯一答案 ✓）。 */
-    private String shotHint = "";
+    /**
+     * ★★★ 每台电脑「为什么没有图」那一句 ✓（键 = {@link HomeShot#cacheKey} ✓，与缩略图同一把钥匙 ✓）。
+     *
+     * ## 为什么要有它 ✗（2026-10-05 用户报的正是这个）
+     *
+     * 用户原话："返回的**既不是截图，也不是壁纸**，是那个**最早版本的占位符**"✗，
+     * 且「Mac 和 Windows 都是这样」✓。
+     * 取图那一截其实一直**算出**了原因 ✓（`HomeShots` 把 `hint` 递到 `applyShot` ✓），
+     * 而这里原来把它存进**一个全局字段**就不再读了 ✓ ⇒ 界面上一个字都没有 ✗
+     * ⇒ 那台电脑只剩一张示意屏 ✓ —— "原因被丢了"说的就是这一处 ✓。
+     *
+     * ★ 按**机器**存 ✗：三台电脑里只有一台取不到图时 ✓，那句原因不能贴到别人头上 ✓。
+     */
+    private final java.util.Map<String, String> shotHints = new java.util.HashMap<String, String>();
+    /**
+     * 上一次那套说明的**指纹** ✓（「键 + 文字」✓）—— 只在它变了时重画一次 ✓。
+     *
+     * ★ 为什么带键 ✗：两台电脑先后失败、且句子**一模一样**时 ✓（例如都是「电脑回了 502」✓），
+     *   只比文字就认不出"第二台也变了" ✓ ⇒ 第二张卡上的那行要等到下次别的原因才会出现 ✗。
+     */
+    private String shotHintStamp = "";
 
     /**
      * ★ 上一次**自动**展开的是哪一台 ✓（空 = 还没自动展开过 ✓）。
@@ -221,21 +240,54 @@ final class HomeView extends FrameLayout {
      */
     void applyShot(String key, android.graphics.Bitmap bitmap, String hint) {
         /**
-         * ★★ 说明**跟着结果走** ✗：拿到图 ⇒ 说明清空 ✓；没拿到 ⇒ 换上这次的说明 ✓。
+         * ★★ 说明**跟着结果走** ✗：拿到图 ⇒ 这台电脑的说明清掉 ✓；没拿到 ⇒ 换上这次的说明 ✓。
          *
-         * 我第一版只在"说明变了"时更新它 ✓ ⇒ 后来**取图成功**了，
+         * 第一版只在"说明变了"时更新它 ✓ ⇒ 后来**取图成功**了，
          * 底部那行还一直写着「缩略图：电脑没允许截屏」✓ ——
          * 与"过期提示盖住真实错误"是同一族（**说过的话要跟着事实改** ✗）。
+         *
+         * ★★★ 2026-10-05：写进去之后**必须有人读**✗ —— 见 {@link #shotHints} 那段注释 ✓
+         *   （原来是存完就没人看 ✓，用户看到的就是"原因被丢了"✗）。
          */
         String nextHint = bitmap != null ? "" : (hint == null ? "" : hint);
+        if (nextHint.isEmpty()) shotHints.remove(key);
+        else shotHints.put(key, nextHint);
         if (bitmap != null) {
             ThumbView target = thumbs.get(key);
             if (target != null) target.setShot(bitmap);
         }
-        if (!nextHint.equals(shotHint)) {
-            shotHint = nextHint;
+        String stamp = nextHint.isEmpty() ? "" : key + "\n" + nextHint;
+        if (!stamp.equals(shotHintStamp)) {
+            shotHintStamp = stamp;
             rebuild();
         }
+    }
+
+    /**
+     * 这台电脑「为什么没有图」那一句 ✓（给长按弹出的判据用 ✓ —— 那里能**选中复制** ✓）。
+     *
+     * ★ 与卡上那行是**同一句** ✗（都 ≤40 字 ✓，上限在 {@link HomeShot#placeholderHint} ✓）——
+     *   宿主那句 `message` 的后半截目前到不了手机上 ✓：要整句就得连着把那个上限也挪走 ✓，
+     *   不属于这一轮的最小改动 ✗（如实写在这里，别让人以为长按能看到全文 ✗）。
+     *
+     * 键与缩略图**同一把钥匙** ✓（`HomeShot.cacheKey` ✓）—— 两处要是各算一份，早晚飘 ✓。
+     */
+    String shotHintFor(HomeModel.Machine machine) {
+        if (machine == null) return "";
+        String key = HomeShot.cacheKey(machine.key, firstAuthorityOf(machine));
+        String note = shotHints.get(key);
+        return note == null ? "" : note;
+    }
+
+    /** 手上这几句说明的**汇总** ✓（判据页要能整段复制 ✓；一句都没有时如实说 ✓，不编 ✗）。 */
+    private String shotHintSummary() {
+        if (shotHints.isEmpty()) return "（没有取不到图的 ✓）";
+        StringBuilder out = new StringBuilder();
+        for (java.util.Map.Entry<String, String> entry : shotHints.entrySet()) {
+            if (out.length() > 0) out.append("；");
+            out.append(entry.getValue());
+        }
+        return out.toString();
     }
 
     /**
@@ -285,6 +337,25 @@ final class HomeView extends FrameLayout {
      */
     void setCurrentAuthorityNow(String authority) {
         currentAuthorityNow = authority == null || authority.length() == 0 ? null : authority;
+        /**
+         * ★★★ 2026-10-05 **再改**（用户："下载提示没问题了，端口也确实合并了，但是那个**正在用它又卡顿了**"✗）
+         *
+         * 这一位换的不只是"地址" ✓ —— 它常常**换了一台电脑** ✗：
+         *   用户真机上有**两台在线**（长按判据/首页读数：`Mac-mini-2024.local` ✓ 与 `Dacling` ✓），
+         *   他说的「换智能体」就是在**这两台之间换** ✓。
+         * 而 {@link #currentMachineKeyNow} **只由"首页上点那一行"时设** ✓（见 {@link #markCurrentMachine} ✓）——
+         *   在会话页里换（网页调 `DshmShell.switchHost` ✓ ⇒ `MainActivity.applyHostUrl` ✓）
+         *   **只走这里** ✗ ⇒ 机器键还停在**上一台** ✗
+         *   ⇒ {@link #isCurrentInstance} 里那句"不是这台就 false"✗ 把**新电脑整台否掉** ✓
+         *   ⇒ 一条「正在用」都不亮 ✓（这正是用户早先报过的"**都不显示正在用**，然后刷新出来刚才的"✓）。
+         *
+         * ⇒ **在这里按同一条判据把它认回来** ✓（逐字优先 ✓、认不出再按端口 ✓ ——
+         *   与画的时候**同源** ✗：两处各写一份判据，早晚飘，所以抽成
+         *   {@link #ownerKeyOfAuthority} ✓ 与 {@link #machineHasAuthority} 共用 ✓）。
+         * ★ 认不出来（快照里还没有这台）⇒ **保持原值** ✓（不猜 ✗；行为与本轮之前一模一样 ✓）。
+         */
+        String owner = ownerKeyOfAuthority(currentAuthorityNow);
+        if (owner.length() > 0) currentMachineKeyNow = owner;
         rebuildNow();
     }
 
@@ -336,16 +407,20 @@ final class HomeView extends FrameLayout {
             if (currentMachineKeyNow != null && (owner == null || !currentMachineKeyNow.equals(owner.key))) return false;
             if (currentAuthorityNow == null) return instance.current;
             /**
-             * ★ 2026-10-05（用户真机反馈）：上面那次「逐字比」会**比不中** ✗ ——
+             * ★ 2026-10-05（用户真机反馈）：先那次「逐字比」会**比不中** ✗ ——
              *   点进去那一刻设好的 currentAuthorityNow 是完整的「主机:端口」✓，
              *   而 instance 的地址来自**快照**（要靠约 3 秒的同步探测才刷新 ✓）⇒
              *   退出首页那一刻，新智能体的地址**还不在列表里** ✗ ⇒ 一个都不亮 ✓
-             *   （用户原话：“退出来不会留着错误的正在用，而是都不显示正在用，
-             *   然后刷新出来刚才的正在用”✓）。
              * ⇒ 补一次**按端口比** ✓：同一台机器上每个智能体有自己的端口 ✓
-             *   （首页那行标题就是「端口 3453」✓）⇒ 端口在同一机器内是唯一的 ✓，
-             *   用它判“是哪一个”不会误判 ✓；而“主机”那半很容易不同 ✗
-             *   （Tailscale IP／局域网 IP／主机名 ✓ 同一台机器有多种写法 ✓）。
+             *   （首页那行标题就是「端口 3453」✓）⇒ 端口在同一机器内是唯一的 ✓；
+             *   而「主机」那半很容易不同 ✗（Tailscale IP／局域网 IP／主机名 ✓ 同一台机器有多种写法 ✓）。
+             * ★★ 2026-10-05 **再改**（用户："那个**正在用它又卡顿了**"✗）：这段判据本身一个字没动 ✓ ——
+             *   坏的是**上面那句机器键**还停在上一台 ✗（换电脑时只有覆盖值会变 ✓）
+             *   ⇒ 那台新电脑整台被否掉 ⇒ 一条都不亮 ✓。修在
+             *   {@link #setCurrentAuthorityNow}（把机器键跟着认回来 ✓）与
+             *   {@link #setSnapshot}（旧数据不许盖掉用户刚做的 ✓）两处 ✗ ——
+             *   这里**不许**再把机器键提到覆盖值前面 ✗：卡上那台全不听覆盖值时，
+             *   跨机器同端口就会**两条同时亮**（正是 §4.1ce 那条"太松"✗）。
              */
             String wantedPort = portOfAuthority(currentAuthorityNow);
             if (wantedPort.length() > 0) {
@@ -374,18 +449,142 @@ final class HomeView extends FrameLayout {
         return port;
     }
 
+    /**
+     * 这条 authority 落在**哪台电脑**上 ✓ —— 三步，**越确凿越先用** ✗，认不出就不猜 ✗：
+     * ```
+     * ① 逐字一样（`host:port` 完全相同 ✓）⇒ 就是它 ✓（同一条 authority 只可能属于一台 ✓）；
+     * ② 主机名/地址一样（端口可能不同 ✓ —— 例如「这台机器身上有 100.123.136.82」✓）⇒ 就是它 ✓；
+     * ③ 同一个端口只出现在**唯一一台**身上 ✓ ⇒ 就是它 ✓（同端口只画一行 ✓，所以这一步也确凿 ✓）；
+     * ④ 其余（含跨机器同端口 ✓）⇒ **空串** ✓（调用方保持原值 ✓ —— 不猜 ✗）。
+     * ```
+     * ★ 与画的时候**同源** ✗：{@link #machineHasAuthorityExactly} / `machineHasHost` / `machineHasPort`
+     *   三个小判据就住在这里 ✓，画那边（{@link #isCurrentInstance}）用的是端口那一条 ✓。
+     */
+    private String ownerKeyOfAuthority(String authority) {
+        if (authority == null || authority.length() == 0 || snapshot == null) return "";
+        String host = hostOfAuthority(authority);
+        String port = portOfAuthority(authority);
+        String byHost = "";
+        int byHostCount = 0;
+        String byPort = "";
+        int byPortCount = 0;
+        for (int i = 0; i < snapshot.machines.size(); i += 1) {
+            HomeModel.Machine machine = snapshot.machines.get(i);
+            if (machine == null || machine.key == null) continue;
+            if (machineHasAuthorityExactly(machine, authority)) return machine.key;
+            if (host.length() > 0 && machineHasHost(machine, host)) {
+                byHostCount += 1;
+                if (byHost.length() == 0) byHost = machine.key;
+            }
+            if (port.length() > 0 && machineHasPort(machine, port)) {
+                byPortCount += 1;
+                if (byPort.length() == 0) byPort = machine.key;
+            }
+        }
+        if (byHostCount == 1) return byHost;
+        if (byPortCount == 1) return byPort;
+        return "";
+    }
+
+    /** 这台电脑身上有**一模一样**这条 authority 吗 ✓（只逐字比 ✓ —— 交给数据之前要的是**确凿** ✓）。 */
+    private static boolean machineHasAuthorityExactly(HomeModel.Machine machine, String authority) {
+        if (machine == null || authority == null || authority.length() == 0) return false;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            if (instance == null) continue;
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                HomeModel.Address address = instance.addresses.get(j);
+                if (address != null && address.authority != null && address.authority.equals(authority)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 这台电脑身上有**这个主机名/地址**吗 ✓（端口不论 ✓ —— 同一台机器会挂好几个端口 ✓）。 */
+    private static boolean machineHasHost(HomeModel.Machine machine, String host) {
+        if (machine == null || host == null || host.length() == 0) return false;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            if (instance == null) continue;
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                HomeModel.Address address = instance.addresses.get(j);
+                if (address == null) continue;
+                if (host.equals(hostOfAuthority(address.authority))) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 这台电脑身上有**这个端口**吗 ✓（端口在同一台机器内唯一 ✓ ⇒ 认端口就等于认那一行 ✓）。 */
+    private static boolean machineHasPort(HomeModel.Machine machine, String port) {
+        if (machine == null || port == null || port.length() == 0) return false;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            HomeModel.Instance instance = machine.instances.get(i);
+            if (instance == null) continue;
+            for (int j = 0; j < instance.addresses.size(); j += 1) {
+                HomeModel.Address address = instance.addresses.get(j);
+                if (address == null) continue;
+                if (port.equals(portOfAuthority(address.authority))) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 从「主机:端口」里取**主机**那半 ✓（IPv6 的方括号去掉 ✓、一律小写 ✓；取不到 ⇒ 空串 ✓）。 */
+    private static String hostOfAuthority(String authority) {
+        if (authority == null) return "";
+        String text = authority.trim();
+        if (text.length() == 0) return "";
+        if (text.startsWith("[")) {
+            int close = text.indexOf(']');
+            return close < 0 ? "" : text.substring(1, close).trim().toLowerCase(java.util.Locale.ROOT);
+        }
+        int colon = text.lastIndexOf(':');
+        String host = colon < 0 ? text : text.substring(0, colon);
+        return host.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * 数据**终于和"用户刚做的"一致了**吗 ✓（一致 ⇒ 两个即时信号一起交还给数据 ✓；
+     * 不一致 ⇒ 留着 ✓ —— "自动行为不许盖掉用户刚做的事" ✓）。
+     *
+     * · 有覆盖值 ⇒ **只认它** ✓：数据里那台身上要有**逐字一样**的这条 authority ✓
+     *   （★ 这里**故意不用端口** ✗ —— 跨机器同端口会让"旧快照"冒充"谈成了"✓，
+     *    于是又退回"等下一趟探测"✗ ⇒ 只逐字比最稳 ✓）；
+     * · 没有覆盖值 ⇒ 才用机器键比 ✓（与原来那句同口径 ✓）。
+     */
+    private boolean currentChoiceConfirmedBy(HomeModel.Machine fromData) {
+        if (fromData == null) return false;
+        if (currentAuthorityNow != null) return machineHasAuthorityExactly(fromData, currentAuthorityNow);
+        if (currentMachineKeyNow != null) return currentMachineKeyNow.equals(fromData.key);
+        return false;
+    }
+
     boolean hasSnapshot() {
         return everHadSnapshot;
     }
 
     void setSnapshot(HomeModel.Snapshot next, HomeLoader.Report nextReport) {
         everHadSnapshot = true;
-        // 数据回来且与用户刚点的那台一致，就把判断交还给数据；不一致则以用户刚做的为准。
+        /**
+         * ★★★ 2026-10-05 **把上面那句注释真正写进代码** ✗（它本来写着"数据回来且与用户刚点的
+         * 那台**一致**，就把判断交还给数据；**不一致则以用户刚做的为准**"✓ —— 而下面是
+         * **无条件清掉** ✗：只要快照里**有**当前那台（`fromData != null` ✓）就清 ✓，
+         * 哪怕那份快照是**换之前**那次探测的结果 ✗ —— 它要**约 3 秒**才回来 ✓）：
+         *
+         * ⇒ 用户刚做的选择**当场被旧数据盖掉** ✗ ⇒ 退出来看到的是**上一台**在「正在用」✓，
+         *   要等下一趟探测（约 3 秒 ✓）才切过去 ✓ = 用户说的"**又卡顿了**"✓✓。
+         * ★ 这条与"同端口合并"无关 ✗（合并只改画几行 ✓）—— 是这一条链本来就有的窗口 ✓，
+         *   合并把同一端口的兄弟行收成一行之后，它**不再被那一行遮住** ✓ ⇒ 才现形 ✓。
+         *
+         * ⇒ 判据改成"**谈成了才交还**" ✓：数据与用户刚做的一致 ⇒ 两个即时信号一起交还 ✓；
+         *   不一致 ⇒ **留着** ✓（本仓那条老规矩：**自动行为不许盖掉用户刚做的事** ✓）。
+         */
         HomeModel.Machine fromData = next == null ? null : next.currentMachine();
-        if (fromData != null && currentMachineKeyNow != null && currentMachineKeyNow.equals(fromData.key)) {
+        if (fromData != null && currentChoiceConfirmedBy(fromData)) {
             currentMachineKeyNow = null;
+            currentAuthorityNow = null;
         }
-        if (fromData != null) currentAuthorityNow = null;
         snapshot = next;
         report = nextReport;
         error = "";
@@ -525,6 +724,11 @@ final class HomeView extends FrameLayout {
                 .append(" · 密度 ").append(scale)
                 .append(" · 字体缩放 ").append(getResources().getConfiguration().fontScale).append('\n');
         text.append("insets：上 ").append(insetTopDp).append("dp / 下 ").append(insetBottomDp).append("dp\n");
+        /**
+         * ★★★ 缩略图那一句 ✓（2026-10-05 加 ✗）—— 真机排障只有屏幕上的字 ✓，
+         *   而"为什么卡上是示意屏而不是壁纸"这个问题，答案只在这里 ✓（卡上那行只有 40 字 ✓）。
+         */
+        text.append("缩略图：").append(shotHintSummary()).append('\n');
         if (titleView != null) {
             String value = titleView.getText() == null ? "" : titleView.getText().toString();
             float needed = titleView.getPaint().measureText(value);
@@ -1146,6 +1350,24 @@ final class HomeView extends FrameLayout {
                 LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
         stateParams.topMargin = dp(6);
         meta.addView(stateRow, stateParams);
+
+        /**
+         * ★★★ 没有图时，把**原因**写在这张卡上 ✗（2026-10-05 用户："返回的既不是截图，也不是壁纸，
+         *   是那个最早版本的占位符"✗ —— 而客户端的 4 道旧闸门让"没有图"成了**唯一**结局 ✓）。
+         *
+         * 为什么写在这儿（不是糊在缩略图上）✗：缩略图只有 82×52dp ✓，
+         *   一句 30 多字的中文塞进去只会变成一行看不清的小字 ✓
+         *   ⇒ 写在它右边这列文字里 ✓（≤40 字 ✓，由 {@link HomeShot#placeholderHint} 先截好 ✓），
+         *   想把它**选中复制**走就长按这张卡 ✓（见 {@link HomeLabels#machineInspect} ✓ —— 与这行同一句 ✓）。
+         */
+        String shotNote = shotHints.get(shotKey);
+        if (shotNote != null && !shotNote.isEmpty()) {
+            TextView note = text(shotNote, 11, theme.ink3, false);
+            LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+            noteParams.topMargin = dp(4);
+            meta.addView(note, noteParams);
+        }
 
         row.addView(meta, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         TextView chevron = text(machineExpanded(machine) ? "▴" : "▾", 13, theme.ink3, false);

@@ -440,6 +440,8 @@ export interface MobileHostService {
     deviceId?: string,
     /** ★ 第二阶段缺口二：这条请求该落到哪个会话（可选；通知点击时用）。 */
     sessionId?: string,
+    /** ★ 2026-10-05：系统通知的标题（可选；形如 `Mac-mini-2024 需要你确认`）。 */
+    title?: string,
   ): { ok: true; id: string } | { ok: false; reason: string }
 
   readonly store: DeviceStore
@@ -1466,6 +1468,12 @@ export function createMobileHost(options: {
     text: string,
     deviceId?: string,
     sessionId?: string,
+    /**
+     * ★ 2026-10-05：系统通知的标题（可选 ✓，只有 `notify` 用得上 ✓）。
+     *   排在最后 ⇒ 既有调用（HTTP 路由 / agent 工具）一处都不用改 ✓，
+     *   不传就是"手机按旧标题显示"✓（行为同今天 ✓）。
+     */
+    title?: string,
   ): { ok: true; id: string } | { ok: false; reason: string } {
     if (!DEVICE_CAPABILITIES.includes(capability as DeviceCapability)) {
       return { ok: false, reason: `未知的端侧能力：${capability}` }
@@ -1507,6 +1515,8 @@ export function createMobileHost(options: {
           capability as DeviceCapability,
           String(text ?? '').slice(0, 500),
           sessionId,
+          // ★ 标题也夹在同一道上限里（它比正文短得多，但形状上不留"无限长"的口子 ✗）
+          title === undefined ? undefined : String(title).slice(0, 120),
         )
         store.record({ deviceId: target, kind: 'rpc', target: 'mobile/device/call', detail: capability, ok: true })
         ids.push(call.id)

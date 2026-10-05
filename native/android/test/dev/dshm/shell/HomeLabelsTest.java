@@ -16,8 +16,8 @@ public final class HomeLabelsTest {
     private static int failed = 0;
     private static int checks = 0;
 
-    /** ★ 断言条数下界（**只许上调** ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 55;
+    /** ★ 断言条数下界（**只许上调** ✓ —— 2026-10-05 加缩略图那句原因时 55 ⇒ **59** ✓）。 */
+    private static final int EXPECTED_MIN_CHECKS = 59;
 
     public static void main(String[] args) {
         summary();
@@ -91,6 +91,22 @@ public final class HomeLabelsTest {
                 ghostText.contains("没有指纹"));
         check("诊断文本：幽灵卡也把自己的键念出来 ✓", ghostText.contains("host:Mac-mini-2024.local"));
         check("诊断文本：没有数据时不炸 ✓", "（没有数据）".equals(HomeLabels.machineInspect(null, "x")));
+
+        /**
+         * ★★★ 2026-10-05（用户："返回的既不是截图，也不是壁纸，是那个最早版本的占位符"✗）：
+         * 缩略图取不到时那句**原因**必须能在长按弹出的判据里读到、能选中复制 ✓ ——
+         * 它原来只被写进 `HomeView` 一个没人读的字段 ✓ ⇒ 用户只看到那张示意屏 ✓。
+         */
+        String withNote = HomeLabels.machineInspect(known, "0.1.0+BUILD-1",
+                "电脑回了 502：这台 Mac 读不到壁纸的文件路径");
+        check("★ 诊断文本：缩略图那句原因带出来（长按能复制给我 ✓）",
+                withNote.contains("电脑回了 502：这台 Mac 读不到壁纸的文件路径"));
+        check("★ 诊断文本：这句是**单独一行**（好念、好复制 ✓）",
+                withNote.contains("\n缩略图："));
+        check("★ 诊断文本：没有原因时**不硬塞一行**（不编 ✗）",
+                !HomeLabels.machineInspect(known, "0.1.0+BUILD-1", "").contains("缩略图："));
+        check("★ 诊断文本：2 参那个重载照旧能用（没有缩略图说明那一路 ✓）",
+                HomeLabels.machineInspect(known, "0.1.0+BUILD-1").contains("fp:3e9f7f3a"));
     }
 
     private static void emptyAndTails() {

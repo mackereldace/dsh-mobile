@@ -9,11 +9,18 @@ import java.nio.file.Paths;
  *
  * ## 为什么值得这样测
  *
- * "手机去取那张缩略图"这件事里有三条**只有真握手才验得出来**的东西 ✓：
+ * "手机去取那张壁纸"这件事里有几条**只有真握手才验得出来**的东西 ✓：
  * ① 钉住的那张 CA 真的在起作用（换一张就取不到 ✓）；
  * ② 上限真的在**读的过程中**生效（不是读完再拒 ✓）；
- * ③ 拿回来的东西真的**被认过是不是 PNG**（一个 200 的错误页会被挡掉 ✓）。
+ * ③ 拿回来的东西真的**被认过是不是一张图**（一个 200 的错误页会被挡掉 ✓）；
+ * ④ ★★ 失败时**宿主那句人话**真的被读出来了（502 的正文里有"为什么" ✓ ——
+ *    用户要的就是"如实说明"，丢掉它等于又退回一句没有信息的占位符 ✗）。
  * 用假连接测，测的只是"我以为 TLS 会怎样" ✗。
+ *
+ * ★★ 2026-10-05 换口径 ✗：这个类原来钉的是**截屏**那条路由的假设（只收 PNG ✓、上限 512KB ✓）；
+ *   壁纸路由（`7299f51` 只换了 `HomeShots` 那行 URL ✓）把这三条全推翻了 ✓ ⇒
+ *   对应的断言**换成新行为** ✓（PNG ✓/**JPEG** ✓ 都认 ✓；上限 **8MB** ✓ 且**超过仍拒** ✓）
+ *   —— 是"把过时假设换成新假设"✗，不是"把断言放松了"✗。
  *
  * 由 `scripts/check-manifest-probe.mjs` 编译并运行 ✓。
  */
@@ -22,8 +29,8 @@ public final class ShotFetchTest {
     private static int failed = 0;
     private static int checks = 0;
 
-    /** ★ 断言条数下界（**只许上调** ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 14;
+    /** ★ 断言条数下界（**只许上调** ✓ —— 2026-10-05 换口径时 14 ⇒ **34** ✓）。 */
+    private static final int EXPECTED_MIN_CHECKS = 34;
 
     public static void main(String[] args) throws Exception {
         String base = required("dshm.shot.base");
@@ -32,10 +39,12 @@ public final class ShotFetchTest {
         String plainBase = required("dshm.shot.plain");
         byte[] expected = Files.readAllBytes(Paths.get(required("dshm.shot.expected")));
 
-        pngMagic();
+        imageMagic();
         goodShotIsFetched(base, ca, expected);
         pinIsEnforced(base, wrongCa, plainBase, ca);
         badBodiesAreRejected(base, ca);
+        failureReasonIsRead(base, ca);
+        capMatchesWallpaperRoute(base, ca);
         timeoutsDoNotHang(base, ca);
 
         System.out.println();
@@ -50,14 +59,47 @@ public final class ShotFetchTest {
         if (failed > 0) System.exit(1);
     }
 
-    private static void pngMagic() {
+    /**
+     * ★★ 认图这一组 —— **2026-10-05 换口径** ✗。
+     *
+     * 旧断言里有这么一条：「★ JPEG 头 ⇒ 不认（我们只收 PNG ✓）」✓ ——
+     * 那是**截屏**时代的假设 ✓（`/mobile/desktop/shot` 只回 PNG ✓）；
+     * 壁纸路由回的是**壁纸本来的格式** ✓（宿主 `imageMimeOf` ⇒ jpg / webp / heic 都可能 ✓）
+     * ⇒ 旧假设**已不成立** ✓ ⇒ 换成"JPEG 也认"✓，并补上 webp / heic 各一条 ✓。
+     * ★ 负例一条没删 ✓（空 ✓ / 太短 ✓ / null ✓ / HTML 错误页 ✓）⇒ 是换口径，不是放宽 ✗。
+     */
+    private static void imageMagic() {
         byte[] png = new byte[] { (byte) 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3 };
-        check("真 PNG 头 ⇒ 认", ShotFetch.looksLikePng(png));
-        check("★ 空字节 ⇒ 不认（空图不能当图 ✗）", !ShotFetch.looksLikePng(new byte[0]));
-        check("★ 太短 ⇒ 不认（别拿半个头当图 ✗）", !ShotFetch.looksLikePng(new byte[] { (byte) 0x89, 'P', 'N' }));
-        check("★ JPEG 头 ⇒ 不认（我们只收 PNG ✓）",
-                !ShotFetch.looksLikePng(new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 0, 0, 0, 0 }));
-        check("null ⇒ 不认（不抛 ✓）", !ShotFetch.looksLikePng(null));
+        check("真 PNG 头 ⇒ 认", ShotFetch.looksLikeImage(png));
+        check("★ JPEG 头 ⇒ 认（壁纸路由会回 image/jpeg ✓ —— 旧口径只收 PNG ✗）",
+                ShotFetch.looksLikeImage(new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 0, 0, 0, 0 }));
+        check("★ WebP 头 ⇒ 认（宿主会给 image/webp ✓）",
+                ShotFetch.looksLikeImage(webpBytes()));
+        check("★ HEIC 头 ⇒ 认（macOS 静态壁纸多是它 ✓）",
+                ShotFetch.looksLikeImage(heicBytes()));
+        check("★ 空字节 ⇒ 不认（空图不能当图 ✗）", !ShotFetch.looksLikeImage(new byte[0]));
+        check("★ 太短 ⇒ 不认（别拿半个头当图 ✗）", !ShotFetch.looksLikeImage(new byte[] { (byte) 0x89, 'P', 'N' }));
+        check("★★ 不是图（HTML 错误页）⇒ 不认（放行它就是花屏或崩 ✗）",
+                !ShotFetch.looksLikeImage("<html><body>这不是图</body></html>".getBytes(StandardCharsets.UTF_8)));
+        check("null ⇒ 不认（不抛 ✓）", !ShotFetch.looksLikeImage(null));
+    }
+
+    /** `RIFF` + 四字节长度 + `WEBP` ✓。 */
+    private static byte[] webpBytes() {
+        byte[] bytes = new byte[16];
+        byte[] riff = "RIFF".getBytes(StandardCharsets.US_ASCII);
+        byte[] webp = "WEBP".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(riff, 0, bytes, 0, 4);
+        System.arraycopy(webp, 0, bytes, 8, 4);
+        return bytes;
+    }
+
+    /** 偏移 4 处 `ftyp` + 品牌 `heic` ✓。 */
+    private static byte[] heicBytes() {
+        byte[] bytes = new byte[24];
+        System.arraycopy("ftyp".getBytes(StandardCharsets.US_ASCII), 0, bytes, 4, 4);
+        System.arraycopy("heic".getBytes(StandardCharsets.US_ASCII), 0, bytes, 8, 4);
+        return bytes;
     }
 
     private static void goodShotIsFetched(String base, String ca, byte[] expected) {
@@ -70,6 +112,19 @@ public final class ShotFetchTest {
         check("取到的**就是**那张图（逐字节比 ✓）", shot.ok && sameBytes(shot.bytes, expected));
         check("认得出是 PNG", shot.ok && ShotFetch.looksLikePng(shot.bytes));
         check("成功时没有原因串（不编 ✗）", shot.ok && shot.reason.isEmpty());
+
+        /** ★ 手机上真正打的那条路由 ✓（`HomeShots` 那行 URL 就是它 ✓）。 */
+        ShotFetch.Shot wallpaper = ShotFetch.fetch(base + "/mobile/desktop/wallpaper", ca);
+        check("★★ 走真路由 /mobile/desktop/wallpaper ⇒ 取到", wallpaper.ok);
+        check("★ 取到的还是那张图（逐字节比 ✓）", wallpaper.ok && sameBytes(wallpaper.bytes, expected));
+
+        /**
+         * ★★ 壁纸是 jpg（Windows 常见 ✓）⇒ 必须**收下** ✗ ——
+         *   旧口径（只认 PNG ✓）会在这一条上红 ✓，而它是用户那台电脑的真实情形 ✓。
+         */
+        ShotFetch.Shot jpeg = ShotFetch.fetch(base + "/wallpaper-jpeg", ca);
+        check("★★ 壁纸是 JPEG ⇒ 收下（旧口径 :108 会拒 ✗）", jpeg.ok);
+        check("★ 收下的确实是 JPEG 那份字节 ✓", jpeg.ok && ShotFetch.looksLikeJpeg(jpeg.bytes));
     }
 
     private static void pinIsEnforced(String base, String wrongCa, String plainBase, String goodCa) {
@@ -87,10 +142,39 @@ public final class ShotFetchTest {
         ShotFetch.Shot html = ShotFetch.fetch(base + "/not-an-image", ca);
         check("★★ 200 但不是图（错误页）⇒ 拒（照着解码就是花屏/崩 ✗）", !html.ok);
         check("★ 拒的时候给得出原因（界面要能念 ✓）", !html.ok && html.reason.length() > 0);
-        ShotFetch.Shot big = ShotFetch.fetch(base + "/shot-too-big", ca);
-        check("★★ 超过上限 ⇒ 拒（而且是**读的过程中**就放弃 ✓）", !big.ok);
         check("500 ⇒ 拒", !ShotFetch.fetch(base + "/boom", ca).ok);
         check("404 ⇒ 拒", !ShotFetch.fetch(base + "/mobile/desktop/nope", ca).ok);
+    }
+
+    /**
+     * ★★★ A（2026-10-05）：**宿主的 502 正文里那句人话必须被读出来** ✗。
+     *
+     * 旧口径只有 `"电脑回了 " + status` ✓ —— 宿主那份
+     * `{"message":"这台 Mac 读不到壁纸的文件路径（现在多是系统动态壁纸，本身没有图片文件）"}`
+     * 被整段丢掉 ✓ ⇒ 手机上只说「电脑回了 502」✓（用户实际看到的就是"没有信息"那一档 ✗）。
+     */
+    private static void failureReasonIsRead(String base, String ca) {
+        ShotFetch.Shot down = ShotFetch.fetch(base + "/wallpaper-unavailable", ca);
+        check("★★ 502 ⇒ 仍然拒（没把 5xx 当成功 ✗）", !down.ok);
+        check("★★ 502 正文里那句人话被读出来了（手机上要能念 ✓）",
+                !down.ok && down.reason.contains("读不到壁纸的文件路径"));
+        check("★ 原因里也带着状态码（排障要它 ✓）", !down.ok && down.reason.contains("502"));
+        ShotFetch.Shot plain = ShotFetch.fetch(base + "/boom", ca);
+        check("★ 正文里没有 message ⇒ 退回旧文案（读不到就不编 ✗）",
+                !plain.ok && plain.reason.contains("电脑回了 500"));
+    }
+
+    /**
+     * ★★★ C（2026-10-05）：上限 **512KB ⇒ 8MB** ✗（与宿主同口径 ✓）—— 两边夹着验 ✓：
+     * 700KB 的合法图必须**进得来** ✓（旧口径把它拒了 ✓），真超过 8MB 的必须**拒** ✓
+     * （⇒ 比旧断言更强 ✓，不是"把上限删掉"✗）。
+     */
+    private static void capMatchesWallpaperRoute(String base, String ca) {
+        ShotFetch.Shot under = ShotFetch.fetch(base + "/wallpaper-under-cap", ca);
+        check("★★ 700KB 的壁纸 ⇒ 取到（旧上限 512KB 会把它拒掉 ✗）", under.ok);
+        ShotFetch.Shot over = ShotFetch.fetch(base + "/wallpaper-over-cap", ca);
+        check("★★ 超过 8MB ⇒ 拒（上限抬高了但没放开 ✗）", !over.ok);
+        check("★ 超上限时给得出原因（界面要能念 ✓）", !over.ok && over.reason.length() > 0);
     }
 
     private static void timeoutsDoNotHang(String base, String ca) {

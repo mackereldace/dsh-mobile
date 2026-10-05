@@ -23903,8 +23903,18 @@
            * ⇒ 走壳的桥发**系统通知** ✓（`shellNotify` 早就有了 ✓，只是没人调它 ✗）；
            *   桥不在（例如用手机浏览器打开，而不是 App）⇒ 退回**页面横幅** ✓，绝不静默 ✗。
            */
+          /**
+           * ★ 标题**由电脑给**（`callInfo.title` ✓，形如「Mac-mini-2024 需要你确认」✓）：
+           *   只有电脑知道自己叫什么 ✓（它读的是与本机 manifest.machineName 同一个口 ✓）
+           *   ⇒ 通知栏里的名字与面板行名不会分叉 ✓。
+           * ★ 拿不到这个字段（老宿主 / agent 工具 `phone_notify` ✓）⇒ 退回原来那三个字 ✓
+           *   —— 行为与今天逐字一致 ✓，绝不因为缺字段就弹一条没有标题的通知 ✗。
+           */
+          var callTitle = typeof callInfo.title === 'string' && callInfo.title.length > 0
+            ? callInfo.title
+            : '需要你确认'
           // ★ 会话 id 一起透传（老页面/老壳都没有它 ⇒ 退回"只打开 App" ✓）
-          var posted = shellNotify('需要你确认', text, callInfo.sessionId)
+          var posted = shellNotify(callTitle, text, callInfo.sessionId)
           if (posted === null) {
             drawBar('info', text, [], false)
             detail = 'banner-no-bridge'

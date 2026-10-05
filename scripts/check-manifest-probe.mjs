@@ -10,6 +10,9 @@
  *   （"只验链、不查 hostname ✓，别顺手修 ✗"）钉成断言 ✓；
  * · 明文 http 不探 ✓（App 禁明文 ✓，那条路是给电脑浏览器的 ✓）；
  * · 非 200 / 非 manifest / 重定向 / 超大响应 / 超时 ⇒ 一律不可用，且**不抛** ✓；
+ * · ★ 取图那条（`ShotFetch`）：**壁纸路由**（`/mobile/desktop/wallpaper` ✓）的三种真实返回都要判对 ✓ ——
+ *   真图（PNG ✓ / JPEG ✓）收下 ✓、502 + `{message}` 的正文要**读出那句人话** ✓、
+ *   700KB 的合法图**收下** ✓ 而真超过 8MB 的**拒** ✓；
  * · ★ 超时**真的按给定的毫秒数结束** ✓（"界面会不会被吊住"的那条命门 ✓）。
  *
  * ## 环境是临时且隔离的
@@ -61,6 +64,27 @@ const SHOT_PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.from('dsh-mobile-shot-fixture-v1', 'utf8'),
 ])
+
+/**
+ * ★ 夹具那张 **JPEG** ✓（三字节魔数 `FF D8 FF` ✓）——
+ * 用户那台 Windows 的壁纸极可能就是 jpg ✓，而旧口径"只收 PNG"会把它拒掉 ✓
+ * ⇒ 这条夹具就是给"认图放宽"那条断言用的 ✓。
+ */
+const SHOT_JPEG = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+  Buffer.from('dsh-mobile-wallpaper-fixture-jpeg', 'utf8'),
+])
+
+/**
+ * ★★ 宿主 502 的**真实形状** ✓（`wireError` ⇒ `{code, message, details}` ✓）——
+ * 用户本机实测那次的 `message` 就是这一句 ✓。
+ * A 那条断言认的是"这句人话被读出来了"✓（原来只留状态码 ⇒ 手机上只说「电脑回了 502」✗）。
+ */
+const WALLPAPER_UNAVAILABLE = JSON.stringify({
+  code: 'mobile/internal',
+  message: '这台 Mac 读不到壁纸的文件路径（现在多是系统动态壁纸，本身没有图片文件）',
+  details: {},
+})
 
 const servers = []
 const cleanup = () => {
@@ -130,16 +154,46 @@ const handler = (request, response) => {
     response.end(SHOT_PNG)
     return
   }
+  if (url === '/mobile/desktop/wallpaper') {
+    // ★ 手机上真正打的那条路由 ✓（`HomeShots` 那行 URL ✓）—— 它也得是真 PNG ✓
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(SHOT_PNG)
+    return
+  }
+  if (url === '/wallpaper-jpeg') {
+    // ★ 壁纸本来的格式就可能是 jpg ✓（宿主按后缀给 MIME ✓）—— 旧口径会把它当"不是图"✗
+    response.writeHead(200, { 'content-type': 'image/jpeg' })
+    response.end(SHOT_JPEG)
+    return
+  }
+  if (url === '/wallpaper-unavailable') {
+    // ★★ 与真宿主一模一样的 502 + 那句人话 ✓（A 那条断言的全部依据 ✓）
+    response.writeHead(502, { 'content-type': 'application/json' })
+    response.end(WALLPAPER_UNAVAILABLE)
+    return
+  }
+  if (url === '/wallpaper-under-cap') {
+    /**
+     * ★★ 700KB 的**合法**图 ✓ —— 旧上限是 512KB ✓ ⇒ 这一条在旧口径下必被拒 ✓，
+     *   现在必须**取到** ✓（"上限抬到与宿主同口径"那条才不是空话 ✓）。
+     */
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(Buffer.concat([SHOT_PNG, Buffer.alloc(700 * 1024, 7)]))
+    return
+  }
+  if (url === '/wallpaper-over-cap') {
+    /**
+     * ★★ 真的**超过 8MB** ✓ —— 上限是抬高了，但**没有放开** ✗：
+     *   这条必须仍然被拒 ✓（否则"抬上限"就变成"没有上限"✗）。
+     */
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(Buffer.concat([SHOT_PNG, Buffer.alloc(8 * 1024 * 1024 + 64 * 1024, 7)]))
+    return
+  }
   if (url === '/not-an-image') {
     // ★ 200，但回的是 HTML —— 就是"错误页当成图"那种情形 ✓
     response.writeHead(200, { 'content-type': 'text/html' })
     response.end('<html><body>这不是图</body></html>')
-    return
-  }
-  if (url === '/shot-too-big') {
-    // ★ 合法 PNG 头 + 超过 512KB 的填充 ✓（"读完再判断"与"读的过程中放弃"因此可分辨 ✓）
-    response.writeHead(200, { 'content-type': 'image/png' })
-    response.end(Buffer.concat([SHOT_PNG, Buffer.alloc(700 * 1024, 7)]))
     return
   }
   if (url === '/shot-slow') {
