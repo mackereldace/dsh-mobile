@@ -140,6 +140,40 @@ export class DeviceStore {
     return structuredClone(next)
   }
 
+  /**
+   * ★ 2026-10-05：**端侧能力**（电脑 → 手机：`show` / `notify` / …）的逐项允许记录落盘。
+   *
+   * 由 `index.ts` 的 `mobile/device/enable` 路由调用 —— 也就是**手机点「允许」/「取消允许」**
+   * 的那一次 ✓。修的是用户实测过的一个窄窗口：**宿主刚重启 + 手机在另一台电脑上**时，
+   * 内存态的授权是空的 ⇒ 提权推送被判 `not enabled` ⇒ 静默丢掉 ✗
+   * （手机侧的「缺什么补报什么」要求它此刻连着**本机** ✗，那正是这个窗口里不成立的前提 ✓）。
+   *
+   * ## 为什么是「整份覆盖写」而不是「加一项 / 减一项」
+   *
+   * 判据的唯一来源是内存态队列 ✓：`DeviceCallQueue.setEnabled` 改完之后会返回
+   * **该设备当前允许的完整集合** ✓，直接把它落盘 ⇒ 两边天然一致 ✓。
+   * 若改成按项加减，迟早会出现「文件里有、内存里没有」（重启后凭空放开 ✗）
+   * 或者反过来（重启后悄悄失效 ✗）那种对不上的状态。
+   *
+   * ★ **默认全禁**不受影响：没调用过这个方法 ⇒ 记录里没有这个键 ⇒ 空 ⇒ 什么都不允许 ✓。
+   *
+   * @returns 落盘后的清单（去重、保持传入顺序）；**设备不存在时返回 `undefined`**，
+   *          不凭空造一条记录 ✗。
+   */
+  setDeviceCallGrants(deviceId: string, capabilities: readonly string[]): string[] | undefined {
+    const current = this.devices.get(deviceId)
+    if (current === undefined) return undefined
+    const next = normalizeGrants(capabilities)
+    const record = stripUndefined({
+      ...current,
+      // 空集合 ⇒ 把这个键删掉（与 `DeviceCallQueue.setEnabled` 的「集合空了就 delete」同一套规矩 ✓）
+      deviceCallGrants: next.length === 0 ? undefined : next,
+    }) as DeviceRecord
+    this.devices.set(deviceId, record)
+    this.persist()
+    return next
+  }
+
   /** 改显示名。 */
   rename(deviceId: string, name: string): DeviceRecord | undefined {
     const current = this.devices.get(deviceId)
@@ -190,6 +224,7 @@ export class DeviceStore {
 
 /** 补全缺省字段，保证从旧文件读入的记录结构完整。 */
 function normalize(record: DeviceRecord): DeviceRecord {
+  const grants = normalizeGrants(record.deviceCallGrants)
   return {
     deviceId: record.deviceId,
     devicePublicKey: record.devicePublicKey,
@@ -202,8 +237,29 @@ function normalize(record: DeviceRecord): DeviceRecord {
     ...(record.lastSeenAt === undefined ? {} : { lastSeenAt: record.lastSeenAt }),
     authorization: record.authorization ?? 'persistent',
     capabilities: { ...DEFAULT_CAPABILITIES, ...(record.capabilities ?? {}) },
+    /**
+     * ★ 端侧能力的逐项允许记录：**没有 / 空的都读成「什么都没允许」** ✓
+     * （老 `devices.json` 里根本没有这个键 ⇒ 默认全禁照旧 ✓）。
+     */
+    ...(grants.length === 0 ? {} : { deviceCallGrants: grants }),
     ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
   }
+}
+
+/**
+ * 归一化端侧能力允许记录：只留**非空字符串**、去重、保持原顺序。
+ *
+ * 入参按**不可信输入**处理（`devices.json` 是明文单文件，用户会手改、
+ * 也可能是更老的版本写下的 ✓）：里面混进数字、空串、重复项都不该让宿主出问题。
+ */
+function normalizeGrants(grants: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(grants)) return []
+  const out: string[] = []
+  for (const grant of grants) {
+    if (typeof grant !== 'string' || grant.length === 0 || out.includes(grant)) continue
+    out.push(grant)
+  }
+  return out
 }
 
 function stripUndefined<T extends object>(value: T): T {

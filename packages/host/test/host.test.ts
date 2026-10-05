@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -1656,6 +1656,103 @@ test('端侧请求：默认全禁 → 手机授权 → 电脑发起 → 手机�
       code?: string
     }
     assert.equal(deniedAgain.code, ErrorCode.CapabilityDenied, '停用后必须回到拒绝状态')
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★ 2026-10-05：**逐设备能力授权的持久化** —— 一条真重启的端到端断言。
+ *
+ * ## 修的是哪个窗口（用户实测过 ✓）
+ *
+ * 「宿主刚重启 + 手机切到了**另一台**电脑」⇒ 本机内存态授权是空的 ✗ ⇒
+ * 提权推送被判 `not enabled` ⇒ **静默丢掉** ✗（用户原话是「切到别的电脑就收不到」✓）。
+ * 手机侧那条「跟宿主对账、缺什么补报什么」（`boot.js`）要求它**此刻连着本机** ✗，
+ * 而那正是这个窗口里不成立的前提 ✓ ⇒ 宿主必须**自己记得** ✓。
+ *
+ * ## 为什么这条必须是端到端的
+ *
+ * 纯函数那一组（`device-calls.test.ts`）证明不了「宿主启动时真的去播种了」✗ ——
+ * 接线掉了它们照样全绿 ✓（本项目老 bug 的典型形态 ✓）。所以这里**真的重启一次**：
+ * 丢掉整个宿主（连同它的内存队列与隧道），只用**同一个目录**新建
+ * `DeviceStore` + 新建宿主（= 退出并重开 DeepSeek Harness ✓）。
+ *
+ * ★ 顺带钉住**默认全禁不许松动**：没记过的 `show` 在重启后必须仍然是 `not enabled` ✓。
+ */
+test('端侧能力授权：宿主重启后仍认这台设备（播种自 devices.json，手机在别的电脑上也收得到）', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    await mobile.waitEstablished()
+
+    // ① 手机点「允许」（真实路径：`mobile/device/enable`）
+    const enabled = (await mobile.call('mobile/device/enable', { capability: 'notify', enabled: true })) as {
+      ok: boolean
+      value?: { capabilities?: string[] }
+    }
+    assert.equal(enabled.ok, true)
+    assert.deepEqual(enabled.value?.capabilities, ['notify'])
+
+    // ② **看磁盘**（不看内存）：这一次允许真的落进了 devices.json
+    const onDisk = JSON.parse(readFileSync(join(env.dir, 'devices.json'), 'utf8')) as {
+      devices: { deviceId: string; deviceCallGrants?: string[] }[]
+    }
+    assert.deepEqual(
+      onDisk.devices.find((device) => device.deviceId === env.deviceId)?.deviceCallGrants,
+      ['notify'],
+      '手机点过的那一次允许必须落盘 —— 否则重启后没有任何来源可以记住它',
+    )
+
+    // ③ === 重启 DSH：内存全丢（隧道、会话、授权队列），只剩磁盘 ===
+    const restartedStore = new DeviceStore({ directory: env.dir })
+    const restarted = createMobileHost({
+      store: restartedStore,
+      identity: {
+        hostId: 'host-e2e-1',
+        hostName: '测试 Mac',
+        signingKey: { publicKey: env.hostSigningKey.publicKey, privateKey: env.hostSigningKey.privateKey },
+      },
+      gateway: {
+        async invoke() {
+          return {}
+        },
+        async stream() {
+          return (async function* () {
+            /* 本用例不会走到网关 */
+          })()
+        },
+      },
+      endpoints: () => ['http://192.168.1.10:3080'],
+      config: { requireHostConfirm: true },
+    })
+
+    // ④ 记住的：手机**没在线、也没再点一次**，notify 照样能入队（这正是用户要的结果）
+    const allowed = (await callHost(restarted, 'POST', '/mobile/device/call', {
+      capability: 'notify',
+      text: '重启后的提权提醒',
+    })) as { id?: string; capability?: string }
+    assert.equal(allowed.capability, 'notify', '重启后仍认这台设备允许过 notify（播种）')
+    assert.ok(typeof allowed.id === 'string' && allowed.id.length > 0, '应返回请求 id')
+
+    // ⑤ 没记过的：show 必须仍然被拒（落盘**不许**变成「默认允许」）
+    const denied = (await callHost(restarted, 'POST', '/mobile/device/call', {
+      capability: 'show',
+      text: '从没允许过的能力',
+    })) as { code?: string; message?: string }
+    assert.equal(denied.code, ErrorCode.CapabilityDenied, '没记录过的能力仍然默认全禁')
+    assert.match(String(denied.message), /not enabled/)
+
+    // ⑥ 播种是**只读**的：启动读一遍不许把这条记录改花（改文件的只有「允许 / 取消允许」那条路径）
+    const afterRestart = JSON.parse(readFileSync(join(env.dir, 'devices.json'), 'utf8')) as {
+      devices: { deviceId: string; deviceCallGrants?: string[] }[]
+    }
+    assert.deepEqual(
+      afterRestart.devices.find((device) => device.deviceId === env.deviceId)?.deviceCallGrants,
+      ['notify'],
+      '播种只读：宿主启动不许改写这条记录',
+    )
   } finally {
     env.cleanup()
   }

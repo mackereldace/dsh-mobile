@@ -272,6 +272,41 @@ export class DeviceCallQueue {
   }
 
   /**
+   * ★ 2026-10-05：用**持久化**的逐项同意给内存态授权**播种**。
+   *
+   * ## 修的是哪个窗口
+   *
+   * 授权原先是**纯内存**的（就是上面那个 `enabled`）⇒ DSH 一重启就清空 ✗。
+   * 手机侧确实会拿自己的 localStorage 跟宿主对账、缺什么补报什么 ✓，
+   * 但那前提是「手机此刻连着**这台**电脑」✗ —— 用户实测的窄窗口恰恰是
+   * **宿主刚重启 + 手机切到了另一台电脑**：补报发给了另一台 ✓，本机永远是空的 ✗
+   * ⇒ 提权推送被判 `not enabled` ⇒ **静默丢掉** ✗。
+   *
+   * 所以宿主启动时用 `devices.json` 里那份逐项允许记录把内存态填回来 ✓。
+   *
+   * ## 三条纪律
+   *
+   * 1. **只读**：播种不写文件 ✗ —— 记录里的内容照旧由 `mobile/device/enable` 那条路由改 ✓；
+   * 2. **只加不减（且只加记得的）**：记录里没有的设备/能力，播种之后仍然是**默认全禁** ✓；
+   * 3. **陌生名字跳过**：能力名不在 `DEVICE_CAPABILITIES` 里就忽略 ✓ ——
+   *    `devices.json` 是用户可见、可手改的明文文件，不能因为它多了一个陌生名字
+   *    就让**整个宿主**起不来 ✗（这是「启动路径上没有抛错」那类硬要求 ✓）。
+   *
+   * @param capabilities 该设备已持久化的能力名（通常是 `DeviceRecord.deviceCallGrants` ✓）。
+   * @returns 播种后该设备被记住的能力（按传入顺序，重复项与陌生名字已剔除 ✓）。
+   */
+  seedEnabled(deviceId: string, capabilities: readonly string[]): string[] {
+    const set = this.enabled.get(deviceId) ?? new Set<string>()
+    for (const capability of capabilities) {
+      if (!DEVICE_CAPABILITIES.includes(capability as DeviceCapability)) continue
+      set.add(capability)
+    }
+    // 一条都没记住 ⇒ **不建条目**（与 `setEnabled` 的空集合行为一致 ✓，也让「空」只有一种表示 ✓）
+    if (set.size > 0) this.enabled.set(deviceId, set)
+    return [...set]
+  }
+
+  /**
    * 入队一次请求。
    *
    * @throws 当能力未对该设备启用时——**默认全禁**，且这个错误是给**电脑侧**看的，

@@ -625,6 +625,23 @@ export function createMobileHost(options: {
   const deviceCalls = new DeviceCallQueue()
 
   /**
+   * ★ 2026-10-05：**启动时用落盘的逐项同意给队列播种**（用户实测的窄窗口：
+   * **宿主刚重启 + 手机在另一台电脑上**）。
+   *
+   * 授权原先只活在 `DeviceCallQueue.enabled` 这个内存 `Map` 里 ⇒ DSH 一重启就清空 ✗。
+   * 手机侧虽然有「跟宿主对账、缺什么补报什么」的机制 ✓（见 `boot.js` 的
+   * `[enable] 电脑侧没有 … 的授权，重新声明一次`），但那要求**手机此刻连着本机** ✗ ——
+   * 手机切到另一台电脑时，补报是发给**那一台**的 ✓，本机永远是空的 ✗
+   * ⇒ 提权推送被判 `not enabled` ⇒ 在源头被丢掉 ✗。
+   *
+   * 所以这里把 `devices.json` 里那份逐项允许记录填回内存 ✓。
+   * ★ 播种**只读**、**只加记得的** ⇒ 没记录过的设备/能力照旧默认全禁 ✓（见 `seedEnabled`）。
+   */
+  for (const device of store.list()) {
+    deviceCalls.seedEnabled(device.deviceId, device.deviceCallGrants ?? [])
+  }
+
+  /**
    * ── 信任判据（本插件那道闸）─────────────────────────────────────────────
    *
    * 判据 = 回环（调用方单独判）∪ 静态列表 ∪ **自推导的本机地址/主机名**。
@@ -1397,6 +1414,13 @@ export function createMobileHost(options: {
       pairedAt: previous?.pairedAt ?? new Date().toISOString(),
       authorization: 'persistent',
       capabilities: previous?.capabilities ?? { ...DEFAULT_CAPABILITIES },
+      /**
+       * ★ 2026-10-05：端侧能力的**逐项同意**同样沿用 ✓（理由与上面那行 `capabilities` 一模一样：
+       * 设备换了密钥不等于用户在手机上重新表过态 ✓）。
+       * 少了这一句，重新配对会**静默清掉**「手机点过的那一次允许」✗ ——
+       * 那正是本单要修掉的那类「同意被悄悄丢掉」✓。
+       */
+      ...(previous?.deviceCallGrants === undefined ? {} : { deviceCallGrants: previous.deviceCallGrants }),
     }
     store.upsert(record)
     store.record({ deviceId: claim.deviceId, kind, detail, ok: true })
@@ -2405,12 +2429,26 @@ export function createMobileHost(options: {
       const args = readLocalArgs(payload)
       switch (endpoint) {
         case 'mobile/device/enable':
-          return {
-            capabilities: deviceCalls.setEnabled(
-              device.deviceId,
-              String(args['capability'] ?? ''),
-              args['enabled'] !== false,
-            ),
+          {
+            /**
+             * ★ 2026-10-05：**手机点「允许」/「取消允许」的那一刻就落盘** ✓。
+             *
+             * 顺序是关键：先 `setEnabled`（它顺带校验能力名，陌生名字在这里抛错 ✓），
+             * 拿到**该设备当前允许的完整集合**，再整份写进 `DeviceRecord` ✓ ——
+             * 于是「内存态」与「重启后的播种来源」永远是同一份东西 ✓，
+             * 也不需要在这里分辨「这次是加还是减」✗（覆盖写天然把撤销也覆盖掉 ✓）。
+             */
+            const capability = String(args['capability'] ?? '')
+            const capabilities = deviceCalls.setEnabled(device.deviceId, capability, args['enabled'] !== false)
+            store.setDeviceCallGrants(device.deviceId, capabilities)
+            store.record({
+              deviceId: device.deviceId,
+              kind: 'capability',
+              target: 'mobile/device/enable',
+              detail: `${capability}=${args['enabled'] !== false ? 'on' : 'off'} granted=[${capabilities.join(',')}]`,
+              ok: true,
+            })
+            return { capabilities }
           }
         /**
          * 手机**自己**解除配对（安全规范 §7："撤销即时生效"）。
