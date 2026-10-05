@@ -9510,6 +9510,32 @@
       '.dshm-file-name { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }',
       '.dshm-file-name > [data-dshm-fs-head] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
       '.dshm-file-name > [data-dshm-fs-ext] { flex: 0 0 auto; white-space: nowrap; }',
+      /* ★★ round 199：名字栏**右端**那颗标签 ✓ —— 文件行吃后缀 ✓、文件夹行吃「文件夹」✓。
+         它占的正是上一单删掉的「文件大小 / 目录」那一段位置 ✓（名字之后、`⋯` 之前 ✓）：
+
+           · `margin-left: auto` ⇒ 在第一行里被推到**最右**（紧挨着 `⋯` ✓）——
+             这就是用户说的"右侧那个位置"✓（原来写的是文件大小 ✓）；
+           · **淡**：`--dsw-alias-label-tertiary` ✓ —— 主题里那颗**次要文字**色 ✓（不新造颜色 ✗，
+             与上面 `.dshm-more-info` 用的是同一颗 ✓）；
+           · ★ **宽度上限 64px** ✓（11.5px 实测：`.PDF` = 25.8px ✓、`.DOCX` = 36.7px ✓、
+             `.NUMBERS` = 60.0px ✓、「文件夹」= 34.5px ✓；唯有最长那颗 `.MARKDOWN` = 73.2px ✗ ——
+             它在标签**自己内部**收尾 ✓，换来的是名字那一栏不被挤没 ✓）——
+             320px 视口下名字栏只有 **≈105px** ✓（算式见 `FILE_NAME_MAX_UNITS` 那段注释 ✓），
+             不设上限就是把名字挤没 ✗；
+           · `box-sizing: content-box` 是**故意**写的 ✓：让 `max-width` 只量文字那一段 ✓；
+             左边留 8px 内边距 = "名字与标签之间至少留一条缝"✓（不留的话两者会贴在一起 ✗）。
+             不写它的话，全局若有 `* { box-sizing: border-box }`，上限会被内边距悄悄吃掉 8px ✗；
+           · **不加** `letter-spacing` ✓：先写了 `.02em`，实测它把 `.NUMBERS`（60.0px）顶到 62px 上限外
+             一点点 ⇒ 一个**真实后缀**被自己的上限多剪一刀 ✗（上限这个数是拿实测换来的 ✓，不是拍脑袋 ✗）；
+           · `overflow: hidden` + `text-overflow: ellipsis` 只作用在**标签自己**身上 ✓ ——
+             比上限还长的后缀（如 `.markdown`）在标签内部收尾 ✓；**名字**永远是先被压的那一段 ✓
+             ⇒ 上一单"后缀剪不掉"那条保证这一轮**换到这颗标签上兑现** ✓（见测试里那段转移说明 ✓）。 */
+      '.dshm-file-name > .dshm-file-tag {',
+      '  box-sizing: content-box; flex: 0 0 auto; white-space: nowrap; margin-left: auto;',
+      '  max-width: 64px; padding-left: 8px; overflow: hidden; text-overflow: ellipsis;',
+      '  font-size: 11.5px; text-transform: uppercase;',
+      '  color: var(--dsw-alias-label-tertiary, #7d858e);',
+      '}',
       '.dshm-file-more {',
       '  flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 9px;',
       '  background: transparent; cursor: pointer;',
@@ -20997,14 +21023,22 @@
    *   同一个可收缩元素里的文本，CSS 会从**尾部**切 ✗，而后缀正是尾部 ✗。
    *   ⇒ "保住后缀"不能只靠预算估算 ✓，得靠**结构** ✓（见 `.dshm-file-name > [data-dshm-fs-ext]` ✓）。
    *
+   * ★★ round 199：多了一个 `asFolder` ✓ —— **目录名不许拆后缀** ✗。
+   *   为什么非要有它 ✗：目录右侧那颗标签是固定的「文件夹」✓，名字本身要**完整** ✓；
+   *   而像 `v1.2` / `dsh-mobile.old` 这种目录名，按文件那条路会被拆出一个假后缀 ✗
+   *   （`.2` / `.old` ✗）⇒ 名字平白短一截 ✓，右侧还可能冒出一颗莫名其妙的标签 ✗。
+   *   （上一版没有这个开关 ✓，只是因为那时目录行的右侧压根没有标签 ✓ —— 这一轮才暴露出来 ✓。）
+   *
    * @param name - 完整文件名（目录名也走这里 ✓）。
    * @param maxUnits - 允许占多少个半角单位（省略时用 `FILE_NAME_MAX_UNITS` ✓）。
+   * @param asFolder - `true` ⇒ 当成目录名：**不认后缀** ✓（`ext` 一定是空串 ✓）。
    */
-  function fitFileNameParts(name, maxUnits) {
+  function fitFileNameParts(name, maxUnits, asFolder) {
     var text = String(name === undefined || name === null ? '' : name)
     var limit = Number(maxUnits) > 0 ? Number(maxUnits) : FILE_NAME_MAX_UNITS
     if (text === '') return { head: '', ext: '' }
-    var ext = fileNameExt(text)
+    // ★ round 199：目录名不认后缀 ⇒ 走下面"没有扩展名"那条路（尾部省略、留头 ✓）
+    var ext = asFolder === true ? '' : fileNameExt(text)
     var stem = ext === '' ? text : text.slice(0, text.length - ext.length)
     // 放得下 ⇒ 原样显示；但后缀**照样单独挂** ✓ —— 短名字也不给 CSS 任何剪尾巴的机会 ✓
     if (fileNameUnits(text) <= limit) return { head: stem, ext: ext }
@@ -21109,14 +21143,37 @@
   }
 
   /**
-   * 一个条目：类型图标 + 名称（中段省略、保住扩展名）；点一下进目录 / 预览。
+   * ★★ round 199：目录行**右端那颗标签**的文案（纯函数 ✓ —— 判据直接打在它身上 ✓）。
+   *
+   * 用户原话："我记得之前我们**文件夹会标注出类型**"✓ + "**只有名字这一块可能需要改一改**"✓。
+   * 上一单把「目录」那一段连同文件大小一起删掉了 ✗ —— 这一轮让它**回来** ✓，
+   * 文案按用户嘴里的那个词写成「**文件夹**」✓（不再写「目录」✓）。
+   *
+   * ★ 为什么把这一句单拎成函数 ✗：它是**唯一**一处决定这个字符串的地方 ✓ ——
+   *   单拎出来，判据才能打在**生产**代码上 ✓（打在测试里另抄一份的复制品上就是假断言 ✗）。
+   *   文件那一侧**不在这里** ✓：文件行右侧吃的是 `fitFileNameParts` 吐出来的 `ext` ✓
+   *   （后缀认不认得出来由 `fileNameExt` 说了算 ✓，两处合起来才叫"右侧标签"✓）。
+   */
+  function dirTagText(entry) {
+    if (entry === null || entry === undefined) return ''
+    return entry.type === 'directory' ? '文件夹' : ''
+  }
+
+  /**
+   * 一个条目：类型图标 + 名称（中段省略）+ **右端那颗标签**（后缀 / 「文件夹」✓）；点一下进目录 / 预览。
    *
    * 用"就地展开操作"而不是弹菜单：手机上弹菜单要么太小要么挡住列表，
    * 就地展开还能让用户看清自己操作的是哪一项。
    *
-   * ★ 大小那一段**已按用户要求删掉** ✗（原话："我们现在还会显示一个文件的大小，
-   *   这个感觉没必要，你把这个去掉的话，空间可能会更大一点"✓）——
-   *   省下来的宽度全部给了名字 ✓。
+   * ★ 文件**大小**那一段**已按用户要求删掉** ✗（原话："我们现在还会显示一个文件的大小，
+   *   这个感觉没必要，你把这个去掉的话，空间可能会更大一点"✓）—— 省下来的宽度全部给了名字 ✓。
+   *
+   * ★★ round 199：用户接着说"**或许把文件的大小直接替换为文件名后缀**就好了"✓ ⇒
+   *   那**同一段位置**（名字之后、`⋯` 之前 ✓）现在装的是：
+   *     · 目录 ⇒ 「文件夹」✓（"以前文件夹会标注出类型"✓ —— 上一单删掉的那条**回来**了 ✓）；
+   *     · 文件 ⇒ 后缀 ✓（`fitFileNameParts` 认出来的那一段 ✓）；
+   *     · 没后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
+   *   ★ 图标（图 / 表 / PDF / 码 / 压缩 / 文 / 其它 + 颜色 ✓）用户点名"改的很好"✓ ⇒ **一个字没动** ✓。
    */
   function entryRow(sheet, state, entry) {
     var wrapper = document.createElement('div')
@@ -21160,7 +21217,11 @@
 
     var name = document.createElement('span')
     name.className = 'dshm-file-name'
-    var shownName = fitFileNameParts(entry.name, FILE_NAME_MAX_UNITS)
+    /**
+     * ★ round 199：第三个参数 `isDir` ✓ —— 目录名**不许拆后缀** ✗（目录右侧那颗标签固定是
+     *   「文件夹」✓，名字要完整 ✓；不传它的话 `v1.2` 这种目录会被拆出一个假后缀 `.2` ✗）。
+     */
+    var shownName = fitFileNameParts(entry.name, FILE_NAME_MAX_UNITS, isDir)
     /**
      * ★★ round 198：后缀渲染成**独立元素**（`[data-dshm-fs-ext]` ✓）——
      *   CSS 给它 `flex: 0 0 auto` ✓ ⇒ 它**在结构上不参与收缩** ⇒ 谁也剪不掉它 ✓。
@@ -21168,13 +21229,33 @@
      *   CSS 就从尾部补一刀 ✗（后缀第一个没 ✗）—— 这正是用户那条反馈 ✓。
      * 头部（`[data-dshm-fs-head]` ✓）才是允许收缩 + `overflow: hidden` 的那一个 ✓：
      *   中段省略由 JS 算 ✓、尾部由 CSS 保证 ✓，两条各管一段 ✓。
+     * ★★ round 199：名字那一段现在**只显示 `head`** ✓（= 去掉后缀的那一截 ✓）——
+     *   后缀不再跟着名字走 ✓，它单独出现在下面那颗右端标签上 ✓ ⇒ 整行里后缀**只出现一次** ✓
+     *   （用户："避免重复显示"✓）。
      */
     var nameHead = document.createElement('span')
     nameHead.setAttribute('data-dshm-fs-head', '1')
     nameHead.textContent = shownName.head
     name.appendChild(nameHead)
-    if (shownName.ext !== '') {
+    /**
+     * ★★ round 199：**右端那颗标签** ✓ —— 用户原话："或许把**文件的大小直接替换为文件名后缀**就好了"✓。
+     *   位置就是上一单删掉的「大小 / 目录」那一段 ✓（CSS 里 `margin-left: auto` 把它推到名字栏最右 ✓）。
+     *   · 目录 ⇒ 「文件夹」✓（文案来自 `dirTagText` ✓ —— 那是**唯一**一处生产它的地方 ✓）；
+     *   · 文件 ⇒ 后缀 ✓（`shownName.ext` ✓，就是 `fileNameExt` 认出来的那一段 ✓）；
+     *   · 没有后缀 ⇒ **不建这个元素** ✓（留白 ✓ —— 空标签只会白占宽度 ✗）。
+     * ★ "后缀必须看得见"这条保证，这一轮从**名字那一栏**转移到这颗标签上 ✓：
+     *   它照样是 `flex: 0 0 auto` + `nowrap` ✓（CSS 里那条 `[data-dshm-fs-ext]` 规则**一个字没改** ✓），
+     *   加上 `margin-left: auto` 与 64px 上限 ⇒ 被压的永远只有名字那一段 ✓。
+     */
+    if (isDir) {
+      var dirTag = document.createElement('span')
+      dirTag.className = 'dshm-file-tag'
+      dirTag.setAttribute('data-dshm-fs-tag', '1')
+      dirTag.textContent = dirTagText(entry)
+      name.appendChild(dirTag)
+    } else if (shownName.ext !== '') {
       var nameExt = document.createElement('span')
+      nameExt.className = 'dshm-file-tag'
       nameExt.setAttribute('data-dshm-fs-ext', '1')
       nameExt.textContent = shownName.ext
       name.appendChild(nameExt)
@@ -23030,6 +23111,11 @@
     fitFileNameParts: fitFileNameParts,
     /** ★ 一行文件名**真正显示**的文本 ✓（= 上面两段接起来 ✓；上一单那条判据仍打它 ✓）。 */
     fitFileName: fitFileName,
+    /**
+     * ★★ round 199：目录行右端那颗标签的文案 ✓ —— 判据直接打在它身上 ✓
+     *   （目录 ⇒ 「文件夹」✓ / 其它 ⇒ 空串 ✓；文件的标签文案走 `fitFileNameParts` 的 `ext` ✓）。
+     */
+    dirTagText: dirTagText,
     fileNameFamily: fileNameFamily,
     fileFamilyIcon: fileFamilyIcon,
     fileNameExt: fileNameExt,

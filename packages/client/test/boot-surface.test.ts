@@ -2060,8 +2060,11 @@ test('★ 结构性：R5 那组身份读数必须挂在「端侧诊断」那一�
  */
 interface FileNameInternals {
   /** ★ round 198：显示层现在要的是**两段**（`head` 允许被压 / `ext` 绝不 ✗）。 */
-  fitFileNameParts: (name: unknown, maxUnits?: number) => { head: string; ext: string }
+  /** ★ round 199：第三个参数是 `asFolder` ✓ —— 目录名**不认后缀** ✓（见下面那组断言 ✓）。 */
+  fitFileNameParts: (name: unknown, maxUnits?: number, asFolder?: boolean) => { head: string; ext: string }
   fitFileName: (name: unknown, maxUnits?: number) => string
+  /** ★ round 199：目录行右端那颗标签的文案 ✓（文件那一侧的文案就是 `ext` ✓）。 */
+  dirTagText: (entry: unknown) => string
   fileNameFamily: (name: unknown) => string
   fileFamilyIcon: (family: string) => string
   fileNameExt: (text: string) => string
@@ -2291,4 +2294,171 @@ test('★ PDF 单独一族 + 红色取自主题变量；Markdown 不与它同族
     /var\(--dsw-alias-state-error-primary,/,
     `PDF 必须用主题里那颗语义红 ✓（实际 ${color}）`,
   )
+})
+
+/**
+ * ★★ round 199：文件列表"右侧那个位置"改成一个**类型标签** ✓。
+ *
+ * 用户原话（照抄 ✓）：
+ *   · "**文件列表没问题** ✓，就是**有点丑** ✗。我记得之前我们**文件夹会标注出类型** ✓，
+ *     然后**文件会标注出大小** ✓。或许把**文件的大小直接替换为文件名后缀**就好了 ✓。呃，
+ *     但是我的意思是，**只有名字这一块可能需要改一改** ✓，★ **你的图标改的很好** ✓。"
+ *
+ * ⇒ 三条落到代码上：
+ *   ① 文件行右端吃**后缀** ✓（位置 = 上一单删掉的「大小 / 目录」那一段 ✓）；
+ *   ② 目录行右端吃「**文件夹**」✓（上一单被删掉的那条**回来** ✓）；
+ *   ③ 名字那一段**只显示 head** ✓ ⇒ 后缀在整行里**只出现一次** ✓（"避免重复显示"✓）。
+ *
+ * ## ★ 两条"保证"的转移（这一轮最要紧的一处，必须写清楚 ✓）
+ *   · 上一单的保证是"**后缀在结构上剪不掉**" ✓ —— 它打在三处：`entryRow` 里后缀有**自己的**
+ *     元素（`data-dshm-fs-ext` ✓）、`nameExt.textContent = shownName.ext` ✓、
+ *     CSS `.dshm-file-name > [data-dshm-fs-ext] { flex: 0 0 auto; white-space: nowrap; }` ✓。
+ *     这一轮**这三处一个字都没动** ✓（下面 round 198 那组断言继续绿 ✓，见本文件上面那一组 ✓）
+ *     ⇒ 后缀仍然挂在**不参与收缩**的元素上 ✓。
+ *   · 新增的保证是"**后缀看得见**"这条**意图**现在由**右端标签**兑现 ✓：
+ *     同一颗元素被 `margin-left: auto` 推到名字栏最右 ✓，而**名字**那一截是唯一会被压的 ✓
+ *     （`[data-dshm-fs-head]` 独占 `overflow: hidden` ✓）。名字再长，被剪的也只是名字 ✓。
+ *   ★ 换句话说：剪不掉这条**没有改名换姓** ✓ —— 它换的是"被剪的是谁"这个答案里的**名字**那一侧 ✓。
+ *
+ * ## ★ 几何：拿**真布局引擎**量过（不是估算 ✓、也不是审美判断 ✗）
+ *   做法：从 `boot.js` 里**原样抽出**那几条 `.dshm-file*` CSS ✓（不手抄 ✗），拼出一个真 `entryRow` 形状的
+ *   行（图标盒 22px 由 CSS 定 ✓），在无头 Chrome 里按 320 / 375 / 412px 三种视口各量一遍
+ *   （行宽 = `min(64vw, 264px) - 20`，即 184.8 / 220 / 243.7px ✓）。实测（macOS system-ui ✓）：
+ *     · 标签**右边缘三档各自恒定**（139.8 / 175 / 198.7px ✓）、距 `⋯` 恒为 **11px** ✓
+ *       ⇒ 右边这一列是对齐的 ✓（不是每行飘 ✓）；
+ *     · `.pdf`(34.2) `.docx`(44.4) `.png`(36.1) `.gz`(27.2) `.md`(29.1) `.numbers`(68.7)
+ *       「文件夹」(42.5) —— **一个都没被自己那颗上限剪到** ✓（`scrollWidth <= clientWidth` ✓）；
+ *     · 被剪的**只有名字那一段** ✓（长名字 `headClipped=true` ✓，标签 `tagClipped=false` ✓）——
+ *       这正是本组要保的那条 ✓；320px 下最坏一档（`.numbers`）名字还剩 36.1px ✓；
+ *     · **没有后缀**的行（`README`）根本没有标签节点 ✓（留白 ✓，不是空标签 ✓）。
+ *   ★ 上限为什么是 **64px**（而不是 62 或 72）：`.NUMBERS` 实测 60.0px ✓ ⇒ 64 留了 4px 余量 ✓；
+ *     先写 62px + `letter-spacing: .02em` 时它**真被剪了** ✗ ⇒ 去掉字距、上限提到 64 ✓；
+ *     再往上（≥73px）就轮到 320px 下的名字被挤 ✗ —— 唯有 `.markdown`（73.2px）与更长的陌生后缀
+ *     会在标签**自己内部**收尾 ✓（全名仍在 `title` / 长按里 ✓）。
+ *   ★ 字体差异：以上是 SF Pro 的数字 ✓；安卓 WebView 是 Roboto ✓ ⇒ 4px 余量就是给它的 ✓。
+ *
+ * ## ★ 变异验证（各做一次 ⇒ **恰好**新增那几条变红 ✓，做完改回 ✓）
+ *   · ① 把右端标签整个去掉 ✗（删掉 `entryRow` 里 `data-dshm-fs-ext` 那一段 ✓）⇒
+ *     本组 ①②③ 与 round 198 那组一起红 ✓；
+ *   · ② 把文件大小加回来 ✗（`entryRow` 里再建一个 `formatSize(entry.size)` ✓）⇒
+ *     下面"不再显示大小"那条负例红 ✓；
+ *   · ③ 把目录的 `asFolder` 丢掉 ✗（调用改成两参 ✓）⇒ 下面 `v1.2` 那条"目录不许被拆出假后缀"红 ✓；
+ *   · ④ 把 `.dshm-file-tag` 的 `margin-left: auto` 去掉 ✗ ⇒ "标签靠右"那条红 ✓。
+ *   ★ 四条都实跑过 ✓：①②③④ 每次都是**恰好**那几条红、其余全绿 ✓（还原后 sha256 回到原值 ✓）。
+ */
+test('★★ 右端标签：文件行吃后缀、文件夹行有「文件夹」、名字里不再重复后缀', () => {
+  const body = functionBodyAtColumn2(bootSource, 'entryRow')
+  const internals = fileNameInternals()
+
+  // ① 文件那一侧：标签元素存在、吃的**正好**是后缀那一段，而且真的挂上了标签样式 ✓
+  //    （只查 CSS 不查"有没有挂上这个类"，就是最常见的那种假断言 ✗）
+  assert.ok(body.includes('data-dshm-fs-ext'), '文件行必须有一颗后缀标签 ✓（data-dshm-fs-ext ✓）')
+  assert.match(
+    body,
+    /nameExt\.className = 'dshm-file-tag'/,
+    '后缀那颗元素必须挂上 `.dshm-file-tag` 样式 ✓（不挂的话 CSS 那几条全是空转 ✗）',
+  )
+  assert.match(
+    body,
+    /nameExt\.textContent = shownName\.ext\b/,
+    '标签里放的必须正好是 `ext` 那一段 ✓（后缀 ✓，不是整串名字 ✗）',
+  )
+
+  // ② 目录那一侧：文案来自**生产函数** `dirTagText` ✓ + 结构上真有那颗标签 ✓（两处合起来才成立 ✓）
+  assert.match(body, /dirTag\.className = 'dshm-file-tag'/, '「文件夹」那颗也要挂同一个类 ✓')
+  assert.match(
+    body,
+    /dirTag\.textContent = dirTagText\(entry\)/,
+    '「文件夹」必须由 `dirTagText` 这个生产函数给 ✓（在测试里另抄一份就是假断言 ✗）',
+  )
+  assert.ok(body.includes('data-dshm-fs-tag'), '目录标签要有自己的记号 ✓（data-dshm-fs-tag ✓）')
+  assert.equal(internals.dirTagText({ type: 'directory' }), '文件夹', '目录 ⇒ 「文件夹」✓（用户原话 ✓）')
+  assert.equal(internals.dirTagText({ type: 'file' }), '', '文件 ⇒ 空串 ✓（文件那条走 ext ✓，不许在这里也吐一个 ✗）')
+  assert.equal(internals.dirTagText(undefined), '', 'undefined 不许崩 ✓')
+  assert.equal(internals.dirTagText(null), '', 'null 不许崩 ✓')
+
+  // ③ 名字里不再重复后缀 ✓ —— 整段 `entryRow` 里后缀只被写进**一个**元素 ✓（写两次 = 重复显示 ✗）
+  const extWrites = body.match(/textContent = shownName\.ext\b/g) ?? []
+  assert.equal(
+    extWrites.length,
+    1,
+    `后缀在整行里只许出现**一次**（重复显示 ✗，实际被写 ${extWrites.length} 次）`,
+  )
+  assert.ok(
+    !/nameHead\.textContent = [^\n]*\+/.test(body),
+    '名字那一截**不许**再拼后缀 ✗（那就退回到"后缀跟着名字走"✗）',
+  )
+  assert.match(body, /nameHead\.textContent = shownName\.head\b/, '名字那一截只放 `head` ✓')
+
+  // ③b 目录名不许被拆出**假后缀** ✗，而且 `entryRow` 必须真把 `isDir` 递进去 ✓（否则下面纯函数那条就是空转 ✗）
+  assert.match(
+    body,
+    /fitFileNameParts\(entry\.name, FILE_NAME_MAX_UNITS, isDir\)/,
+    '`entryRow` 必须把 `isDir` 传给 `fitFileNameParts` ✓（不传 ⇒ `v1.2` 这种目录会被拆出 `.2` ✗）',
+  )
+  // ★ 用两条 `equal` 而不是 `deepEqual` ✗：boot.js 跑在**另一个 realm** 里 ✓，
+  //   它返回的对象原型与测试侧不是同一个 ⇒ 深比较会因原型不同而假红 ✓。
+  const folderParts = internals.fitFileNameParts('v1.2', 22, true)
+  assert.equal(folderParts.head, 'v1.2', '目录名要**原样**留着 ✓（不许被拆短 ✗）')
+  assert.equal(folderParts.ext, '', '目录名不认后缀 ✓')
+  assert.equal(internals.fitFileNameParts('v1.2', 22).ext, '.2', '文件那一侧照旧认后缀 ✓（这条证明上一条不是恒真 ✓）')
+  assert.equal(internals.fitFileNameParts('.gitignore', 22, true).ext, '', '目录名也不认隐藏文件那种点开头 ✓')
+  const longFolder = internals.fitFileNameParts('一个很长的目录名字最终版', 8, true)
+  assert.equal(longFolder.ext, '', '目录永远不吐后缀 ✓')
+  assert.ok(longFolder.head.endsWith('\u2026'), '长目录名退化成尾部省略（留头 ✓）')
+
+  // ④ 标签的样式：**靠右 + 淡 + 有宽度上限** —— 三条缺一，下面每一条都能被变异打红 ✓
+  const tagRule = (/\.dshm-file-name > \.dshm-file-tag \{([^}]*)\}/.exec(bootSource) ?? [])[1] ?? ''
+  assert.ok(tagRule !== '', 'CSS 里必须有 `.dshm-file-name > .dshm-file-tag` 那条规则 ✓')
+  assert.match(
+    tagRule,
+    /margin-left:\s*auto/,
+    '标签必须被推到名字栏**最右** ✓（那里原来写的是文件大小 ✓）',
+  )
+  assert.match(
+    tagRule,
+    /color:\s*var\(--dsw-alias-label-tertiary/,
+    '淡 = 主题里那颗**次要文字**色 ✓（不许自创颜色 ✗）',
+  )
+  assert.match(tagRule, /max-width:\s*\d+(?:\.\d+)?px/, '标签必须有**宽度上限** ✓（否则窄栏里把名字挤没 ✗）')
+  const cap = Number((/max-width:\s*(\d+(?:\.\d+)?)px/.exec(tagRule) ?? [])[1] ?? '0')
+  // 下界：要放得下「文件夹」（11.5px 实测 34.5px ✓）；上界：320px 视口下名字栏只有 ≈105px ✓
+  assert.ok(
+    cap >= 35 && cap <= 72,
+    `上限要放得下「文件夹」（实测 34.5px ✓）又要在 320px 下给名字留出大半（实测上限 ${cap}px ✓）`,
+  )
+  assert.ok(!/flex:\s*\d+\s+1\b/.test(tagRule), `标签**不许**允许收缩 ✗（收缩就是被剪 ✓）：${tagRule}`)
+
+  // ⑤ 没有后缀的文件**不留空标签** ✓（留白 ✓ —— 用户点名的是"替换"，不是"多一颗空的"✗）
+  assert.match(
+    body,
+    /if \(isDir\) \{[\s\S]*?\} else if \(shownName\.ext !== ''\) \{[\s\S]*?nameExt/,
+    '文件那条标签必须只在 `ext !== \'\'` 时才建 ✓（没后缀 ⇒ 留白 ✓）',
+  )
+
+  // ⑥ 负例（沿用上一单那条 ✓）：列表里不许再出现文件大小 ✗
+  assert.ok(!body.includes('formatSize('), '右端标签装的是**类型/后缀**，不是大小 ✗')
+  assert.ok(!bootSource.includes('dshm-file-meta'), '大小那一段仍然整个不存在 ✓')
+  // ⑦ 图标：用户点名"你的图标改的很好"✓ ⇒ 这一轮**一行都没动** ✓（唯一证据是 git diff 里那片区域零增删 ✓）。
+  //    这里再补一条**不软**的判据 ✓：五颗专用族图标**两两不同** ✓，且都与其它那颗不同 ✓ ——
+  //    这正是"图 / 表 / PDF / 码 / 压缩在窄栏里一眼分得开"那条 ✓（把任意两族并成一颗 ⇒ 红 ✓）。
+  const special = ['image', 'sheet', 'pdf', 'code', 'archive']
+  const icons = special.map((family) => internals.fileFamilyIcon(family))
+  assert.equal(
+    new Set(icons).size,
+    special.length,
+    `五颗专用族图标必须两两不同 ✓（实际只有 ${new Set(icons).size} 颗不同 ⇒ 有两族撞在一起了 ✗）`,
+  )
+  for (const family of special) {
+    assert.ok(
+      internals.fileFamilyIcon(family) !== internals.fileFamilyIcon('other'),
+      `${family} 族的图标必须仍然与"其它"那颗不同 ✓（用户：图标改的很好 ✓）`,
+    )
+  }
+  // 而且族名这条映射也没被顺手动过 ✓（图标分族的入口就在这儿 ✓）
+  assert.equal(internals.fileNameFamily('截图.png'), 'image')
+  assert.equal(internals.fileNameFamily('预算.xlsx'), 'sheet')
+  assert.equal(internals.fileNameFamily('报告.pdf'), 'pdf')
+  assert.equal(internals.fileNameFamily('脚本.mjs'), 'code')
+  assert.equal(internals.fileNameFamily('备份.zip'), 'archive')
 })
