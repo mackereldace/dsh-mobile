@@ -2154,6 +2154,47 @@
   }
 
   /**
+   * ★★ 本轮 C：「手机下载」这条链的提示口 —— **优先壳的系统通知**（APK 里唯一进得了通知栏的
+   *   那条路），壳不在 / 通知没发出去 ⇒ 退回一条**短**页面横幅。
+   *
+   * 为什么页面内那条横幅必须让位（用户原话：「手机下载这功能，它的那个提示，现在会闪烁一下，
+   *   闪烁一串很长的东西，我看不清，然后再提示成功下载。把这种通知，你可以考虑改成安卓的通知」）：
+   *   这条链一次要说三句 ——「正在从电脑读取 …」→「已交给手机保存：<文件名>（<体积>）——
+   *   存好之后会告诉你落在哪」→「已保存到「下载」：<文件名>」，每一句都**替换**上一条横幅
+   *   ⇒ 屏幕上就是闪一串看不清的字；而壳那条系统通知是通知栏里一条短的、读得完的东西
+   *   （壳那边用同一个 notification id ⇒ 后来的替换先前的，不会堆成一片）。
+   *
+   * @param title 通知标题（短：「正在下载」/「已下载」/「下载失败」）。
+   * @param body  正文；超过 72 字就截断 —— 全量文案仍然写进面板提示行与调试框
+   *              （长路径只在调试框里打）。
+   * @returns `'notify'` / `'toast'`（调试框那行据此能分清「通知真发出去了」与「退回横幅了」）。
+   */
+  function downloadNotice(title, body) {
+    var short = String(body === undefined || body === null ? '' : body)
+    if (short.length > 72) short = short.slice(0, 72) + '…'
+    var result = shellNotify(title, short, '')
+    if (result === 'ok') {
+      try {
+        debugBoxLine('[download] 系统通知已发出：' + String(title) + '｜' + short)
+      } catch (error) {
+        void error
+      }
+      return 'notify'
+    }
+    /**
+     * 到这儿说明**通知栏那一路没走通**（没有壳 / 权限是 default|denied / untrusted / 壳报错）
+     * ⇒ 退回页面横幅，而且只有上面那一份**短的**（绝不把长串再闪一遍）。
+     */
+    shellToast(String(title) + '：' + short)
+    try {
+      debugBoxLine('[download] 系统通知没发出去（' + String(result) + '）⇒ 退回短横幅：' + short)
+    } catch (error) {
+      void error
+    }
+    return 'toast'
+  }
+
+  /**
    * ★ 发一条**原生**系统通知 ✓ —— APK 里唯一进得了通知栏的路 ✓。
    *
    * 为什么网页那套（`new Notification()` / `ServiceWorkerRegistration.showNotification()`）
@@ -2283,6 +2324,30 @@
   }
 
   /** 「保存」这件事的统一反馈口 ✓（面板提示行 + 页面提示条 + 调试框 ✓，三处同一条文案 ✓）。 */
+  /**
+   * ★★ 本轮 C：这句话是不是「把文件存进手机」那条链说的 —— 是就返回**通知标题**，不是返回 null。
+   *
+   * 判据只用**那几句自己就有的措辞**（它们全出自壳保存那两条链：`shellSaveBytes` 与
+   * `handleShellSaveCallback`，以及卡片那颗「手机下载」的入口 `runCardDownload`）；
+   * 一处都没命中 ⇒ 照旧走页面横幅（例如「在文件面板中打开：…」「已在我们的文件面板里打开并跳到：…」
+   * 这些**面板内**的反馈，本来就不该弹到通知栏上）。
+   * ★ 改那几句文案时要一起改这里，否则那一条会退回横幅（不会崩，但就不是通知了）。
+   */
+  function saveToPhoneNotice(message) {
+    var text = String(message)
+    if (text.indexOf('已交给手机保存') >= 0) return '正在下载'
+    if (text.indexOf('正在从电脑读取') >= 0) return '正在下载'
+    if (text.indexOf('正在从电脑取 Session 日志') >= 0) return '正在下载'
+    if (text.indexOf('已保存到') >= 0) return '已下载'
+    if (text.indexOf('保存失败') >= 0) return '下载失败'
+    if (text.indexOf('下载失败') >= 0) return '下载失败'
+    if (text.indexOf('导出失败') >= 0) return '下载失败'
+    if (text.indexOf('导出在手机上取不到') >= 0) return '下载失败'
+    if (text.indexOf('手机保存的结果看不懂') >= 0) return '下载失败'
+    if (text.indexOf('还没有「保存文件」这座桥') >= 0) return '下载失败'
+    return null
+  }
+
   function saveFeedback(text) {
     var message = String(text)
     try {
@@ -2290,7 +2355,14 @@
     } catch (error) {
       void error
     }
-    shellToast(message)
+    /**
+     * ★ 本轮 C：「存进手机」那条链改走**壳的系统通知**（见 downloadNotice），页面横幅那一份
+     *   不再发 —— 面板提示行（上面那行 `setNote`）与调试框**一个字没变**：面板开着时用户看的是它，
+     *   验收脚本读的也是它。
+     */
+    var notice = saveToPhoneNotice(message)
+    if (notice === null) shellToast(message)
+    else downloadNotice(notice, message)
     try {
       debugBoxLine('[save] ' + message)
     } catch (error) {
@@ -10663,20 +10735,68 @@
       '  [data-presented-file] [data-open-target] { display: none !important; }',
 
       /**
-       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）：
-       *   尺寸与圆角照 DSH 原来那颗分体按钮 ✓（高 28 / 圆角 10 ✓），颜色一律走设计 token ✓。
+       * 卡片右侧我们自己的两个动作（预览 / 手机下载 ✓）。
+       *
+       * ★★ 本轮更正（用户：「预览跟手机下载其实有点丑，因为我记得我们之前是有那个空间的，
+       *   我不知道你为什么没有用」）—— 上一版（f17758d）这两颗是**手写**一套样式 ✗：
+       *   高 28 / 圆角 10 / 边框 l3 / 底色 button-floating-fill / 字号 12，照的是
+       *   **上一代** deliverables 那颗分体按钮（0.1.5 的 `nyYjTG_split` / `nyYjTG_open`）；
+       *   而**运行时**卡片里那一套是另外一份数（本轮从 DSH 应用包里逐条读出来的，不是猜的）：
+       *   出处 `ui-open-in-app/src/client/OpenTargetButton.module.css`（app.asar 内）：
+       *     _split{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);
+       *       border-radius:var(--dsw-radius-sm);height:24px;font-family:var(--dsw-font-family);
+       *       align-items:stretch;display:inline-flex;overflow:hidden}
+       *     _main,_chevron{color:var(--dsw-alias-label-primary);white-space:nowrap;cursor:pointer;
+       *       background:0 0;border:0;justify-content:center;align-items:center;font-size:11px;
+       *       line-height:16px;display:inline-flex}
+       *     _main{gap:4px;padding:3px 5px}
+       *     _chevron{border-left:.5px solid var(--dsw-alias-border-l4);
+       *       color:var(--dsw-alias-label-secondary);padding:3px 4px 3px 3px}
+       *   ★ 结构也不一样：它是**一个药丸** ✓（两颗之间那道 border-left 就是分隔 ✓），
+       *   我们的是「两颗各自整圈边框的小胶囊 + gap:6px」✗ —— 这正是「没用到那套」的地方。
+       *
+       * ★ 复用分两路（见 installDeliverablesCardBridge 的 nativeCardSkin）：
+       *   · 原生控件在场 ⇒ 把它的类名（装动作的容器 `_actions` + 药丸 `_split` +
+       *     两颗 `_main` / `_chevron`）**原样抄过来** ⇒ 下面这段一个字都不生效
+       *     （同一个 class、同一套 CSS 变量）；
+       *   · 不在场（手机上就是：0.2.0 的 FileOpenTarget 在 desktop !== true 时 render null）
+       *     ⇒ 走下面 `data-dshm-skin="fallback"` 这一路：**逐条对齐**上面那份原生 CSS
+       *     （不是自己另调一套审美 ✗）。两路必须分开 ⇒ 我们的 `[data-dshm-card-actions]`
+       *     选择器比原生那条更具体，不分开写就会把原生样式压掉 ✗。
+       *
+       * ★ 触摸屏把那**一行用满**：卡片 `_file` 实测高 60px、上下内边距 8px ⇒ 内容盒正好 44px，
+       *   而旧版原生那颗分体按钮自己就写着
+       *   `@media (pointer:coarse){_split{min-height:44px};_open,_chevron{min-width:44px}}`
+       *   （出处：0.1.5 的 dsh-client-ui-deliverables）—— 用户那句「我们之前是有那个空间的」。
+       *
        *   `pointer-events: auto` 是必需的 ✓ —— 卡片正文那层 `_fileBody` 是 `pointer-events:none` ✓，
        *   而铺满整张卡的 `_cardPreview` 覆盖层在它下面（z-index 1 ✓）⇒ 不写这一条就点不到 ✗。
        */
       '  [data-dshm-card-actions] {',
-      '    pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px;',
+      '    pointer-events: auto; flex: none; display: inline-flex;',
       '  }',
-      '  [data-dshm-card-actions] button {',
-      '    height: 28px; padding: 0 10px; border-radius: 10px; font: inherit; font-size: 12px;',
-      '    line-height: 18px; white-space: nowrap; cursor: pointer; color: var(--dsw-alias-label-primary);',
-      '    border: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-button-floating-fill);',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] {',
+      '    box-sizing: border-box; border: .5px solid var(--dsw-alias-border-l4);',
+      '    border-radius: var(--dsw-radius-sm); height: 24px; font-family: var(--dsw-font-family);',
+      '    align-items: stretch; overflow: hidden;',
       '  }',
-      '  [data-dshm-card-actions] button:active { background: var(--dsw-alias-interactive-bg-hover); }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button {',
+      '    color: var(--dsw-alias-label-primary); white-space: nowrap; cursor: pointer;',
+      '    background: 0 0; border: 0; justify-content: center; align-items: center;',
+      '    font-size: 11px; line-height: 16px; padding: 3px 5px; gap: 4px; display: inline-flex;',
+      '  }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button + button {',
+      '    border-left: .5px solid var(--dsw-alias-border-l4); color: var(--dsw-alias-label-secondary);',
+      '    padding: 3px 4px 3px 3px;',
+      '  }',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button:hover,',
+      '  [data-dshm-card-actions][data-dshm-skin="fallback"] > button:focus-visible {',
+      '    background: var(--dsw-alias-interactive-bg-hover);',
+      '  }',
+      '  @media (pointer: coarse) {',
+      '    [data-dshm-card-actions][data-dshm-skin="fallback"] { min-height: 44px; }',
+      '    [data-dshm-card-actions][data-dshm-skin="fallback"] > button { min-width: 44px; }',
+      '  }',
 
       /**
        * ★★ 本轮 B/C（用户原话：「呃，你的**选择卡**跟**审批通知**，它能不能**稍微宽一点**？」✓）
@@ -18404,6 +18524,13 @@
       if (card === null) return null
       var button = node.closest('button')
       if (button === null) return null
+      /**
+       * ★ 本轮 A：我们自己注入的那两颗（`data-dshm-card-act`）不许被当成 DSH 自己的控件 ——
+       *   它们会**抄原生类名**（`_main` / `_chevron`）⇒ 下面那条后缀判据会把「手机下载」
+       *   错认成 DSH 那颗 v（pointerup 那一路会因此直接 return，把这一下让给
+       *   「DSH 自己的菜单」⇒ 点了没反应）。
+       */
+      if (button.closest('[data-dshm-card-act]') !== null) return null
       if (!classHasSuffix(button, 'chevron') && !classHasSuffix(button, 'open')) return null
       if (!card.contains(button)) return null
       return { card: card, button: button }
@@ -18960,7 +19087,58 @@
       return card.querySelector('div[class*="actions"]')
     }
 
-    /** 一颗动作按钮 ✓（动作名写在属性上 ✓ ⇒ 一条委托监听就能认 ✓）。 */
+    /** 一个节点身上的 class 原样读出来（抄的是**运行时**拿到的类名，不是写死的哈希）。 */
+    function classTextOf(node) {
+      if (node === null || node === undefined || typeof node.getAttribute !== 'function') return ''
+      var raw = node.getAttribute('class')
+      return raw === null || raw === undefined ? '' : String(raw).trim()
+    }
+
+    /**
+     * ★★ 本轮 A：把卡片里**原生那套控件**的类名原样抄出来（同一个 class = 同一套 CSS）。
+     *
+     * 判据只用**语义属性 + 类名后缀**：`[data-open-target]`（插件打的稳定属性）+ `_split` /
+     * `_main` / `_chevron` 后缀。前缀（运行时是 `dwRWCG_` / `iq4beG_` 这种）是**构建哈希**，
+     * 一个字都不写进源码（本仓因写死哈希类名静默失效过多次）。
+     *
+     * @returns `{actions, split, main, chevron}`；这一版卡片里没有原生控件时返回 null
+     *          —— 手机上就是这一支：0.2.0 的 FileOpenTarget 在 `desktop !== true` 时
+     *          `render null`（本轮从 app.asar 里读出来的），此时调用方走
+     *          `data-dshm-skin="fallback"` 那套逐条对齐的样式。
+     */
+    function nativeCardSkin(card) {
+      var native = card.querySelector('[data-open-target]')
+      if (native === null) return null
+      var buttons = native.querySelectorAll('button')
+      var main = null
+      var chevron = null
+      for (var i = 0; i < buttons.length; i++) {
+        if (classHasSuffix(buttons[i], 'chevron')) {
+          chevron = buttons[i]
+          continue
+        }
+        /**
+         * ★ 只认 `_main`（新插件那一版）——**不认** `_open`（上一代 deliverables 那个类名）：
+         *   `[data-open-target]` 本身就是新插件才打的属性，所以走到这里时那颗一定是 `_main`；
+         *   而 `_open` 会被下面 cardActionOf 那条老判据认成「卡片打开」⇒ 两处一起接管同一颗
+         *   按钮 ⇒ 轻点一下**开两次预览**。
+         */
+        if (main === null && classHasSuffix(buttons[i], 'main')) main = buttons[i]
+      }
+      if (main === null || chevron === null) return null
+      var host = native.parentElement
+      return {
+        actions: host === null ? '' : classTextOf(host),
+        split: classTextOf(native),
+        main: classTextOf(main),
+        chevron: classTextOf(chevron),
+      }
+    }
+
+    /**
+     * 一颗动作按钮（动作名写在属性上 ⇒ 一条委托监听就能认）。
+     * 类名由调用方在抄到原生皮肤之后补上（`data-dshm-skin="native"` 时）。
+     */
     function cardActionButton(act, label) {
       var button = document.createElement('button')
       button.type = 'button'
@@ -18983,10 +19161,32 @@
         if (card.querySelector('[data-dshm-card-actions]') !== null) continue
         var host = cardActionsHost(card)
         if (host === null) continue
+        /**
+         * ★ 本轮 A：皮肤分两路（见 nativeCardSkin）——
+         *   抄到原生类名 ⇒ `native`（同一个 class、同一套 CSS 变量）；抄不到 ⇒ `fallback`
+         *   （CSS 里那段逐条对齐原生的）。两路必须互斥：我们的 `[data-dshm-card-actions]`
+         *   选择器比原生那条更具体，两个都套会把原生样式压掉。
+         */
+        var skin = nativeCardSkin(card)
         var group = document.createElement('div')
         group.setAttribute('data-dshm-card-actions', '1')
+        group.setAttribute('data-dshm-skin', skin === null ? 'fallback' : 'native')
         group.appendChild(cardActionButton('preview', '预览'))
         group.appendChild(cardActionButton('download', '手机下载'))
+        /**
+         * ★ 本轮 A：原生控件的类名**原样抄过来**（不写死哈希）。组这一层同时是 DSH 自己
+         *   那个装动作的容器（`_actions`）与那个药丸（`_split`）；两颗分别拿 `_main` /
+         *   `_chevron`（后者带那道 `border-left` 分隔 —— 用户说的「那个空间」就是它）。
+         */
+        if (skin !== null) {
+          var adopted = (skin.actions + ' ' + skin.split).trim()
+          if (adopted !== '') group.setAttribute('class', adopted)
+          var halves = group.children
+          if (halves.length === 2) {
+            if (skin.main !== '') halves[0].setAttribute('class', skin.main)
+            if (skin.chevron !== '') halves[1].setAttribute('class', skin.chevron)
+          }
+        }
         host.appendChild(group)
         changed += 1
       }
