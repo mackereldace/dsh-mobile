@@ -335,11 +335,25 @@ final class HomeView extends FrameLayout {
         try {
             if (currentMachineKeyNow != null && (owner == null || !currentMachineKeyNow.equals(owner.key))) return false;
             if (currentAuthorityNow == null) return instance.current;
-            for (int i = 0; i < instance.addresses.size(); i += 1) {
-                HomeModel.Address address = instance.addresses.get(i);
-                if (address == null) continue;
-                String authority = address.authority;
-                if (authority != null && authority.equals(currentAuthorityNow)) return true;
+            /**
+             * ★ 2026-10-05（用户真机反馈）：上面那次「逐字比」会**比不中** ✗ ——
+             *   点进去那一刻设好的 currentAuthorityNow 是完整的「主机:端口」✓，
+             *   而 instance 的地址来自**快照**（要靠约 3 秒的同步探测才刷新 ✓）⇒
+             *   退出首页那一刻，新智能体的地址**还不在列表里** ✗ ⇒ 一个都不亮 ✓
+             *   （用户原话：“退出来不会留着错误的正在用，而是都不显示正在用，
+             *   然后刷新出来刚才的正在用”✓）。
+             * ⇒ 补一次**按端口比** ✓：同一台机器上每个智能体有自己的端口 ✓
+             *   （首页那行标题就是「端口 3453」✓）⇒ 端口在同一机器内是唯一的 ✓，
+             *   用它判“是哪一个”不会误判 ✓；而“主机”那半很容易不同 ✗
+             *   （Tailscale IP／局域网 IP／主机名 ✓ 同一台机器有多种写法 ✓）。
+             */
+            String wantedPort = portOfAuthority(currentAuthorityNow);
+            if (wantedPort.length() > 0) {
+                for (int i = 0; i < instance.addresses.size(); i += 1) {
+                    HomeModel.Address address = instance.addresses.get(i);
+                    if (address == null) continue;
+                    if (wantedPort.equals(portOfAuthority(address.authority))) return true;
+                }
             }
             return false;
         } catch (RuntimeException ignored) {
@@ -348,6 +362,18 @@ final class HomeView extends FrameLayout {
     }
 
     /** 已经有数据可画了吗 ✓（调用方据此决定"要不要转圈"✓）。 */
+    /** 从「主机:端口」里取端口 ✓（取不到就返回空串 ✓ —— 调用方据此跳过“按端口比”✓）。 */
+    private static String portOfAuthority(String authority) {
+        if (authority == null) return "";
+        int colon = authority.lastIndexOf(':');
+        if (colon < 0 || colon + 1 >= authority.length()) return "";
+        String port = authority.substring(colon + 1).trim();
+        for (int i = 0; i < port.length(); i += 1) {
+            if (port.charAt(i) < '0' || port.charAt(i) > '9') return "";
+        }
+        return port;
+    }
+
     boolean hasSnapshot() {
         return everHadSnapshot;
     }
