@@ -38,10 +38,45 @@ const sleep=(ms)=>new Promise(r=>setTimeout(r,ms))
 const LAN=(await import(join(REPO,'scripts/detect-lan-ip.mjs'))).detectLanIp()
 if(!LAN){console.error('[check-device-channel] 探测不到局域网 IP（检查网卡）');process.exit(2)}
 const HOME='/tmp/e2e-dsh-home', DSH=3653, PROXY=3651, TLS=3652
-const ok=(c,l,d)=>{console.log((c?'  ✓ ':'  ✗ ')+l+(d!==undefined?'  ['+d+']':''));if(!c)failures.push(l);assertions+=1}
+const ok=(c,l,d)=>{console.log((c?'  ✓ ':'  ✗ ')+l+(d!==undefined?'  ['+d+']':''));if(c)passedLabels.push(l);else failures.push(l);assertions+=1}
+/**
+ * ★★ 显式跳过 ✓ —— 跑不起来的检查**不许**记成通过 ✗（2026-10-05 修）。
+ *
+ * 为什么要有这个：原先 ⑦ 那一节在「准备不出演示工作区」时走的是
+ * `ok(true, '跳过多选验收…')` ✗ ⇒ 屏幕上是一条**绿** ✓、总账里也算**通过** ✓ ——
+ * 于是一整节（本单实测：**21 条断言** ✓ —— 见下方 `skip(...)` 那一处 ✓）**从来没跑过**，而报告上写着「全绿」✗
+ * （本项目吃过同一类亏：见 `check-apk.mjs` 里 `EXPECTED_MIN_CHECKS` 那一段 ✓）。
+ *
+ * 现在：跑不起来 ⇒ 打一条 **SKIP** ✓（不计通过、单独计数 ✓），收尾一并点名 ✓ ——
+ * 而且条数会掉到 `EXPECTED_MIN_CHECKS` 以下 ⇒ 整个脚本**红且 exit 1** ✓。
+ * ⇒ 跳过再也伪装不成绿 ✗。
+ */
+let skips=0
+const skippedLabels=[]
+const skip=(label,detail)=>{skips+=1;skippedLabels.push(label);console.log('  ⤫ SKIP '+label+(detail===undefined?'':'  ['+detail+']'))}
 /** 断言计数：跑完给一句总账，并让 ✗ **真的**以非零退出码结束（红就是红，不然等于没测）。 */
 let assertions=0
 const failures=[]
+/** 通过的那些标签 ✓ —— 收尾那条守卫拿它核对「有没有人把跳过记成通过」✗。 */
+const passedLabels=[]
+/**
+ * ★★ 断言条数**下界** ✓（照 `check-apk.mjs` 的既有做法 ✓）。
+ *
+ * 为什么要有这条：本脚本的「通过」一直只看**失败数** ✗ ⇒「有人删掉几条断言」或
+ * 「整节被跳过」在输出上都表现为**更短的全绿** ✗ —— 与「全都验过了」长得一模一样 ✗
+ * （2026-10-05 实测：⑦ 那一节 9 条假红的背后，是**整节 21 条从未执行** ✓）。
+ * 配上下界之后：删断言 / 跳过整节 ⇒ 条数掉到下界以下 ⇒ **报红并 exit 1** ✓。
+ *
+ * ★ 数值按**实测**写 ✓，且**只许上调** ✗ 不许下调 ✗。
+ *   本单实测（5 处判据/定位都修完之后 ✓，健康环境 ✓）：**56/56** ✓
+ *   （修前是 55 条里 12 条红 ✓ —— 那 12 条全是判据过时 / 定位不到行 ✗，不是产品缺陷 ✓）。
+ *   ★ 别写小 ✗：写小了等于给「以后少跑几条」留后门 ✓
+ *   （本项目已有「下界 14 而实测 23」的假下界 ✓）。
+ *
+ * ★ 只在脚本**真的走到收尾**时执法 ✓：任何一步抛错 ⇒ 代码根本走不到末尾那几句 ✓，
+ *   不会把「环境没起来」误报成「断言被删」✗（与 `check-apk.mjs` 的 `environmentComplete` 同一个用意 ✓）。
+ */
+const EXPECTED_MIN_CHECKS = 56
 let dsh,proxy,chrome,chromeDir,cloneSnapshot
 
 // ── 给「文件面板多选」准备一个**真实存在**的工作区 ──────────────────────
@@ -76,7 +111,7 @@ const workspaceReady=(()=>{
     writeFileSync(join(HOME,'storages','workspace.json'),JSON.stringify(table,null,2))
     return true
   } catch(error){
-    console.log('  · 多选验收将跳过：准备演示工作区失败（'+String(error&&error.message?error.message:error)+'）')
+    console.log('  · 演示工作区准备失败 —— ⑦ 那一节会**显式 SKIP**（不计通过 ✓），原因：'+String(error&&error.message?error.message:error))
     return false
   }
 })()
@@ -171,7 +206,18 @@ try {
   let res2=null
   for(let i=0;i<14;i++){await sleep(1500);const s=await get(`/mobile/device/status?id=${call2?call2.id:''}`);res2=s&&s.result;if(res2&&res2.ok)break}
   const detail2=res2?String(res2.detail):''
-  ok(res2&&res2.ok===true&&/notified|banner-fallback/.test(detail2),'手机执行 notify 并如实回报走了哪条路',detail2||'未拿到')
+  /**
+   * ★ 判据修正（2026-10-05）：无壳时产品回报的原话是 **`banner-no-bridge`** ✓。
+   *
+   * 旧的 `/notified|banner-fallback/` 是**过时**的 ✗：`banner-fallback` 只剩在
+   * `boot.js` 里那个**走不到的**重复分支（`:24714` ✓，同一个 `else if (capability === 'notify')`
+   * 在 `:24485` 已经被前面的分支吃掉 ✓）⇒ 现场永远拿不到它 ✗ ⇒ 这条**恒红** ✓。
+   * 实际能拿到的只有两种（都在 `runCall` 里 ✓）：
+   *   · `notified:<桥的返回值>` ✓（有壳 ✓，`:24510` ✓ —— 见 ④b ✓）；
+   *   · `banner-no-bridge` ✓（没壳 ⇒ 退回页面横幅并**如实**说是"没有桥"✓，`:24508` ✓）。
+   * ★ 这是**收紧**不是放松 ✗：把一个产品永远回不出来的值从判据里拿掉 ✓。
+   */
+  ok(res2&&res2.ok===true&&/notified|banner-no-bridge/.test(detail2),'手机执行 notify 并如实回报走了哪条路',detail2||'未拿到')
 
   // ── ④b 冒充 APK（原生壳）：notify 必须**优先走原生** ────────────────────
   //
@@ -207,9 +253,22 @@ try {
     if (res2b && res2b.ok) break
   }
   const detail2b = res2b ? String(res2b.detail) : ''
+  /**
+   * ★ 判据修正（2026-10-05）：口径从裸词 `notified` 改成 **`notified:ok`** ✓。
+   *
+   * 产品侧的**原话**是 `'notified:' + 桥的返回值` ✓（`boot.js:24510` ✓）——
+   * 而壳那条桥成功时返回的就是 `ok` ✓（`MainActivity.java:1247-1252` ✓：
+   * `untrusted` / `ok` / `default` / `denied` ✓）。这里那个假壳写死 `return 'ok'` ✓
+   * ⇒ 现场拿到的必然是 `notified:ok` ✓（2026-10-05 实测 ✓）。
+   *
+   * ★ 为什么用**等号**而不是 `/^notified/` ✗：后者会把 `notified:denied` /
+   *   `notified:error`（= **桥明确说没发出去** ✗）也算通过 ⇒ 又是一条**比被测对象软**的假判据 ✗
+   *   —— 正是本单要根除的那类东西 ✓。上面那条"桥真的收到了正文"另有一条断言 ✓，
+   *   两条一起才等于"原生那条路通了"✓。
+   */
   ok(
-    res2b && res2b.ok === true && detail2b === 'notified',
-    '有壳时 notify 走**原生**并回报 notified（不再退回页面横幅 ✓ —— 用户报的那条 ✗）',
+    res2b && res2b.ok === true && detail2b === 'notified:ok',
+    '有壳时 notify 走**原生**并回报 notified:ok（不再退回页面横幅 ✓ —— 用户报的那条 ✗）',
     detail2b || '未拿到',
   )
   const nativeCalls = String(await ev('JSON.stringify(globalThis.__dshmNativeCalls||[])'))
@@ -393,6 +452,18 @@ try {
    *   原来它们塞在同一个 div 里 ✗ ⇒ 用户长按全选会把那句说明一起复制走 ✗。
    * 怎么把它打红：把 clipBody 那几行去掉、退回 `drawBar('info', '…：\n' + text, …)`
    * ⇒ 这条立刻红（`body` 变成 null ✓），其余全绿 ✓。
+   *
+   * ★★ 判据修正（2026-10-05）：可选中这件事要读**内联属性** ✓，
+   *   **不许**去匹配 `style.cssText` 序列化出来的文本 ✗。
+   *
+   *   旧判据是 `/user-select:text/.test(cssText)` ✗ —— 而浏览器解析 `cssText` 之后
+   *   **会重新序列化** ✓：冒号后面**多一个空格** ⇒ 真实文本是 `user-select: text;` ✓
+   *   ⇒ 旧正则**恒不匹配** ✓ ⇒ 这条从上线起就是**恒红** ✓（2026-10-05 实测：
+   *   现场拿到的 `css` 是 `"margin-top: 8px; padding: 8px 10px; …"` ✓）。
+   *   改成读属性之后，判据落在**真正决定"能不能选中"的那一格**上 ✓
+   *   （`CSSStyleDeclaration.getPropertyValue` ✓ —— 布局引擎读的也是它 ✓）。
+   *   ★ 怎么把它打红（可不改产品即验 ✓）：把 `clipBody.style.cssText` 里那两句
+   *     `user-select:text;-webkit-user-select:text` 去掉 ⇒ 属性变成空串 ⇒ 这条立刻红 ✓。
    */
   const clipSplit = String(await ev(`(function(){
     var b = document.querySelector('[data-dshm-banner=info]')
@@ -402,7 +473,10 @@ try {
       count: b.children.length,
       prefix: b.children[0] ? String(b.children[0].textContent) : '',
       body: t ? String(t.textContent) : null,
-      css: t ? String(t.style.cssText) : '',
+      /** ★ 读**属性值**（判据用它 ✓）；下面两份只作证据、不参与判定 ✓。 */
+      userSelect: t ? String(t.style.getPropertyValue('user-select')).trim() : '',
+      webkitUserSelect: t ? String(t.style.getPropertyValue('-webkit-user-select')).trim() : '',
+      cssText: t ? String(t.style.cssText) : '',
     })
   })()`))
   let clipSplitSeen = {}
@@ -411,9 +485,9 @@ try {
     clipSplitSeen.body === failText &&
       clipSplitSeen.count >= 2 &&
       !String(clipSplitSeen.prefix).includes(failText) &&
-      /user-select:text/.test(String(clipSplitSeen.css)),
+      clipSplitSeen.userSelect === 'text',
     '★ 降级横幅里**正文单独一个元素**且可选中（长按复制到的就是干净正文 ✓ —— 不带那句前缀说明 ✗）',
-    clipSplit.slice(0, 110),
+    `user-select=${JSON.stringify(clipSplitSeen.userSelect)}｜` + clipSplit.slice(0, 150),
   )
   // 打桩收回（后面的动线不许被这一节的桩影响 ✓）
   await ev("try{delete navigator.clipboard.writeText}catch(e){};try{delete document.execCommand}catch(e){};'ok'")
@@ -424,8 +498,15 @@ try {
   // 二次确认 → 串行删除 → **在宿主侧的文件系统上核对**真的没了、没勾的原样还在。
   console.log('\n【⑦ 文件面板：多选批量操作】')
   if (!workspaceReady) {
-    // 准备阶段失败已在上面说明原因：这里如实标注为"跳过"，而不是伪造一条绿 ✓
-    ok(true, '跳过多选验收（临时家目录里没有可用的演示工作区）', '见上方说明')
+    /**
+     * ★★ 准备阶段失败 ⇒ **显式 SKIP** ✓（跑不起来**不算通过** ✗）。
+     *
+     * 旧写法是 `ok(true, '跳过多选验收（…）', '见上方说明')` ✗ —— 一条**绿** ✓，
+     * 总账里也算通过 ✓ ⇒ 这一节（**21 条** ✓ —— 拿"强制走这一支"的对照跑实测过 ✓）从来没跑过，
+     * 而报告上是「全绿」✗。
+     * 现在：SKIP 单独计数 ✓、收尾点名 ✓，条数掉到下界以下 ⇒ **整个脚本红** ✓。
+     */
+    skip('⑦ 文件面板：多选批量操作（整节未执行）', '演示工作区不可用 —— 原因见上方那条日志')
   } else {
     await ev(`document.getElementById('dsh-mobile-files').click()`)
     await sleep(1200)
@@ -470,11 +551,32 @@ try {
       capsRaw,
     )
 
-    /** 多选态下点某一行的整行 = 勾选/取消（热区是整行，不是那颗小圆圈）。 */
+    /**
+     * 多选态下点某一行的整行 = 勾选/取消（热区是整行，不是那颗小圆圈）。
+     *
+     * ★★ 定位修正（2026-10-05）：认一行只能靠 **`data-dshm-fs-name`** ✓，
+     *   **不许**拿整行的 `innerText` 去 `indexOf` 完整文件名 ✗ —— 本行原来就是那么写的 ✗，
+     *   于是这一整节 9 条**从来没真的勾上过一次** ✓。
+     *
+     *   根因：`entryRow()`（`boot.js:21341-21378` ✓）把名字那栏改成**只放词干** ✓
+     *   （`[data-dshm-fs-head]` ✓），后缀挂在**右端那颗标签**上 ✓（`[data-dshm-fs-ext]` ✓）；
+     *   行文本于是是 `待删-甲 .txt` 这种**拆开**的样子 ✗ ⇒
+     *   `innerText.indexOf('待删-甲.txt') === -1` ✓ ⇒ `tick()` 恒 false ✓ ⇒
+     *   后面「已选 0 项 / 已删除 1 项 / 粘贴没变」全是对**空集合**操作的**连带**假红 ✓。
+     *
+     *   `data-dshm-fs-name` 是 `entryRow()` **刻意**留的契约 ✓（`:21303-21308` ✓
+     *   那句注释原话就是「验收脚本 / 工具按真名定位那一行」✓）⇒
+     *   拿真名**逐字相等**地认行 ✓ —— 屏幕上被截过 / 被拆开都影响不到它 ✓。
+     *   点法照 `check-mobile-layout.mjs` 的 `tapEntry`（`:5493` ✓）：优先点 `.dshm-file-head` ✓。
+     */
     const tick = async (name) => ev(`(function(){
       var rows=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry]'))
       for(var i=0;i<rows.length;i++){
-        if((rows[i].innerText||'').indexOf(${JSON.stringify(name)})>=0){ rows[i].querySelector('.dshm-file-head').click(); return true }
+        if(rows[i].getAttribute('data-dshm-fs-name')===${JSON.stringify(name)}){
+          var head=rows[i].querySelector('.dshm-file-head')
+          if(head){head.click();return true}
+          rows[i].click();return true
+        }
       }
       return false })()`)
     const countText = async () => String(await ev(`(function(){var e=document.getElementById('dshm-select-count');return e?e.textContent:''})()`))
@@ -685,10 +787,19 @@ try {
       var bar=document.getElementById('dsh-mobile-sheet-select')
       return JSON.stringify({paste:paste?paste.textContent.trim():null, barHidden:bar?bar.hidden:null}) })()`))
     ok(/"paste":"粘贴 1 项"/.test(moveState) && /"barHidden":true/.test(moveState), '「移动」把选中项放进剪贴板并退出多选态（工具栏出现「粘贴 1 项」）', moveState)
+    /**
+     * ★★ 同一处定位修正（2026-10-05）：进目标目录也认 **`data-dshm-fs-name`** ✓，
+     *   不拿 `innerText` 搜名字 ✗ —— 理由与上面 `tick()` 那段逐字相同 ✓
+     *   （目录那一行的名字旁边还挂着「文件夹」标签 ✓，`indexOf` 同样认不出 ✓）。
+     */
     const into = await ev(`(function(){
       var rows=[].slice.call(document.querySelectorAll('[data-dshm-fs-entry]'))
       for(var i=0;i<rows.length;i++){
-        if((rows[i].innerText||'').indexOf(${JSON.stringify(DEMO_MOVE_TARGET)})>=0){ rows[i].querySelector('.dshm-file-head').click(); return true }
+        if(rows[i].getAttribute('data-dshm-fs-name')===${JSON.stringify(DEMO_MOVE_TARGET)}){
+          var head=rows[i].querySelector('.dshm-file-head')
+          if(head){head.click();return true}
+          rows[i].click();return true
+        }
       }
       return false })()`)
     await sleep(1500)
@@ -830,8 +941,37 @@ try {
   removeQuietly(DEMO)
   sweepChromeClones(cloneSnapshot ?? new Set())
 }
-// 总账：断言条数 + 失败清单。★ 有 ✗ 就以非零退出码结束 —— 否则"红"只是屏幕上的一行字，
+/**
+ * ★★ 守卫：**「跳过」不许出现在通过清单里** ✗（2026-10-05 加）。
+ *
+ * 它抓的是一件很具体的事：有人（或某个"临时"改动 ✓）把跑不起来的整节写成
+ * `ok(true, '跳过…')` ✗ ⇒ 屏幕上一条绿 ✓、总账算通过 ✓，而那一节根本没跑 ✓。
+ * ★ 怎么把它打红：把 ⑦ 那段 `skip(...)` 改回 `ok(true, '跳过多选验收（…）')` ✓
+ *   并让那段真的走到（把前置条件强制为 false ✓ —— 模拟"演示工作区准备不出来"✓）
+ *   ⇒ 这一条立刻红 ✓（本单验过 ✓）。
+ */
+const skipLikePasses = passedLabels.filter((label) => /跳过|skip/i.test(label))
+ok(
+  skipLikePasses.length === 0,
+  '★ 通过清单里没有一条「跳过」（跑不起来 ⇒ 走 SKIP ✗，不许 ok(true,…) 冒充通过 ✗）',
+  `通过 ${passedLabels.length} 条｜显式跳过 ${skips} 条${skips > 0 ? '：' + skippedLabels.join('、') : ''}` +
+    (skipLikePasses.length > 0 ? '｜冒充通过的跳过：' + skipLikePasses.join('、') : ''),
+)
+// 总账：断言条数 + 失败清单 + 跳过清单。★ 有 ✗ 就以非零退出码结束 —— 否则"红"只是屏幕上的一行字，
 // 在 `&&` 链与 CI 里等同于通过（这个项目吃过"测试与被测对象同错=永远绿"的亏）。
 console.log(`\n[check-device-channel] ${assertions - failures.length}/${assertions} 条断言通过`)
 for (const label of failures) console.log(`  ✗ ${label}`)
-process.exit(failures.length === 0 ? 0 : 1)
+/**
+ * ★★ 跳过清单**必须显式打出来** ✓（不许只藏在某一行绿里 ✗）——
+ * 看报告的人一眼就能知道"这一轮到底少跑了什么"✓。
+ */
+console.log(`[check-device-channel] 显式跳过 ${skips} 条${skips > 0 ? '：' + skippedLabels.join('、') : '（无 ✓）'}`)
+/**
+ * ★★ 条数防呆 ✓（见上面 `EXPECTED_MIN_CHECKS` 那段 ✓）：只许多 ✗ 不许少 ✓。
+ * 少 ⇒ 要么有人删了断言 ✓、要么有整节被跳过 ✓ ⇒ **红 + exit 1** ✓。
+ */
+if (assertions < EXPECTED_MIN_CHECKS) {
+  console.error(`\n[check-device-channel] 断言条数不足：${assertions} < ${EXPECTED_MIN_CHECKS} ✗`)
+  console.error('  - 有人删掉了断言？还是有整节被跳过？（跳过的检查必须显式 SKIP，见 EXPECTED_MIN_CHECKS 的说明）')
+}
+process.exit(failures.length === 0 && assertions >= EXPECTED_MIN_CHECKS ? 0 : 1)
