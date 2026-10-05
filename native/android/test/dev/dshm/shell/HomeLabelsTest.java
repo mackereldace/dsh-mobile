@@ -17,7 +17,7 @@ public final class HomeLabelsTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 33;
+    private static final int EXPECTED_MIN_CHECKS = 55;
 
     public static void main(String[] args) {
         summary();
@@ -26,6 +26,7 @@ public final class HomeLabelsTest {
         subtitles();
         machineStates();
         machineInspectText();
+        portMerge();
 
         System.out.println();
         System.out.println("── check-home-labels ──────────────────────────");
@@ -135,6 +136,161 @@ public final class HomeLabelsTest {
                 HomeLabels.machineState(false, 0, false, 0, true).equals("未知（还没探到）"));
         check("★ 未知的两种原因**不是一回事**：压根没有它的证书",
                 HomeLabels.machineState(false, 0, false, 0, false).equals("未知（没有它的证书）"));
+    }
+
+    /**
+     * ★★★ 2026-10-05 用户真机截图（`Mac-mini-2024.local` ✓）：**同一个端口的 tail 与局域网
+     * 被画成了两行** ✗ —— 用户原话「**同一个电脑的同一个端口，它的 tail 跟局域网就不分开了**」✓。
+     *
+     * ## 场景照截屏抄（不是编的 ✓）
+     *
+     * ```
+     * ● 端口 3453  Tailscale · dsh 0.2.0-rc.2   ← 通（正在用）✓
+     *   端口 3453  局域网 · 身份未知 · 没响应    ← 同端口的那条 ✗（它才是要并进去的）
+     *   端口 3082 / 3091 / 3444 / 3733 / 3743    ← 别的端口 ✓（它们**各占一行** ✓）
+     * ```
+     *
+     * ## 它守的是什么 ✗
+     *
+     * ① **同端口并成一行** ✓（并且两条路都还留着 ✓）；② 那一行说**活的那条** ✓；
+     * ③ **不同的端口一行都不许并** ✓（上一轮用户纠正过「端口确实是存在的」✓）；
+     * ④ 认不出端口的实例**不并** ✓（不许猜 ✗）；⑤ 合并**不许丢信息** ✓。
+     */
+    private static void portMerge() {
+        final String tail = "100.101.102.103:3453";
+        HomeModel.Machine machine = screenshotMachine();
+
+        int rowsWith3453 = 0;
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            if (rowHasPort(machine.instances.get(i), "3453")) rowsWith3453 += 1;
+        }
+        check("前置事实：模型把 3453 画成**两行**（用户截图里那个形状 ✓）", rowsWith3453 == 2);
+        check("前置事实：这张卡一共 7 行（与截图逐条对上 ✓）", machine.instances.size() == 7);
+
+        java.util.List<HomeModel.Instance> rows = HomeLabels.mergeByPort(machine.instances);
+
+        check("★ 同端口合并：7 行 → 6 行 ✓", rows.size() == 6);
+        int merged3453 = 0;
+        for (int i = 0; i < rows.size(); i += 1) {
+            if (rowHasPort(rows.get(i), "3453")) merged3453 += 1;
+        }
+        check("★ 同端口合并：端口 3453 **只在一行**里 ✓（兄弟行没了 ✓）", merged3453 == 1);
+
+        HomeModel.Instance row = rowWithPort(rows, "3453");
+        check("★ 合并后那一行**两条路都留着** ✓（tail 与局域网都在 ✓）",
+                row != null && row.addresses.size() == 2);
+        check("★ 合并后那一行是**活的** ✓（不是灰的 ✓）", row != null && row.online);
+        check("★ 合并后那一行显示**通的那条** ✓（Tailscale ✓，不是局域网 ✓）",
+                row != null && "Tailscale".equals(row.addresses.get(0).kind));
+        check("★ 合并后那一行的端口串是「3453」✓（不许拼出「3453、3453」✗）",
+                row != null && "3453".equals(HomeLabels.portTextOf(row)));
+        check("★ 合并后当前那条就是通的那条 ✓（⇒ 点进去走它 ✓）",
+                row != null && row.addresses.get(0).authority.equals(tail) && row.addresses.get(0).reachable);
+
+        String[] otherPorts = {"3082", "3091", "3444", "3733", "3743"};
+        boolean eachOtherPortStillOwnRow = true;
+        for (int i = 0; i < otherPorts.length; i += 1) {
+            int count = 0;
+            for (int j = 0; j < rows.size(); j += 1) {
+                if (rowHasPort(rows.get(j), otherPorts[i])) count += 1;
+            }
+            if (count != 1) eachOtherPortStillOwnRow = false;
+        }
+        check("★ **别的端口仍各占一行** ✓（上一轮「端口确实是存在的」那条结论不动 ✓）",
+                eachOtherPortStillOwnRow);
+
+        java.util.List<String> before = new java.util.ArrayList<String>();
+        for (int i = 0; i < machine.instances.size(); i += 1) {
+            for (int j = 0; j < machine.instances.get(i).addresses.size(); j += 1) {
+                before.add(machine.instances.get(i).addresses.get(j).authority);
+            }
+        }
+        java.util.List<String> after = new java.util.ArrayList<String>();
+        for (int i = 0; i < rows.size(); i += 1) {
+            for (int j = 0; j < rows.get(i).addresses.size(); j += 1) {
+                after.add(rows.get(i).addresses.get(j).authority);
+            }
+        }
+        java.util.Collections.sort(before);
+        java.util.Collections.sort(after);
+        check("★ 合并**一条地址都不丢** ✓（7 条原样都在 ✓）", before.equals(after) && after.size() == 7);
+
+        check("边界：空表 ⇒ 空表 ✓（不炸 ✓）",
+                HomeLabels.mergeByPort(new java.util.ArrayList<HomeModel.Instance>()).isEmpty());
+        check("边界：端口不同 ⇒ 一行都不并 ✓",
+                HomeLabels.mergeByPort(java.util.Arrays.asList(
+                        fakeInstance("addr:a:1", false, false, false, "10.0.0.1:1"),
+                        fakeInstance("addr:a:2", false, false, false, "10.0.0.2:2"))).size() == 2);
+        check("边界：**认不出端口**的实例不并 ✓（不许猜 ✗）",
+                HomeLabels.mergeByPort(java.util.Arrays.asList(
+                        fakeInstance("addr:a", false, false, false, "host-no-port"),
+                        fakeInstance("addr:b", false, false, false, "host-no-port"))).size() == 2);
+        check("边界：合并是**传递的** ✓（A 与 B 同端口 ✓、B 与 C 同端口 ⇒ 一行 ✓）",
+                HomeLabels.mergeByPort(java.util.Arrays.asList(
+                        fakeInstance("addr:a", false, false, false, "10.0.0.1:3453"),
+                        fakeInstance("addr:b", false, false, false, "10.0.0.2:3453", "10.0.0.2:3091"),
+                        fakeInstance("addr:c", false, false, false, "10.0.0.3:3091"))).size() == 1);
+
+        HomeModel.Instance mixed = HomeLabels.mergeByPort(java.util.Arrays.asList(
+                fakeInstance("addr:a", false, false, false, "10.0.0.1:3453"),
+                fakeInstance("hid:x", true, false, true, "100.64.0.9:3453"))).get(0);
+        check("边界：活的那条赢 ✓（身份与在线都取它 ✓）",
+                mixed.identified && mixed.online && "hid:x".equals(mixed.key));
+    }
+
+    /** 用户截图那台机器 ✓：7 条地址、一张卡（`HomeModel` 就是它们进来时的样子 ✓）。 */
+    private static HomeModel.Machine screenshotMachine() {
+        String tail = "100.101.102.103:3453";
+        String[] lanPorts = {"3082", "3091", "3444", "3453", "3733", "3743"};
+
+        java.util.List<String> slots = new java.util.ArrayList<String>();
+        slots.add("https://" + tail + "/");
+        for (int i = 0; i < lanPorts.length; i += 1) slots.add("https://192.168.1.50:" + lanPorts[i] + "/");
+
+        java.util.List<HomeModel.HostRecord> records = new java.util.ArrayList<HomeModel.HostRecord>();
+        records.add(new HomeModel.HostRecord("fp1", "Mac-mini-2024.local", slots, 0L));
+
+        java.util.Map<String, HomeModel.Probe> probes = new java.util.LinkedHashMap<String, HomeModel.Probe>();
+        probes.put(tail, HomeModel.Probe.up("hid-1", "fp1", "Mac-mini-2024.local", "0.2.0-rc.2"));
+        for (int i = 0; i < lanPorts.length; i += 1) {
+            probes.put("192.168.1.50:" + lanPorts[i], HomeModel.Probe.down());
+        }
+
+        HomeModel.Input input = new HomeModel.Input(records, java.util.Collections.<HomeModel.Slot>emptyList(),
+                tail, "https://" + tail + "/", probes);
+        return HomeModel.build(input).machines.get(0);
+    }
+
+    /** 手搓一条实例 ✓（只给地址与三个标志 ✓ —— 合并只看这些 ✓）。 */
+    private static HomeModel.Instance fakeInstance(String key, boolean identified, boolean current, boolean online,
+            String... authorities) {
+        java.util.List<HomeModel.Address> addresses = new java.util.ArrayList<HomeModel.Address>();
+        for (int i = 0; i < authorities.length; i += 1) {
+            String authority = authorities[i];
+            addresses.add(new HomeModel.Address(authority, "https://" + authority + "/",
+                    HomeModel.kindOf(authority), current && i == 0, online, ""));
+        }
+        return new HomeModel.Instance(key, identified, "", "", current, online, addresses);
+    }
+
+    private static java.util.List<String> portsOfRow(HomeModel.Instance instance) {
+        java.util.List<String> ports = new java.util.ArrayList<String>();
+        for (int i = 0; i < instance.addresses.size(); i += 1) {
+            String port = HomeModel.portOf(instance.addresses.get(i).authority);
+            if (!port.isEmpty() && !ports.contains(port)) ports.add(port);
+        }
+        return ports;
+    }
+
+    private static boolean rowHasPort(HomeModel.Instance instance, String port) {
+        return portsOfRow(instance).contains(port);
+    }
+
+    private static HomeModel.Instance rowWithPort(java.util.List<HomeModel.Instance> rows, String port) {
+        for (int i = 0; i < rows.size(); i += 1) {
+            if (rowHasPort(rows.get(i), port)) return rows.get(i);
+        }
+        return null;
     }
 
     private static void check(String name, boolean ok) {

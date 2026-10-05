@@ -570,7 +570,7 @@ final class HomeView extends FrameLayout {
         if (snapshot != null) {
             for (int i = 0; i < snapshot.machines.size(); i += 1) {
                 HomeModel.Machine item = snapshot.machines.get(i);
-                List<HomeModel.Instance> merged = mergeByPort(item.instances);
+                List<HomeModel.Instance> merged = HomeLabels.mergeByPort(item.instances);
                 text.append("同端口合并：").append(item.name).append(' ')
                         .append(item.instances.size()).append(" 行 → ").append(merged.size()).append(" 行")
                         .append(merged.size() < item.instances.size() ? "（已并成一行 ✓）" : "（没有同端口 ✓）")
@@ -1044,11 +1044,11 @@ final class HomeView extends FrameLayout {
     private View buildMachine(final HomeModel.Machine machine) {
         /**
          * ★★★ A（2026-10-05）：**这张卡实际要画的样子** ✓ —— 同一个端口并成一行 ✓
-         *   （见 {@link #mergeByPort} ✓）。全卡共用这一个值 ✓：下面每一行 ✓、
+         *   （见 {@link HomeLabels#mergeByPort} ✓）。全卡共用这一个值 ✓：下面每一行 ✓、
          *   以及长按弹出的「这张卡的全部判据」页 ✓（卡里并了行、判据页还念两条 ⇒
          *   用户会以为没修好 ✗ —— 说过的话要跟着事实改 ✓）。
          */
-        final HomeModel.Machine shown = mergeCard(machine);
+        final HomeModel.Machine shown = HomeLabels.mergeCard(machine);
         LinearLayout wrap = new LinearLayout(getContext());
         wrap.setOrientation(LinearLayout.VERTICAL);
         /**
@@ -1323,7 +1323,7 @@ final class HomeView extends FrameLayout {
      *   在 `native/android/java` 里**没有任何生产调用点** ✓ ⇒ 生产里真正决定走哪条的就是**这个方法** ✓。
      *   （两者口径一致 ✓：通着的优先 ✓、其次当前 ✓、再按种类的偏好 ✓ —— 差别只在
      *     `HomeEntry` 会读手机的网段偏好 ✓，这里不读 ✓。）
-     *   ⇒ 合并同端口（{@link #mergeByPort} ✓）之后，两条路进了同一行 ✓，
+     *   ⇒ 合并同端口（{@link HomeLabels#mergeByPort} ✓）之后，两条路进了同一行 ✓，
      *     于是「走 tail 还是走局域网」在这里**一次性**判完 ✓（不再有两行各说各话 ✗）。
      */
     private String bestUrl(HomeModel.Instance instance) {
@@ -1337,162 +1337,10 @@ final class HomeView extends FrameLayout {
     }
 
     /**
-     * ★★★ A（2026-10-05 用户真机报的）：**同一台电脑上的同一个端口只画一行** ✓。
-     *
-     * ## 用户原话 ✓
-     *
-     * 「比如说**同一个电脑的同一个端口**，它的 **tail 跟局域网就不分开了** ✓。
-     *   我们**智能地去做**：你到底是进 tail 还是进局域网 …… **先 check 一下我们的 IP
-     *   能不能跑到局域网上去** ✓，如果可以就走局域网 ✓，不可以就走 tail ✓，
-     *   然后如果都不可以，它就相当于是**灰色的** ✓。」
-     *
-     * ## 为什么同一个端口会画成两行 ✗（真因 ✓）
-     *
-     * 行的粒度由 `HomeModel` 定 ✓：键是 **`hostId`** ✓，探不到身份时才退化成 `addr:<authority>` ✓
-     * （见 `HomeModel.buildInstances` ✓）。而「同一台电脑的同一个端口」在**地址**上是两条
-     * `host:port`（Tailscale 那条 ✓ / 局域网那条 ✓）⇒ 两条 authority ⇒ 两个键 ⇒ 两行 ✗。
-     * ★ 而且那是**故意的** ✗：`HomeModel` 写着「端口 ≠ 实例」✓，用户上一轮也纠正过
-     *   「每个端口各自保留一行」✓ —— 但那一轮说的是**不同的端口**（3082 / 3091 / 3444 / 3453 ✓），
-     *   与这一轮说的**同一个端口走了两条路**不是一回事 ✓。
-     * ⇒ 缺的就是这一步：**把同一个端口的几条路并成一行** ✓
-     *   （不同的端口照旧各占一行 ✓ —— 上一轮的结论一个字都不动 ✓）。
-     *
-     * ## 判据（不是猜 ✓）
-     *
-     * · 同一台电脑（同一个 {@link HomeModel.Machine} ✓）上，**端口相同 ⇒ 就是同一个监听** ✓
-     *   （一台主机的同一个端口物理上只有一个服务 ✓）；
-     * · 于是**只要两条实例沾同一个端口就并** ✓，并完再扫一遍（传递性 ✓：
-     *   A 与 B 同端口 ✓、B 与 C 同端口 ⇒ 三条其实是一行 ✓）；
-     * · **认不出端口**的实例不参与合并 ✗（不许猜 ✓）；
-     * · 合并**只影响画几行** ✗：每条 authority 都原样留在合并后那一行的 `addresses` 里 ✓
-     *   （点进去选哪条仍走 {@link #bestUrl} ✓ —— 这里**不新增第二份选路逻辑** ✗）。
-     *
-     * ★ 它是**纯逻辑**（一行 android 都不碰 ✓）⇒ 与 `HomeModel` 一样能在电脑上被断言 ✓。
+     * ★ 合并判据（**同一台电脑的同一个端口只画一行** ✓）在 {@link HomeLabels#mergeByPort} ✓ ——
+     *   放在那里是因为它**零 android 依赖** ✓ ⇒ 才能在电脑上被断言 ✓（`HomeLabelsTest` 守着 ✓）。
+     *   ★ 这里**只留调用** ✗：这个判断在本文件里一个字都不留 ✓（不许出现第二份 ✗）。
      */
-    static List<HomeModel.Instance> mergeByPort(List<HomeModel.Instance> instances) {
-        List<HomeModel.Instance> groups = new ArrayList<HomeModel.Instance>();
-        if (instances != null) {
-            for (int i = 0; i < instances.size(); i += 1) {
-                if (instances.get(i) != null) groups.add(instances.get(i));
-            }
-        }
-        boolean merged = true;
-        while (merged) {
-            merged = false;
-            for (int a = 0; a < groups.size() && !merged; a += 1) {
-                for (int b = a + 1; b < groups.size() && !merged; b += 1) {
-                    if (!sharesPort(groups.get(a), groups.get(b))) continue;
-                    groups.set(a, combine(groups.get(a), groups.get(b)));
-                    groups.remove(b);
-                    merged = true;
-                }
-            }
-        }
-        return groups;
-    }
-
-    /** 这一条实例占了哪几个端口 ✓（去重 ✓；认不出端口的那些不算 ✓）。 */
-    private static List<String> portsOf(HomeModel.Instance instance) {
-        List<String> ports = new ArrayList<String>();
-        if (instance == null) return ports;
-        for (int i = 0; i < instance.addresses.size(); i += 1) {
-            HomeModel.Address address = instance.addresses.get(i);
-            if (address == null) continue;
-            String port = HomeModel.portOf(address.authority);
-            if (port.isEmpty() || ports.contains(port)) continue;
-            ports.add(port);
-        }
-        return ports;
-    }
-
-    /** 两条实例有没有共用某个端口 ✓（共用 ⇒ 同一个监听 ⇒ 是同一行 ✓）。 */
-    private static boolean sharesPort(HomeModel.Instance a, HomeModel.Instance b) {
-        List<String> left = portsOf(a);
-        List<String> right = portsOf(b);
-        for (int i = 0; i < left.size(); i += 1) {
-            if (right.contains(left.get(i))) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 两条实例并成一行 ✓：**地址全都留着** ✓（按 authority 去重 ✓），
-     * 身份 / 名字 / 版本 / 当前 / 在线取「两条里更好的那条」✓。
-     */
-    private static HomeModel.Instance combine(HomeModel.Instance a, HomeModel.Instance b) {
-        HomeModel.Instance first = betterForDisplay(a, b);
-        HomeModel.Instance second = first == a ? b : a;
-        List<HomeModel.Address> addresses = new ArrayList<HomeModel.Address>();
-        addAddresses(addresses, first);
-        addAddresses(addresses, second);
-        return new HomeModel.Instance(
-                first.identified ? first.key : (second.identified ? second.key : first.key),
-                first.identified || second.identified,
-                first.title.isEmpty() ? second.title : first.title,
-                first.version.isEmpty() ? second.version : first.version,
-                first.current || second.current,
-                first.online || second.online,
-                addresses);
-    }
-
-    /**
-     * 两条里**更该拿来说话**的那一条 ✓：通着的 ✓ > 当前那条 ✓ > 有身份 ✓ > 先来的 ✓。
-     *
-     * ★ 它**只决定显示**（那一行的种类 / 版本 / 名字要说「活着的那条」✓ ——
-     *   用户要的是「合并后那一行显示通的那条」✓），**不决定点进去走哪条** ✗ ——
-     *   那仍是 {@link #bestUrl} 的活 ✓（本仓忌讳同一件事写两份 ✓）。
-     */
-    private static HomeModel.Instance betterForDisplay(HomeModel.Instance a, HomeModel.Instance b) {
-        if (a.online != b.online) return a.online ? a : b;
-        if (a.current != b.current) return a.current ? a : b;
-        if (a.identified != b.identified) return a.identified ? a : b;
-        return a;
-    }
-
-    private static void addAddresses(List<HomeModel.Address> into, HomeModel.Instance from) {
-        if (from == null) return;
-        for (int i = 0; i < from.addresses.size(); i += 1) {
-            HomeModel.Address address = from.addresses.get(i);
-            if (address == null) continue;
-            boolean seen = false;
-            for (int j = 0; j < into.size(); j += 1) {
-                if (into.get(j).authority.equals(address.authority)) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen) into.add(address);
-        }
-    }
-
-    /**
-     * 这张卡**实际要画**的样子 ✓：同一个端口并成一行 ✓；
-     * 没有同端口 ⇒ **原样返回** ✓（一个字段都不动 ✓）。
-     */
-    private static HomeModel.Machine mergeCard(HomeModel.Machine machine) {
-        if (machine == null) return null;
-        List<HomeModel.Instance> merged = mergeByPort(machine.instances);
-        if (merged.size() == machine.instances.size()) return machine;
-        return new HomeModel.Machine(machine.key, machine.known, machine.name, machine.current,
-                machine.online, machine.offline, machine.neverProbed, merged);
-    }
-
-    /**
-     * 这一行标题里的端口串 ✓ —— **去重** ✓。
-     *
-     * ★ {@code HomeModel.Instance.portText()} 是**逐条地址拼**的 ✓ ⇒ 同一个端口出现在两条地址上时
-     *   会拼出「3453、3453」✗（合并后必然如此 ✓，而同一实例的两条地址同端口也早就会这样 ✓）。
-     *   文案仍交给 {@link HomeLabels#instanceTitle} ✓ —— 这里只把重复的端口去掉 ✓。
-     */
-    private static String portTextOf(HomeModel.Instance instance) {
-        List<String> ports = portsOf(instance);
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < ports.size(); i += 1) {
-            if (builder.length() > 0) builder.append('、');
-            builder.append(ports.get(i));
-        }
-        return builder.toString();
-    }
 
     /**
      * 智能体那行的标题 ✓。
@@ -1502,7 +1350,7 @@ final class HomeView extends FrameLayout {
      *   等用户定了要不要给 manifest 加 `profileName` 再换成名字 ✓。
      */
     private String instanceTitle(HomeModel.Instance instance) {
-        return HomeLabels.instanceTitle(instance.title, portTextOf(instance), instance.version);
+        return HomeLabels.instanceTitle(instance.title, HomeLabels.portTextOf(instance), instance.version);
     }
 
     private String instanceSubtitle(HomeModel.Instance instance) {
