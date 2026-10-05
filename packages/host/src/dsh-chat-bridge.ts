@@ -19,18 +19,23 @@
  *                 （★ 真形状只有 items ✓ —— 从 `dsh-api-session-controller` 的 typert 描述符读的 ✓；
  *                   `sessions` 是我们为老式替身留的**回退** ✓，不是真形状 ✗）
  * session/page    参数 request = { address:{kind:"session",sessionId} | {kind:"subagent",…},
- *                                  throughSeq / beforeSeq / maxMessages / turnWindow / … }
- *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore, asOfSeq,
- *                        values{ title, todos, content, status, modelSelection, permissions, … } }
+ *                                  **throughSeq（必填）** / beforeSeq? / maxMessages? / turnWindow? }
+ *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore }
+ *                 （★ 只有这两个字段 ✓ —— 2026-10-05 在生产实例上实测 ✓：返回的键是
+ *                   `[records, hasMore]` ✓；本文档早先写的 `asOfSeq` / `values` 在 0.2.0-rc.2
+ *                   的 `session/page` 里**根本不存在** ✗ —— `normalizePage` 那两处是**老式回退** ✓）
+ * session/projections  参数 request = { sessionId } ⇒ 返回 { asOfSeq, values } ✓
+ *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓）
  * session/prompt  参数 request = { requestId, sessionId, mode:"queue"|"steer", content:[…] }
  * ```
  *
  * ## ★ 两条**刻意**的克制（别顺手改 ✗）
  *
- * 1. **不发明游标语义** ✓：`beforeSeq` / `throughSeq` **原样透传** ——
- *    "哪个是'取这之后'、哪个是'取这之前'"我**没在真机上验过** ✗（探针文档里如实标着 ✓）。
- *    在这一层自己编一个 `sinceSeq` 的翻译，等于把"没验过的语义"固化成一个更看不出来的假设 ✗。
- *    ⇒ 等会话页真跑起来、拿真会话验过语义，**再加**那层便利 API ✓。
+ * 1. **游标语义只到"验过的那一步"为止** ✓：`beforeSeq` 仍**原样透传**（"取这之前"这一层没在
+ *    真机上验过 ✗）；而 `throughSeq` 的语义**已经实测钉死** ✓ —— 它就是"**取到这一条为止**"
+ *    的**闭区间上界** ✓（2026-10-05，生产实例 0.2.0-rc.2，逐条读数见 `pageRequest` 的大雷注释 ✓）。
+ *    ⇒ 手机不传 `throughSeq` 时，**由本层补一个会话 head** ✓（`resolveHeadSeq` ✓）——
+ *    这不是"发明语义" ✓，是"补上 DSH 已经要求、而页面没有的必填项" ✓。
  * 2. **只暴露我们要用的字段** ✓：返回做**白名单归一化**（`records` 里的 `seq/time/type/data` ✓、
  *    `values` 里点名的那几个 ✓）—— 不把 DSH 的内部结构整坨转给手机 ✗
  *    （转过去就等于把它的形状变成了我们的契约 ✗）。
@@ -101,9 +106,32 @@ async function listSessions(deps: DshChatDeps, signal?: AbortSignal): Promise<un
   return { ok: true, sessions: normalizeSessions(value) }
 }
 
-/** 读一页事件 ✓（**游标字段原样透传** ✓，见模块注释第 1 条）。 */
+/**
+ * 读一页事件 ✓（**游标必带** ✓，见 `pageRequest` 的大雷注释 ✓）。
+ *
+ * ## ★★ 为什么这里要先"问一次 head"（2026-10-05 的真机报错 ✗，已在生产实例上逐字复现 ✓）
+ *
+ * 会话页（`app.js` ✓，**本次一个字不许改** ✗）只传 `{ sessionId, maxMessages }` ✓
+ * ⇒ 桥改前是"页面没给 `throughSeq` 就不加" ✗ ⇒ DSH 的 zod 在**入口**就拒了：
+ * `typert gateway: session/page: wire field "request" failed boundary validation` ✓
+ * （用户真机报错原文 ✓，2026-10-05 在本机生产实例上逐字复现 ✓）。
+ * `throughSeq` 是 `SessionPageRequest` 的**必填**字段 ✗（`z.number()` ✓）——
+ * 而这一版（`0.2.0-rc.2`）的 `paginate` **没有**服务端默认值 ✗
+ * （本机全局装的 `0.1.5-rc.1` 那份 `paginate` 有默认参数 `throughSeq = events.at(-1)?.seq ?? -1` ✓，
+ *   而 `0.2.0-rc.2` 把那个默认值去掉了 ✗ —— 两边的 `history.js` 我都直接读过 ✓）。
+ * ⇒ 页面不传，就**由本层补 head** ✓（`resolveHeadSeq` ✓）。
+ */
 async function readPage(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-  const request = pageRequest(args)
+  const headSeq = await resolveHeadSeq(deps, args, signal)
+  /**
+   * ★ `head < 0` ⇒ 这个会话**一条事件都没有** ✓ ⇒ 正确答案就是"空的一页" ✓。
+   *   ★ 这里**不再**拿 -1 去调 `session/page` ✗：那条路只会得到"不报错但永远空白" ✗
+   *     （见 `pageRequest` 的大雷注释 ✓）。外层形状与 `normalizePage` 的输出**保持一致** ✓。
+   */
+  if (headSeq < 0) {
+    return { ok: true, sessionId: requestSessionId(args), events: [], hasMore: false, asOfSeq: headSeq, values: {} }
+  }
+  const request = pageRequest(args, headSeq)
   const value = unwrap(await deps.call('session/page', { args: { request } }, signal))
   return { ok: true, ...normalizePage(value) }
 }
@@ -308,8 +336,46 @@ export function normalizeValues(value: unknown): Record<string, unknown> {
   return out
 }
 
-/** `session/page` 的请求：**只搬我们认识的字段** ✓（游标原样透传 ✓）。 */
-export function pageRequest(args: Record<string, unknown>): Record<string, unknown> {
+/**
+ * `session/page` 的请求：**只搬我们认识的字段** ✓ + **`throughSeq` 必带** ✓。
+ *
+ * ## ★★★ 大雷：`throughSeq: -1` **不是**"取最新"的哨兵 ✗ —— 它会拿到**永远空白**的一页 ✗
+ *
+ * 这一版（`0.2.0-rc.2` ✓）的 `paginate` 是（`dsh-api-session-controller/lib/types/history.js` ✓）：
+ *
+ * ```js
+ * const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
+ * …
+ * return { events: events.slice(cut, end), hasMore: cut > 0 }
+ * ```
+ *
+ * ⇒ `throughSeq = -1` ⇒ `end = 0` ⇒ `slice(cut, 0)` ⇒ **恒空** ✓，而且**不报错** ✗。
+ * ★ 生产实例实测（2026-10-05，本机 `127.0.0.1:19387`，DSH `0.2.0-rc.2` ✓，
+ *   会话 `session-e52f9835-…` ✓，其 head = `asOfSeq` = **784** ✓）：
+ *
+ * | `throughSeq` | 结果 |
+ * |---|---|
+ * | **不带**（改前的写法 ✗） | `gateway/input-invalid`：`wire field "request" failed boundary validation` ✓ |
+ * | `784`（= head ✓） | `n=237`，`seqMin=548`，`seqMax=784`，`hasMore=true` ✓ |
+ * | `783` | `n=236`，`seqMax=783` ✓ |
+ * | `785` | `gateway/bad-request`：`session page through seq 785 is past cursor 784` ✓ |
+ * | **`-1`** ✗ | **`n=0`**，`hasMore=false` ✓ —— **不报错、永远空白** ✗（比红字更难查 ✗） |
+ * | `0` | `n=1`，`seqMin=seqMax=0` ✓ |
+ *
+ * ⇒ 纪律：**`throughSeq` 必须是 `>= 0` 的安全整数** ✓；只有"这个会话一条事件都没有"
+ *   （head = `-1` ✓）时才允许 `-1` —— 而那种情况由 `readPage` **提前返回空页** ✓，
+ *   根本不会走到这里 ✗。★ **别把这个字段写回"-1 = 取最新"** ✗。
+ *
+ * ## `-0` 也要挡 ✗
+ *
+ * DSH 自己的校验：`if (… || request.throughSeq < -1 || Object.is(request.throughSeq, -0)) throw …`
+ * ⇒ `-0` 会被它拒 ✓ —— `-0` 过得了 `>= 0` ✗，所以这里显式排除 ✓（`isSeqCursor` ✓）。
+ *
+ * @param args 调用方给的参数 ✓（`address` / `sessionId` / 各种游标 ✓）
+ * @param headSeq 页面**没给** `throughSeq` 时用的 head ✓（= 会话日志最后一条事件的 `seq` ✓）——
+ *   由 `resolveHeadSeq` 取 ✓（页面给了就用页面的 ✓，见下 ✓）。
+ */
+export function pageRequest(args: Record<string, unknown>, headSeq?: number | null): Record<string, unknown> {
   const sessionId = typeof args['sessionId'] === 'string' ? (args['sessionId'] as string) : ''
   /**
    * `address` 两种形状都支持 ✓（探针里读到的 ✓）：
@@ -327,10 +393,149 @@ export function pageRequest(args: Record<string, unknown>): Record<string, unkno
   }
   const request: Record<string, unknown> = { address }
   if (typeof args['beforeSeq'] === 'number') request['beforeSeq'] = args['beforeSeq']
-  if (typeof args['throughSeq'] === 'number') request['throughSeq'] = args['throughSeq']
   if (typeof args['maxMessages'] === 'number') request['maxMessages'] = args['maxMessages']
   if (typeof args['turnWindow'] === 'number') request['turnWindow'] = args['turnWindow']
+  /**
+   * ★★ `throughSeq`：页面的（**非负** ✓）优先 ✓，否则用实测/兜底拿到的 head ✓。
+   *
+   * ★ 页面给负数（含 `-1`）**不算"给了"** ✗ ⇒ 走 head ✓ —— 因为 `-1` 只会得到空白页 ✗
+   *   （大雷见上 ✓），照搬它等于把"页面写错"变成"用户看到空会话" ✗。
+   * ★ 都拿不到 ⇒ **抛错** ✗（宁可红字点名，也不发一个缺必填项的请求：
+   *   那样用户看到的是 DSH 的 `boundary validation` ✗ —— 一句看不出该修哪儿的话 ✗）。
+   */
+  const throughSeq = providedThroughSeq(args) ?? (isSeqCursor(headSeq) ? headSeq : null)
+  if (throughSeq === null) {
+    throw Object.assign(new Error('取不到会话的 head 序号，读不了这一页（session/page 的 throughSeq 必填）'), {
+      code: ErrorCode.Internal,
+    })
+  }
+  request['throughSeq'] = throughSeq
   return request
+}
+
+/** 游标判定：**非负的安全整数** ✓（`-1` / `-0` / 小数 / `NaN` 一律不认 ✗，见 `pageRequest` 的大雷）。 */
+function isSeqCursor(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0)
+}
+
+/** 页面自己给的 `throughSeq` ✓ —— 只有 `isSeqCursor` 认的形状才算"给了" ✗（`-1` 不算 ✓）。 */
+function providedThroughSeq(args: Record<string, unknown>): number | null {
+  const value = args['throughSeq']
+  return isSeqCursor(value) ? value : null
+}
+
+/** 这次请求说的是哪个会话 ✓（`address` 的两种形状 + 裸 `sessionId` 都认 ✓）。 */
+function requestSessionId(args: Record<string, unknown>): string {
+  const address = args['address']
+  if (address !== null && typeof address === 'object') {
+    const record = address as Record<string, unknown>
+    const child = typeof record['childSessionId'] === 'string' ? (record['childSessionId'] as string) : ''
+    if (child.length > 0) return child
+    const id = typeof record['sessionId'] === 'string' ? (record['sessionId'] as string) : ''
+    if (id.length > 0) return id
+  }
+  return typeof args['sessionId'] === 'string' ? (args['sessionId'] as string) : ''
+}
+
+/** 从 `{ asOfSeq }` 形状里取序号 ✓（不是安全整数 ⇒ `null` ✓ —— **不猜** ✗）。 */
+function asOfSeqOf(value: unknown): number | null {
+  if (value === null || typeof value !== 'object') return null
+  const asOfSeq = (value as Record<string, unknown>)['asOfSeq']
+  return typeof asOfSeq === 'number' && Number.isSafeInteger(asOfSeq) ? asOfSeq : null
+}
+
+/** 在 `session/list` 的返回里找一条会话的 `projections.asOfSeq` ✓（找不到 ⇒ `null` ✓）。 */
+function listAsOfSeq(value: unknown, sessionId: string): number | null {
+  if (value === null || typeof value !== 'object') return null
+  const container = value as Record<string, unknown>
+  const raw = Array.isArray(container['items'])
+    ? (container['items'] as unknown[])
+    : Array.isArray(container['sessions'])
+      ? (container['sessions'] as unknown[])
+      : []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id')
+    if (id !== sessionId) continue
+    const projections = record['projections']
+    return projections !== null && typeof projections === 'object' ? asOfSeqOf(projections) : null
+  }
+  return null
+}
+
+/**
+ * ★★ 取会话当前的 **head 序号** = "会话日志最后一条事件的 `seq`" ✓ ——
+ * `session/page` 的 `throughSeq` 要的就是它 ✓。
+ *
+ * ## 为什么是它 ✗（不是另一个数 ✓）—— 生产实例实测，2026-10-05
+ *
+ * DSH 自己的实现（`dsh-api-session-controller/lib/types/history.js` ✓）：
+ * `const sourceCursor = sourceLog.at(-1)?.seq ?? -1`，并且
+ * `if (throughSeq > sourceCursor) throw 'session page through seq N is past cursor M'` ✓
+ * ⇒ 那句错误里的 `M` 就是**真实 head** ✓ —— 我用它给 `asOfSeq` 做了**独立校验** ✓：
+ *
+ * | 会话（生产实例 ✓） | 列表里的 `asOfSeq` | `throughSeq = asOfSeq + 1` 的答复 | 结论 |
+ * |---|---|---|---|
+ * | `session-33308b4e-…`（`sequenced`） | 17626 | `past cursor 17626` | **相等** ✓ |
+ * | `session-4412ada5-…`（`sequenced`） | 393 | `past cursor 393` | 相等 ✓ |
+ * | `session-c16e3fbd-…`（`cached`） | 3844 | `past cursor 3844` | 相等 ✓ |
+ * | `session-d95bd77a-…`（`cached`） | 17702 | `past cursor 17702` | 相等 ✓ |
+ * | `session-f25af257-…`（`cached`） | 639 | `past cursor 639` | 相等 ✓ |
+ * | `session-1831f514-…`（`cached`） | 1272 | `past cursor 1272` | 相等 ✓ |
+ * | `session-b3206a33-…`（`cached`） | 9307 | `past cursor 9307` | 相等 ✓ |
+ *
+ * 另有磁盘上的**独立证词** ✓：`session-e52f9835-…` 的 `session.v4.jsonl.zstd` 解压后
+ * 最后一条事件就是 `{"type":"turn/end","seq":784,…}` ✓，而 `session/list` 与
+ * `session/projections` 给的都是 `asOfSeq = 784` ✓
+ * ⇒ **`asOfSeq` 与 `events.at(-1).seq` 是"相等"** ✓（**不是差 1** ✗）——
+ *   这正好答复了 `37-会话页数据面探针.md` §二点五 记的那笔欠账 ✓。
+ *
+ * ## 两个来源的次序（**实测定的** ✓，不是随手排的 ✗）
+ *
+ * 1. 页面自己给的 `throughSeq` ✓ ⇒ **不问**网关 ✓（页面说了算 ✓）；
+ * 2. `session/projections { sessionId }` ✓ ⇒ `asOfSeq` ✓
+ *    —— 只读一个会话 ✓，实测线上 `3 KB / 3 ms`（冷会话首次 `39 ms`）✓；
+ * 3. `session/list` ✓ ⇒ 该条 `projections.asOfSeq` ✓
+ *    —— 用户点名的来源 ✓，**但一次 815 KB / 120 ms**（387 条会话 ✓），
+ *    而会话页每 `900 ms` 就轮询一次 ✓ ⇒ 只作**兜底** ✓；
+ * 4. 都拿不到 ⇒ **抛错** ✓（原文带上两次失败的原因 ✓ —— 手机上要能念 ✓）。
+ *
+ * ★ 为什么**不能**用 `session/follow` 的开场快照 `cursor`（原计划的兜底 ✓）✗：
+ *   它是**流**端点 ✓，而本层的 `deps.call` 是**一问一答** ✓（生产里就是 `gateway.invoke(…)` ✓）——
+ *   流要走另一条入口 ✓，而那个入口在 `index.ts` 里 ✓（本单**不许碰** ✗）⇒ 本单不采用 ✓。
+ *
+ * ★ 覆盖情况（实测 ✓）：生产实例 387 条会话里 **372 条**列表里带 `projections` ✓、
+ *   357 条 `blank:false` 且 `asOfSeq` 是数字 ✓；剩下 **15 条列表里没有投影** ✓
+ *   —— 第 2 步对它们照样有效 ✓（实测 `asOfSeq = 3` ⇒ `page@3` 拿到 `n=4` ✓）。
+ */
+async function resolveHeadSeq(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<number> {
+  const provided = providedThroughSeq(args)
+  if (provided !== null) return provided
+  const sessionId = requestSessionId(args)
+  if (sessionId.length === 0) {
+    throw Object.assign(new Error('参数缺失：sessionId（或 address）'), { code: ErrorCode.Internal })
+  }
+  const failures: string[] = []
+  try {
+    const value = unwrap(await deps.call('session/projections', { args: { request: { sessionId } } }, signal))
+    const asOfSeq = asOfSeqOf(value)
+    if (asOfSeq !== null) return asOfSeq
+    failures.push('session/projections 没给 asOfSeq')
+  } catch (error) {
+    failures.push(`session/projections：${messageOf(error)}`)
+  }
+  try {
+    const value = unwrap(await deps.call('session/list', { args: { _request: {} } }, signal))
+    const asOfSeq = listAsOfSeq(value, sessionId)
+    if (asOfSeq !== null) return asOfSeq
+    failures.push('session/list 里没有这条会话的 projections.asOfSeq')
+  } catch (error) {
+    failures.push(`session/list：${messageOf(error)}`)
+  }
+  throw Object.assign(new Error(`取不到会话「${sessionId}」的 head 序号（${failures.join('；')}）`), {
+    code: ErrorCode.Internal,
+  })
 }
 
 // ────────────────────────────── 工具 ──────────────────────────────
@@ -368,6 +573,11 @@ function unwrap(result: unknown): unknown {
     throw Object.assign(new Error(message), { code: ErrorCode.Internal })
   }
   return envelope.value
+}
+
+/** 错误 ⇒ 一句能念给人听的话 ✓（非 `Error` 也认 ✓ —— 网关有时抛的是字符串 ✗）。 */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {

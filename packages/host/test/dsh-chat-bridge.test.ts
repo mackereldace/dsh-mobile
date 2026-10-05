@@ -86,11 +86,59 @@ describe('mobile/dsh 桥：端点分发', () => {
     assert.deepEqual(calls[0]?.payload, { args: { _request: {} } })
   })
 
-  it('读一页：用 **`request`** 这个参数名调 session/page', async () => {
-    const { call, calls } = fakeGateway()
-    await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1' }))
+  it('读一页：用 **`request`** 这个参数名调 session/page，且请求里**带 head 当 throughSeq**', async () => {
+    // ★ 页面只传 { sessionId, maxMessages }（app.js 现状 ✓，本单不许改它 ✗）⇒ 桥必须先问 head ✓
+    const { call, calls } = fakeGateway({
+      'session/projections': { ok: true, value: { asOfSeq: 42, values: {} } },
+      'session/page': { ok: true, value: { records: [], hasMore: false } },
+    })
+    await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1', maxMessages: 60 }))
+    assert.equal(calls[0]?.endpoint, 'session/projections')
+    const page = calls.find((entry) => entry.endpoint === 'session/page')
+    assert.deepEqual(page?.payload, {
+      args: { request: { address: { kind: 'session', sessionId: 's-1' }, maxMessages: 60, throughSeq: 42 } },
+    })
+  })
+
+  it('★★ 页面给了 throughSeq ⇒ **一次网关调用都不多问**，照页面的用', async () => {
+    const { call, calls } = fakeGateway({ 'session/page': { ok: true, value: { records: [], hasMore: false } } })
+    await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1', throughSeq: 7 }))
+    assert.equal(calls.length, 1)
     assert.equal(calls[0]?.endpoint, 'session/page')
-    assert.deepEqual(calls[0]?.payload, { args: { request: { address: { kind: 'session', sessionId: 's-1' } } } })
+    assert.equal((calls[0]?.payload as { args: { request: { throughSeq: number } } }).args.request.throughSeq, 7)
+  })
+
+  it('★★ head = -1（这个会话一条事件都没有）⇒ 直接给空页，**不拿 -1 去调 session/page**', async () => {
+    // -1 不是"取最新"的哨兵：拿它去调只会得到"不报错但永远空白"（见 pageRequest 的大雷注释）
+    const { call, calls } = fakeGateway({ 'session/projections': { ok: true, value: { asOfSeq: -1, values: {} } } })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-empty' }))) as Record<string, unknown>
+    assert.deepEqual(calls.map((entry) => entry.endpoint), ['session/projections'])
+    assert.equal(page['ok'], true)
+    assert.deepEqual(page['events'], [])
+    assert.equal(page['hasMore'], false)
+    // 外层形状与 normalizePage 的输出一致（页面按这些键读）
+    assert.deepEqual(Object.keys(page).sort(), ['asOfSeq', 'events', 'hasMore', 'ok', 'sessionId', 'values'])
+    assert.equal(page['sessionId'], 's-empty')
+  })
+
+  it('★ session/projections 拿不到 ⇒ 退到 session/list 的 projections.asOfSeq（用户点名的来源）', async () => {
+    const { call, calls } = fakeGateway({
+      'session/projections': { ok: false, error: { code: 'session/projections-unavailable', message: '会话投影不可用' } },
+      'session/list': realList(realSummary('s-1', { projections: { kind: 'cached', asOfSeq: 9, values: { title: '标题' } } })),
+      'session/page': { ok: true, value: { records: [{ type: 'event', event: { seq: 5, time: 1, type: 'turn/start', data: {} } }], hasMore: true } },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1' }))) as Record<string, unknown>
+    assert.deepEqual(calls.map((entry) => entry.endpoint), ['session/projections', 'session/list', 'session/page'])
+    assert.equal((page['events'] as unknown[]).length, 1)
+    assert.equal(page['hasMore'], true)
+  })
+
+  it('★ 两个来源都没有 asOfSeq ⇒ **抛错**，且一个缺必填项的 session/page 都不许发', async () => {
+    // 宁可红字点名"取不到 head"，也不要发出一个缺 throughSeq 的请求 —— 那样用户看到的会是
+    // DSH 的 boundary validation（一句看不出该修哪儿的话）
+    const { call, calls } = fakeGateway({ 'session/projections': { ok: true, value: { values: {} } }, 'session/list': realList(realSummary('s-2')) })
+    await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1' })), /head/)
+    assert.equal(calls.some((entry) => entry.endpoint === 'session/page'), false)
   })
 
   it('发消息：调 session/prompt，且 requestId 由桥生成', async () => {
@@ -135,8 +183,11 @@ describe('mobile/dsh 桥：坏参数要说得出话', () => {
     await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})), /writer-held/)
   })
 
-  it('网关自己抛 ⇒ 原样冒上去', async () => {
-    const { call } = fakeGateway({ 'session/page': new Error('网关连不上') })
+  it('网关自己抛 ⇒ 原样冒上去（head 问到了，是 session/page 那一步抛的）', async () => {
+    const { call } = fakeGateway({
+      'session/projections': { ok: true, value: { asOfSeq: 3, values: {} } },
+      'session/page': new Error('网关连不上'),
+    })
     await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's' })), /网关连不上/)
   })
 })
@@ -332,7 +383,7 @@ describe('normalizePage：事件白名单 + 值白名单', () => {
   })
 })
 
-describe('pageRequest：游标**原样透传**（不发明语义）', () => {
+describe('pageRequest：throughSeq **必带**，其余游标仍原样透传', () => {
   it('认识的字段照搬，别的丢掉', () => {
     const request = pageRequest({ sessionId: 's', beforeSeq: 10, throughSeq: 20, maxMessages: 30, turnWindow: 2, 乱入: 'x' })
     assert.deepEqual(request, {
@@ -345,17 +396,52 @@ describe('pageRequest：游标**原样透传**（不发明语义）', () => {
     assert.equal('乱入' in request, false)
   })
 
+  /**
+   * ★★★ 本单的核心断言（2026-10-05 的真机报错 ✓）：真形状是
+   * `SessionPageRequest = { address, throughSeq: z.number()（必填）, beforeSeq?, maxMessages?, turnWindow? }`
+   * ⇒ 请求里**必须**有 `throughSeq`，而且是 `>= 0` 的安全整数 ✓。
+   *
+   * ★ 变异实验（我逐次跑过 ✓）：
+   * · 把 `request['throughSeq'] = throughSeq` 那一行**删掉** ⇒ 本用例红在"是 number"✓；
+   * · 把它写成 `-1` ⇒ 本用例红在"不许是 -1"与">= 0"✓（且端到端会变成"永远空白"✗）。
+   */
+  it('★★ throughSeq 必带：是 number、>= 0、**不许是 -1**（页面没给时用 head）', () => {
+    const request = pageRequest({ sessionId: 's' }, 42)
+    const throughSeq = request['throughSeq']
+    assert.equal(typeof throughSeq, 'number', 'session/page 的 request 必须带 throughSeq（缺了 DSH 会在入口拒）')
+    assert.ok(Number.isSafeInteger(throughSeq), 'throughSeq 必须是安全整数')
+    assert.notEqual(throughSeq, -1, '-1 会拿到永远空白的一页（不是取最新）')
+    assert.ok((throughSeq as number) >= 0, 'throughSeq 必须 >= 0')
+    assert.equal(throughSeq, 42)
+  })
+
+  it('页面给了非负的 throughSeq ⇒ 就用页面的（head 边都不碰）', () => {
+    assert.equal(pageRequest({ sessionId: 's', throughSeq: 7 }, 999)['throughSeq'], 7)
+  })
+
+  it('★★ 页面给 -1 / -0 / 负数 ⇒ **不照搬**，改用 head（照搬就是静默空白）', () => {
+    assert.equal(pageRequest({ sessionId: 's', throughSeq: -1 }, 42)['throughSeq'], 42)
+    assert.equal(pageRequest({ sessionId: 's', throughSeq: -0 }, 42)['throughSeq'], 42)
+    assert.equal(pageRequest({ sessionId: 's', throughSeq: 0 }, 42)['throughSeq'], 0) // 0 是真的游标（第一条事件）⇒ 照搬
+  })
+
+  it('★ 页面没给、head 也没有 ⇒ **抛错**（不许发出一个缺必填项的请求）', () => {
+    assert.throws(() => pageRequest({ sessionId: 's' }), /throughSeq 必填/)
+    assert.throws(() => pageRequest({ sessionId: 's' }, null), /throughSeq 必填/)
+  })
+
   it('子智能体那套 address 原样透传（同一端点 ✓）', () => {
     const request = pageRequest({
       address: { kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' },
-    })
+    }, 5)
     assert.deepEqual(request['address'], { kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' })
+    assert.equal(request['throughSeq'], 5)
   })
 
-  it('非数字的游标不当数字用（宁可不要，也不猜）', () => {
-    const request = pageRequest({ sessionId: 's', beforeSeq: '10', throughSeq: null })
+  it('非数字的 beforeSeq 不当数字用（宁可不要，也不猜）', () => {
+    const request = pageRequest({ sessionId: 's', beforeSeq: '10', throughSeq: null }, 3)
     assert.equal('beforeSeq' in request, false)
-    assert.equal('throughSeq' in request, false)
+    assert.equal(request['throughSeq'], 3)
   })
 })
 
