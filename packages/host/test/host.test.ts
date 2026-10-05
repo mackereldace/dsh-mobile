@@ -426,19 +426,24 @@ async function setup(
   const calls: { namespace: string; method: string; args: Record<string, unknown> }[] = []
   const gateway: RemoteGateway = {
     /**
-     * ★★ 替身要**像真 DSH**：返回的是**信封** `{ok, value}` ✓，不是裸值 ✗。
+     * ★★★ 替身必须与**真 DSH 同形** ✓：`gateway.invoke(…)` 在真 DSH 里返回的是
+     * **业务值本身**（**裸值** ✗ 不是信封 ✓），失败则**抛** ✓
+     * （README：「直接调用 `invoke()` 会保留业务错误」✓）。
      *
-     * 为什么这条重要（2026-10-05 新增 `client_source` 接线用例时踩到 ✗）：
-     * 生产里 `dsh-chat-bridge.ts` 的 `unwrap()` 拿到的就是**信封** ✓
-     * （`invokeGatewayEndpoint` 把 `gateway.invoke(…)` 的结果**原样**往上传 ✓，
-     * 见 index.ts 那段"`invokeGatewayEndpoint` **必须保持原样**"✗）。
-     * 替身返回裸值 ⇒ `unwrap()` 抛「网关拒绝了这次调用」✗ ⇒
-     * `mobile/dsh/send` 那条路在**测试里**必然红 ✓，而那是**替身的形状错** ✗
-     * —— 后来的人会顺着它去查一个根本不存在的实现故障 ✓。
+     * ★ 为什么这条重要（第 106 轮的真机故障 ✗，改前这里正是**反的** ✗）：
+     *   生产中 `dsh-chat-bridge.ts` 的 `unwrap()` 拿到的就是这个**裸值** ✓
+     *   （`invokeGatewayEndpoint` 对 `session/*` 走的正是 `gateway.invoke(…)` ✓，
+     *   见 `index.ts` 的 `invokeLocalEndpoint` / `/mobile/chat/sessions` 两处 ✓），
+     *   而真 DSH 的 `dispatchRpc` 才返回信封 ✓。
+     *   替身把两者**反过来** ⇒ `unwrap` 抛「网关拒绝了这次调用」✗ 在测试里看不出来 ✓
+     *   ⇒ 「全绿但线上 502」✗（真机读数：`GET /mobile/chat/sessions` = 502 ✓，
+     *     `sessions / read / send / create` 四个端点全坏 ✓）。
+     * ★ 形状钉死在下面那条用例里：`假网关必须与真 DSH 同形` ✓
+     *   （只写在注释里不算数 ✗ —— 注释不能把变异打红 ✓）。
      */
     async invoke(request) {
       calls.push({ namespace: request.namespace, method: request.method, args: request.args as Record<string, unknown> })
-      return { ok: true, value: bareValue(request) }
+      return bareValue(request)
     },
     async stream(request) {
       calls.push({ namespace: request.namespace, method: request.method, args: request.args as Record<string, unknown> })
@@ -449,7 +454,7 @@ async function setup(
     },
   }
 
-  /** 业务值本身（裸值 ⇒ 由 `invoke` 包成信封 ✓，与真 DSH 一致 ✓）。 */
+  /** 业务值本身（裸值 ✓ —— 真 DSH 的 `invoke` 就回这个 ✓，替身照抄 ✓）。 */
   function bareValue(request: { namespace: string; method: string; args: Record<string, unknown> }): unknown {
     if (request.namespace === 'session' && request.method === 'create') {
       return { sessionId: 'session-created-by-mobile', workspace: request.args['cwd'] ?? '/tmp' }
@@ -498,27 +503,25 @@ async function setup(
     const maybeArgs = payload !== null && typeof payload === 'object'
       ? (payload as { args?: Record<string, unknown> }).args
       : undefined
+    const args = maybeArgs ?? {}
     /**
-     * ★★★ 业务端点返回**裸值**（不是 `{ok,value}` 信封 ✓）—— 2026-10-05 新增
-     *   `client_source` 接线用例时把这条形状钉住的 ✓。
+     * ★★★ 业务端点返回**信封** `{ok:true, value}` ✓ —— 与真 DSH 一致 ✓
+     *   （`dispatchRpc` **就是** `/api` 的宿主侧入口 ✓：
+     *    `connection.rpc.intercept('/api', …, (e, p, s, peer) => this.dispatchRpc(e, p, s, peer))` ✓，
+     *    `encodeRpcResult` 在那一层把结果包成 `{ok:true,value}`＋可选 `attachments` ✓）。
      *
-     * 为什么必须是裸值（推理链，三处都有据可查 ✓）：
-     * · `invokeGatewayEnvelope`（隧道那条路 ✓）把 `dispatchRpc` 的返回值**直接当信封** ✓
-     *   ⇒ 这里要是包成 `{ok:true,value:…}` ⇒ 会变成**双层信封** ✗
-     *   ⇒ `session/create` 等既有用例立刻红 ✓（实测 ✓）。
-     * · `session/list` / `session/page`（会话页数据面 ✓）走的是**另一条**路
-     *   `invokeGatewayEndpoint` ⇒ `gateway.invoke(…)` ✓，也就是上面那个**返回信封**的替身 ✓
-     *   —— 而 `dsh-chat-bridge.ts` 的 `unwrap()` 正好按信封写 ✓（两者自洽 ✓）。
-     * ⇒ 所以本替身现在是：`invoke` 返回信封 ✓、`dispatchRpc` 返回裸值 ✓，两条路各自自洽 ✓。
+     * ★ 为什么 `invoke`（上面那个）回**裸值**、这里回**信封**（两者**本来就不同** ✗ 不是笔误 ✓）：
+     * · 隧道那条路（`invokeGatewayEnvelope` ✓，`boot.js` 走的就是它 ✓）把 `dispatchRpc` 的返回值
+     *   **直接当信封**发给手机 ✓ ⇒ 这里必须是信封 ✓；
+     * · `dsh-chat-bridge.ts` 的 `deps.call` 走的是**另一个**入口 `invokeGatewayEndpoint` ✓
+     *   ⇒ `gateway.invoke(…)` ⇒ 裸值 ✓ ⇒ 桥的 `unwrap()` 必须**宽容两种形状** ✓。
      *
-     * ★ 顺带记一处**尚未查清**的疑问 ✗（别当成已解决 ✗）：
-     *   `invokeGatewayEndpoint` 与 `invokeGatewayEnvelope` 对 `dispatchRpc` 的处理**不一样** ✓
-     *   （前者取 `.value` ✓、后者把返回值当信封 ✓）—— 真实 DSH 里 `dispatchRpc` 到底返回哪个形状，
-     *   我**没有在真机上验** ✗。如果它返回**信封** ✓，那么 `mobile/dsh/send` 那条桥在真机上
-     *   就会拿到一个"少一层"的值 ⇒ `unwrap` 抛「网关拒绝了这次调用」✗。
-     *   ⇒ 这一条写进了本轮交付报告的「不确定」一节 ✓，**不要**在没验之前当成结论 ✗。
+     * ★ 改前这里是把 `invoke` 的结果（信封 ✓）原样透传 ✓ —— 也就是"两个形状都跟真 DSH 反了" ✗
+     *   （真正把这条 bug 掩住的**唯一**原因 ✓）。形状由下面的
+     *   `假网关必须与真 DSH 同形` 用例钉住 ✓（注释不算数 ✗）。
      */
-    return await gateway.invoke({ namespace, method, args: maybeArgs ?? {} })
+    calls.push({ namespace, method, args })
+    return { ok: true, value: bareValue({ namespace, method, args }) }
   }
 
   const host: MobileHost = createMobileHost({
@@ -621,6 +624,7 @@ async function setup(
     dir,
     store,
     host,
+    gateway,
     calls,
     dispatches,
     pairing,
@@ -1070,6 +1074,55 @@ test('配对流程：claim 需电脑端确认，指纹与公钥必须自洽', as
 
     env.host.confirmPairing(env.pairing.ticket.code, env.deviceId, true)
     assert.equal(env.host.listPendingPairings()[0]?.state, 'approved')
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★★★ 替身的**形状**必须与真 DSH 一致 ✓（第 106 轮的真机故障就是因为这条没钉住 ✗）。
+ *
+ * ## 判据（两条都得能被变异打红 ✓，且**不匹配注释** ✗）
+ *
+ * 真 DSH 的两个方法**形状不同是设计如此** ✓：
+ * · `gateway.invoke(…)` ⇒ **业务值本身**（裸值 ✓，没有 `ok` 字段 ✓），失败**抛** ✓；
+ * · `dispatchRpc(…)` ⇒ **信封** `{ok:true,value}` ✓ / `{ok:false,error}` ✓（**不抛** ✓）。
+ *
+ * ★ 为什么值这个用例 ✗：改前替身把两者**反过来** ✓ ⇒ `dsh-chat-bridge.ts` 的 `unwrap()`
+ *   在测试里拿到信封、在真机上拿到裸值 ⇒ **单测全绿、线上 502** ✓
+ *   （真机读数：`GET /mobile/chat/sessions` = 502 ✓ +「拿不到会话清单：网关拒绝了这次调用」✓）。
+ *   所以这里断言的是**实际返回值**（不是注释里的字符串 ✓）：
+ *   把替身改回相反形状 ⇒ 这个用例必须**恰好**变红 ✓（本轮已实测 ✓）。
+ */
+test('★★★ 假网关必须与真 DSH 同形：invoke 回裸值、dispatchRpc 回信封', async () => {
+  const env = await setup()
+  try {
+    const request = { namespace: 'session', method: 'create', args: { cwd: '/tmp/shape-probe' } }
+    const business = { sessionId: 'session-created-by-mobile', workspace: '/tmp/shape-probe' }
+
+    // ① `invoke` ⇒ 裸业务值（**不许**是信封 ✗ —— 那正是改前替身的形状错 ✓）
+    const viaInvoke = await env.gateway.invoke(request)
+    assert.deepEqual(viaInvoke, business, 'gateway.invoke 必须回**裸业务值**（真 DSH 就是这样）')
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(viaInvoke as object, 'ok'),
+      false,
+      'gateway.invoke 的返回值上不得有 ok 字段（有 = 替身又变回信封 ✗）',
+    )
+
+    // ② `dispatchRpc` ⇒ 信封（真 DSH 的 `/api` 宿主侧入口就是它 ✓）
+    const dispatch = (env.gateway as unknown as {
+      dispatchRpc: (endpoint: string, payload: unknown) => Promise<unknown>
+    }).dispatchRpc
+    const viaDispatch = await dispatch('session/create', { args: { cwd: '/tmp/shape-probe' } })
+    assert.deepEqual(viaDispatch, { ok: true, value: business }, 'gateway.dispatchRpc 必须回**信封**（真 DSH 就是这样）')
+
+    // ③ `$events/result` 那条特判仍然只给哨兵（它不经 invoke ✓）
+    assert.deepEqual(await dispatch('$events/result', { args: {} }), { ok: true, value: { dispatched: true } })
+    assert.equal(
+      env.calls.some((call) => call.namespace === '$events'),
+      false,
+      '$events/result 不得被当成普通 Remote 方法送进 invoke',
+    )
   } finally {
     env.cleanup()
   }

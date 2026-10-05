@@ -1,7 +1,11 @@
 // 会话页数据面桥的不变量。
 //
 // 全部跑在**假网关**上：真网关要一台跑着的 DSH 与设备配对，单测里不该依赖它们；
-// 而这一层的逻辑（参数名映射、信封拆解、归一化白名单、游标透传）与"对面是谁"无关。
+// 而这一层的逻辑（参数名映射、形状拆解、归一化白名单、游标透传）与"对面是谁"无关。
+//
+// ★★ 假替身**必须与真 DSH 同形** ✗（第 106 轮的教训 ✓）：`gateway.invoke(…)` 回**裸业务值** ✓、
+//    `gateway.dispatchRpc(…)` 回**信封** ✓。改前 `host.test.ts` 的替身把两者**反过来** ✓
+//    ⇒ 这一层"只认信封"的 bug 被掩住 ⇒ **全绿但真机 502** ✓（`GET /mobile/chat/sessions` ✓）。
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
@@ -99,6 +103,67 @@ describe('mobile/dsh 桥：坏参数要说得出话', () => {
   it('网关自己抛 ⇒ 原样冒上去', async () => {
     const { call } = fakeGateway({ 'session/page': new Error('网关连不上') })
     await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's' })), /网关连不上/)
+  })
+})
+
+/**
+ * ★★★ `unwrap` 必须**宽容两种真实形状** ✓ —— 第 106 轮真机故障（`GET /mobile/chat/sessions` = 502 ✓
+ * +「拿不到会话清单：网关拒绝了这次调用」✓）的回归断言 ✓。
+ *
+ * ## 为什么会有两种形状（这不是笔误 ✗，是 DSH 的设计 ✓）
+ *
+ * · 生产里这个 `call` 就是 `invokeGatewayEndpoint(gateway, …)` ✓（`index.ts` 两处：隧道 ✓ +
+ *   `/mobile/chat/sessions` HTTP 路由 ✓），它对 `session/*` 走 `gateway.invoke(…)` ✓
+ *   ⇒ 真 DSH 的 `invoke` 返回**业务值本身** ✓（`session/list` ⇒ `{sessions:[…]}` ✓，**没有 `ok`** ✓），
+ *     失败则**抛** ✓；
+ * · `dispatchRpc` 才返回信封 ✓（`{ok:true,value}` ✓ / `{ok:false,error}` ✓，**不抛** ✓）。
+ *
+ * ⇒ 只认信封 ⇒ 拿裸值去查 `ok` ⇒ `undefined !== true` ⇒ 抛「网关拒绝了这次调用」✗
+ *   ⇒ `sessions / read / send / create` 四个端点全坏 ✓。
+ * ★ 判据只有**一处** ✓（`gateway-rpc.ts` 的 `readHostRpcResult` ✓）—— 这里断言行为，不改判据 ✗。
+ */
+describe('unwrap：两种真实形状都要解得出', () => {
+  it('★ 信封形（`dispatchRpc` 那条路）：{ok:true,value} ⇒ 取 value', async () => {
+    const { call } = fakeGateway({ 'session/list': { ok: true, value: { sessions: [{ id: 's-envelope' }] } } })
+    const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({}))) as {
+      ok: boolean
+      sessions: Array<Record<string, unknown>>
+    }
+    assert.equal(result.ok, true)
+    assert.equal(result.sessions.length, 1)
+    assert.equal(result.sessions[0]?.['id'], 's-envelope')
+  })
+
+  it('★★ 裸值形（`invoke` 那条路 = 真机上走的就是它）：没有 ok 字段 ⇒ 整体当业务值', async () => {
+    // 这一条就是真机的形状：`session/list` 回 `{sessions:[…]}`，**没有** ok 字段
+    const { call } = fakeGateway({ 'session/list': { sessions: [{ id: 's-bare' }] } })
+    const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})) as {
+      ok: boolean
+      sessions: Array<Record<string, unknown>>
+    })
+    assert.equal(result.ok, true, '裸值必须被当成业务值，而不是"网关拒绝"')
+    assert.equal(result.sessions.length, 1, '裸值里的 sessions 必须真的被归一出来（否则手机上还是空清单）')
+    assert.equal(result.sessions[0]?.['id'], 's-bare')
+  })
+
+  it('★ 失败信封（{ok:false,error}）⇒ 仍然抛，且带 DSH 的原文（手机上要能念）', async () => {
+    const { call } = fakeGateway({ 'session/list': { ok: false, error: { code: 'x', message: 'writer-held：另一台设备在改' } } })
+    await assert.rejects(() => handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})), /writer-held/)
+  })
+
+  it('★★★ 边界：裸值里恰好有个 ok:false 字段 ⇒ **不许**误判成失败（它不是失败信封）', async () => {
+    /**
+     * 失败信封**一定**带 `error` 对象 ✓；只按"`ok` 是布尔"判定的话 ✓，
+     * 一个碰巧带 `ok:false` 字段的**业务值**会被误报成「网关拒绝了这次调用」✗
+     * —— 那正是本仓最忌的"把无害差异当故障"✓。判据见 `gateway-rpc.ts` 的 `readHostRpcResult` ✓。
+     */
+    const { call } = fakeGateway({ 'session/list': { ok: false, sessions: [{ id: 's-still-here' }] } })
+    const result = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.sessions, args({})) as {
+      ok: boolean
+      sessions: Array<Record<string, unknown>>
+    })
+    assert.equal(result.ok, true, '业务值里的 ok:false 不是网关的失败信号（它没有 error 对象）')
+    assert.deepEqual(result.sessions.map((item) => item['id']), ['s-still-here'])
   })
 })
 

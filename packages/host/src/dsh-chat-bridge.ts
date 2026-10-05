@@ -41,6 +41,8 @@
 
 import { ErrorCode } from '@dsh-mobile/protocol'
 
+import { readHostRpcResult } from './gateway-rpc.ts'
+
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>
 
@@ -281,17 +283,27 @@ function readArgs(payload: unknown): Record<string, unknown> {
 }
 
 /**
- * 拆网关返回的那层信封 ✓（`{ ok:true, value }` ✓）。
+ * 拆网关返回的那一层 ✓ —— **宽容两种真实形状** ✓（判据只有一处 ✓：`gateway-rpc.ts` 的
+ * `readHostRpcResult` ✓，这里**不许**再写第二套 ✗）。
  *
- * ★ 这个形状是**实测**来的：手机那边一直是 `response.result.ok` / `.value` 两层 ✓
- *   （`boot.js` 取 `session/list` / `session/modelCatalog` 都这样 ✓）
- *   ⇒ 网关端点本身的返回值就是 `{ok,value}` ✓。
+ * ## ★ 为什么必须宽容（第 106 轮的真机故障 ✗，已复现 ✓）
+ *
+ * 这一层的 `deps.call` 在生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓（`index.ts` 两处 ✓：
+ * 隧道那条 ✓ + `/mobile/chat/sessions` 那条 HTTP 路由 ✓），而它对 `session/*` 走的是
+ * `gateway.invoke(…)` ✓ —— 真 DSH 里 `invoke` 返回的是**裸业务值** ✓（`session/list` ⇒ `{sessions:[…]}` ✓，
+ * **没有 `ok` 字段** ✓）；只有 `dispatchRpc` 才返回 `{ok,value}` 信封 ✓（两者形状不同是**设计如此** ✓）。
+ *
+ * ⇒ 原先"只认信封"的写法拿裸值去查 `ok` ⇒ `undefined !== true` ⇒ 抛「网关拒绝了这次调用」✗
+ *   ⇒ `GET /mobile/chat/sessions` = **502** ✓（真机读数 ✓），
+ *     `sessions / read / send / create` **四个端点全坏** ✗
+ *   —— 而单测一直全绿 ✓，根因是**假网关两个形状都跟真 DSH 反了** ✗（已在本轮改真 ✓）。
+ *
+ * ★ 输出契约**没变** ✓：调用方看到的仍然是"业务值 or 抛错" ✓。
  */
 function unwrap(result: unknown): unknown {
-  if (result === null || typeof result !== 'object') return undefined
-  const envelope = result as { readonly ok?: unknown; readonly value?: unknown; readonly error?: unknown }
+  const { envelope } = readHostRpcResult(result)
   if (envelope.ok !== true) {
-    const error = envelope.error as { readonly message?: unknown; readonly code?: unknown } | undefined
+    const error = envelope.error
     const message = typeof error?.message === 'string' ? error.message : '网关拒绝了这次调用'
     throw Object.assign(new Error(message), { code: ErrorCode.Internal })
   }

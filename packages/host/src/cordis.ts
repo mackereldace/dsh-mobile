@@ -1379,7 +1379,7 @@ export function apply(ctx: Context, config: Config = {}): void {
  * ★ 语义注记（**当前端侧实现下唯一做不到"端侧报失败"的能力**）：`clipboard` 的端侧分支
  *   把"浏览器不允许自动复制、于是把文本摆到横幅上让你长按"也回报成 `ok:true`
  *   （`detail = banner-manual`，页面侧 `ok = how !== undefined`）。
- *   也就是说 **clipboard 目前永远不会给出端侧的 `ok:false`** —— 它只会"成功"或"超时"。
+ *   也就是说 ★ **2026-10-05 起已修正**：降级（`banner-manual`）时页面会**如实回 `ok:false`** ✓，且**先问壳**（`copied:shell-clipboard`，壳原生 `ClipboardManager`，不需要手势 ✓） —— 它只会"成功"或"超时"。
  *   宿主这一轮**不改** `boot.js`（那是第二版的事），但 agent 侧照旧能靠 `detail`
  *   把"真写进剪贴板了"与"降级成让你手动长按"分开。
  *
@@ -1601,7 +1601,7 @@ export function buildPhoneTools(mobileHost: DeviceDispatchHost, options: DeviceD
         'open=把 text 当作链接推到手机上（用户在横幅里点一下才打开，浏览器不允许无手势开新窗口）。' +
         '手机需先在移动端逐项允许该能力，否则返回原因而不是抛错。' +
         '★ clipboard 要特别留意 detail=banner-manual：那是**降级**（浏览器不允许自动复制，' +
-        '端侧只把文本摆到横幅上让用户长按），不是"已经放进剪贴板了"。' +
+        '端侧只把文本摆到横幅上让用户长按），不是"已经放进剪贴板了"；★ 此时 **ok 也是 false** ✓（2026-10-05 起）。' +
         '★ vibrate 的 detail=vibrate-unsupported 同理（端侧没有震动能力）。' +
         semantics,
       parameters: {
