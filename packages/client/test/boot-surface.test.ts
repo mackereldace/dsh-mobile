@@ -194,6 +194,22 @@ interface Surface {
   composerProbeNodes: () => { center: ProbeNode; layer: ProbeNode; input: ProbeNode } | null
   /** ★★ 本轮追加：冒充"DSH 把输入框重渲染了"✓（换掉输入元素 ✓，层不动 ✓）。 */
   composerRerender: () => void
+  /**
+   * ★★ round 215 追加：`window.__dshmBack` ✓ —— **生产函数本体** ✓
+   *   （壳在返回时调的就是它 ✓，不是测试另抄一份 ✓）。
+   */
+  back: () => (() => boolean) | undefined
+  /** ★★ round 215 追加：假 DSH 树 ✓（只有传了 `dshBackProbe` 时才有 ✓）。 */
+  dshBack: () => DshBackTree | null
+  /**
+   * ★★ round 215 追加：顶栏那颗「回到主会话」—— **生产造的那个元素** ✓
+   *   （从夹具的 id 表里取 ✓，不是另抄一份 ✓）。
+   * ★ 读"此刻显不显示"要读它的 **`dataset['dshmShown']`** ✓ ——
+   *   生产写的是 `dataset.dshmShown` ✓（真 DOM 里它同时就是 `data-dshm-shown` 属性 ✓，
+   *   CSS 那条规则读的正是它 ✓）；夹具这两者**不互通** ✓，读 `attrs` 会恒为 undefined ✗。
+   * ★ 取它的 `listeners['click']` ✓ 就能**按它一下** ✓（夹具把 `addEventListener` 记下来了 ✓）。
+   */
+  backToMain: () => Record<string, unknown> | null
 }
 
 /**
@@ -220,6 +236,22 @@ interface ProbeNode {
   querySelector: (selector: string) => ProbeNode | null
   querySelectorAll: (selector: string) => ProbeNode[]
   getBoundingClientRect: () => { top: number; left: number; right: number; bottom: number; width: number; height: number }
+  /**
+   * ★★ 本轮追加的四样 ✓ —— 它们都是**生产代码真的会调**的方法 ✓
+   *   （少一个，本轮那条路就会在夹具里抛错 ⇒ 测出来的是夹具坏了 ✗，不是产品坏了 ✓）：
+   *   · `contains`   —— `clickDshCollapseControl` 算搜索范围时用 ✓；
+   *   · `hasAttribute` / `removeAttribute` —— 面板那个语义属性 ✓（收起 = 摘掉它 ✓）；
+   *   · `click`      —— `best.node.click()`（收起键 ✓）与面包屑按钮 ✓；
+   *   · `getAttribute` / `setAttribute` —— 按 `aria-label` / `title` 找那颗收起键 ✓。
+   */
+  contains: (other: ProbeNode) => boolean
+  hasAttribute: (name: string) => boolean
+  removeAttribute: (name: string) => void
+  getAttribute: (name: string) => string | null
+  setAttribute: (name: string, value: string) => void
+  click: () => void
+  /** ★★ 本轮追加：`click()` 时生产之外要顺手做的事（记账 / 冒充 DSH 收起面板 ✓）。 */
+  onClick?: () => void
 }
 
 /** ★★ 本轮追加：假观察器记下来的那一条 ✓（`callback` = 生产回调本体 ✓，不是复制品 ✓）。 */
@@ -231,7 +263,12 @@ interface ObservedWatcher {
 
 /**
  * ★★ 本轮追加：**最小**选择器匹配 ✓ —— 只认生产代码真的用到的形状 ✓：
- *   `.类名` ✓ / `[class*="子串"]` ✓ / `[属性="值"]` ✓ / 标签名 ✓ / 逗号分隔 ✓。
+ *   `.类名` ✓ / `[class*="子串"]` ✓ / `[属性="值"]` ✓ / **`[属性]`（存在性 ✓）** / 标签名 ✓ / 逗号分隔 ✓。
+ *
+ * ★ round 215 起改成**按 token 逐个判** ✓（原来只认单个前缀 ✓）—— 因为本轮新加的那条判据是
+ *   **复合**的：`[data-sidebar-right-panel][data-sidebar-right-open]` ✓（两个存在性属性 ✓，
+ *   生产就是这么写的 ✓）。只认前缀的话它会**恒不匹配** ✗ ⇒ "面板开着"在夹具里永远到不了 ✗
+ *   ⇒ 那一条会变成**假绿** ✓（本项目今天的头号教训 ✓）。
  * 认不出来的（`link[rel="manifest"]` 这种组合 ✓）一律**不匹配** ✓ ——
  * 与"夹具原来恒为 null"等价 ✓，所以对既有用例零影响 ✓。
  */
@@ -239,12 +276,32 @@ function matchesProbeSelector(node: ProbeNode, raw: string): boolean {
   const selector = raw.trim()
   if (selector.length === 0) return false
   if (selector.includes(',')) return selector.split(',').some((part) => matchesProbeSelector(node, part))
-  if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1))
-  const classSub = /^\[class\*="([^"]*)"\]$/.exec(selector)
-  if (classSub !== null) return node.className.includes(classSub[1] ?? '')
-  const attrEq = /^\[([a-zA-Z-]+)="([^"]*)"\]$/.exec(selector)
-  if (attrEq !== null) return node.attrs[attrEq[1] ?? ''] === attrEq[2]
-  return node.tagName.toLowerCase() === selector.toLowerCase()
+  /**
+   * ★ round 215：`*` = **全部后代** ✓（真 DOM 就是这条语义 ✓）——
+   *   `dshSidebarRoot()` 正是用 `column.querySelectorAll('*')` 找那一列的根的 ✓。
+   *   夹具认不出它 ⇒ 那一列**永远被当成"没展开"**✗ ⇒ `ensureSidebarExpanded()` 会去
+   *   `dshToggleSidebar()` 点一颗带「侧栏」字样的按钮 ✓ —— 而假收起键的
+   *   `aria-label` 正是「收起右侧边栏」✓，**撞上它那条兜底正则** ✓ ⇒
+   *   夹具会在**启动时就把面板收掉** ✗（实测：还没按返回，面板标记就已经没了 ✓，
+   *   于是"按一次返回"那条量到的是个假象 ✓）。这是**夹具**的问题 ✓
+   *   （真机上侧栏是展开的 ✓、那条路一步都不走 ✓），所以这里补齐语义 ✓。
+   */
+  if (selector === '*') return true
+  const tokens = selector.match(/\[[^\]]+\]|\.[^.[\]]+|[a-zA-Z][a-zA-Z0-9-]*/g)
+  if (tokens === null || tokens.length === 0) return false
+  return tokens.every((token) => {
+    if (token.startsWith('.')) return node.className.split(/\s+/).includes(token.slice(1))
+    if (token.startsWith('[')) {
+      const classSub = /^\[class\*="([^"]*)"\]$/.exec(token)
+      if (classSub !== null) return node.className.includes(classSub[1] ?? '')
+      const attrEq = /^\[([a-zA-Z-]+)="([^"]*)"\]$/.exec(token)
+      if (attrEq !== null) return node.attrs[attrEq[1] ?? ''] === attrEq[2]
+      const attrPresent = /^\[([a-zA-Z-]+)\]$/.exec(token)
+      if (attrPresent !== null) return Object.prototype.hasOwnProperty.call(node.attrs, attrPresent[1] ?? '')
+      return false
+    }
+    return node.tagName.toLowerCase() === token.toLowerCase()
+  })
 }
 
 /** ★★ 本轮追加：深度优先收**后代**里命中选择器的那些 ✓（不含自己 ✓，与 DOM 一致 ✓）。 */
@@ -289,8 +346,111 @@ function makeProbeNode(
     querySelector: (selector: string) => queryProbeDescendants(node, selector)[0] ?? null,
     querySelectorAll: (selector: string) => queryProbeDescendants(node, selector),
     getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+    /** ★★ 本轮追加：真 DOM 的 `Node.contains` ✓（含自己 ✓ —— `clickDshCollapseControl` 靠它算范围 ✓）。 */
+    contains: (other: ProbeNode) => {
+      let cursor: ProbeNode | null = other
+      while (cursor !== null) {
+        if (cursor === node) return true
+        cursor = cursor.parentElement
+      }
+      return false
+    },
+    hasAttribute: (name: string) => Object.prototype.hasOwnProperty.call(node.attrs, name),
+    removeAttribute: (name: string) => {
+      delete node.attrs[name]
+    },
+    getAttribute: (name: string) => (Object.prototype.hasOwnProperty.call(node.attrs, name) ? node.attrs[name] ?? null : null),
+    setAttribute: (name: string, value: string) => {
+      node.attrs[name] = value
+    },
+    click: () => {
+      if (node.onClick !== undefined) node.onClick()
+    },
   }
   return node
+}
+
+/**
+ * ★★ round 215：**假 DSH 顶栏 + 右侧栏面板** ✓ —— 本轮那三处判据都要有一份**真的 DOM**
+ *   才验得到 ✗（本文件原来的 `document.querySelector` 恒为 null ✓ ⇒
+ *   "面板开着"这个态在夹具里**根本到不了** ✓ = 那几条会变成假绿 ✓）。
+ *
+ * 形状照真机实测（写在这里，省得下次再猜 ✗）：
+ *   · `[data-dshm-topheader]` 里挂着面包屑 `span.*_crumbSeg` ✓（格数 = 层级 ✓，
+ *     `deriveAncestry()` 只在子代理会话里给 ≥2 格 ✓）；
+ *   · 右侧栏面板挂 `data-sidebar-right-panel` ✓，**展开时**才多一个
+ *     `data-sidebar-right-open` ✓ —— 「收起」= DSH 自己把那个属性摘掉 ✓。
+ *
+ * ★ 那颗假收起键**真的会摘掉属性** ✓（不只是一根计数器 ✓）——
+ *   所以"按一次返回 ⇒ 面板标记消失"量的是**因果** ✓，不是"某个字符串还在不在" ✗。
+ */
+interface DshBackTree {
+  root: ProbeNode
+  header: ProbeNode
+  panel: ProbeNode
+  /** 那颗「收起右侧边栏」被生产代码点了几次 ✓。 */
+  collapseClicks: () => number
+  /** 面包屑上那颗「上一级」被生产代码点了几次 ✓（= 真的退回了一层 ✓）。 */
+  crumbClicks: () => number
+  /** 冒充"用户在 DSH 里进了 / 退出了子单"✓：把面包屑改成 `count` 格 ✓。 */
+  setCrumbs: (count: number) => void
+}
+
+function makeDshBackTree(options: { crumbs?: number; panelOpen?: boolean }): DshBackTree {
+  const root = makeProbeNode('div', 'probeAppRoot')
+  /**
+   * ★ 侧栏那一列也要给 ✓（**展开态** ✓）—— `ensureSidebarExpanded()` 先问
+   *   `dshSidebarExpanded()` ✓（= 那一列的根不带 `*_collapsed` ✓）；
+   *   少了它 ⇒ 启动时会去点一颗带「侧栏」字样的按钮 ✓ ⇒ 正好点中下面那颗假收起键 ✗
+   *   ⇒ 面板在**还没按返回时**就被收掉了 ✓（实测踩到过 ✓，见 `matchesProbeSelector` 里那段 ✓）。
+   */
+  const sidebar = makeProbeNode('div', 'probe_sidebarCol')
+  const sidebarRoot = makeProbeNode('div', 'probe_root')
+  sidebar.appendChild(sidebarRoot)
+  root.appendChild(sidebar)
+  const header = makeProbeNode('div', 'probePageHead', { attrs: { 'data-dshm-topheader': '1' } })
+  root.appendChild(header)
+  const nav = makeProbeNode('div', 'probeCrumbs')
+  header.appendChild(nav)
+
+  const panel = makeProbeNode('div', 'probeRightCol', { attrs: { 'data-sidebar-right-panel': '' } })
+  root.appendChild(panel)
+  if (options.panelOpen === true) panel.attrs['data-sidebar-right-open'] = ''
+
+  let collapseClicks = 0
+  const collapse = makeProbeNode('button', 'probeIconButton', { attrs: { 'aria-label': '收起右侧边栏' } })
+  // ★ 生产会先量它的 rect（`rect.width <= 0` 就跳过 ✓）⇒ 不给尺寸就等于"那颗键不存在" ✗
+  collapse.getBoundingClientRect = () => ({ top: 8, left: 300, right: 340, bottom: 48, width: 40, height: 40 })
+  collapse.onClick = () => {
+    collapseClicks += 1
+    // ★ 冒充 DSH：收起 = **摘掉那个语义属性** ✓（它同时是"面板还开着吗"的唯一判据 ✓）
+    delete panel.attrs['data-sidebar-right-open']
+  }
+  panel.appendChild(collapse)
+
+  let crumbClicks = 0
+  const setCrumbs = (count: number): void => {
+    nav.children.length = 0
+    for (let index = 0; index < count; index++) {
+      const seg = makeProbeNode('span', 'probe_crumbSeg')
+      const button = makeProbeNode('button', 'probeCrumbButton')
+      button.onClick = () => {
+        crumbClicks += 1
+      }
+      seg.appendChild(button)
+      nav.appendChild(seg)
+    }
+  }
+  setCrumbs(options.crumbs ?? 0)
+
+  return {
+    root,
+    header,
+    panel,
+    collapseClicks: () => collapseClicks,
+    crumbClicks: () => crumbClicks,
+    setCrumbs,
+  }
 }
 
 /**
@@ -424,6 +584,17 @@ function bootOnSurface(options: {
    *   （一辈子都不跑 ✓，也就永远测不到"跑了几次"✗）。
    */
   composerProbe?: boolean
+  /**
+   * ★★ round 215：给沙箱一份**假 DSH 顶栏 + 右侧栏面板** ✓（默认不建 ⇒ 不传时既有用例逐字不变 ✓）。
+   *
+   * 为什么需要 ✗：本轮修的是"**面板开着 ⇒ 返回键得管它**"✓ ——
+   *   而原来的夹具里 `document.querySelector` 恒为 null ✓ ⇒ "面板开着"这个态
+   *   在测试里**根本到不了** ✗ ⇒ 那几条断言会变成**假绿** ✓（今天的头号教训 ✓）。
+   *
+   *   · `crumbs` = 面包屑格数 ✓（≥2 = 在子单层级里 ✓，1 = 主单 ✓）；
+   *   · `panelOpen` = 面板带不带 `data-sidebar-right-open` ✓。
+   */
+  dshBackProbe?: { crumbs?: number; panelOpen?: boolean }
 }): Surface {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
@@ -456,8 +627,38 @@ function bootOnSurface(options: {
       setAttribute: (name: string, value: unknown) => {
         ;(element['attrs'] as Record<string, string>)[String(name)] = String(value)
       },
+      /**
+       * ★★ round 215：补上 `getAttribute` ✓ —— 同样是**把夹具对齐到它自己的接口**
+       *   （`FakeElement` 里早就声明了它 ✓，只是最小夹具没建 ✓）。
+       *
+       * 为什么非补不可 ✗：`syncDrawer()` 里有一句 `nav.getAttribute('aria-expanded')` ✓，
+       *   而 `nav` 正是我们自己的顶栏按钮（`makeElement` 造的 ✓）—— 没有这个方法就
+       *   `TypeError` ✗ ⇒ `installShell` 又在 `mount()` **之前**抛掉 ✗ ⇒
+       *   `mount()` / `startObserving()` / `schedule()` 全都跑不到 ✓
+       *   ⇒ 本轮"那颗键显不显示"的行为断言只会量到初值 ✓ = **假绿** ✓
+       *   （实测抓到的 ✓：`installShell` 抛的就是这一句 ✓）。
+       * ★ 对既有用例零影响 ✓：它们本来就先撞在 `applyPush()`（`documentElement.style` ✓）
+       *   那一步上、走不到这一句 ✓；而未设置的属性返回 `null` ✓ 正是真 DOM 的答案 ✓。
+       */
+      getAttribute: (name: string) => {
+        const attrs = element['attrs'] as Record<string, string>
+        return Object.prototype.hasOwnProperty.call(attrs, String(name)) ? attrs[String(name)] ?? null : null
+      },
       removeAttribute: () => {},
-      addEventListener: () => {},
+      /**
+       * ★★ round 215：把 `addEventListener` 挂上去的回调**记下来** ✓（原先是个空函数 ✗）。
+       *   为什么现在要 ✗：顶栏那颗「回到主会话」的动作是**用 `addEventListener` 挂的** ✓
+       *   （与 ☰ / 文件夹那两颗同一个写法 ✓）—— 不记下来就没法按它一下 ✗，
+       *   而"按下之后两件事都发生了吗"正是本轮最值钱的那条断言 ✓。
+       *   `FakeElement` 接口里本来就声明了 `listeners` ✓（只是最小夹具没建它 ✓）——
+       *   这里同样是**把夹具对齐到它自己的接口** ✓，对既有用例零影响 ✓。
+       */
+      listeners: {},
+      addEventListener: (type: string, run: (event?: unknown) => void) => {
+        const bucket = element['listeners'] as Record<string, Array<(event?: unknown) => void>>
+        if (bucket[type] === undefined) bucket[type] = []
+        bucket[type].push(run)
+      },
       removeEventListener: () => {},
       remove: () => {},
       querySelector: () => null,
@@ -519,6 +720,12 @@ function bootOnSurface(options: {
         })()
       : null
 
+  /**
+   * ★★ round 215：假 DSH 树 ✓（只有 `dshBackProbe` 时才建 ✓ —— 不传时 `document.querySelector`
+   *   与原来**逐字等价** ✓ ⇒ 既有用例一个字节都不变 ✓）。
+   */
+  const dshBack = options.dshBackProbe === undefined ? null : makeDshBackTree(options.dshBackProbe)
+
   const documentStub = {
     readyState: options.readyState ?? 'complete',
     body,
@@ -526,24 +733,54 @@ function bootOnSurface(options: {
     documentElement: makeElement('html'),
     getElementById: (id: string) => registry.get(id) ?? null,
     /**
-     * ★ 只有 `composerProbe` 那条用例才认得对话列 ✓ —— 其余选择器照旧恒为 null ✓
-     *   （与这个夹具原来的样子逐字等价 ✓）。
+     * ★ 只有 `composerProbe` 那条用例才认得对话列 ✓；`dshBackProbe` 那条才认得假 DSH 树 ✓
+     *   —— 其余选择器照旧恒为 null ✓（与这个夹具原来的样子逐字等价 ✓）。
      */
-    querySelector: (selector: string) =>
-      composer !== null && selector === '[class*="centerCol"]' ? composer.center : null,
+    querySelector: (selector: string) => {
+      if (composer !== null && selector === '[class*="centerCol"]') return composer.center
+      if (dshBack !== null) return queryProbeDescendants(dshBack.root, selector)[0] ?? null
+      return null
+    },
     /**
      * ★★ 本轮追加：**把它查过的选择器全记下来** ✓ —— 返回值照旧是空表 ✓
      *   （既有用例看到的完全一样 ✓）。`previewScans()` 数的就是这里面含 `katex` 的那几次 ✓：
      *   全文件只有 `dshPreviewSurface()` 起手会扫 `.katex` ✓ ⇒ **数次数 = 数扫描次数** ✓。
+     * ★ round 215：有假 DSH 树时，这里返回**树上命中的那些** ✓ ——
+     *   那颗「收起右侧边栏」就在其中 ✓（否则生产代码永远找不到它 ✗）。
      */
     querySelectorAll: (selector: string) => {
       documentQueries.push(String(selector))
-      return []
+      return dshBack === null ? [] : queryProbeDescendants(dshBack.root, selector)
     },
     createElement: (tag: string) => makeElement(tag),
     createTextNode: (text: string) => ({ textContent: text }),
     addEventListener: () => {},
     removeEventListener: () => {},
+  }
+
+  /**
+   * ★★ round 215：给假 `<html>` 补上**行内样式的三个方法** ✓（真 DOM 的 `style` 本来就有 ✓）。
+   *
+   * ## 为什么非有不可 ✗（这是本轮**实测**抓到的一个夹具缺口 ✓）
+   * `installShell` 里 `mount()` 之前会走 `syncDrawer()` → `applyPush()` ✓，而它读的是
+   * `document.documentElement.style.getPropertyValue('--dshm-push')` ✓ ——
+   * 夹具那个 `style` 是个**空对象** ✗ ⇒ `TypeError` ⇒ `installShell` 整体抛错 ✗
+   * ⇒ 被上一层的 `catch` 吞掉（`console.error` 在夹具里是空的 ✓）⇒
+   * **`mount()` 从来没跑过** ✗ ⇒ `startObserving()` / `schedule()` 也从来没跑过 ✓。
+   * 对本轮意味着：顶栏那颗键的**显/隐（`syncBackToMainButton()`）**一次都不会被调到 ✗
+   * ⇒ 那条行为断言只会量到初值 ✓ = **假绿** ✓（今天的头号教训 ✓）。
+   *
+   * ## 为什么只在这条用例上补 ✗
+   * 补上它 ⇒ `mount()` 会**真的跑起来** ✓（对本轮是好事 ✓：量到的就是线上那条路 ✓）。
+   * 但那会顺带改变**既有**探针用例的执行路径 ✗（它们现在都在 `mount()` 抛错之后停着 ✓）——
+   * 一单只碰两个文件、且"不许新增红" ✗ ⇒ 这里**只在 `dshBackProbe` 那条路上补** ✓，
+   * 既有用例看到的字节级不变 ✓。
+   */
+  if (options.dshBackProbe !== undefined) {
+    const htmlStyle = documentStub.documentElement['style'] as Record<string, unknown>
+    htmlStyle['getPropertyValue'] = () => ''
+    htmlStyle['setProperty'] = () => {}
+    htmlStyle['removeProperty'] = () => {}
   }
 
   const sandbox: Record<string, unknown> = {
@@ -679,6 +916,18 @@ function bootOnSurface(options: {
           },
         }
       : {}),
+    /**
+     * ★★ round 215：`dshBackProbe` 这条也要一个 `getComputedStyle` ✓ ——
+     *   `clickDshCollapseControl()` 会拿它把"看不见的键"筛掉 ✓
+     *   （夹具里**没有** `getComputedStyle` 时那句会抛 ⇒ 被内层 catch 吞掉 ⇒ 一个键都点不到 ✗
+     *   ⇒ 测出来会是"生产代码没点"✗，而真相是"夹具没给这个函数" ✓ —— 那正是假绿的样子 ✓）。
+     *   `composerProbe` 与它不会同时传 ✓（同时传时**后者生效** ✓，两条用例互不影响 ✓）。
+     */
+    ...(options.dshBackProbe !== undefined
+      ? {
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1', position: 'static' }),
+        }
+      : {}),
     innerWidth: options.innerWidth,
     innerHeight: 915,
     isSecureContext: true,
@@ -741,6 +990,10 @@ function bootOnSurface(options: {
       fresh.parentElement = composer.layer
       composer.input = fresh
     },
+    // ── ★★ round 215 追加的那三个口子 ✓（默认全 null ✓ —— 不传选项时既有用例看到的逐字不变 ✓）──
+    back: () => sandbox['__dshmBack'] as (() => boolean) | undefined,
+    dshBack: () => dshBack,
+    backToMain: () => (registry.get('dsh-mobile-back-main') as Record<string, unknown> | undefined) ?? null,
   }
 }
 
@@ -4343,5 +4596,314 @@ test('★★ 行为：输入区没变 ⇒ 那 200ms 心跳不再逐层 getComput
     surface.composerProbeNodes()?.input.style['overscrollBehaviorY'],
     'contain',
     '★ 换上来那个新输入框也要被标上 `contain` ✓（不许漏 ✓）',
+  )
+})
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ round 215：进子智能体会话之后**没有任何方式回到主会话** ✗
+ *
+ * 用户现场（原话 ✓）：「查看子智能体的时候，★ **没有任何方式回到对应的主智能体** ✗……
+ *   **退出 APP 再重进也不能刷新掉** ✗，**这是很恐怖的** ✓。」
+ *
+ * 根因（上一单已查清 ✓，这里只用它 ✓，不重查 ✗）：`localStorage["dsh.sessions.current"]`
+ * 里存着 `{sessionId, subagentAddress}` ✓，DSH 每次加载都会**按它恢复子单** ✓；
+ * 而我们这一侧的三处判据里**都没有"DSH 右侧栏面板开着"这一层** ✗：
+ *   ① `backAvailableNow()` —— 壳先问它 ✓，为假 ⇒ 返回键**到不了网页** ⇒ `finish()` = 退出 App ✗；
+ *   ② `dshmBack()` 的梯子 —— 少一层 ⇒ 那一下没人吃 ✓；
+ *   ③ `clickDshCollapseControl()` 的 scope 只认预览层 ✗ ⇒ 面板里那颗「收起右侧边栏」
+ *      要么找不到 ✓、要么（退回全文档扫时）**找错**✓（round 118 那个事故的形状 ✓）。
+ *
+ * 这一组钉三件事 ✓（**每个方向都要能被打红** ✓ —— 变异对照写在交付说明里 ✓）：
+ *   ① 结构：判据里有那一层 ✓、动作走的是既有的收起控件 ✓、**标签表一个字没动** ✓；
+ *   ② 结构：顶栏那颗「回到主会话」存在 ✓ + 动作**同时**做两件事 ✓ +
+ *      `z-index` **高于**面板那一列 ✓（"不可能被盖住"的机械保证 ✓）；
+ *   ③ 行为：面板开着 ⇒ 上报"可返回"为真 ✓；按一次返回 ⇒ 点了收起控件 + 面板标记消失 ✓；
+ *      按那颗顶栏键 ⇒ **两件事都真的发生** ✓；它在子单层级显示 ✓、主单**不显示** ✓。
+ *
+ * ★ 判据纪律（本项目头号教训：**假判据** ✓）：只打**可执行代码形状**与**真实副作用** ✓
+ *   （注释整行先滤掉 ✓）；"面板开着"这个态由**夹具真的造出来** ✓（不是靠一个字符串 ✓）。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ★★ round 215：一个**最小假壳** ✓ —— 只为拿 `setBackAvailable` 那一条上报 ✓
+ *   （形状照本项目既有的 `makeVaultShell` ✓，只留这一轮要用的 ✓）。
+ * `pushes` 是外面传进来的数组 ✓ ⇒ 断言直接看"壳收到了什么"✓（= 用户在真机上按返回时的判据 ✓）。
+ */
+function makeBackShell(pushes: boolean[]): Record<string, unknown> {
+  return {
+    version: () => 'test-shell-back',
+    setBackAvailable: (value: unknown) => {
+      pushes.push(value === true)
+    },
+    backAvailable: () => {},
+    insets: () => JSON.stringify({ seen: false }),
+    platform: () => JSON.stringify({ android: 34 }),
+    endpoints: () => JSON.stringify({ slots: [], timeoutMs: 2000 }),
+    vaultGet: () => JSON.stringify({}),
+    vaultSet: () => {},
+    notify: () => {},
+    onResume: () => {},
+  }
+}
+
+/**
+ * ★★ round 215：取一条 CSS 规则的正文 ✓（起点 = 那条规则的选择器串 ✓，
+ *   终点 = 它自己那一行 `'}'` ✓）。两个锚点都是**纯 ASCII** ✓。
+ * ★ 为什么需要 ✗：本轮的机械保证是**两条 CSS 规则的 z-index 比大小** ✓ ——
+ *   正则满文件乱找会撞上"别处的 z-index"✗（右栏那条 `!important` 在文件里有**两条** ✓：
+ *   基态 25 ✓ 与预览态 190 ✓）⇒ 必须先**圈定规则**、再取值 ✓。
+ */
+function cssRuleBody(source: string, selectorLiteral: string): string {
+  const start = source.indexOf(selectorLiteral)
+  assert.ok(start >= 0, '必须能找到 CSS 规则：' + selectorLiteral)
+  const end = source.indexOf("\n      '}',", start)
+  assert.ok(end > start, 'CSS 规则的结束那一行应当能在第 6 列找到：' + selectorLiteral)
+  return source.slice(start, end)
+}
+
+test('★★ 结构：返回键判据里有「DSH 右侧栏面板」那一层，动作走既有的收起控件', () => {
+  const code = executableOnly(bootSource)
+
+  // ── ① 判据本体：那个**语义属性**（与 `dshPreviewMinimizedNotClosed` 同一个 ✓，不是哈希类名 ✗）──
+  assert.ok(
+    code.includes("document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]')"),
+    '★ 认"面板开着"必须用那个语义属性 ✓（哈希类名会随构建变 ✗）',
+  )
+  const panelFn = executableOnly(functionBodyAtColumn2(bootSource, 'dshRightPanelOpen'))
+  assert.ok(
+    panelFn.includes("'[data-sidebar-right-panel][data-sidebar-right-open]'"),
+    '★ `dshRightPanelOpen()` 必须是那份判据的唯一落点 ✓',
+  )
+
+  // ── ② `backAvailableNow()` 里必须真的调它 ✗✗（壳先问它 ✓ —— 漏了 ⇒ 返回键到不了网页 ⇒ 退出 App ✗）──
+  const available = executableOnly(functionBodyAtColumn2(bootSource, 'backAvailableNow'))
+  assert.ok(
+    available.includes('dshRightPanelOpen()'),
+    '★ `backAvailableNow()` 必须把"面板开着"算成可返回 ✓（漏了 ⇒ 返回键根本进不了网页 ✗）',
+  )
+
+  // ── ③ `dshmBack()` 的梯子里必须有这一支，而且动作是**点 DSH 自己那颗收起键** ✓ ──
+  const back = executableOnly(functionBodyAtColumn2(bootSource, 'dshmBack'))
+  const guardAt = back.indexOf('if (dshRightPanelOpen())')
+  // ★ 从那一支**往下**找 ✓ —— `dshmBack` 里"预览"那一支**也**调 `clickDshCollapseControl()` ✓，
+  //   从函数头开始找会拿到**上面**那一处 ✗（这一句我自己当场踩到过 ✓）。
+  const clickAt = back.indexOf('clickDshCollapseControl()', guardAt)
+  assert.ok(guardAt >= 0, '★ 返回键梯子里必须有"面板开着"这一支 ✓（否则那一下没人吃 ✗）')
+  assert.ok(clickAt > guardAt, '★ 这一支的动作必须是点 DSH 自己那颗「收起右侧边栏」✓（不许自己猜关闭方式 ✗）')
+})
+
+test('★★ 结构：收起控件的搜索范围含「右侧栏面板」，而标签表一个字没动', () => {
+  const body = executableOnly(functionBodyAtColumn2(bootSource, 'clickDshCollapseControl'))
+
+  // ── ① scope 必须收成一条名单，且**含右侧栏面板** ✓ ──
+  assert.ok(body.includes('var scopes = []'), '★ scope 应当收成一条名单 ✓（预览层 ∪ 面板 ✓）')
+  assert.ok(
+    body.includes("document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]')"),
+    '★ scope 里必须有右侧栏面板 ✓（子单那一屏**过不了**预览层那两条判据 ✗ ⇒ 少了它就够不到 ✓）',
+  )
+  assert.ok(body.includes('scopes.push('), '★ 两个 scope 都要真的进名单 ✓（只算不 push = 白算 ✗）')
+  assert.ok(
+    !body.includes('var scope = hitLayer'),
+    '★ 原来那条"scope 就是预览层"的写法必须已经不在了 ✓（留着就还是够不到面板 ✗）',
+  )
+
+  // ── ② ★ 标签表**逐字**保持原样 ✗（本轮只许改搜索范围 ✓）──
+  const labelsAnchor = [
+    'var labels = [',
+    '      /^关闭$/,',
+    '      /^close$/i,',
+    '      /收起右侧边栏/,',
+    '      /收起侧边栏/,',
+    '      /收起侧栏/,',
+    '      /collapse (right )?(sidebar|panel)/i,',
+    '    ]',
+  ].join('\n')
+  assert.ok(bootSource.includes(labelsAnchor), '★ 标签表必须逐条逐字不变 ✓（本轮一个字都不许动 ✗）')
+})
+
+test('★★ 结构：顶栏那颗「回到主会话」存在、动作两半都在、且 z-index 压得住面板', () => {
+  const code = executableOnly(bootSource)
+
+  // ── ① 存在 ✓，而且挂在**顶栏**里 ✓ ──
+  assert.ok(
+    code.includes("shellIconButton('dsh-mobile-back-main', '回到主会话', ICON_BACK_MAIN)"),
+    '★ 那一颗必须真的建出来 ✓（同一个 `shellIconButton` ✓，不是另起一套 ✓）',
+  )
+  assert.ok(code.includes('bar.appendChild(backToMain)'), '★ 而且必须挂在**顶栏**里 ✓（挂别处 ⇒ 会被面板盖住 ✗）')
+
+  // ── ② 显/隐的判据 = 面包屑 ≥ 2 格，而且与"退回上一级"**共用同一份判据** ✓ ──
+  // ★ 它是 `installShell` 里的**第二层**函数（4 列缩进 ✓）⇒ 用 `innerFunctionBody` ✓
+  //   （`functionBodyAtColumn2` 只认 2 列那一档 ✓ —— 拿错会报"boot.js 里应当有 …"✗）
+  const sync = innerFunctionBody(bootSource, '    function syncBackToMainButton() {')
+  assert.ok(sync.includes('subagentCrumbSegs()'), '★ 显/隐判据必须与"退回上一级"同一份 ✓（两套实现迟早漂 ✗）')
+  assert.ok(sync.includes('segs.length >= 2'), '★ 判据 = 面包屑 ≥ 2 格 ✓（= 此刻在子单层级里 ✓）')
+  assert.ok(sync.includes('backToMain.dataset.dshmShown'), '★ 结论必须**写进 DOM** ✓（否则 CSS 无从生效 ✗）')
+
+  // ── ③ ★ 动作里**两半**都要在 ✓（少任何一半 ⇒ 用户看到的都是"回不去"✗）──
+  const handlerStart = code.indexOf("backToMain.addEventListener('click'")
+  assert.ok(handlerStart >= 0, '★ 那颗键必须有 click 处理 ✓')
+  const handlerEnd = code.indexOf('reportBackAvailable()', handlerStart)
+  assert.ok(handlerEnd > handlerStart, '★ 那个处理必须先把两件事做完、再上报 ✓')
+  const handler = code.slice(handlerStart, handlerEnd)
+  assert.ok(handler.includes('clickDshCollapseControl()'), '★ 第一半：**关掉右侧栏面板** ✓（少了它 ⇒ 面板还整屏盖着 ✗）')
+  assert.ok(
+    handler.includes('backOutOfSubagentSession(true)'),
+    '★ 第二半：**退出子单那一层** ✓（少了它 ⇒ 面板关了人还在子单里 ✗）',
+  )
+  assert.ok(
+    handler.indexOf('clickDshCollapseControl()') < handler.indexOf('backOutOfSubagentSession(true)'),
+    '★ 顺序固定：先关面板、再退层级 ✓（反过来 ⇒ 面板还盖着，看不出退没退 ✗）',
+  )
+
+  // ── ④ ★★ 机械保证：顶栏的 z-index **严格高于**面板那一列 ✓ ──
+  const topZRaw = /z-index:\s*(\d+)/.exec(cssRuleBody(bootSource, "'#dsh-mobile-top {'"))
+  assert.ok(topZRaw !== null, '★ 顶栏那条 CSS 规则里必须有 z-index ✓')
+  const panelZRaw = /\[class\*="rightbarCol"\] \{ z-index: (\d+) !important; \}/.exec(code)
+  assert.ok(panelZRaw !== null, '★ 右侧栏那一列的**基态** z-index 规则必须仍在 ✓')
+  const topZ = Number(topZRaw?.[1] ?? NaN)
+  const panelZ = Number(panelZRaw?.[1] ?? NaN)
+  assert.ok(Number.isFinite(topZ) && Number.isFinite(panelZ), '夹具自检：两个 z-index 都要能取到数 ✓')
+  assert.ok(
+    topZ > panelZ,
+    `★ 顶栏 z-index(${String(topZ)}) 必须**严格高于**面板那一列(${String(panelZ)}) ✓ —— 这就是"那颗键不可能被面板盖住"的机械保证 ✓（把它改小 ⇒ 本条红 ✓）`,
+  )
+})
+
+test('★★ 行为：面板开着 ⇒ 壳收到"可返回=true"；面板关着 ⇒ false（同一套 DOM，只差那个属性）', () => {
+  /**
+   * ★ 量的是**壳真的收到了什么** ✓（`installBackHook()` 里那次 `reportBackAvailable(true)` ✓）——
+   *   它就是真机上 `MainActivity.handleBackPressed` 据以决定"这一下吃掉还是退出"的那个量 ✓。
+   * ★ 而且它**不依赖任何定时器** ✓（启动那一刻同步上报 ✓）。
+   */
+  const openPushes: boolean[] = []
+  const open = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell(openPushes),
+    dshBackProbe: { crumbs: 0, panelOpen: true },
+  })
+  assert.equal(open.thrown.length, 0, `顶层不应抛错：${String(open.thrown[0])}`)
+  assert.equal(
+    openPushes[0],
+    true,
+    '★ 面板开着 ⇒ 必须上报"可返回=true" ✓（报 false 的那一下，壳会直接 finish() = 退出 App ✗）',
+  )
+
+  // ── ★ 反向：**逐字相同**的一套 DOM，只把面板那个属性拿掉 ⇒ 必须是 false ✓ ──
+  const shutPushes: boolean[] = []
+  const shut = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell(shutPushes),
+    dshBackProbe: { crumbs: 0, panelOpen: false },
+  })
+  assert.equal(shut.thrown.length, 0, `顶层不应抛错：${String(shut.thrown[0])}`)
+  assert.equal(
+    shutPushes[0],
+    false,
+    '★ 面板关着、又不在子单层级 ⇒ 不许虚报可返回 ✓（虚报 ⇒ 返回键被白吃一下、用户以为坏了 ✗）',
+  )
+})
+
+test('★★ 行为：按一次返回 ⇒ 点了 DSH 那颗收起键、面板标记随之消失', () => {
+  const pushes: boolean[] = []
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell(pushes),
+    dshBackProbe: { crumbs: 0, panelOpen: true },
+  })
+  const tree = surface.dshBack()
+  assert.ok(tree !== null, '夹具：假 DSH 树应当建好了 ✓')
+  const back = surface.back()
+  assert.ok(back !== undefined, '★ 有壳时必须装上 `window.__dshmBack` ✓（壳的返回走的就是它 ✓）')
+
+  assert.equal(back(), true, '★ 面板开着 ⇒ 这一下必须被网页吃掉 ✓（返回 false 就是壳退出 App ✗）')
+  assert.equal(tree.collapseClicks(), 1, '★ 必须点的是 **DSH 自己那颗「收起右侧边栏」** ✓（不是我们猜的关闭方式 ✗）')
+  assert.equal(
+    tree.panel.hasAttribute('data-sidebar-right-open'),
+    false,
+    '★ 收起之后那个标记必须消失 ✓（= 屏幕回到主会话那一层 ✓）',
+  )
+  assert.equal(pushes[pushes.length - 1], false, '★ 面板没了 ⇒ 这一下之后上报必须是 false ✓（否则返回键会被连续白吃 ✗）')
+
+  // ── ★ 反向：面板已经关了 ⇒ 这一下必须**交还壳** ✓，而且**不许**再点一次 ✓ ──
+  assert.equal(back(), false, '★ 面板关了、又不在子单层级 ⇒ 必须交还壳 ✓（吃掉它就等于"返回键失灵"✗）')
+  assert.equal(tree.collapseClicks(), 1, '★ 面板已经关了 ⇒ 不许再点一次收起键 ✓')
+})
+
+test('★★ 行为：按那颗「回到主会话」⇒ 面板收起 + 真的退了一层（两半都发生）', () => {
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell([]),
+    dshBackProbe: { crumbs: 2, panelOpen: true },
+  })
+  const tree = surface.dshBack()
+  assert.ok(tree !== null, '夹具：假 DSH 树应当建好了 ✓')
+  const button = surface.backToMain()
+  assert.ok(button !== null, '★ 顶栏那颗必须真的建出来了 ✓')
+
+  /**
+   * ★ 用**生产自己挂上去的那个回调** ✓（夹具把 `addEventListener` 记下来了 ✓）——
+   *   不是测试另调一遍 `clickDshCollapseControl()` ✗（那就测不到"那颗键挂对了没有"✓）。
+   */
+  const listeners = (button['listeners'] as Record<string, Array<(event?: unknown) => void>>)['click'] ?? []
+  assert.equal(listeners.length, 1, '★ 那颗键必须恰好挂了一个 click 处理 ✓')
+  for (const run of listeners) run(undefined)
+
+  assert.equal(tree.collapseClicks(), 1, '★ 第一半：必须收起面板 ✓（少了它 ⇒ 面板还整屏盖着、看起来"什么都没发生"✗）')
+  assert.equal(
+    tree.panel.hasAttribute('data-sidebar-right-open'),
+    false,
+    '★ 收起之后那个标记必须消失 ✓',
+  )
+  assert.equal(
+    tree.crumbClicks(),
+    1,
+    '★ 第二半：必须真的点了**上一级那一格** ✓（少了它 ⇒ 面板关了、人还在子单里 ✗）',
+  )
+})
+
+test('★★ 行为：那颗顶栏键只在子单层级显示（子单 = 显示 ✓；主单 = 不显示 ✗，两个方向都验）', () => {
+  // ── ① 子单层级（面包屑 2 格 ✓）⇒ 必须显示 ──
+  const deep = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell([]),
+    dshBackProbe: { crumbs: 2, panelOpen: true },
+  })
+  const deepButton = deep.backToMain()
+  assert.ok(deepButton !== null, '★ 顶栏那颗必须真的建出来了 ✓')
+  assert.equal(
+    /**
+     * ★ 读的是**生产自己写下的那个 `dataset` 键** ✓（`backToMain.dataset.dshmShown` ✓）——
+     *   真 DOM 里它同时就是 `data-dshm-shown` 属性 ✓（CSS 那条规则读的正是它 ✓）；
+     *   夹具这两者不互通 ✓，所以这里读 dataset ✓（读 `attrs` 会恒为 undefined ✗ = 假红 ✓）。
+     */
+    (deepButton['dataset'] as Record<string, string>)['dshmShown'],
+    '1',
+    '★ 在子单层级里必须显示 ✓（它就是"永远回得去"那条保证 ✓）',
+  )
+
+  // ── ② 主单（面包屑 1 格 ✓）⇒ 必须不显示 ──
+  const root = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    shell: makeBackShell([]),
+    dshBackProbe: { crumbs: 1, panelOpen: false },
+  })
+  const rootButton = root.backToMain()
+  assert.ok(rootButton !== null, '★ 顶栏那颗必须真的建出来了 ✓')
+  assert.equal(
+    (rootButton['dataset'] as Record<string, string>)['dshmShown'],
+    '0',
+    '★ 主单上必须**不显示** ✗（常驻一颗按下去什么都不发生的键 = 用户以为它坏了 ✗）',
   )
 })

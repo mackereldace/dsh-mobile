@@ -1874,6 +1874,33 @@
     }
   }
 
+  /**
+   * ★★ round 215：**DSH 右侧栏面板开着吗** ✓。
+   *
+   * 判据取**语义属性** ✓（不是哈希类名 ✗）—— 与本文件 `dshPreviewMinimizedNotClosed`
+   * 里那条**同一个判据** ✓（实测 DSH 的 CSS：`[data-sidebar-right-panel]` 基态
+   * `visibility:hidden` + `translate(100%)` ✓，`[data-sidebar-right-open]` 才真的展开 ✓）。
+   *
+   * ## 为什么返回键必须认它 ✗（用户现场 ✓）
+   * 子智能体会话那一屏（`subagentchat` 面板 ✓）**只挂这个属性** ✓ ——
+   * 它**过不了** `dshPreviewSurface()` 的两条判据 ✗（里面没有 `.katex` ✓、
+   * 类名里也没有 `_preview` / `_document` ✓）⇒ 在它开着的整段时间里，
+   * 返回键在梯子上**看不到任何一层** ✓ ⇒ 这一下交给壳 ✓（而 DSH **从不写历史** ✗）
+   * ⇒ `goBack()` 无路可走 ⇒ `finish()` = **退出 App** ✗。
+   * 用户原话："查看子智能体的时候，**没有任何方式回到对应的主智能体** ✗……**退出 APP
+   * 再重进也不能刷新掉** ✗，**这是很恐怖的** ✓"。
+   *
+   * ★ 手机上它**盖住整屏**（`viewportWidth < 768` ✓）⇒ 它就是"看得见的最上面那一层" ✓，
+   *   所以它必须是**可返回的一层** ✓ —— 见 `backAvailableNow()` 与 `dshmBack()` 两处 ✓。
+   */
+  function dshRightPanelOpen() {
+    try {
+      return document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]') !== null
+    } catch (error) {
+      return false
+    }
+  }
+
   /** 现在有没有"可返回的东西" ✓（只读那几个已经存在的标记 ✓）。 */
   function backAvailableNow() {
     var body = document.body
@@ -1884,6 +1911,17 @@
       body.dataset.dshmFiles === 'open' ||
       body.dataset.dshMobileDrawer === 'open' ||
       body.dataset.dshmDshPreview === '1' ||
+      /**
+       * ★★ round 215：**DSH 右侧栏面板开着**也算"有一层可返回" ✓（子智能体会话就住在里面 ✓）。
+       *
+       * ★ 它必须在这里也回答"有" ✗✗ —— 与下面 round 163 那两条**同一个理由** ✓：
+       *   壳**先问** `backAvailable` ✓、为真才把这一下交给网页 ✓（`MainActivity.handleBackPressed` ✓）
+       *   ⇒ 这里漏了 ⇒ 返回键**根本到不了** `dshmBack()` ✓ ⇒ 直接退出 App ✗。
+       *
+       * ★ 顺序：它在**预览**之后、"内容层"之前 ✓ —— 与 `dshmBack()` 的梯子一一对应 ✓
+       *   （那里有为什么排在那儿的说明 ✓）。
+       */
+      dshRightPanelOpen() ||
       /**
        * ★★ round 163（C ✓）：两级**内容层**的返回（「轨迹」⇒「对话」✓、
        *   子代理会话 ⇒ 上一级 ✓ —— 见 `backOutOfTrajectoryView` /
@@ -1945,6 +1983,32 @@
   }
 
   /**
+   * ★★ round 215：**当前会话的面包屑格数** ✓ —— "此刻在不在子单的层级里"这件事
+   *   **只有这一份判据** ✓（`backOutOfSubagentSession()` 与顶栏那颗「回到主会话」都读它 ✓；
+   *   同一个概念写两套实现 ⇒ 迟早一边改、一边漏 ✗，本项目在这上面栽过 ✓）。
+   *
+   * 判据形状照 round 163 那一版**逐字**保留 ✓：先按 `[class*="crumbSeg"]` 子串粗筛 ✓、
+   * 再用 `classHasSuffix` 确认后缀 ✓（"选择器写太宽"这个项目已经栽过四次 ✗）。
+   *
+   * @returns 命中的 `span.*_crumbSeg` 节点表 ✓（认不到 / 抛错 ⇒ **空表** ✓ —— 调用方按
+   *          "不在子单层级里"处理 ✓，那是安全的一侧 ✓）。
+   */
+  function subagentCrumbSegs() {
+    try {
+      var header = document.querySelector('[data-dshm-topheader]')
+      if (header === null || header === undefined) return []
+      var candidates = header.querySelectorAll('[class*="crumbSeg"]')
+      var segs = []
+      for (var i = 0; i < candidates.length; i++) {
+        if (classHasSuffix(candidates[i], '_crumbSeg')) segs.push(candidates[i])
+      }
+      return segs
+    } catch (error) {
+      return []
+    }
+  }
+
+  /**
    * ★★ round 163（C ✓）：**子代理会话退回上一级** —— 用户原话：
    *   "目前进入子代理聊天以后退不出来，只能走左侧聊天页面回到主对话兜底"✓。
    *
@@ -1974,14 +2038,11 @@
    */
   function backOutOfSubagentSession(act) {
     try {
-      var header = document.querySelector('[data-dshm-topheader]')
-      if (header === null || header === undefined) return false
-      var candidates = header.querySelectorAll('[class*="crumbSeg"]')
-      var segs = []
-      for (var i = 0; i < candidates.length; i++) {
-        // ★ 子串先筛、再用 `classHasSuffix` 确认 ✓（"选择器写太宽"这个项目已经栽过四次 ✗）
-        if (classHasSuffix(candidates[i], '_crumbSeg')) segs.push(candidates[i])
-      }
+      /**
+       * ★★ round 215：判据搬进 `subagentCrumbSegs()` ✓ —— 顶栏那颗「回到主会话」
+       *   用的是**同一个**函数 ✓（两套实现迟早漂 ✗）。这里的行为一个字没变 ✓。
+       */
+      var segs = subagentCrumbSegs()
       if (segs.length < 2) return false
       // 紧邻的上一级 = **倒数第二格** ✓（最后一格是"当前会话"✓，它那颗按钮是 `disabled` 且没有 onClick ✗）
       var target = segs[segs.length - 2].querySelector('button')
@@ -2111,6 +2172,34 @@
       }
       if (body.dataset.dshMobileDrawer === 'open') {
         runtime.closeDrawer()
+        reportBackAvailable()
+        return true
+      }
+      /**
+       * ★★ round 215：**DSH 右侧栏面板 ⇒ 收起它** ✓（子智能体会话"回不去"的那条主路 ✓）。
+       *
+       * ## 为什么排在这里（在"我们自己的三层"之后 ✗、在"内容层"之前 ✓）
+       * 面板那一整列只有 `z-index: 25` ✓（`[class*="rightbarCol"] { z-index: 25 !important; }` ✓），
+       * 而我们自己的三层都在它之上 ✓（文件面板 85 ✓ / 抽屉蒙层 80 ✓ / 顶栏 70 ✓）
+       * ⇒ 只要我们自己那几层开着，"看得见的最上面那一层"就还是我们的 ✓
+       * ⇒ 照"返回 = 关掉最上面那一层"的规矩，它们**必须先关** ✓。
+       * 反过来，内容层（「轨迹」页 / 子代理会话层级 ✓）都在**面板底下** ✓
+       * ⇒ 面板必须排在它们**前面** ✓（否则用户会"关了半天，屏幕上什么都没变"✗ ——
+       * 因为整屏面板还盖着 ✓）。
+       *
+       * ## 动作不新写一套 ✓
+       * 借 `clickDshCollapseControl()` ✓ —— 它按**可读标签**找 DSH 自己那颗
+       * 「关闭 / 收起右侧边栏」✓（scope 这一轮已经含右侧栏面板 ✓，见那个函数里的说明 ✓）。
+       * 点空（那一帧正在重渲染 ✓）时**仍然返回 true** ✓ —— 这一下已经属于
+       * "收起面板"这个层级 ✓，不能因为一次点空就退出 App ✗（下一次返回会再试 ✓）；
+       * 但**不许静默** ✗ —— 点空必须留一行日志 ✓（手机上只能靠它 ✓，
+       * 而这一行正是"顶栏那颗按钮还兜着"的证据 ✓）。
+       */
+      if (dshRightPanelOpen()) {
+        var panelClose = clickDshCollapseControl()
+        if (panelClose === '' || panelClose.indexOf('(无匹配') === 0) {
+          debugBoxLine('[back] 收起右侧栏面板点空了：' + panelClose)
+        }
         reportBackAvailable()
         return true
       }
@@ -7056,6 +7145,18 @@
     '<path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l.9 1.2H19a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>' +
     '</svg>'
 
+  /**
+   * ★★ round 215：顶栏那颗「**回到主会话**」的图标 ✓ —— 语义就是"退到上一层 / 回根" ✓，
+   *   所以用一支**向左再向上的回钩箭头** ✓（与「关闭」「返回」那几支区分得开 ✓，
+   *   又不像 ☰ 那样会被当成抽屉键 ✓）。尺寸/线宽/网格与上面那颗文件夹键**同一套** ✓。
+   */
+  var ICON_BACK_MAIN =
+    '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M9 14L4 9l5-5"/>' +
+    '<path d="M4 9h10a6 6 0 0 1 0 12h-3"/>' +
+    '</svg>'
+
   /** 面板用的小图标：统一 24 网格、1.7 线宽、currentColor（跟随主题）。 */
   function svgIcon(paths, size) {
     var n = size === undefined ? 18 : size
@@ -7847,14 +7948,46 @@
      * 另外再兜一条：**排除聊天列**（`[class*="centerCol"]` ✓）—— 那是消息所在的地方 ✓。
      */
     var hitLayer = dshPreviewSurface()
-    var scope = hitLayer
-    if (scope !== null && scope !== undefined) {
-      for (var up = 0; up < 5 && scope.parentElement !== null; up++) scope = scope.parentElement
+    /**
+     * ★★ round 215：scope 改成「**预览层 ∪ DSH 右侧栏面板**」✓（原先只有预览层 ✗）。
+     *
+     * ## 为什么必须加这一支 ✗
+     * 子智能体会话面板**过不了** `dshPreviewSurface()` 的两条判据 ✓（没有 `.katex` ✓、
+     * 类名里也没有 `_preview` / `_document` ✓）⇒ 原先 `hitLayer` 是 `null` ✓ ⇒
+     * 这一趟就退回"**全文档**扫按钮"✗ —— 而全文档扫正是 round 118 那个事故的形状 ✓
+     * （当时匹配到了一条**聊天消息** ✓，它正文里提到了「收起」✓ ⇒ 点了个空 ✗ ⇒
+     * 后面 16 条断言连锁失败 ✗）。也就是说"够不到面板"不是最坏的结果 ✗：
+     * **既能找不到、也能找错** ✓。把面板本身当 scope ⇒ 两个方向一起收住 ✓。
+     *
+     * ★ 标签表（下面那个 `labels` ✓）**一个字都没动** ✗ —— 这一轮改的**只有搜索范围** ✓。
+     * ★ 取或而不是二选一 ✓：文件预览开着时这两层**同时**在 ✓（预览正文挂在右栏那一列里 ✓），
+     *   关闭键在**层外、栏内** ✓ ⇒ 两个 scope 缺一不可 ✓。
+     */
+    var scopes = []
+    if (hitLayer !== null && hitLayer !== undefined) {
+      var previewScope = hitLayer
+      for (var up = 0; up < 5 && previewScope.parentElement !== null; up++) previewScope = previewScope.parentElement
+      scopes.push(previewScope)
     }
+    var rightScope = document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]')
+    if (rightScope !== null && rightScope !== undefined) scopes.push(rightScope)
     var best = null
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i]
-      if (scope !== null && scope !== undefined && scope.contains(node) === false) continue
+      if (scopes.length > 0) {
+        var inScope = false
+        for (var s = 0; s < scopes.length; s++) {
+          /**
+           * ★ 认不出 `contains` 的对象按"算它在里面"处理 ✓ —— 这一条**只会让识别更宽** ✓，
+           *   绝不会把面板里那颗真的关闭键挡在外面 ✗（"认不出"与"不在里面"是两件事 ✓）。
+           */
+          if (typeof scopes[s].contains !== 'function' || scopes[s].contains(node) === true) {
+            inScope = true
+            break
+          }
+        }
+        if (!inScope) continue
+      }
       if (typeof node.closest === 'function' && node.closest('[class*="centerCol"]') !== null) continue
       var label = String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '')
       var matched = false
@@ -9445,6 +9578,16 @@
       '  -webkit-tap-highlight-color: transparent;',
       '}',
       '#dsh-mobile-top > button:active { opacity: .55; }',
+      /**
+       * ★★ round 215：顶栏那颗「回到主会话」只在**子单层级**里显示 ✓
+       *   （`data-dshm-shown="0"` = 当前在主单 ✓，见 `syncBackToMainButton()` ✓）。
+       *
+       * ★ 用 `visibility` 而**不是** `display` ✓：顶栏是三区 flex ✓，
+       *   `display:none` 会让标题随进/出子单**左右跳 44px** ✗（进一次、出一次各跳一下 ✓）；
+       *   `visibility: hidden` 保留盒子 ✓ ⇒ 标题一个像素都不动 ✓；
+       *   而它同时**收不到点击** ✓（`pointer-events: none` 再兜一道 ✓）⇒ 不会被误触 ✓。
+       */
+      '#dsh-mobile-back-main[data-dshm-shown="0"] { visibility: hidden; pointer-events: none; }',
       /* 打开抽屉时顶栏跟着主页面一起右移（推挤式）。
          顶栏是我们自己的元素、且没有 fixed 后代，所以这里用 transform 是安全的
          （DSH 的内容列不能用 transform——那会成为其 fixed 浮层的包含块）。 */
@@ -11617,6 +11760,36 @@
     titleElement.setAttribute('role', 'heading')
     titleElement.setAttribute('aria-level', '1')
     var files = shellIconButton('dsh-mobile-files', '电脑文件目录', ICON_FOLDER)
+    /**
+     * ★★ round 215：顶栏那颗「**回到主会话**」✓（用户现场的唯一保证 ✓）。
+     *
+     * 用户原话："查看子智能体的时候，**没有任何方式回到对应的主智能体** ✗……
+     * **退出 APP 再重进也不能刷新掉** ✗"✓。
+     *
+     * ## 为什么必须有这一颗（而不是"修好返回键就够了"✗）
+     * 返回键那条路要靠**壳**把这一下交给网页 ✓（`MainActivity.handleBackPressed` ✓），
+     * 而且它一次只退**一层** ✓；而这条路上的"层"太多了 ✓（右侧栏面板 / 子单层级 /
+     * 预览 / 我们自己的三层 ✓）⇒ 用户很容易按了返回却"看不出变化"✗。
+     * 这一颗是**这一层里唯一一个说自己要干什么的键** ✓：按下 = 收起子单面板 + 退回上一级 ✓。
+     *
+     * ## ★ 它结构上**不可能被面板盖住** ✓（这是"永远回得去"的机械保证 ✓）
+     * 它挂在 `#dsh-mobile-top` 里 ✓（下一行 `bar.appendChild(backToMain)` ✓），
+     * 而顶栏是 `position: fixed; z-index: 70` ✓（`installShell` 的样式表 ✓），
+     * 右侧栏面板那一列只有 `z-index: 25 !important` ✓
+     * （`[class*="rightbarCol"] { z-index: 25 !important; }` ✓）⇒ **70 > 25** ✓。
+     * 用户现在唯一的入口（侧栏里那条会话行 ✓）正好**会被面板盖住** ✗ ——
+     * 这一颗不会 ✓（所以它是兜底，不是重复 ✓）。
+     * ★ 那条 `!important` 只在 DSH 预览被认出来时抬到 190 ✓
+     *   （`body[data-dshm-preview-pending="1"]` / `body[data-dshm-dsh-preview="1"]` ✓）——
+     *   那时屏幕上是**文件预览** ✓（预览本来就该盖住顶栏 ✓，round 172 定的 ✓）。
+     *
+     * ## 显/隐
+     * 只在**子单层级**里显示 ✓（见 `syncBackToMainButton()` ✓）——
+     * 主单上常驻一颗"回到主会话"纯属噪声 ✗（它什么都不会做 ✓）。
+     */
+    var backToMain = shellIconButton('dsh-mobile-back-main', '回到主会话', ICON_BACK_MAIN)
+    // ★ 初值按"不显示"给 ✓：首帧还没数过面包屑 ✓，宁可先不显示 ✓（`syncBackToMainButton()` 会立刻纠正 ✓）
+    backToMain.dataset.dshmShown = '0'
 
     var bar = document.createElement('header')
     bar.id = 'dsh-mobile-top'
@@ -11626,6 +11799,11 @@
      */
     bar.setAttribute('data-dshm-push-follower', '1')
     bar.appendChild(nav)
+    /**
+     * ★★ round 215：它排在 ☰ 的**右边、标题的左边** ✓ —— 两颗"导航类"的键挨在一起 ✓，
+     *   而右边那颗文件夹键的位置**一个像素都没动** ✓（用户的肌肉记忆不被打乱 ✓）。
+     */
+    bar.appendChild(backToMain)
     bar.appendChild(titleElement)
     bar.appendChild(files)
 
@@ -13636,6 +13814,34 @@
       return false
     }
 
+    /**
+     * ★★ round 215：顶栏那颗「回到主会话」的**显 / 隐** ✓。
+     *
+     * ## 判据
+     * `[data-dshm-topheader]` 里的 `span.*_crumbSeg` **≥ 2 格** ✓ ——
+     * 与 `backOutOfSubagentSession()` 判"此刻在子代理会话里"**同一把尺子** ✓
+     * （它调的就是 `subagentCrumbSegs()` ✓ —— 同一个概念只有一份判据 ✓）：
+     * `deriveAncestry()` 只在当前会话是**子代理**时才给出 ≥2 格 ✓。
+     *
+     * ## 为什么两个方向都必须对 ✗
+     * · 子单层级里**必须显示** ✓（否则"永远回得去"这条保证就没了 ✗）；
+     * · 主单上**必须不显示** ✗ —— 常驻一颗按下去什么都不发生的键 ✓
+     *   会让用户以为它坏了 ✓（而且白占 44px，标题被挤 ✓）。
+     *
+     * ★ 认不到顶栏标记（插件页 / 首帧 ✓）⇒ 按"不在子单层级"处理 ✓ =
+     *   **不显示** ✓，那是安全的一侧 ✓（宁可少一颗键，也不要一颗假的 ✓）。
+     */
+    function syncBackToMainButton() {
+      try {
+        var segs = subagentCrumbSegs()
+        var shown = segs.length >= 2 ? '1' : '0'
+        // ★ 只在真的变了才写 DOM ✓（观察者每 120ms 就可能调一次 ✓，无条件重写会让它闪 ✓）
+        if (backToMain.dataset.dshmShown !== shown) backToMain.dataset.dshmShown = shown
+      } catch (error) {
+        debugBoxLine('[back] 同步「回到主会话」失败：' + String(error && error.message ? error.message : error))
+      }
+    }
+
     function syncTitle() {
       var text = conversationTitle()
       var shown = text === '' ? 'DeepSeek Harness' : text
@@ -13960,6 +14166,54 @@
     })
 
     /**
+     * ★★ round 215：顶栏那颗「**回到主会话**」的动作 ✓ —— **两件事一起做** ✓：
+     *   ① **收起 DSH 右侧栏面板** ✓（子单往往就整屏开在它里面 ✓，见 `dshRightPanelOpen()` ✓）；
+     *   ② **顺着面包屑退回上一级** ✓（子单 ⇒ 主单 ✓，`backOutOfSubagentSession(true)` ✓）。
+     *
+     * ## 为什么必须两件都做 ✗
+     * · 只做① ⇒ 面板关了、**人还在子单里** ✗（这正是用户"回不到主智能体"的一半 ✓）；
+     * · 只做② ⇒ 层级退了、**面板还整屏盖着** ✗ ⇒ 屏幕上什么都没变 ✓
+     *   （就是用户分辨不出来的那个 (b) ✓）。
+     * ★ 顺序固定为"先关面板、再退层级" ✓：面板是**覆盖层** ✓（在子单内容之上 ✓），
+     *   先把它掀掉、再退层级 ⇒ 每一步都看得出来 ✓。
+     *
+     * ## 为什么这里不借 `dshmBack()` ✗
+     * `dshmBack()` 是**壳那条路**的梯子 ✓：它一次只关**最上面一层** ✓，
+     * 而这一颗的语义是明确的"关面板 + 退一级"✓ —— 借它就变成"按一下只看运气"✗。
+     * 两件事各自**复用已有实现** ✓（`clickDshCollapseControl()` ✓ +
+     * `backOutOfSubagentSession()` ✓），这里只是把它们**并起来** ✓，没有第三份实现 ✓。
+     *
+     * ## 退一级 ≠ 一步到根（如实记下 ✓）
+     * `backOutOfSubagentSession()` 退的是**紧邻的上一级** ✓（面包屑倒数第二格 ✓）。
+     * 子代理可以嵌套 ✓ ⇒ 深两层时要按两次 ✓ —— 但**这颗键这时仍然显示着** ✓
+     * （判据是 `≥2` 格 ✓）⇒"回得去"这条保证成立 ✓（用户不会卡死 ✓）。
+     *
+     * ## 每一半都要能自证 ✓（手机上只能靠调试框 ✓）
+     * · 面板那一半点空了 ⇒ `clickDshCollapseControl()` 会返回 `'(无匹配…)'` ✓ —— 记一行 ✓；
+     * · 面板明明开着、却一处面包屑都没有（`backOutOfSubagentSession` 返回 false ✓）
+     *   ⇒ 也记一行 ✓（那说明**面板里的子单不在顶栏的面包屑里** ✓，
+     *   是一个需要我再看一眼的形态 ✓，绝不能静默 ✗）。
+     */
+    backToMain.addEventListener('click', function (event) {
+      if (event !== undefined) event.stopPropagation()
+      var panelWasOpen = dshRightPanelOpen()
+      if (panelWasOpen) {
+        var panelResult = clickDshCollapseControl()
+        if (panelResult === '' || panelResult.indexOf('(无匹配') === 0) {
+          debugBoxLine('[back] 「回到主会话」收起面板点空了：' + panelResult)
+        }
+      }
+      var steppedUp = backOutOfSubagentSession(true) === true
+      if (panelWasOpen && steppedUp !== true) {
+        debugBoxLine('[back] 「回到主会话」只收起了面板：顶栏面包屑里没有可退的上一级')
+      }
+      // ★ 关掉之后那两层都可能已经没了 ✓ ⇒ 当场把状态推给壳 ✓（下一按才不会白吃一下 ✓）
+      reportBackAvailable()
+      // ★ 那一颗自己的显/隐也要跟着变 ✓（退回主单后它就该消失 ✓）
+      syncBackToMainButton()
+    })
+
+    /**
      * ★★ round 163（C ✓）：**内容层那两级返回的"可返回状态"要跟得上 DSH 的 DOM 变化** ✓。
      *
      * 为什么要单独补这一条 ✗：主观察者的 `attributeFilter` **只盯 `class`** ✓，
@@ -14062,6 +14316,12 @@
           syncTitle()
           tagSettingsOverlay()
           tagTopHeader()
+          /**
+           * ★★ round 215：顶栏那颗「回到主会话」的显/隐也挂在这一套上 ✓
+           *   （**必须在 `tagTopHeader()` 之后** ✗ —— 没有那个标记就一处面包屑都数不到 ✓，
+           *   顺序反了就是"它永远不显示"✗，而且只在真机上看得出来 ✓）。
+           */
+          syncBackToMainButton()
           // ★ round 155：子智能体入口的位置也挂在这一套上 ✓（**顺序在 tagTopHeader 之后** ✓ ——
           //   没有那个标记就找不到顶栏 ✓）。它自己幂等 ✓，认不到入口就只做清理 ✓。
           tagLineageEntry()
@@ -14205,6 +14465,11 @@
       markKeyboardGuard()
       syncDrawer() // 挂载后同步一次（此时 body 一定存在）
       syncTitle()
+      // ★★ round 215：那一颗也要**当场**定一次显/隐 ✓（不等 120ms 去抖 ✓ ——
+      //   它决定"进子单之后第一眼有没有那颗键"✓）。★ 此刻顶栏标记**可能还没打上**
+      //   （`tagTopHeader()` 挂在 `schedule()` 那一套里 ✓）⇒ 数不到面包屑就按"不显示"✓，
+      //   120ms 后那条去抖会把它纠正过来 ✓（宁可晚一点出现，也不要一颗假的 ✓）。
+      syncBackToMainButton()
       startObserving()
       schedule()
       return true
