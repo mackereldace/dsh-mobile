@@ -33,10 +33,46 @@ import { fileURLToPath } from 'node:url'
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ASSETS = join(HERE, '..', 'packages', 'host', 'assets', 'dsh-chat')
+/**
+ * ★★ 夹具：一条**真实**的 `assistant/message` 事件（从 `~/.dsh/sessions/**` 原样取出的 ✓）。
+ *
+ * 为什么不再自造 ✗：这个页面曾经把**真消息整段画成 JSON** ✓，而当时的夹具是
+ * 自己编的 `data:{text}` ✓ —— **夹具与真实形状不符** ⇒ 断言全绿、线上照错 ✓
+ * （与今天那 9 条"静默跳过"、6 处"假判据"同一族 ✓）。
+ *
+ * ★ 页面侧**拿不到**这块数据 ✗（不挂在 `/mobile/chat/` 下 ✓）——
+ *   它由假宿主的 `/fixture/real-assistant-message-event.json` 端点交给 `boot.js` ✓
+ *   （模拟真宿主"从磁盘读会话日志再发下来"那一步 ✓）。
+ */
+const FIXTURE_DIR = join(HERE, '..', 'packages', 'host', 'test', 'dsh-chat', 'fixtures')
+const FIXTURE_EVENT = JSON.parse(readFileSync(join(FIXTURE_DIR, 'real-assistant-message-event.json'), 'utf8'))
 const KEEP = process.argv.includes('--keep')
 
+/** 夹具读数（**由真事件机械推出** ✓ —— 不是手抄的期望值 ✗）。 */
+const PART_TEXT = (part) => (part !== null && typeof part === 'object' && typeof part.text === 'string' ? part.text : '')
+/** ★ 只认真形状 ✓：`data.message.content[]` —— 认不出就给空数组（由"夹具形状自检"报红 ✓，不崩 ✗）。 */
+const PART_LIST = (event) =>
+  event !== null && typeof event === 'object' && event.data !== null && typeof event.data === 'object' &&
+  event.data.message !== null && typeof event.data.message === 'object' && Array.isArray(event.data.message.content)
+    ? event.data.message.content
+    : []
+const REAL_PARTS_ALL = PART_LIST(FIXTURE_EVENT)
+const REAL_PARTS = REAL_PARTS_ALL.filter((part) => part !== null && typeof part === 'object' && part.type === 'text')
+const REAL_PROSE = REAL_PARTS.map(PART_TEXT).join('\n')
+const REAL_REASONING = REAL_PARTS_ALL
+  .filter((part) => part !== null && typeof part === 'object' && part.type === 'reasoning')
+  .map(PART_TEXT)
+  .join('\n')
+/** 把一串字折成"HTML 里安全的片段" ✓（页面把文字转义过 ⇒ 直接 includes 会假失败 ✗）。 */
+const escapeHtml = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+/**
+ * ★ 思维链里**开头**那一小段 ✓ —— 用来证明"它进了折叠的思考块、但**没进**正文气泡" ✓。
+ * 取前 24 字（真思维链 ≥100 字 ✓）⇒ 它是 `data-text-head`（前 64 字）的**前缀** ✓。
+ */
+const REAL_REASONING_HEAD = REAL_REASONING.slice(0, 24)
+
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 24
+const EXPECTED_MIN_CHECKS = 30
 
 let checks = 0
 let failed = 0
@@ -59,13 +95,45 @@ const FAKE_BOOT = `
     { id: 's-1', title: '换图标那两个标签', updatedAt: 30, current: true },
     { id: 's-2', title: '原生首页的卡片间距', updatedAt: 90, running: true },
   ]
+  /*
+   * ★★ 事件**全部按真形状造** ✓（这是本单一半的价值 ✓）：
+   *   · user/message   ⇒ data.message.content[{type:'text',text}] ✓（真日志逐条核过 ✓）
+   *   · assistant/message ⇒ 从 ~/.dsh/sessions 取出的**真事件**（由假宿主的 /fixture/ 端点发下来 ✓）
+   *   · approval/asked ⇒ data.{id,toolName,callId,reason} ✓（真日志里 **55/55 条都是这一个形状** ✓，
+   *                       而且**没有 options 字段** ✗ —— 所以页面上不该出现任何审批按钮 ✓）
+   *   · someUnknownEvent ⇒ 保留（它验的是"认不出也要看得见" ✓）
+   */
   var events = [
     { seq: 1, time: 1, type: 'turn/start', data: { turn: 1 } },
-    { seq: 2, time: 2, type: 'userMessage', data: { text: '把首页那两颗图标的圆角再收一点' } },
-    { seq: 3, time: 3, type: 'agentMessage', data: { text: '收到，我把圆角从 14 收到 12。' } },
-    { seq: 4, time: 4, type: 'approval/asked', data: { requestId: 'ap-1', tool: '执行命令', detail: 'npm test', options: [{ id: 'allow', label: '允许一次' }, { id: 'deny', label: '拒绝' }] } },
+    { seq: 2, time: 2, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '把首页那两颗图标的圆角再收一点' }], source: { kind: 'user' }, id: 'u-1' } },
+    { seq: 3, time: 3, type: 'approval/asked', data: { id: 'ap-1', toolName: 'bash', callId: 'call_1', reason: 'escalate sandbox to danger-full-access: npm test' } },
     { seq: 5, time: 5, type: 'someUnknownEvent', data: { whatever: 1 } }
   ]
+  var realAssistant = null
+  var pending = []
+  var settled = false
+  function flush() {
+    settled = true
+    var queue = pending
+    pending = []
+    for (var i = 0; i < queue.length; i++) queue[i]()
+  }
+  function whenReady(deliver) {
+    if (settled) deliver()
+    else pending.push(deliver)
+  }
+  // ★ 真事件**同步**拉（经典脚本先跑、module 是 defer ✓）⇒ 第一次读之前一定已经就位 ✓
+  try {
+    var xhr = new XMLHttpRequest()
+    xhr.open('GET', '/fixture/real-assistant-message-event.json', false)
+    xhr.send(null)
+    realAssistant = JSON.parse(xhr.responseText)
+    events = events.concat([realAssistant])
+    flush()
+    document.documentElement.setAttribute('data-e2e-fixture', String(Array.isArray(realAssistant.data.message.content) ? realAssistant.data.message.content.length : -1))
+  } catch (error) {
+    document.documentElement.setAttribute('data-e2e-fixture-error', String((error && error.message) || error))
+  }
   var sent = []
   var calls = []
   function ok(value) { return Promise.resolve({ type: 'server-response', rpcId: 'r1', result: { ok: true, value: value } }) }
@@ -83,11 +151,15 @@ const FAKE_BOOT = `
         calls.push(method)
         if (method === 'mobile/dsh/sessions') return ok({ ok: true, sessions: sessions })
         if (method === 'mobile/dsh/read') {
-          reads += 1
-          if (phase === 'read-fail' && reads > 1) { document.documentElement.setAttribute('data-e2e-badreads', String(reads - 1)); return bad('隧道断了：socket closed') }
-          var want = payload && payload.args ? payload.args.sessionId : ''
-          if (want === 's-new') return ok({ ok: true, sessionId: 's-new', events: [], hasMore: false })
-          return ok({ ok: true, sessionId: 's-1', events: events, hasMore: false })
+          return new Promise(function (resolve, reject) {
+            whenReady(function () {
+              reads += 1
+              if (phase === 'read-fail' && reads > 1) { document.documentElement.setAttribute('data-e2e-badreads', String(reads - 1)); resolve(bad('隧道断了：socket closed')) ; return }
+              var want = payload && payload.args ? payload.args.sessionId : ''
+              if (want === 's-new') { resolve(ok({ ok: true, sessionId: 's-new', events: [], hasMore: false })); return }
+              resolve(ok({ ok: true, sessionId: 's-1', events: events, hasMore: false }))
+            })
+          })
         }
         if (method === 'mobile/dsh/create') {
           sessions = sessions.concat([{ id: 's-new', title: '新会话', updatedAt: 999 }])
@@ -99,7 +171,7 @@ const FAKE_BOOT = `
           sent.push(text)
           // ★ 真宿主下一次读取就会带上这条 ⇒ 夹具也必须这样 ✓
           //   （否则"发出去的字出现在页面上"这条断言会在一个**不真**的夹具上失败 ✓）
-          events = events.concat([{ seq: 100 + events.length, time: 100 + events.length, type: 'userMessage', data: { text: text } }])
+          events = events.concat([{ seq: 100 + events.length, time: 100 + events.length, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: text }] } }])
           return ok({ ok: true, requestId: 'rq-1' })
         }
         return Promise.reject(new Error('假隧道不认这个端点：' + method))
@@ -197,6 +269,10 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 /**
  * 起一个"像宿主"的小服务：`/mobile/chat` 发 page.html ✓、`/mobile/chat/*` 发真资源 ✓、
  * `/mobile/boot.js` 发假隧道 ✓（模式由 `mode` 决定 ✓）。
+ *
+ * ★ 多加一条 `/fixture/…` ✗：**这条路径真实宿主上有，但它不属于会话页要拿的量** ✓ ——
+ *   它模拟的是"宿主从 `~/.dsh/sessions` 读会话日志"那一步 ✓，
+ *   真事件由此**原样**交给页面（不经过会话页自己的任何代码 ✓）。
  */
 async function serve(mode) {
   const server = createServer((req, res) => {
@@ -207,6 +283,10 @@ async function serve(mode) {
     }
     if (path === '/mobile/boot.js') {
       send(mode === 'no-tunnel' ? NO_TUNNEL_BOOT : FAKE_BOOT, MIME['.js'])
+      return
+    }
+    if (path === '/fixture/real-assistant-message-event.json') {
+      send(readFileSync(join(FIXTURE_DIR, 'real-assistant-message-event.json')), 'application/json; charset=utf-8')
       return
     }
     if (path === '/mobile/chat' || path === '/mobile/chat/') {
@@ -278,11 +358,87 @@ try {
   check('夹具自检：页面跑完了测试驱动（DOM 上有 data-e2e=sent）', html.includes('data-e2e="sent"'))
   check('夹具自检：产品页面里**没有**开发壳那行内部读数（说明发的是产品页 ✓）', !html.includes('dev：'))
   check('夹具自检：会话列表已到（标题来自宿主 ✓ —— 说明隧道被用上了 ✓）', html.includes('换图标那两个标签'))
+  /**
+   * ★★ 夹具自检（本单最要紧的一条 ✓）：**真事件**必须真的到了页面上 ✓ ——
+   *   它从 `/fixture/…` 下来的 ✓，没到就说明下面"正文不是 JSON"那几条是**空转** ✓。
+   */
+  const fixtureParts = (html.match(/data-e2e-fixture="(-?\d+)"/) ?? [])[1] ?? ''
+  const fixtureError = (html.match(/data-e2e-fixture-error="([^"]*)"/) ?? [])[1] ?? ''
+  check(
+    '★★ 夹具自检：夹具文件本身是**真形状**（`data.message.content[]` = reasoning + text ✓）',
+    REAL_PARTS_ALL.length === 2 && REAL_PROSE.length > 0 && REAL_REASONING.length > 0,
+    `块数=${REAL_PARTS_ALL.length}｜正文 ${REAL_PROSE.length} 字｜思维链 ${REAL_REASONING.length} 字`,
+  )
+  check(
+    '★★ 夹具自检：真事件已交给页面（2 个内容块 ✓）',
+    fixtureParts === String(REAL_PARTS_ALL.length) && fixtureError === '',
+    `块数=${fixtureParts}｜夹具错误=${fixtureError || '(无)'}`,
+  )
 
   check('页头显示的是当前会话的标题 ✓', html.includes('换图标那两个标签'))
-  check('用户消息被画出来了', html.includes('把首页那两颗图标的圆角再收一点'))
-  check('助手消息被画出来了', html.includes('我把圆角从 14 收到 12'))
-  check('审批卡片被画出来了，且选项按钮是**置灰**的（不假装能用 ✓）', html.includes('允许一次') && /class="approval-option"[^>]*disabled/.test(html))
+  /**
+   * ★ 用户消息现在按**真形状**给（`data.message.content[]` ✓ —— 不再是自造的 `data:{text}` ✗）
+   *   ⇒ 这条同时钉住"用户消息也走同一套正文提取" ✓。
+   */
+  check(
+    '用户消息被画出来了（真形状 `data.message.content[]` ⇒ 用户气泡 ✓）',
+    /class="ev ev-user"[^>]*>\s*<div class="bubble">把首页那两颗图标的圆角再收一点</.test(html),
+  )
+  /**
+   * ★★ 本单的**主断言** ✓：真事件的正文必须**一字不差**地出现在气泡里 ✓，
+   *   而且**不许**是 `{"turn":…` 那种"整坨 JSON 被当正文画"✓
+   *   （那条 bug 的判据就是它 ✓ —— 变异回旧 `textOf` 时这条必红 ✓）。
+   */
+  const headAttr = (html.match(/<div class="ev ev-agent[^"]*" data-type="assistant\/message"[^>]*>/) ?? [])[0] ?? ''
+  const textChars = Number((headAttr.match(/data-text-chars="(\d+)"/) ?? [])[1] ?? '-1')
+  const textHead = decodeURIComponent((headAttr.match(/data-text-head="([^"]*)"/) ?? [])[1] ?? '(没有这个读数)')
+  /**
+   * 助手那条的**整块 DOM**（`\s*` 兼顾换行 ✓）—— 气泡与折叠的思考块都在里面 ✓。
+   * ★ 先取整块、再从里面切气泡 ✗：真实事件带 `details`、被变异过的不带 ⇒
+   *   直接从外层数 `</div>` 的个数会**时对时错** ✓（我第一次就写成那样，读出来是空串 ✓）。
+   */
+  const agentBlock = (html.match(/<div class="ev ev-agent[^"]*" data-type="assistant\/message"[\s\S]*?<\/div><\/div>/) ?? [])[0] ?? ''
+  /**
+   * 助手气泡里那段字（气泡里**只有文字、没有嵌套元素** ⇒ 非贪婪匹配停在自己的 `</div>` ✓）。
+   */
+  const agentBubble = (agentBlock.match(/<div class="bubble">([\s\S]*?)<\/div>/) ?? [])[1] ?? ''
+  check(
+    '★★ 真事件画出来的是**正文**（不是整坨 JSON）：气泡**以正文开头**，且页面上没有 `{"turn":`',
+    agentBubble.length > 0 && agentBubble.startsWith(escapeHtml(REAL_PROSE.slice(0, 40))) && !html.includes(escapeHtml('{"turn":')),
+    `气泡开头=${JSON.stringify(agentBubble.slice(0, 40))}`,
+  )
+  check(
+    '★★ 正文**就是**期望的那段（字符数逐字对上 `type:\'text\'` 块 ✓）',
+    textChars === REAL_PROSE.length,
+    `页面上 ${textChars} 字 vs 期望 ${REAL_PROSE.length} 字`,
+  )
+  check(
+    '★ 正文开头不是 JSON（页面上的前 64 字 = 期望正文的前 64 字 ✓）',
+    textHead === REAL_PROSE.slice(0, 64),
+    `页面上 ${JSON.stringify(textHead)}`,
+  )
+  /**
+   * ★ 思维链的处理（口径同官方客户端 ✓）：它**不进正文** ✗，但在页面上**看得见** ✓
+   *   （进了一个**默认折叠**的"思考"块 ✓）。
+   */
+  check(
+    '★★ 思维链**没混进正文**（正文的 data-text-head 不是思维链开头 ✓）',
+    textHead !== REAL_REASONING_HEAD && html.includes('思考'),
+  )
+  check(
+    '★★ 思维链本身**看得见**（在折叠的思考块里 ✓ —— 不是丢掉 ✓）',
+    html.includes(escapeHtml(REAL_REASONING_HEAD)),
+    `思维链开头=${JSON.stringify(REAL_REASONING_HEAD)}`,
+  )
+  /**
+   * ★ 审批按**真形状**（`{id,toolName,callId,reason}` ✓ —— 真日志 55/55 条都没有 `options` ✗）
+   *   ⇒ 页面上**不该有任何审批按钮** ✓，而原因原文要摊出来 ✓。
+   *   （这与"不许假装能用"是同一条纪律 ✓：看不懂的审批绝不摆按钮 ✓）
+   */
+  check(
+    '★ 真形状的审批（没有 options）⇒ 一颗按钮都不给，且原文摊出来 ✓',
+    html.includes('escalate sandbox to danger-full-access') && !/class="approval-option"/.test(html),
+  )
   check('★ 认不出的事件类型也画了出来（没有静默丢弃 ✓）', html.includes('someUnknownEvent'))
   check('★ 发出去的这条以用户气泡出现在页面上（走的是真实提交路径 ✓）', html.includes('这条是端到端检查发出去的'))
   check('发送之后输入框是空的（清空立刻 ✓）', !/id="input"[^>]*>这条是端到端检查发出去的</.test(html))

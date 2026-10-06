@@ -61,10 +61,12 @@ export function titleFor(kind, type) {
 /**
  * 一条事件 ⇒ **view model**（纯函数 ✓，不碰 DOM ✓）。
  *
- * 字段：`kind` / `type` / `text` / `title` / `body` / `collapsed` / `hiddenLines` / `isError` / `lines` ✓。
+ * 字段：`kind` / `type` / `text` / `thinking` / `title` / `body` / `collapsed` / `hiddenLines` / `isError` / `lines` ✓。
  * · `collapsed` 只对**工具类**与"认不出的类型"生效 ✓（消息再长也不折 ✗ —— 那是正文 ✓）；
  * · 折叠时 `body` 是**截过的**（保头 ✓）+ `hiddenLines` 说清还藏了几行 ✓
  *   （"少了几行"必须说出来 ✓，静默截断是最气人的一种 ✗）。
+ * · `thinking` 是这条消息自己的**思维链** ✓（DSH 的 `reasoning` 块 ✓）——它**不进** `text` ✗，
+ *   由 `renderEvent` 画成一条**默认折叠**的"思考"行 ✓（口径与官方客户端一致 ✓）。
  */
 export function toViewModel(event) {
   const type = event !== null && typeof event === 'object' ? String(event.type || '') : ''
@@ -77,6 +79,7 @@ export function toViewModel(event) {
     type,
     title: titleFor(kind, type),
     text,
+    thinking: thinkingOf(data),
     body: text,
     lines,
     collapsed: false,
@@ -182,7 +185,75 @@ export function classify(type) {
   return 'other'
 }
 
-/** 从事件里尽量掏出一段**能读的文字** ✓（掏不出就返回空串，绝不编 ✗）。 */
+/**
+ * 把 `data.message.content[]`（**DSH 的真形状** ✓）拼成一段能读的正文 ✓。
+ *
+ * 形状来源（**不是猜的** ✗）：
+ * · `@deepseek-ai/dsh-llm` 0.2.0-rc.2 的类型声明 ——
+ *   `TextBlock{type:'text',text}` / `ReasoningBlock{type:'reasoning',text}` /
+ *   `ToolCallBlock{type:'tool-call',…}` / `ImageBlock` / `FileBlock` ✓；
+ * · 真会话日志（`~/.dsh/sessions/**`，85 份）里逐条核过 ✓。
+ *
+ * ★ 只收 `text` 块 ✗ —— `reasoning`（思维链）**不是正文** ✓：
+ *   官方 DSH 客户端的正文就是 `blocks.filter(block => block.kind === 'text')` ✓
+ *   （`dsh-client-ui-chat` 的 `assistantText()` ✓），思维链单独走一条**默认折叠**的
+ *   "思考"行（同包的 `ReasoningRow` ✓）。手机端照同一口径 ✓。
+ *
+ * ★ 空 `text` 一律丢掉 ✓：DSH 的 reasoning 块**经常是空串**（这仓里 17178 个 reasoning
+ *   块中 2939 个是空的 ✓）⇒ 拼进去只会在正文里留一片空白 ✓。
+ */
+export function assistantText(data) {
+  if (data === null || typeof data !== 'object') return ''
+  const message = data.message
+  const contents = []
+  if (message !== null && typeof message === 'object' && Array.isArray(message.content)) contents.push(message.content)
+  // ★ `data.content` 是**字符串**时它就是一整段正文 ✓（不是块数组 ✓）—— 不必按块拆 ✗
+  if (Array.isArray(data.content)) contents.push(data.content)
+  for (const parts of contents) {
+    const texts = []
+    for (const part of parts) {
+      if (part === null || typeof part !== 'object') continue
+      if (part.type === 'reasoning') continue
+      if (typeof part.text === 'string' && part.text.length > 0) texts.push(part.text)
+    }
+    if (texts.length > 0) return texts.join('\n')
+  }
+  return ''
+}
+
+/**
+ * 一条消息里的**思维链**（DSH 的 `reasoning` 块 ✓）—— 与正文**分开**取 ✓。
+ *
+ * ★ 为什么分开 ✗：思维链不是"助手对用户说的话" ✓ —— 官方 DSH 客户端把它渲染成
+ *   一条**默认折叠**的"思考"行（`ReasoningRow` ✓，收起时只露第一段的首行 ✓），
+ *   而正文只取 `text` 块 ✓。手机端照同一口径 ⇒ 正文里**不许混进思维链** ✗。
+ */
+export function thinkingOf(data) {
+  if (data === null || typeof data !== 'object') return ''
+  const message = data.message
+  const contents = []
+  if (message !== null && typeof message === 'object' && Array.isArray(message.content)) contents.push(message.content)
+  if (Array.isArray(data.content)) contents.push(data.content)
+  for (const parts of contents) {
+    const texts = []
+    for (const part of parts) {
+      if (part === null || typeof part !== 'object') continue
+      if (part.type !== 'reasoning') continue
+      if (typeof part.text === 'string' && part.text.length > 0) texts.push(part.text)
+    }
+    if (texts.length > 0) return texts.join('\n')
+  }
+  return ''
+}
+
+/**
+ * 从事件里尽量掏出一段**能读的文字** ✓（掏不出就返回空串，绝不编 ✗）。
+ *
+ * ★ 认得出的形状 ⇒ **绝不退回 `JSON.stringify`** ✗：一条真消息被整段画成 JSON，
+ *   在手机上是**最难查的一类**（它不报错、只是"看着像乱码"）✓ —— 这正是本轮的 bug ✓。
+ * `JSON.stringify` **只留作最后兜底** ✓：真的一个字段都不认识时，宁可把原文摊出来
+ *   （"认不出的也要看得见"✓），也不许返回空串让人以为"什么都没有" ✓。
+ */
 export function textOf(event) {
   const data = event === null || typeof event !== 'object' ? null : event.data
   if (typeof data === 'string') return data
@@ -191,14 +262,9 @@ export function textOf(event) {
       const value = data[key]
       if (typeof value === 'string' && value.length > 0) return value
     }
-    // 数组内容（DSH 的 content 常是 parts 数组 ✓）
-    if (Array.isArray(data.content)) {
-      const parts = []
-      for (const part of data.content) {
-        if (part !== null && typeof part === 'object' && typeof part.text === 'string') parts.push(part.text)
-      }
-      if (parts.length > 0) return parts.join('\n')
-    }
+    // ★ DSH 的事件都是 `data.message.content[]` / `data.content[]`（真形状 ✓ —— 见 assistantText ✓）
+    const assistant = assistantText(data)
+    if (assistant.length > 0) return assistant
     try {
       return JSON.stringify(data)
     } catch (error) {
@@ -244,8 +310,32 @@ export function renderEvent(event) {
   const wrapper = document.createElement('div')
   wrapper.className = 'ev ev-' + view.kind + (view.isError ? ' is-error' : '')
   wrapper.setAttribute('data-type', view.type)
+  /**
+   * ★ 这两个读数**只给验收用** ✓（纯 ASCII 名字 ✓）—— DOM 上看不出区别，
+   *   但"正文到底掏出来几个字 / 有没有混进 JSON"从此**能在 dump 里逐字对** ✓。
+   *   为什么非要它 ✗：正文里有引号/换行/`<`，直接拿字符串去撞 HTML 很容易变成
+   *   "判据比被判断的东西软" ✓（本项目今天栽过 9+ 次的那类 ✓）。
+   *   `data-text-head` 走 `encodeURIComponent` ✓（属性值里不留 `<` `"` `&` 这些会毁掉 dump 的字 ✓）。
+   */
+  wrapper.setAttribute('data-text-chars', String(view.text.length))
+  // ★ 逐字符编 ✓（空格也编成 `%20` ⇒ `decodeURIComponent` 能**原样**还原 ✓）
+  wrapper.setAttribute('data-text-head', view.text.slice(0, 64).split('').map((ch) =>
+    /[A-Za-z0-9\-_.~]/.test(ch) ? ch : encodeURIComponent(ch)).join(''))
 
   if (view.kind === 'user' || view.kind === 'agent') {
+    // ★ 思维链**默认折叠** ✓（口径同官方客户端的"思考"行 ✓）—— 点开才看全文 ✓
+    if (view.thinking.length > 0) {
+      const think = document.createElement('details')
+      think.className = 'thinking'
+      const summary = document.createElement('summary')
+      summary.textContent = '思考'
+      const body = document.createElement('pre')
+      body.className = 'thinking-body'
+      body.textContent = view.thinking
+      think.appendChild(summary)
+      think.appendChild(body)
+      wrapper.appendChild(think)
+    }
     const bubble = document.createElement('div')
     bubble.className = 'bubble'
     bubble.textContent = view.text.length > 0 ? view.text : '（这条没有文字内容）'
