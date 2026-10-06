@@ -29,7 +29,7 @@
  * session/prompt  参数 request = { requestId, sessionId, mode:"queue"|"steer", content:[…] }
  * ```
  *
- * ## ★ 两条**刻意**的克制（别顺手改 ✗）
+ * ## ★ 三条**刻意**的克制（别顺手改 ✗）
  *
  * 1. **游标语义只到"验过的那一步"为止** ✓：`beforeSeq` 仍**原样透传**（"取这之前"这一层没在
  *    真机上验过 ✗）；而 `throughSeq` 的语义**已经实测钉死** ✓ —— 它就是"**取到这一条为止**"
@@ -39,6 +39,11 @@
  * 2. **只暴露我们要用的字段** ✓：返回做**白名单归一化**（`records` 里的 `seq/time/type/data` ✓、
  *    `values` 里点名的那几个 ✓）—— 不把 DSH 的内部结构整坨转给手机 ✗
  *    （转过去就等于把它的形状变成了我们的契约 ✗）。
+ * 3. ★★ **子智能体的对话不进会话列表** ✗（用户 2026-10-06 定 ✓，**是刻意的** ✓，不是漏了 ✓）：
+ *    子智能体占列表多数（生产实测 388 条里 308 条 ✓），点进去读不到**是对的** ✓（本来也不该读 ✓）——
+ *    但让它们混在用户自己的会话里就是噪声 ✓ ⇒ 在 `normalizeSessions` 里按 `origin === 'subagent'` 滤掉 ✓
+ *    （判据与证据见 `isSubagentSession` ✓；★ **用户 fork 出来的分支保留** ✓，别一起杀掉 ✗）。
+ *    ★ 别顺手把它"还原" ✗：这看起来像 bug（列表凭空少了 308 条 ✓），其实是有意的 ✓。
  *
  * ## 与隧道的关系
  *
@@ -214,6 +219,21 @@ function stringField(source: Record<string, unknown>, key: string): string {
 }
 
 /**
+ * ★ 透传一个**真形状里的可选字符串字段** ✓ —— 源里没有 / 不是字符串 ⇒ **连键都不输出** ✗。
+ *
+ * 为什么不用 `stringField` ✗：它给缺省值 `''` ✓ ⇒ 顶层会话会多出一个 `origin: ""` ✓，
+ * 而真形状（`SessionSummary` ✓）里**根本没有这个键** ✗ ⇒ 那是"编"出来的字段 ✗
+ * （与 `status` 那条不同 ✓：`status` 是**我们对外契约里一直在的**键 ✓，缺省空串是有意的 ✓）。
+ *
+ * @param key 纯 ASCII 键名 ✓（`origin` / `parentSessionId` 都是真形状的键 ✓）。
+ * @returns 有就 `{ [key]: value }` ✓，没有就 `{}` ✓（可直接展开进输出对象 ✓）。
+ */
+function optionalString(source: Record<string, unknown>, key: string): Record<string, string> {
+  const value = source[key]
+  return typeof value === 'string' && value.length > 0 ? { [key]: value } : {}
+}
+
+/**
  * ★ 取投影值（`projections.values` ✓ —— `title` 的**真身在这里** ✓）。
  *
  * 真形状（`SessionListValue` 的 zod 描述符 ✓，从 `app.asar` 的
@@ -231,7 +251,56 @@ function projectionValues(record: Record<string, unknown>): Record<string, unkno
 }
 
 /**
+ * ★★ 这条条目是不是**子智能体会话** ✓（会话列表要**屏蔽**它们 ✗ —— 用户 2026-10-06 定的 ✓）。
+ *
+ * ## 判据为什么是 `origin` ✗（而不是"有 `parentSessionId` 就算"✗）
+ *
+ * 真形状里**两个**字段都可能出现在子智能体身上 ✓，但它们**不是同一个意思** ✗ ——
+ * `parentSessionId` 是"**这份日志是从哪个会话派生的**" ✓，而**派生有两种**：
+ *
+ * | 派生方式 | `parentSession` | `origin` | 是不是"子智能体对话" |
+ * |---|---|---|---|
+ * | 子智能体（`dsh-subagent` 的 `childSessionMeta` ✓） | 父会话 ✓ | **`'subagent'`** ✓ | **是** ✓ ⇒ 要屏蔽 ✓ |
+ * | 用户自己 fork 出来的分支（`session/fork` ✓） | 父会话 ✓ | **缺省** ✗ | **不是** ✗ ⇒ **不许误杀** ✗ |
+ *
+ * 证据（都是读出来的，不是想的 ✓）：
+ * · `dsh-subagent/lib/types/child-agent.js` 的 `childSessionMeta` 一并设
+ *   `parentSession: parentHeader.id` ✓ 与 `origin: 'subagent'` ✓
+ *   （同文件注释：`origin` 是「Navigation classification only」✓ = 专为"分类/导航"设的 ✓）；
+ * · `dsh-api-session-controller/lib/types/commands.js` 的 fork 分支**只**设 `parentSession` ✗、
+ *   **不设** `origin` ✗；
+ * · `dsh-api-session-controller/lib/types/list.js` 的 `listFields()` 把 `header` 上的这两个字段
+ *   **分别**透出（`...(header.origin === undefined ? {} : { origin: header.origin })` ✓）；
+ * · 生产实例实测（2026-10-06 ✓，437 份会话头 + `GET /mobile/chat/sessions` 的 388 条逐条对上 ✓）：
+ *   308 条 `origin:'subagent'` ✓、78 条两者皆无 ✓、**2 条只有 `parentSessionId` 没有 `origin`** ✗
+ *   —— 那 2 条标题带「(1)」后缀 ✓，是用户 fork 出来的分支 ✓，手机上照样要能点进去 ✓。
+ *
+ * ⇒ 判据取 **`origin === 'subagent'`**（**恰好** 308 条 ✓）；用 `parentSessionId` 当判据会**多杀 2 条** ✗。
+ *
+ * ★ 值就是字符串 `'subagent'`（`repr` 核过 ✓，磁盘上那份 JSON 里是 `'subagent'` ✓）；
+ *   只认**严格等值** ✗ —— 认不出就别屏蔽 ✓（宁可多留一条，不可误杀 ✓）。
+ */
+export function isSubagentSession(record: Record<string, unknown>): boolean {
+  return record['origin'] === 'subagent'
+}
+
+/**
  * `session/list` 的返回 ⇒ 我们那套会话条目 ✓。
+ *
+ * ## ★★ 子智能体会话**不进这张表** ✗（用户 2026-10-06 定稿 ✓）
+ *
+ * 用户原话：「**我希望的是：屏蔽在会话的子智能体**」✓。
+ * 背景：这条列表现状是**按时间排序、且子智能体占多数** ✓（生产实测 388 条里 308 条是子智能体 ✓）
+ * ⇒ 手机上看到的前几条**全是主线发给子单的提示词** ✓，点进去只撞红字 ✓（读不到是**对的** ✓）。
+ *
+ * ★ 屏蔽放在**这一层**（而不是页面侧 ✓）：这张表有**两个**消费者 ✓ ——
+ *   手机原生「会话」标签（`native/android/…/ChatSessions.java` ✓）**和**我们的 chat 页
+ *   （`packages/host/assets/dsh-chat/app.js` ✓）⇒ 在这一层滤一次，两处一起对 ✓；
+ *   在页面侧滤就得滤两遍 ✓、还得指望两边都记得滤 ✗。
+ * ★ **只删"子智能体"这一类** ✗：用户 fork 出来的分支保留 ✓（判据见 `isSubagentSession` ✓）；
+ * ★ **排序不动** ✗（`session/list` 已经是 `updatedAt` 递减 ✓，见 `list.js` 的
+ *   `items.sort((left, right) => right.updatedAt - left.updatedAt)` ✓）；
+ * ★ **外层形状不动** ✗（仍是 `{ ok, sessions }` ✓）。
  *
  * ## 容器：`value.items` 是真形状 ✓、`value.sessions` 是**历史写法** ✓
  *
@@ -261,6 +330,8 @@ function projectionValues(record: Record<string, unknown>): Record<string, unkno
  * | `status` | **不存在** ✗（`SessionSummary` 里没有这个字段 ✗） | 保留为老式回退 ⇒ 真机上恒为空串 ✓（**不编** ✗） |
  * | `awaitingApproval` | **不存在** ✗（同上 ✗） | 保留为老式回退 ⇒ 真机上恒为 `false` ✓（**不编** ✗） |
  * | `current` | **不存在** ✗（"当前会话"是**客户端**拿 `tunnel.sessionId` 比出来的 ✓，见 `boot.js` ✓） | 保留为老式回退 ✓（真机上不由网关给 ✓） |
+ * | `parentSessionId` | `parentSessionId` ✓（顶层 ✓ 可选 ✓，来自会话头的 `parentSession` ✓） | ★ **透传** ✓（判据不用它 ✗，但"被滤掉的到底是谁"要留个可查的痕 ✓） |
+ * | `origin` | `origin` ✓（顶层 ✓ 可选 ✓，目前只有 `'subagent'` 这一个取值 ✓） | ★ **透传** ✓ —— 它就是**屏蔽的判据** ✓；留在输出里是为了"页面/日志能看出为什么这条被滤" ✓（我们自己不画它 ✓） |
  */
 export function normalizeSessions(value: unknown): unknown[] {
   const container = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
@@ -276,6 +347,8 @@ export function normalizeSessions(value: unknown): unknown[] {
     // ★ `sessionId` 优先 ✓（真形状 ✓），`id` 回退 ✓（老式样本 / 我们的测试替身 ✓）
     const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id')
     if (id.length === 0) continue // 两个都没有的条目对界面没有意义（点不动）⇒ 丢掉
+    // ★ 子智能体的对话**不进这张表** ✗（用户 2026-10-06 定的 ✓ —— 判据与理由见 isSubagentSession ✓）
+    if (isSubagentSession(record)) continue
     const values = projectionValues(record)
     const projectionTitle = stringField(values, 'title')
     out.push({
@@ -288,6 +361,19 @@ export function normalizeSessions(value: unknown): unknown[] {
       current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
       updatedAt: typeof record['updatedAt'] === 'number' ? (record['updatedAt'] as number) : null,
       blank: record['blank'] === true,
+      /**
+       * ★ 两个**真形状里就有**的可选字段，原样透传 ✓（**都不是新造的名字** ✓）：
+       * · `origin` ✓ —— 子智能体的标记（`'subagent'` ✓）；进来的表里已经滤掉这一类 ✓，
+       *   留在这里是为了「**这条为什么没被滤掉**」查得动 ✓（例如 fork 出来的分支：`origin` 缺省 ✓）。
+       * · `parentSessionId` ✓ —— 派生自哪个会话 ✓。
+       * ★ 真形状里这两个键是**可选的** ⇒ 消息里**没有就根本不输出这个键** ✗（**不编** ✓）——
+       *   用 `stringField` 会补出一个 `''` ✓，那是**编**出来的值 ✗（顶层会话的 `origin` 会成为 `""` ✓，
+       *   与真形状「键不存在」对不上 ✓）。
+       * ★ 透传 ≠ 判据 ✗：屏蔽用的是 `record['origin']`（见上面那行 `continue` ✓）——
+       *   把透传删掉，屏蔽照样生效 ✓；把屏蔽删掉，透传也照样生效 ✓（两件事各测各的 ✓）。
+       */
+      ...optionalString(record, 'origin'),
+      ...optionalString(record, 'parentSessionId'),
     })
   }
   return out

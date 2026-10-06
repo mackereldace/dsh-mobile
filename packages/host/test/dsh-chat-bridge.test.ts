@@ -345,6 +345,100 @@ describe('normalizeSessions：真形状（sessionId / items）与老式形状（
   })
 })
 
+/**
+ * ★★ 会话列表**屏蔽子智能体的对话** ✓（用户 2026-10-06 定的 ✓ —— 这之前本模块**一条都不滤** ✓）。
+ *
+ * ## 这些夹具为什么长这样（★ 不是编的形状 ✓）
+ *
+ * 三个条目**逐字照抄**生产实例实测到的三种（2026-10-06 ✓，437 份会话头 + `GET /mobile/chat/sessions`
+ * 的 **388** 条逐条对上 ✓）：
+ *
+ * | 真身 | `parentSessionId` | `origin` | 生产条数 | 期望 |
+ * |---|---|---|---|---|
+ * | 普通会话（顶层 ✓） | **键不存在** ✗ | **键不存在** ✗ | 78 ✓ | 留下 ✓ |
+ * | 子智能体（`dsh-subagent` 建的 ✓） | 有 ✓ | **`'subagent'`** ✓ | **308** ✓ | **滤掉** ✗ |
+ * | 用户 fork 出来的分支（`session/fork` ✓） | 有 ✓ | **键不存在** ✗ | 2 ✓ | 留下 ✓ ★ 不许误杀 ✗ |
+ *
+ * ⇒ 388 − 308 = **80** ✓（78 顶层 + 2 fork ✓）。
+ *
+ * ★★ 这里最容易犯的错 ✗：拿「**有 `parentSessionId` 就算子智能体**」当判据 ✓ ——
+ *   那会连**用户自己 fork 的分支**一起杀掉 ✗（生产那 2 条标题带「(1)」后缀 ✓，是真会话 ✓）。
+ *   所以下面**必须有**那条「fork 出来的分支不许被误杀」的断言 ✓：判据一旦退回
+ *   `parentSessionId`，它就会红 ✓（`origin` 判据则不会 ✓）。
+ */
+describe('normalizeSessions：屏蔽子智能体的对话（只按 origin，不按 parentSessionId）', () => {
+  /** 普通会话 ✓（顶层的真身：两个可选键**都不存在** ✗ —— 实测如此 ✓）。 */
+  const topLevel = () => realSummary('top-1', { updatedAt: 1791258280428 })
+  /** 子智能体会话 ✓（`dsh-subagent` 的 `childSessionMeta` 一并设这两个 ✓）。 */
+  const subagent = () => realSummary('sub-1', {
+    updatedAt: 1791258299543,
+    parentSessionId: 'session-c16e3fbd-edd1-456d-82fe-84aade856b35',
+    origin: 'subagent',
+  })
+  /** 用户 fork 出来的分支 ✓（fork 只设 `parentSession` ✗、**不设** `origin` ✗）。 */
+  const forked = () => realSummary('fork-1', {
+    updatedAt: 1791226993648,
+    parentSessionId: 'session-f6288a69-6555-49a4-b5b5-2ef43b11155a',
+  })
+
+  it('★★★ 三种真身混在一起：子智能体滤掉，普通会话与 fork 分支都留下', () => {
+    // 顺序照生产：按 updatedAt 递减（子智能体最新 —— 这正是用户抱怨「前几条全是子单」的由来）
+    const out = normalizeSessions(realList(subagent(), topLevel(), forked())) as Array<Record<string, unknown>>
+    assert.deepEqual(
+      out.map((row) => row['id']),
+      ['top-1', 'fork-1'],
+      '只许滤掉 origin=subagent 那一条 —— 滤多了（连 fork 一起杀）或滤少了都是错',
+    )
+  })
+
+  it('★★ 只有 parentSessionId、没有 origin ⇒ **不许**当子智能体滤掉（fork 出来的分支是真会话）', () => {
+    const out = normalizeSessions(realList(forked())) as Array<Record<string, unknown>>
+    assert.equal(out.length, 1, '用 parentSessionId 当判据就会把这条误杀 —— 判据必须是 origin')
+    assert.equal(out[0]?.['parentSessionId'], 'session-f6288a69-6555-49a4-b5b5-2ef43b11155a')
+    assert.equal(out[0]?.['origin'], undefined, 'fork 出来的分支没有 origin ⇒ 键不该出现（不编）')
+  })
+
+  it('★ 判据是**严格等值**：origin 是别的字符串 / 不是字符串 ⇒ 都不屏蔽（认不出就留着）', () => {
+    const out = normalizeSessions({
+      items: [
+        { sessionId: 'o-1', origin: 'subagent-ish' },
+        { sessionId: 'o-2', origin: 'Subagent' },
+        { sessionId: 'o-3', origin: true },
+        { sessionId: 'o-4', origin: 'subagent' },
+      ],
+    }) as Array<Record<string, unknown>>
+    assert.deepEqual(out.map((row) => row['id']), ['o-1', 'o-2', 'o-3'], '只认 origin === "subagent"')
+  })
+
+  it('★ 全程只剩子智能体 ⇒ 空表（不是"崩"也不是"全留"）', () => {
+    assert.deepEqual(normalizeSessions(realList(subagent(), realSummary('sub-2', { origin: 'subagent' }))), [])
+  })
+
+  it('★ 老式形状（`sessions` / `id`）也照样屏蔽 —— 判据与容器名无关', () => {
+    const out = normalizeSessions({
+      sessions: [
+        { id: 'old-sub', origin: 'subagent' },
+        { id: 'old-top' },
+      ],
+    }) as Array<Record<string, unknown>>
+    assert.deepEqual(out.map((row) => row['id']), ['old-top'])
+  })
+
+  it('★★ 两个可选字段**原样透传**：有就带出真值，没有就**不出现这个键**（不编 ✗）', () => {
+    const out = normalizeSessions(realList(topLevel(), forked())) as Array<Record<string, unknown>>
+    const byId = new Map(out.map((row) => [row['id'], row]))
+    const top = byId.get('top-1') as Record<string, unknown>
+    const fork = byId.get('fork-1') as Record<string, unknown>
+    // 有 parentSessionId 的那条 ⇒ 带出来 ✓
+    assert.equal(fork['parentSessionId'], 'session-f6288a69-6555-49a4-b5b5-2ef43b11155a')
+    // 没有的那条 ⇒ 键**根本不存在**（★ 不是空串 ✗ —— 空串是"编"出来的值 ✓）
+    assert.equal(Object.hasOwn(top, 'parentSessionId'), false, '真形状里这个键可选 ⇒ 没有就不许补一个 ""')
+    assert.equal(Object.hasOwn(top, 'origin'), false, '顶层会话没有 origin ⇒ 不许补 ""')
+    // 两条都逃过了屏蔽 ⇒ 这里顺便钉住"屏蔽没把普通会话一起弄没"（★ 别拿它当屏蔽生效的证据 ✗）
+    assert.equal(out.length, 2)
+  })
+})
+
 describe('normalizePage：事件白名单 + 值白名单', () => {
   it('records 里的 event 归一成 seq/time/type/data', () => {
     const out = normalizePage({
