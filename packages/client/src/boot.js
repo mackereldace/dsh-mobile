@@ -7265,12 +7265,61 @@
    * 每次调用都很便宜 ✓（用 data 标记跳过已处理过的节点 ✓），所以挂在已有的
    * 200ms 心跳上跑 ✓ —— composer 被 DSH 重渲染后也能自动补上 ✓。
    */
+  /**
+   * ★★ 本轮（性能）追加：上一次**真的跑过**的那条「输入元素 → 对话列」祖先链 ✓
+   *   （只记**节点身份** ✓，不记样式 ✓）—— 见 `tuneComposerScroll` 里的签名判断 ✓。
+   */
+  var composerScrollChain = null
+  /** 上一次那条链的**类名签名** ✓（同一个节点换了类也要重跑 ✓ —— 见 `tuneComposerScroll` ✓）。 */
+  var composerScrollKey = null
+  /** 两条祖先链是不是同一串节点 ✓（**只比身份** ✓，O(层数) ✓，不碰样式 ✓）。 */
+  function chainLooksSame(chain, last) {
+    if (last === null || last === undefined) return false
+    if (chain.length !== last.length) return false
+    for (var i = 0; i < chain.length; i++) {
+      if (chain[i] !== last[i]) return false
+    }
+    return true
+  }
   function tuneComposerScroll() {
     try {
       var center = document.querySelector('[class*="centerCol"]')
       if (center === null) return
       var input = center.querySelector('[contenteditable="true"], textarea')
       if (input === null) return
+      /**
+       * ★★ 本轮（性能）追加：**输入区没变就不跑** ✓。
+       *
+       * 为什么 ✗ —— 这条挂在 200ms 心跳上 ✓，而下面那个循环对「输入元素 → 对话列」之间的
+       * **每一层**都要 `getComputedStyle()` ✓（= 逐层的样式解析 ✓，手机上并不便宜 ✗）。
+       * 本仓规矩（`10-交接文档.md` 教训 22 ✓）：「**别在 200ms 的循环里扫全文档**」✓ ——
+       * 它说的是"**别让 200ms 的活随 DOM 大小增长**"✓；这里同一条道理 ✗：
+       * 输入区**一个字都没动**时，这趟逐层 `getComputedStyle` 量出来的结论**不可能变** ✓。
+       *
+       * ★ 签名 = **输入元素 + 它的祖先链（节点身份 ✓ + 每一层的类名 ✓，都不看样式 ✓）**：
+       *   取链只走 `parentElement` ✓、只读 `className` ✓（**零 `getComputedStyle`、零 rect** ✓），
+       *   与上一次跑过的那条逐节点比 ✓ —— 全同 ⇒ 直接返回 ✓（那几层上的标记本来就还在 ✓）。
+       *   DSH 重渲染（换掉输入元素、或换掉中间某一层 ✓）⇒ 链的身份立刻不同 ⇒ 照旧重跑一遍 ✓
+       *   ⇒ 原来"每 200ms 重跑"要追的那件事（补 `dshmComposerScroller` / `overscrollBehaviorY` ✓）
+       *   **一件都不会漏** ✓（换掉了的节点，链上就看得见 ✓）。
+       *   ★ 类名也进签名 ✓：万一 DSH 是**在同一个节点上换类**（比如换成"可滚"那一态 ✓），
+       *   节点身份没变 ✗ 但结论会变 ✓ ⇒ 那也必须重跑 ✓（读类名**不触发样式解析** ✓，仍然便宜 ✓）。
+       */
+      var chain = []
+      var chainKey = ''
+      var probe = input
+      while (probe !== null && probe !== undefined && probe !== center) {
+        chain.push(probe)
+        chainKey += String(probe.className || '') + '\u0001'
+        probe = probe.parentElement
+      }
+      if (probe !== center) {
+        // 输入区压根不在对话列里（或链条断了 ✓）⇒ 这形状没见过 ✓，照旧往下跑 ✓
+        composerScrollChain = null
+        composerScrollKey = null
+      } else if (chainLooksSame(chain, composerScrollChain) && chainKey === composerScrollKey) {
+        return
+      }
       var node = input
       var scrollerFound = false
       while (node !== null && node !== center) {
@@ -7319,6 +7368,9 @@
         node.style.overscrollBehaviorY = 'contain'
         node = node.parentElement
       }
+      // ★ 这一趟跑成了 ⇒ 把这条链（**身份 + 类名**两半 ✓）记下来 ✓（下一趟先比签名 ✓，没变就不再来 ✓）
+      composerScrollChain = chain
+      composerScrollKey = chainKey
     } catch (error) {
       /* 输入区还没渲染出来是正常的 ✓（首屏会再跑一次 ✓）；异常本身写一行日志 ✓ */
       try {
@@ -12224,9 +12276,113 @@
      *   并且每 400ms 兜一次 ✓（一次 `querySelector` + 两个 `getBoundingClientRect` ✓，
      *   开销可忽略 ✓，却让"外壳知道预览开着"这件事不依赖观察器是否好用 ✓）。
      */
+    /**
+     * ★★ 本轮（性能）追加：**这次变动里到底有没有"预览层那一类"的东西** ✓。
+     *
+     * 为什么非有它不可 ✗ —— 用户现场（原话 ✓）：「目前我在使用**手机端**的时候，
+     * 感觉当**聊天渲染了很多公式**会**非常卡** ✗，这**正常吗** ✓？」。
+     * 量出来的根因就挂在下面那条 `MutationObserver` 上 ✓：
+     * 它是 `childList+subtree` ✓ ⇒ **每一次 DOM 变动后的那一帧**就调 `syncDshPreviewState()` ✓，
+     * 而那个函数**第一句**就是 `dshPreviewSurface()` ✓ —— **无条件扫全文档两趟**
+     * （`document.querySelectorAll('.katex')` ✓ + `[class*="_preview"], [class*="_document"]` ✓），
+     * 再对**每一颗** `.katex` 沿祖先链走一遍 ✓ ⇒ **公式越多 / 会话越长，这一趟越贵** ✓
+     * （实测 772 公式 / 24,937 节点的 DOM：0.74ms（1x）/ 3.15ms（4x）/ 6.7ms（8x）✓ ——
+     * 8x 时 = **每帧 16.7ms 里的四成** ✗，而它前面还有 DSH 的 markdown + KaTeX + React + 布局 ✓）。
+     * 流式时每 token 都在动 ⇒ 每帧都扫 ✗ = 用户说的"非常卡" ✓。
+     *
+     * ★ 这正是本仓**已有的规矩** ✓（`10-交接文档.md` 教训 22 ✓）：
+     *   「**别在 200ms 的循环里扫全文档** ✗：真机 DOM 可达二十万节点 ✓，
+     *   `body.querySelectorAll('*')` + 逐元素 `getBoundingClientRect()` = 必然卡顿 ✓。
+     *   用 `document.elementsFromPoint(x, y)` 在带子里打几个点 ✓，成本与 DOM 大小无关 ✓。」
+     *   ⇒ 本轮就是**回到这条规矩** ✓（**不是新发明** ✗）：让"扫全文档"这件事
+     *   **不再随 DOM 大小、也不再随变动次数无脑发生** ✓。
+     *
+     * ★ 判据只用 `MutationRecord` 递过来的 `addedNodes` / `removedNodes` ✓
+     *   （**O(变动)** ✓、**一次都不查全文档** ✗）—— "像"才允许扫 ✓：
+     *   ① 类名里有 `_preview` / `_document` ✓（**自己** ✓、**自己的子树** ✓、**自己的祖先** ✓）
+     *      —— 预览层的出生 / 消失就是这个形状 ✓（PDF / 图片预览也走这条 ✓，它们没有公式 ✓）；
+     *   ② `.katex` ✓ —— **但它必须落在预览层里**（祖先链上先有 ① 那种节点 ✓）。
+     *
+     * ★ ② 为什么要加"落在预览层里"这一条 ✗（而不是照字面"见到 `.katex` 就当信号"✓）：
+     *   **聊天里的公式也是 `.katex`** ✓ ⇒ 把 `.katex` 一律当信号的话，
+     *   "聊天正在流式渲染公式"**恰好就是最贵的那条路** ✓ —— 守卫会在用户抱怨的那个场景里
+     *   一帧不落地放行 ✗ ⇒ 等于没修 ✓（本项目的头号教训正是**假判据** ✓）。
+     *   ★ 而这一条**一点识别能力都不丢** ✓：`dshPreviewSurface()` 的路径①本来就是
+     *   "从 `.katex` 往上找 `looksLikePreview` 的祖先" ✓ ⇒ **它能返回的东西必然都过得了 ②** ✓
+     *   （守卫只是比它**宽** ✓ —— 少了 `covers` / `visible` 那两道 ✓）；
+     *   路径②（不带公式的预览 ✓）由 ① 直接覆盖 ✓。
+     *
+     * ★ 代价（也写在交付报告里 ✓）：预览层的识别**最坏延迟 = 下面那条 200ms 心跳** ✓ ——
+     *   观察器只负责"更快" ✓，**不负责"必须"** ✗ ⇒ ★ 那条心跳**绝不能删** ✗。
+     */
+    var PREVIEW_LAYER_CLASS = /_preview|_document|documentPreview/
+    var KATEX_CLASS = /(^|\s)katex(\s|$)/
+    /** 只看**自己**的类名 ✓（祖先链上要逐层问 ✓ —— 这里不 `querySelector` ✓）。 */
+    var classIsPreviewLayer = function (node) {
+      return PREVIEW_LAYER_CLASS.test(String(node.className || ''))
+    }
+    /** 这个节点（或它**子树里**）是不是预览层 ✓ —— 只在**这一块**里问 ✓，不是全文档 ✓。 */
+    var nodeIsPreviewLayer = function (node) {
+      if (node === null || node === undefined) return false
+      if (node.nodeType !== undefined && node.nodeType !== 1) return false
+      if (classIsPreviewLayer(node)) return true
+      if (typeof node.querySelector !== 'function') return false
+      try {
+        return node.querySelector('[class*="_preview"], [class*="_document"]') !== null
+      } catch (error) {
+        return false
+      }
+    }
+    /** 这个节点（或它**子树里**）有没有 `.katex` ✓ —— 同样只看这一块 ✓。 */
+    var nodeHoldsKatex = function (node) {
+      if (node === null || node === undefined) return false
+      if (node.nodeType !== undefined && node.nodeType !== 1) return false
+      if (KATEX_CLASS.test(String(node.className || ''))) return true
+      if (typeof node.querySelector !== 'function') return false
+      try {
+        return node.querySelector('.katex') !== null
+      } catch (error) {
+        return false
+      }
+    }
+    /** 这个节点在不在预览层**里面** ✓（只读 `className` ✓ —— 代价 O(层数) ✓，与 DOM 大小无关 ✓）。 */
+    var nodeSitsInPreview = function (node) {
+      var cursor = node
+      for (var up = 0; up < 40 && cursor !== null && cursor !== undefined; up++) {
+        if (classIsPreviewLayer(cursor)) return true
+        if (cursor === document.body) break
+        cursor = cursor.parentElement
+      }
+      return false
+    }
+    /** ★ 这一次变动"像不像"预览层那边的事 ✓ —— **纯判断** ✓（不查文档 ✓、不读样式 ✓）。 */
+    var mutationLooksLikePreview = function (records) {
+      if (records === null || records === undefined) return false
+      for (var r = 0; r < records.length; r++) {
+        var record = records[r]
+        if (record === null || record === undefined) continue
+        var groups = [record.addedNodes, record.removedNodes]
+        for (var g = 0; g < groups.length; g++) {
+          var nodes = groups[g]
+          if (nodes === null || nodes === undefined) continue
+          for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i]
+            if (nodeIsPreviewLayer(node)) return true
+            if (nodeHoldsKatex(node) && nodeSitsInPreview(node)) return true
+          }
+        }
+      }
+      return false
+    }
     var previewWatchQueued = false
-    var runPreviewWatch = function () {
+    /**
+     * ★ 观察器那条路 ✓：**"像"才排一帧** ✓；不像 ⇒ **什么也不做** ✓
+     *   （扫描留给下面那条 200ms 心跳 ✓ —— 最坏 200ms 也能认出来 ✓）。
+     *   `records` 直接来自 `MutationObserver` ✓（给不出来时按"不像"处理 ✓ —— 宁可走心跳 ✓）。
+     */
+    var runPreviewWatch = function (records) {
       if (previewWatchQueued) return
+      if (!mutationLooksLikePreview(records)) return
       previewWatchQueued = true
       requestAnimationFrame(function () {
         previewWatchQueued = false
@@ -12234,7 +12390,9 @@
       })
     }
     try {
-      new MutationObserver(runPreviewWatch).observe(document.body, { childList: true, subtree: true })
+      new MutationObserver(function (records) {
+        runPreviewWatch(records)
+      }).observe(document.body, { childList: true, subtree: true })
     } catch (error) {
       debugBoxLine('[dsh-preview] 观察器不可用（' + String(error && error.message ? error.message : error) + '）→ 靠轮询 ✓')
     }

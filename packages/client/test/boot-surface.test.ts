@@ -168,6 +168,154 @@ interface Surface {
    *   它证明的是"**没壳时退的是提示条、不是蓝横幅**"✓（本轮的核心契约之一 ✓）。
    */
   toastText: () => string | null
+  /**
+   * ★★ 本轮（性能）追加：沙箱里那个假 `MutationObserver` 记下来的**生产回调本体** ✓
+   *   （`callback` 就是 `boot.js` 交给 `new MutationObserver(...)` 的那个函数 ✓ ——
+   *   测试自己造一条 `MutationRecord` 递进去 ✓，不真的排帧 ✓）。
+   */
+  observers: ObservedWatcher[]
+  /** ★★ 本轮追加：`requestAnimationFrame` 的队列 ✓（测试自己挑时机 `flushFrames()` ✓）。 */
+  frames: Array<() => void>
+  /** ★★ 本轮追加：把当前排队的帧跑掉 ✓（生产代码一帧只排一次 ✓，跑的过程中新排的留下 ✓）。 */
+  flushFrames: () => void
+  /**
+   * ★★ 本轮追加：**这一页到底扫了几趟全文档** ✓ —— 数的是
+   *   `document.querySelectorAll('…katex…')` 被调了几次 ✓。
+   *   ★ 判据自检：全文件只有 `dshPreviewSurface()` 起手那一处扫 `.katex` ✓
+   *   （结构那条断言钉着它 ✓）⇒ **数次数 = 数扫描次数** ✓（不用猜 ✓、也不看"代码看起来省了" ✗）。
+   */
+  previewScans: () => number
+  /**
+   * ★★ 本轮追加：`getComputedStyle` 被调了几次 ✓ —— 用来量 `tuneComposerScroll`
+   *   那趟"沿输入区祖先链逐层量样式"到底跑没跑 ✓（**调用次数**做证据 ✓）。
+   */
+  composerStyleProbes: () => number
+  /** ★★ 本轮追加：假输入区那三层的**真身** ✓（断言生产代码写下的标记时用它 ✓）。 */
+  composerProbeNodes: () => { center: ProbeNode; layer: ProbeNode; input: ProbeNode } | null
+  /** ★★ 本轮追加：冒充"DSH 把输入框重渲染了"✓（换掉输入元素 ✓，层不动 ✓）。 */
+  composerRerender: () => void
+}
+
+/**
+ * ★★ 本轮（性能）追加：夹具用的**假节点** ✓ —— 只有本轮那两个探针要它 ✓。
+ *
+ * 为什么不能用既有的最小夹具 ✗：本文件上面那条注释写着"假 DOM 没有选择器引擎 ✓
+ * （`querySelector` 恒为 null ✓）"—— 而本轮要量的**恰好是**"变动里的那个节点
+ * 自己看不看得见 `.katex` / `_preview`"✓。选择器恒为 null 的话，"没扫"就可能只是
+ * "夹具瞎了" ✗ = **假绿** ✓（本项目今天的头号教训 ✓）。所以这里给它一个**最小**选择器引擎 ✓，
+ * 只认生产代码真的用到的那几个形状 ✓（`.类` / `[class*="子串"]` / `[属性="值"]` / 标签名 / 逗号 ✓）。
+ */
+interface ProbeNode {
+  tagName: string
+  nodeType: number
+  className: string
+  attrs: Record<string, string>
+  dataset: Record<string, string>
+  style: Record<string, unknown>
+  children: ProbeNode[]
+  parentElement: ProbeNode | null
+  id: string
+  textContent: string
+  appendChild: (child: ProbeNode) => ProbeNode
+  querySelector: (selector: string) => ProbeNode | null
+  querySelectorAll: (selector: string) => ProbeNode[]
+  getBoundingClientRect: () => { top: number; left: number; right: number; bottom: number; width: number; height: number }
+}
+
+/** ★★ 本轮追加：假观察器记下来的那一条 ✓（`callback` = 生产回调本体 ✓，不是复制品 ✓）。 */
+interface ObservedWatcher {
+  callback: (records: Array<{ addedNodes: ProbeNode[]; removedNodes: ProbeNode[] }>) => void
+  target: unknown
+  options: Record<string, unknown>
+}
+
+/**
+ * ★★ 本轮追加：**最小**选择器匹配 ✓ —— 只认生产代码真的用到的形状 ✓：
+ *   `.类名` ✓ / `[class*="子串"]` ✓ / `[属性="值"]` ✓ / 标签名 ✓ / 逗号分隔 ✓。
+ * 认不出来的（`link[rel="manifest"]` 这种组合 ✓）一律**不匹配** ✓ ——
+ * 与"夹具原来恒为 null"等价 ✓，所以对既有用例零影响 ✓。
+ */
+function matchesProbeSelector(node: ProbeNode, raw: string): boolean {
+  const selector = raw.trim()
+  if (selector.length === 0) return false
+  if (selector.includes(',')) return selector.split(',').some((part) => matchesProbeSelector(node, part))
+  if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1))
+  const classSub = /^\[class\*="([^"]*)"\]$/.exec(selector)
+  if (classSub !== null) return node.className.includes(classSub[1] ?? '')
+  const attrEq = /^\[([a-zA-Z-]+)="([^"]*)"\]$/.exec(selector)
+  if (attrEq !== null) return node.attrs[attrEq[1] ?? ''] === attrEq[2]
+  return node.tagName.toLowerCase() === selector.toLowerCase()
+}
+
+/** ★★ 本轮追加：深度优先收**后代**里命中选择器的那些 ✓（不含自己 ✓，与 DOM 一致 ✓）。 */
+function queryProbeDescendants(node: ProbeNode, selector: string): ProbeNode[] {
+  const found: ProbeNode[] = []
+  const walk = (current: ProbeNode): void => {
+    for (const child of current.children) {
+      if (matchesProbeSelector(child, selector)) found.push(child)
+      walk(child)
+    }
+  }
+  walk(node)
+  return found
+}
+
+/**
+ * ★★ 本轮追加：造一颗假节点 ✓（带 `children` / `parentElement` / 最小选择器引擎 ✓）。
+ * ★ 默认 `nodeType: 1` ✓（真 DOM 里元素就是 1 ✓）；文本节点传 `3` ✓
+ *   （`boot.js` 的守卫第一句就按它把文本节点排除 ✓ —— 那条也要能被测到 ✓）。
+ */
+function makeProbeNode(
+  tagName: string,
+  className: string,
+  options: { attrs?: Record<string, string>; nodeType?: number; textContent?: string } = {},
+): ProbeNode {
+  const node: ProbeNode = {
+    tagName,
+    nodeType: options.nodeType ?? 1,
+    className,
+    attrs: options.attrs ?? {},
+    dataset: {},
+    style: {},
+    children: [],
+    parentElement: null,
+    id: '',
+    textContent: options.textContent ?? '',
+    appendChild: (child: ProbeNode) => {
+      child.parentElement = node
+      node.children.push(child)
+      return child
+    },
+    querySelector: (selector: string) => queryProbeDescendants(node, selector)[0] ?? null,
+    querySelectorAll: (selector: string) => queryProbeDescendants(node, selector),
+    getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+  }
+  return node
+}
+
+/**
+ * ★★ 本轮追加：从假观察器里挑出**预览那一个** ✓。
+ *
+ * ★ 为什么不能只按 `{childList, subtree}` 找 ✗（**这个坑我自己当场踩了 ✓**）：
+ *   `boot.js` 里还有别的观察器也是 `body + childList + subtree` ✓（设置面板那条 ✓、
+ *   模型菜单那条 ✓）⇒ 按选项找会拿到**别人** ✓。实测第一版就是这么写的 ✓：
+ *   "给预览类节点 ⇒ 必须扫"当场红 ✓，而"没有预览类节点 ⇒ 不扫"**假绿** ✓✗
+ *   —— 它压根没把那条变动递给预览观察器 ✓（正是本项目头号教训的样子 ✓）。
+ *   ⇒ 判据改成"**回调本体**把 `records` 递给 `runPreviewWatch`" ✓ ——
+ *   这是**可执行代码的形状** ✓（不是注释 ✓），也正是上面结构那条断言钉住的形状 ✓。
+ */
+function findPreviewWatcher(surface: Surface): ObservedWatcher {
+  const watcher = surface.observers.find(
+    (observed) =>
+      observed.options['childList'] === true &&
+      observed.options['subtree'] === true &&
+      String(observed.callback).includes('runPreviewWatch(records)'),
+  )
+  assert.ok(
+    watcher !== undefined,
+    '★ 必须找得到**预览那条**观察器（判据：回调把 records 递给 runPreviewWatch ✓）',
+  )
+  return watcher
 }
 
 /** ★★ 方案 A：`sideChannels()` 的形状 ✓（断言打在**生产函数**的返回值上 ✓）。 */
@@ -258,10 +406,33 @@ function bootOnSurface(options: {
    * 本文件既有的 `ReplaySocket` + 真 `TunnelSession` 就是干这个的 ✓（见 `bootReplayWorld` ✓）。
    */
   webSocket?: unknown
+  /**
+   * ★★ 本轮（性能）追加：把 `MutationObserver` / `requestAnimationFrame` 换成
+   *   **可注入的假货** ✓（默认仍是原来那个什么都不做的桩 ✓ —— 不传时既有用例逐字不变 ✓）。
+   *
+   * 为什么需要 ✗：本轮修的那条路是"**观察器回调先判类、再决定扫不扫**"✓ ——
+   *   原来的桩 `observe() {}` 把回调**吞了** ✗，于是"扫没扫"在测试里**根本到不了** ✓。
+   *   有它之后，测试能自己造一条 `MutationRecord` 递进**生产回调** ✓（不起浏览器 ✓）。
+   */
+  previewWatchProbe?: boolean
+  /**
+   * ★★ 本轮追加：沙箱里给一套**假输入区**（对话列 + 可滚层 + 输入框 ✓）+ 会记账的
+   *   `getComputedStyle` ✓（默认不装 ⇒ 不传时既有用例逐字不变 ✓）。
+   *
+   * 为什么需要 ✗：要证明"**输入区没变就不跑**"必须能数**调用次数** ✓ ——
+   *   而原来的夹具里 `document.querySelector` 恒为 null ✓ ⇒ `tuneComposerScroll` 第一句就返回 ✓
+   *   （一辈子都不跑 ✓，也就永远测不到"跑了几次"✗）。
+   */
+  composerProbe?: boolean
 }): Surface {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
   const thrown: unknown[] = []
+  /** ★★ 本轮追加：假观察器 / 假帧队列 / 全文档扫描计数 / 逐层量样式计数 ✓。 */
+  const observers: ObservedWatcher[] = []
+  const frames: Array<() => void> = []
+  const documentQueries: string[] = []
+  let composerStyleProbes = 0
 
   const registry = new Map<string, Record<string, unknown>>()
   const makeElement = (tag: string): Record<string, unknown> => {
@@ -328,14 +499,47 @@ function bootOnSurface(options: {
     for (const [key, value] of Object.entries(options.seed)) store.set(key, value)
   }
 
+  /**
+   * ★★ 本轮追加：假输入区 ✓（只有 `composerProbe` 时才建 ✓，其余用例一个字不变 ✓）：
+   *   `center`（对话列 ✓）→ `layer`（DSH 自己声明 `overflow-y: auto` 的那一层 ✓）→ `input`（输入框 ✓）。
+   * ★ 三层的**类名**都照着生产代码真的在找的形状给 ✓：对话列含 `centerCol` ✓
+   *   （`document.querySelector('[class*="centerCol"]')` ✓）、可滚层含 `_scroll` ✓
+   *   （`getComputedStyle` 桩对它回 `overflow-y: auto` ✓ ⇒ 走"给这一层限高"那一支 ✓）。
+   * ★ 三层都带 `parentElement` ✓ ⇒ 生产代码那条签名链「输入元素 → 对话列」走得出来 ✓。
+   */
+  const composer =
+    options.composerProbe === true
+      ? (() => {
+          const center = makeProbeNode('div', 'uV2eYG_centerCol')
+          const layer = makeProbeNode('div', 'uV2eYG_scroll')
+          const input = makeProbeNode('div', 'uV2eYG_input', { attrs: { contenteditable: 'true' } })
+          center.appendChild(layer)
+          layer.appendChild(input)
+          return { center, layer, input }
+        })()
+      : null
+
   const documentStub = {
     readyState: options.readyState ?? 'complete',
     body,
     head: makeElement('head'),
     documentElement: makeElement('html'),
     getElementById: (id: string) => registry.get(id) ?? null,
-    querySelector: () => null,
-    querySelectorAll: () => [],
+    /**
+     * ★ 只有 `composerProbe` 那条用例才认得对话列 ✓ —— 其余选择器照旧恒为 null ✓
+     *   （与这个夹具原来的样子逐字等价 ✓）。
+     */
+    querySelector: (selector: string) =>
+      composer !== null && selector === '[class*="centerCol"]' ? composer.center : null,
+    /**
+     * ★★ 本轮追加：**把它查过的选择器全记下来** ✓ —— 返回值照旧是空表 ✓
+     *   （既有用例看到的完全一样 ✓）。`previewScans()` 数的就是这里面含 `katex` 的那几次 ✓：
+     *   全文件只有 `dshPreviewSurface()` 起手会扫 `.katex` ✓ ⇒ **数次数 = 数扫描次数** ✓。
+     */
+    querySelectorAll: (selector: string) => {
+      documentQueries.push(String(selector))
+      return []
+    },
     createElement: (tag: string) => makeElement(tag),
     createTextNode: (text: string) => ({ textContent: text }),
     addEventListener: () => {},
@@ -428,10 +632,53 @@ function bootOnSurface(options: {
       removeEventListener() {}
     },
     fetch: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
+    MutationObserver:
+      options.previewWatchProbe === true
+        ? class {
+            callback: (records: Array<{ addedNodes: ProbeNode[]; removedNodes: ProbeNode[] }>) => void
+            constructor(
+              callback: (records: Array<{ addedNodes: ProbeNode[]; removedNodes: ProbeNode[] }>) => void,
+            ) {
+              this.callback = callback
+            }
+            observe(target: unknown, observeOptions: Record<string, unknown>) {
+              // ★ 记下**生产回调本体** ✓ —— 测试自己造 MutationRecord 递进去 ✓（不真的排帧 ✓）。
+              observers.push({ callback: this.callback, target, options: observeOptions })
+            }
+            disconnect() {}
+          }
+        : class {
+            observe() {}
+            disconnect() {}
+          },
+    ...(options.previewWatchProbe === true
+      ? {
+          // ★★ 本轮追加：帧**不真的排** ✓ —— 测试自己挑时机 `flushFrames()` ✓（与 setInterval 同一个手法 ✓）。
+          requestAnimationFrame: (callback: () => void): unknown => {
+            frames.push(callback)
+            return frames.length
+          },
+          cancelAnimationFrame: () => {},
+        }
+      : {}),
+    ...(options.composerProbe === true
+      ? {
+          /**
+           * ★★ 本轮追加：会记账的 `getComputedStyle` ✓ —— 只有 `composerProbe` 时才存在 ✓
+           *   （既有用例里它压根不存在 ✓ ⇒ 行为逐字不变 ✓）。
+           *   判据形状照生产代码真的在读的：`overflowY` ✓ —— 含 `_scroll` 的那层回 `auto` ✓。
+           */
+          getComputedStyle: (node: ProbeNode) => {
+            composerStyleProbes += 1
+            return {
+              overflowY: String(node.className || '').includes('_scroll') ? 'auto' : 'visible',
+              display: 'block',
+              visibility: 'visible',
+              opacity: '1',
+            }
+          },
+        }
+      : {}),
     innerWidth: options.innerWidth,
     innerHeight: 915,
     isSecureContext: true,
@@ -474,6 +721,25 @@ function bootOnSurface(options: {
     toastText: () => {
       const box = registry.get('dshm-shell-toast')
       return box === undefined ? null : String(box['textContent'] ?? '')
+    },
+    // ── ★★ 本轮（性能）追加的那几个探针 ✓（默认全空 ✓ —— 不传选项时既有用例看到的一模一样 ✓）──
+    observers,
+    frames,
+    flushFrames: () => {
+      // ★ 只跑**这一刻**排队的那几帧 ✓（生产代码一帧只排一次 ✓；跑的过程中新排的留在队列里 ✓）
+      const queued = frames.splice(0, frames.length)
+      for (const frame of queued) frame()
+    },
+    previewScans: () => documentQueries.filter((selector) => selector.includes('katex')).length,
+    composerStyleProbes: () => composerStyleProbes,
+    composerProbeNodes: () => composer,
+    composerRerender: () => {
+      if (composer === null) return
+      // ★ 冒充"DSH 把输入框重渲染了"✓：**换掉输入元素** ✓（层不动 ✓ ⇒ 链的身份变了 ✓）。
+      const fresh = makeProbeNode('div', 'uV2eYG_input', { attrs: { contenteditable: 'true' } })
+      composer.layer.children = [fresh]
+      fresh.parentElement = composer.layer
+      composer.input = fresh
     },
   }
 }
@@ -3847,4 +4113,235 @@ test('★★★ 方案 A 真跑：两条隧道同时 pending ⇒ 各取各的队
     dirs.push(join(tmpdir(), 'dsh-mobile-side-a-'), join(tmpdir(), 'dsh-mobile-side-b-'))
     cleanup()
   }
+})
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ 本轮（性能）：`/mobile/app` 上那个「**每次 DOM 变动就扫全文档**」的放大器
+ *
+ * 用户现场（原话 ✓）：「目前我在使用**手机端**的时候，感觉当**聊天渲染了很多公式**
+ * 会**非常卡** ✗，这**正常吗** ✓？」
+ *
+ * 量出来的根因 ✓（上一单的读数 ✓，不重做 ✗）：`MutationObserver`（`childList+subtree` ✓）在
+ * **每一次 DOM 变动后的那一帧**就调 `syncDshPreviewState()` ✓，而它**第一句**就是
+ * `dshPreviewSurface()` ✓ —— **无条件扫全文档两趟** ✓（`.katex` ✓ + 属性子串选择器 ✓），
+ * 再对**每一颗** `.katex` 沿祖先链走一遍 ✓ ⇒ **公式越多 / 会话越长，这一趟越贵** ✓
+ * （实测 772 公式 / 24,937 节点：0.74ms（1x）/ 3.15ms（4x）/ 6.7ms（8x）✓ ——
+ * 8x 时 = **每帧 16.7ms 里的四成** ✗，而它前面还有 DSH 的 markdown + KaTeX + React + 布局 ✓）。
+ *
+ * 这一组钉三件事 ✓（**每个方向都要能被打红** ✓）：
+ *   ① 不像预览层的变动 ⇒ **一趟全文档扫描都不许跑** ✓（流式时最常进来的文本节点就是这个形状 ✓）；
+ *   ② 像的变动 ⇒ **必须立刻扫** ✓（`_preview` / `_document` / 预览层**里面**的 `.katex` ✓、
+ *      以及**摘掉**预览层那一笔 ✓）—— 识别能力**不许降级** ✗；
+ *   ③ 结构上：观察器**先判类再排帧** ✓、判类那一趟**绝不许查全文档** ✓、
+ *      200ms 心跳**仍在** ✓（兜底不许删 ✗ —— 识别最坏延迟就等于它 ✓）、
+ *      `tuneComposerScroll` 有签名判断 ✓ 且它在逐层 `getComputedStyle` **之前** ✓。
+ *
+ * ★ 判据纪律（本项目的头号教训：**假判据** ✓）：断言只打在**可执行代码形状**与
+ *   **调用次数**上 ✓（注释行先滤掉 ✓）；性能证据是**扫描次数** / **逐层量样式的次数** ✓——
+ *   **不是**"代码看起来省了" ✗。★ 而且"数次数 = 数扫描次数"这件事由下面第一条**自检**兜住 ✓。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+test('★ 判据自检：全文件只有一处扫 `.katex` ⇒「数次数」就等于「数扫描次数」', () => {
+  /**
+   * 下面那几条"扫了几次"的判据数的是 `document.querySelectorAll('…katex…')` 的**调用次数** ✓。
+   * 这条自检保证那个等式成立 ✓：全文件只有 `dshPreviewSurface()` 的**起手**会扫 `.katex` ✓
+   * （它每次调用都必然先走这一句 ✓）。多出第二处 ⇒ 计数就失真了 ✗ ⇒ 这条先红 ✓。
+   */
+  assert.equal(
+    executableOnly(bootSource).split("document.querySelectorAll('.katex')").length - 1,
+    1,
+    '★ 全文件只许有一处扫 `.katex`（= `dshPreviewSurface` 的起手 ✓）—— 计数判据靠它成立 ✓',
+  )
+})
+
+test('★★ 结构：观察器先判类再排帧、判类那趟不查全文档、200ms 心跳仍在', () => {
+  /** 这一段 = 判类守卫 + 观察器 + 三条 200ms/250ms 心跳 ✓（锚点全是纯 ASCII ✓）。 */
+  const region = executableOnly(
+    sourceRegionBetween(bootSource, 'var PREVIEW_LAYER_CLASS =', 'setInterval(liftPopupsOverKeyboard, 250)'),
+  )
+
+  // ── ① 观察器必须把 `MutationRecord` **递进**生产回调（否则没法按变动判类 ✗）──
+  assert.match(
+    region,
+    /new MutationObserver\(function \(records\) \{\s*runPreviewWatch\(records\)\s*\}\)\.observe\(document\.body, \{ childList: true, subtree: true \}\)/,
+    '★ 观察器必须把 MutationRecord 递给回调 ✓（原来是无条件 `new MutationObserver(runPreviewWatch)` ✗）',
+  )
+
+  // ── ② 守卫必须在「排帧」之前、扫描之前 ──
+  const guardAt = region.indexOf('if (!mutationLooksLikePreview(records)) return')
+  const frameAt = region.indexOf('requestAnimationFrame(')
+  const scanAt = region.indexOf('syncDshPreviewState()')
+  assert.ok(
+    guardAt >= 0,
+    '★ 回调里必须有"不像就不扫"的守卫 ✓（"一有变动就扫全文档"正是本轮要修的那件 ✗）',
+  )
+  assert.ok(frameAt > guardAt, '★ 守卫必须在**排帧之前** ✓（排在后面 = 每一帧还是照扫 ✗）')
+  assert.ok(scanAt > frameAt, '★ 那一扫必须在守卫之后 ✓')
+  assert.equal(
+    region.split('syncDshPreviewState()').length - 1,
+    1,
+    '★ 这一段里只许有**一处**调扫描 ✓（在守卫之后 ✓ —— 多一处就是又冒出一条无条件扫 ✓）',
+  )
+
+  // ── ③ 兜底：那条 200ms 心跳**必须在**（它现在是识别的最坏延迟 ✓）──
+  assert.ok(
+    /setInterval\(syncDshPreviewState, 200\)/.test(region),
+    '★ 那条 200ms 心跳**绝不能删** ✗ —— 识别的最坏延迟就等于它 ✓',
+  )
+
+  // ── ④ 判类那一趟**绝不许查全文档**（它必须只 O(变动) ✓）──
+  const guardRegion = executableOnly(
+    sourceRegionBetween(bootSource, 'var PREVIEW_LAYER_CLASS =', 'var previewWatchQueued = false'),
+  )
+  assert.ok(
+    !guardRegion.includes('document.querySelectorAll'),
+    '★ 判类不许查全文档 ✗（那等于把放大器原样留下 ✓）',
+  )
+  assert.ok(
+    !guardRegion.includes('document.querySelector('),
+    '★ 判类也不许从文档里找东西 ✓（只看 MutationRecord 递过来的节点 ✓）',
+  )
+  assert.ok(
+    guardRegion.includes('addedNodes') && guardRegion.includes('removedNodes'),
+    '★ 判据必须真的来自 `MutationRecord` 的 `addedNodes` / `removedNodes` ✓',
+  )
+})
+
+test('★★ 结构：`tuneComposerScroll` 有"输入区没变就不跑"的签名判断，且在逐层 getComputedStyle 之前', () => {
+  const body = executableOnly(functionBodyAtColumn2(bootSource, 'tuneComposerScroll'))
+  const guardAt = body.indexOf('chainLooksSame(')
+  const styleAt = body.indexOf('getComputedStyle(')
+  assert.ok(guardAt >= 0, '★ 签名判断必须真的在 ✓（否则那 200ms 心跳每趟都沿祖先链逐层量样式 ✗）')
+  assert.ok(styleAt >= 0, '夹具自检：逐层 `getComputedStyle` 仍在 ✓（只是挪到签名之后 ✓）')
+  assert.ok(guardAt < styleAt, '★ 签名判断必须在**逐层 getComputedStyle 之前** ✓（排在后面 = 一次都没省 ✗）')
+  assert.ok(body.includes('composerScrollChain = chain'), '★ 真的跑成了才记签名 ✓（不记 ⇒ 下一趟又从头量 ✗）')
+  assert.ok(
+    body.includes('composerScrollKey = chainKey'),
+    '★ 签名的**两半都要记下来** ✓（漏了类名那半 ⇒ 每趟都不相等 ⇒ 一次都没省 ✗ —— 这一条就是实测抓到的那个坑 ✓）',
+  )
+  assert.ok(
+    body.includes("chainKey += String(probe.className || '')"),
+    '★ 类名也要进签名 ✓（DSH 在**同一个节点上换类** ⇒ 结论会变 ⇒ 必须重跑 ✓）',
+  )
+  // ★ 修性能**不许**靠"把这条心跳删掉" ✗（那会连带丢掉"DSH 重渲染后补标记"✓）
+  assert.ok(
+    executableOnly(bootSource).includes('setInterval(tuneComposerScroll, 200)'),
+    '★ 输入区那条 200ms 心跳必须仍在 ✓（本轮只是让它先比签名 ✓）',
+  )
+})
+
+test('★★ 行为（负）：变动里没有预览类节点 ⇒ 一趟全文档扫描都不许跑（聊天里的 `.katex` 正是这个形状）', () => {
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], previewWatchProbe: true })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  /**
+   * ★ 用 `findPreviewWatcher` 挑**预览那条** ✓ —— 不是"随便一条 childList+subtree" ✗
+   *   （那条路会拿到设置面板/模型菜单的观察器 ⇒ 下面"没扫"变**假绿** ✓，见它的注释 ✓）。
+   */
+  const watcher = findPreviewWatcher(surface)
+  const before = surface.previewScans()
+
+  // ── 造三种"聊天在流式渲染"的变动（**都不在预览层里** ✓）──
+  //   ① 流式时最常见的一笔：一个**文本节点**（`nodeType: 3` ✓）
+  const textNode = makeProbeNode('#text', '', { nodeType: 3, textContent: '一' })
+  //   ② 一条新消息的容器（里面带公式 ✓ —— 聊天里的 `.katex` ✓）
+  const message = makeProbeNode('div', 'ds-markdown')
+  const messageKatex = message.appendChild(makeProbeNode('span', 'katex'))
+  //   ③ 单独插进来的一颗公式（DSH 增量渲染时的形状 ✓）
+  const loneKatex = makeProbeNode('span', 'katex')
+
+  const framesBefore = surface.frames.length
+  watcher.callback([{ addedNodes: [message], removedNodes: [] }])
+  watcher.callback([{ addedNodes: [messageKatex], removedNodes: [] }])
+  watcher.callback([{ addedNodes: [loneKatex], removedNodes: [] }])
+  watcher.callback([{ addedNodes: [textNode], removedNodes: [] }])
+
+  assert.equal(surface.frames.length, framesBefore, '★ 不像 ⇒ 连一帧都不该排 ✓（排了就一定会扫 ✗）')
+  surface.flushFrames()
+  assert.equal(
+    surface.previewScans() - before,
+    0,
+    '★ 变动里没有预览类节点 ⇒ **一趟全文档扫描都不许跑** ✗（这一笔就是用户"非常卡"里的开销 ✓）',
+  )
+})
+
+test('★★ 行为（正）：`_preview` / `_document` / 预览层里的 `.katex` / 摘掉预览层 ⇒ 必须立刻扫', () => {
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], previewWatchProbe: true })
+  const watcher = findPreviewWatcher(surface)
+
+  // ── ① 预览层**自己**进来（类名后缀 `_preview` ✓ —— 实测就是这个形状 ✓）──
+  let before = surface.previewScans()
+  watcher.callback([{ addedNodes: [makeProbeNode('div', 'dhJKeW_preview')], removedNodes: [] }])
+  surface.flushFrames()
+  assert.equal(surface.previewScans() - before, 1, '★ 预览层进来 ⇒ 必须扫 ✓')
+
+  // ── ② 预览层**已经在**了，只是里面的公式被换成了新的（`.katex` ✓ + 祖先链上有 `_document` ✓）──
+  const docLayer = makeProbeNode('div', '0RKuNG_document')
+  const holder = makeProbeNode('div', '_markdown_abc')
+  docLayer.appendChild(holder)
+  holder.appendChild(makeProbeNode('span', 'katex'))
+  before = surface.previewScans()
+  watcher.callback([{ addedNodes: [holder], removedNodes: [] }])
+  surface.flushFrames()
+  assert.equal(surface.previewScans() - before, 1, '★ 预览层**里面**的公式变了 ⇒ 必须扫 ✓')
+
+  // ── ③ 摘掉预览层（用户关掉预览 ✓）⇒ 也要立刻认出来 ──
+  before = surface.previewScans()
+  watcher.callback([{ addedNodes: [], removedNodes: [docLayer] }])
+  surface.flushFrames()
+  assert.equal(surface.previewScans() - before, 1, '★ 摘掉预览层 ⇒ 必须扫 ✓（"关掉了"要立刻认出来 ✓）')
+})
+
+test('★★ 行为：输入区没变 ⇒ 那 200ms 心跳不再逐层 getComputedStyle（调用次数为证）', () => {
+  const surface = bootOnSurface({ pathname: '/mobile/app', innerWidth: 412, consent: [], composerProbe: true })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  /**
+   * ★ 用**生产那条心跳本体**（`setInterval(tuneComposerScroll, 200)` 递进去的就是这个函数 ✓）——
+   *   不是另抄一份复制品 ✓。
+   */
+  const tick = surface.intervals.find((fn) => fn.name === 'tuneComposerScroll')
+  assert.ok(tick !== undefined, '★ 输入区那条 200ms 心跳必须仍在 ✓')
+  const nodes = surface.composerProbeNodes()
+  assert.ok(nodes !== null, '夹具：假输入区应当建好了 ✓')
+
+  const before = surface.composerStyleProbes()
+  tick()
+  const firstPass = surface.composerStyleProbes() - before
+  assert.ok(
+    firstPass >= 2,
+    `第一趟必须真的逐层量过 ✓（实测 ${String(firstPass)} 次 ⇒ 少于 2 次说明判据/夹具不成立 ✗）`,
+  )
+  // ★ 功能侧也不许降级：这一趟该写下的标记必须真的写上了 ✓
+  assert.equal(
+    nodes.layer.dataset['dshmComposerScroller'],
+    'v2',
+    '★ 限高必须仍然落在**真的会滚的那一层**上 ✓（判据形状照生产 ✓）',
+  )
+  assert.equal(
+    nodes.input.style['overscrollBehaviorY'],
+    'contain',
+    '★ 输入框那一层的 `contain` 必须仍然写上 ✓',
+  )
+
+  // ── ★ 输入区一个字都没动 ⇒ 后面每一趟**一次都不许再量** ──
+  tick()
+  tick()
+  tick()
+  assert.equal(
+    surface.composerStyleProbes() - before,
+    firstPass,
+    '★ 输入区没变 ⇒ 后续心跳一次 `getComputedStyle` 都不许再跑 ✗',
+  )
+
+  // ── ★ 反向：DSH 把输入框重渲染了 ⇒ 必须重新逐层量（该补的标记一件都不许漏 ✓）──
+  surface.composerRerender()
+  tick()
+  assert.ok(
+    surface.composerStyleProbes() - before > firstPass,
+    '★ 输入元素被换掉 ⇒ 必须重新量一遍 ✓（签名把"变了"认出来了 ✓）',
+  )
+  assert.equal(
+    surface.composerProbeNodes()?.input.style['overscrollBehaviorY'],
+    'contain',
+    '★ 换上来那个新输入框也要被标上 `contain` ✓（不许漏 ✓）',
+  )
 })
