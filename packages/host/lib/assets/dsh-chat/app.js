@@ -57,6 +57,53 @@ function rpc(method, args) {
 const params = new URLSearchParams(location.search)
 let currentId = params.get('session') || ''
 
+/**
+ * ★★ 审批**裁决**那条路 ✓（`mobile/dsh/approval` ✓ —— 手机上点「拒绝」/「允许一次」✓）。
+ *
+ * 入参就是 `{requestId, decision}` ✓：
+ * · `requestId` **必须**是页面从会话日志里读到的那个 `approval/asked.id` ✓
+ *   （宿主那边靠它把这一下对到 waterfall 里那条请求上 ✓）；
+ * · `decision` 用 DSH 的**封闭词汇** ✓（`"rejected"` / `"allowed-once"` ✓，见 `ui.js` 的
+ *   `APPROVAL_OPTIONS` ✓）—— **没有「总是允许」** ✗（DSH 里不存在 ✓，
+ *   那是会话策略那个旋钮 ✓，走 `/permission <preset>` ✓）。
+ *
+ * ★ 宿主回话是**数据**不是状态 ✓：`{ok, accepted, pending, granted, outcome, vocabulary}` ✓。
+ *   `ok:false` 表示"这一下没落到任何在等的请求上"（重复点 / 已超时 / id 不对 ✓）——
+ *   页面据此**说实话** ✓（见 `ui.js` 的 `answerApproval` ✓）。
+ */
+function answerApproval(requestId, decision) {
+  return rpc('mobile/dsh/approval', { requestId: requestId, decision: decision })
+}
+
+/**
+ * ★★ 裁决通道**到底接通了没有** ✗ —— 探一次 ✓，然后交给页面决定按钮按不按得动 ✓。
+ *
+ * ## 判据为什么是"发一条**注定落空**的裁决" ✗
+ *
+ * 因为我们**没有别的读数** ✓：这条路是**我们自己的**端点（不是 DSH 的 ✓，
+ * 全 asar 里带引号的 `"approval/decide"` 是 0 命中 ✓）⇒ 没有"能力清单"可查 ✓。
+ * 而把它**探出来**比"我们觉得应该通了"强得多 ✓：
+ * · 端点/中间人**都在** ⇒ 宿主回一个对象 ✓（`ok:false` ✓，因为那个 id 谁也不等 ✓）；
+ * · 端点或中间人**缺一个** ⇒ `rpc` 抛错 ✓。
+ * ⇒ 「能走到回话」就是"通道接通"这条判据 ✓。
+ *
+ * ★ 这个探针**不可能**替谁裁决 ✗：`requestId` 是一个谁都不在等的固定串 ✓
+ *   ⇒ 宿主那边 `found:false` ✓、**什么都不改** ✓（`settle` 命中不了就不会有副作用 ✓）。
+ * ★ 探完立刻、也只探一次 ✓（不做轮询 ✓ —— 通道起来与否是宿主重启才有的事 ✓）。
+ */
+function probeApprovalChannel(page) {
+  return answerApproval('probe-no-such-request', 'rejected').then(
+    function () {
+      page.setApprovalChannel(true)
+      return true
+    },
+    function () {
+      page.setApprovalChannel(false)
+      return false
+    },
+  )
+}
+
 const page = mountChat({
   root: document,
   onSwitch: function (id) {
@@ -88,6 +135,11 @@ const page = mountChat({
       return poller.refreshNow()
     })
   },
+  /**
+   * ★ 页面点了审批上的一颗按钮 ⇒ 打到宿主那条裁决路 ✓（动作与判定见 `ui.js` 的
+   *   `answerApproval` ✓：它负责置灰、把结果说出来、失败也说出来 ✓）。
+   */
+  answerApproval: answerApproval,
 })
 
 let received = 0
@@ -161,6 +213,21 @@ try {
 }
 try {
   poller.start()
+} catch (error) {
+  page.handlers.onError(error instanceof Error ? error.message : String(error))
+}
+/**
+ * ★★ 裁决通道探一次 ✓（探针的判据与"为什么不可能误裁决"见 `probeApprovalChannel` ✓）。
+ *
+ * ★ 探不到**不报错** ✗：那是"这台宿主的裁决路还没落地"✓（本单之前的状态 ✓），
+ *   页面自己会把两颗按钮**置灰** ✓ —— 那是**诚实**的 ✓，不是故障 ✓；
+ *   硬报一行红字反而误导（用户会以为是自己哪里点坏了 ✓）。
+ * ★ 但**要留一条可念的日志** ✓：真机现象"按钮怎么是灰的"✗ 时，这一行就是答案 ✓。
+ */
+try {
+  void probeApprovalChannel(page).then(function (connected) {
+    console.log('[dsh-chat] 审批裁决通道：' + (connected ? '已接通（按钮可点）' : '未接通（按钮置灰）'))
+  })
 } catch (error) {
   page.handlers.onError(error instanceof Error ? error.message : String(error))
 }

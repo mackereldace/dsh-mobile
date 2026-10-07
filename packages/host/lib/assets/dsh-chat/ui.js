@@ -183,10 +183,19 @@ export function toApprovalViewModel(event, decided) {
   /**
    * ★★ 按钮来自**事件类型** ✓（封闭词汇的子集 ✓），不是从 data 里解析出来的 ✗
    *   —— 这一行原来是 `parseOptions(data)` ✓，那个函数在真机上**永远返回空表** ✓。
+   * ★ 再加一道：**认不出是哪条请求**（没有 id ✓）就一颗都不给 ✗ ——
+   *   否则那两颗按钮**注定失败** ✓（宿主那边 `requestId` 是必填 ✓），
+   *   而"按下去报一句参数缺失"比"一开始就不给按钮"糟得多 ✓。
    */
-  const options = approvalOptionsFor(type)
+  const options = requestId.length > 0 ? approvalOptionsFor(type) : NO_APPROVAL_OPTIONS
+  /**
+   * ★★ 裁决**结果的那个字**要按 DSH 的真字段名取 ✗：`approval/decided` 的 data 是
+   *   **`{id, outcome}`** ✓（`dsh-user-approval/lib/index.js:139-142` 那条 append ✓）——
+   *   不是 `decision` ✗（本仓栽过四次"照着想的字段名写"✓）。
+   *   `decision` / `option` 这些是**老夹具**的写法 ✓，一起认，但 `outcome` 排第一 ✓。
+   */
   const decision = decided !== null && decided !== undefined
-    ? firstString(decided.data !== null && typeof decided.data === 'object' ? decided.data : {}, ['decision', 'option', 'choice', 'result', 'answer']) || '已处理'
+    ? firstString(decided.data !== null && typeof decided.data === 'object' ? decided.data : {}, ['outcome', 'decision', 'option', 'choice', 'result', 'answer']) || '已处理'
     : ''
   const dump = safeJson(data)
   return {
@@ -385,6 +394,19 @@ function decidedEventFor(context, event) {
   return value === undefined ? null : value
 }
 
+/**
+ * 一条审批事件里的**请求 id** ✓（空串 = 认不出 ✓ ⇒ 不给按钮 ✓，见 `toApprovalViewModel` ✓）。
+ *
+ * ★ DSH 的真字段名是 **`id`** ✓（`dsh-user-approval/lib/index.js:132-137` 那条 append ✓：
+ *   `session.append("approval/asked", { id, toolName, … })` ✓）；
+ *   `requestId` 一起认 ✓ 是为了**老夹具**（本仓的单测夹具 ✓）—— 两种都试，不猜语义 ✓。
+ */
+function approvalIdOf(event) {
+  const data =
+    event !== null && typeof event === 'object' && event.data !== null && typeof event.data === 'object' ? event.data : {}
+  return firstString(data, ['id', 'requestId', 'request_id', 'approvalId'])
+}
+
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
 export function renderEvent(event, context) {
   const view = toViewModel(event)
@@ -473,14 +495,21 @@ export function renderEvent(event, context) {
 /**
  * 审批卡片 ✓。
  *
- * ★ 按钮**一律置灰**（`disabled` ✓）并且写清原因 ✓ —— 这是本项目的既定纪律：
- *   **不假装能用** ✗（与首页那两个还没通电的标签同一个处理 ✓）。
- *   为什么：按下去会**改变电脑上正在发生的事** ✓，而"决策走哪条通道"还没在真机上验过 ✗
- *   （见 `37-会话页数据面探针.md` §十四 ✓）。等验过再把 `disabled` 摘掉 ✓。
+ * ★★ 按钮什么时候**能按** ✗（2026-10-08 改 ✓）：
+ *   · 通道**探测到接通**（`approvalActionState` 的 `channelConnected` ✓）⇒ 才可点 ✓；
+ *   · 没接通 ⇒ **一律置灰** ✓ 并写清理由 ✓ —— 这条纪律**没变** ✓（不假装能用 ✗）。
+ *   ★ 改前是无条件置灰 ✓（那时通道确实没接通 ✓）；现在"接通"是**探出来的** ✓
+ *     （`app.js` 探一次 ⇒ `setApprovalChannel` ✓），不是"我们觉得应该通了"✗。
+ *
+ * ★ 按下去之后 ✓：① 先把这张卡的按钮全置灰（同一次审批不许提交两次 ✓）；
+ *   ② 把宿主回话**原样说出来** ✓ —— `ok:false` 的意思是"这一下没落到任何在等的请求上"
+ *   （重复点 / 已经超时 / id 不对 ✓）⇒ **必须说出来** ✓，不许显示成"已处理" ✗。
  */
-function approvalCard(view) {
+function approvalCard(view, context) {
   const card = document.createElement('div')
   card.className = 'approval' + (view.decided ? ' approval-decided' : '')
+  /** ★ 这张卡对应哪条请求 ✓（纯 ASCII 属性名 ✓ —— 验收与排障都要按它找 ✓）。 */
+  if (view.requestId.length > 0) card.setAttribute('data-request', view.requestId)
 
   const head = document.createElement('div')
   head.className = 'approval-head'
@@ -497,7 +526,13 @@ function approvalCard(view) {
     card.appendChild(detail)
   }
 
-  if (!view.decided) {
+  const state = approvalActionState({
+    decided: view.decided,
+    channelConnected: context !== null && context !== undefined && context.channelConnected === true,
+    sending: false,
+  })
+
+  if (state.showActions) {
     const actions = document.createElement('div')
     actions.className = 'approval-actions'
     if (view.options.length > 0) {
@@ -505,21 +540,27 @@ function approvalCard(view) {
         const button = document.createElement('button')
         button.type = 'button'
         button.className = 'approval-option'
+        button.setAttribute('data-decision', option.id)
         button.textContent = option.label
-        button.disabled = true
+        button.disabled = state.disabled
+        button.addEventListener('click', () => {
+          void answerApproval(card, view, option, context)
+        })
         actions.appendChild(button)
       }
     } else {
       const note = document.createElement('div')
       note.className = 'dim small'
-      note.textContent = '这条审批的选项没能解析出来（原文在下面）—— 先不给你能按的按钮'
+      note.textContent = '这一条不是 DSH 的审批请求（认不出该给什么按钮）—— 原文在下面'
       actions.appendChild(note)
     }
     card.appendChild(actions)
-    const why = document.createElement('div')
-    why.className = 'approval-why'
-    why.textContent = '裁决通道还没接通（正在真机上验），所以这里的按钮先置灰'
-    card.appendChild(why)
+    if (state.why.length > 0) {
+      const why = document.createElement('div')
+      why.className = 'approval-why'
+      why.textContent = state.why
+      card.appendChild(why)
+    }
   }
 
   if (view.raw.length > 0) {
@@ -529,6 +570,38 @@ function approvalCard(view) {
     card.appendChild(raw)
   }
   return card
+}
+
+/**
+ * 手机点了审批上的一颗按钮 ✓。
+ *
+ * ★ 失败**必须说出来** ✗：**一个安静的按钮比一个置灰的按钮更坏** ✓
+ *   （置灰至少是诚实的 ✓；"按下去什么都没发生"会让人以为已经批准了 ✓）。
+ */
+function answerApproval(card, view, option, context) {
+  const buttons = card.querySelectorAll('.approval-option')
+  for (const button of buttons) button.disabled = true
+  const status = document.createElement('div')
+  status.className = 'approval-why'
+  status.textContent = '正在提交…'
+  card.appendChild(status)
+  const answer = context !== null && typeof context === 'object' ? context.answer : undefined
+  if (typeof answer !== 'function') {
+    status.textContent = '这一页没有接上裁决通道（按钮本不该能按）'
+    return Promise.resolve()
+  }
+  return Promise.resolve()
+    .then(() => answer(view.requestId, option.id))
+    .then((result) => {
+      const ok = result !== null && typeof result === 'object' && result.ok === true
+      const outcome = result !== null && typeof result === 'object' && typeof result.outcome === 'string' ? result.outcome : ''
+      status.textContent = ok
+        ? '已提交：' + (outcome.length > 0 ? outcome : option.id)
+        : '这一下没落到任何在等的审批上（可能已经处理过或已超时）'
+    })
+    .catch((error) => {
+      status.textContent = '没提交成功：' + (error instanceof Error ? error.message : String(error))
+    })
 }
 
 /**
@@ -899,6 +972,94 @@ export function mountChat(options) {
   let pendingSwitch = false
   /** 切换之后是否已经收到过一趟回应 ✓（用来判"该不该把旧内容换掉"✓）。 */
   let sawResponseSinceSwitch = false
+  /**
+   * ★★ 裁决通道**探测到**的状态 ✓（默认 `false` ⇒ 按钮置灰 ✓ —— 不假装能用 ✗）。
+   *   由 `app.js` 探一次之后喂进来 ✓（`setApprovalChannel` ✓）；
+   *   ★ 探测结果可能比卡片**晚到** ✓ ⇒ 变了必须把已经画出来的卡**就地重画** ✓（见下 ✓）。
+   */
+  let approvalChannelConnected = false
+  /**
+   * ★ 那本账之一：`requestId ⇒ 那条 approval/decided` ✓。
+   *   ★ 为什么非得有它 ✗：裁决事件可能比那张卡**晚到** ✓（页面是分批轮询的 ✓），
+   *     而画出来的卡不会自己变 ✓ ⇒ 缺了它就会出现"这条已经处理过了、按钮还在"✓
+   *     —— 这正是那条**硬编码 `null`** 造成的第二条断链 ✓
+   *     （`toApprovalViewModel(event, null)` ⇒ `decided` 永远是 `false` ✓）。
+   */
+  const decidedApprovals = new Map()
+  /** ★ 那本账之二：`requestId ⇒ {wrapper, event}` ✓（"屏幕上还真挂着这几张待办的卡"✓）。 */
+  const drawnApprovals = new Map()
+
+  /** 画一张审批卡要的上下文 ✓（**每次现取** ✓ —— 缓存它就是"状态变了卡不变"那类 bug ✓）。 */
+  const approvalContext = () => ({
+    channelConnected: approvalChannelConnected && typeof options.answerApproval === 'function',
+    decidedFor: (event) => {
+      const id = approvalIdOf(event)
+      return id.length > 0 ? decidedApprovals.get(id) : undefined
+    },
+    answer: options.answerApproval,
+  })
+
+  /** 这一批里的 `approval/decided` 入账 ✓（返回**这一批新增**的那些 ✓）。 */
+  const collectDecided = (events) => {
+    const fresh = new Map()
+    for (const event of Array.isArray(events) ? events : []) {
+      const type = event !== null && typeof event === 'object' ? String(event.type || '') : ''
+      if (type !== 'approval/decided') continue
+      const id = approvalIdOf(event)
+      if (id.length === 0) continue
+      decidedApprovals.set(id, event)
+      fresh.set(id, event)
+    }
+    return fresh
+  }
+
+  /** 就地重画一张已经画出来的审批卡 ✓（裁决到了 / 通道状态变了 ✓）。 */
+  const redrawApproval = (wrapper, event, decided) => {
+    if (wrapper === null || wrapper === undefined || typeof wrapper.querySelector !== 'function') return
+    const existing = wrapper.querySelector('.approval')
+    if (existing === null || existing === undefined) return
+    existing.replaceWith(approvalCard(toApprovalViewModel(event, decided === undefined ? null : decided), approvalContext()))
+  }
+
+  /** 裁决到了 ⇒ 把**屏幕上那几张待办的卡**就地改成"已处理"✓（摘按钮 ✓，不必等重画 ✗）。 */
+  const settleDrawnApprovals = (fresh) => {
+    for (const [id, decided] of fresh) {
+      const drawn = drawnApprovals.get(id)
+      if (drawn === undefined) continue
+      drawnApprovals.delete(id)
+      redrawApproval(drawn.wrapper, drawn.event, decided)
+    }
+  }
+
+  /**
+   * 把**刚刚画出来**的审批卡登记进账 ✓（只登记还没登记的 ✓）。
+   * ★ 用 `data-request` 从 DOM 里认 ✓，而不是让 `renderEvent` 往回调里写 ✗ ——
+   *   画卡那条路是纯函数 ✓（`appendEvents`/`renderEvent` 不碰页面状态 ✓）。
+   */
+  const registerDrawnApprovals = (events) => {
+    if (typeof list.querySelectorAll !== 'function') return
+    for (const card of list.querySelectorAll('.approval[data-request]')) {
+      const id = String(card.getAttribute('data-request') || '')
+      if (id.length === 0 || drawnApprovals.has(id)) continue
+      const asked = (Array.isArray(events) ? events : []).filter((event) => approvalIdOf(event) === id)[0]
+      if (asked === undefined) continue
+      const wrapper = typeof card.closest === 'function' ? card.closest('.ev') : card.parentElement
+      if (wrapper !== null && wrapper !== undefined) drawnApprovals.set(id, { wrapper, event: asked })
+    }
+  }
+
+  /**
+   * 通道状态变了 ⇒ **已经画出来的卡也要跟着变** ✓（否则"探测晚到"就白探了 ✗：
+   * 卡片会永远停在置灰 ✓ —— 而那看起来完全像"功能没做"✓）。
+   */
+  const setApprovalChannel = (connected) => {
+    const next = connected === true
+    if (next === approvalChannelConnected) return
+    approvalChannelConnected = next
+    for (const [id, drawn] of [...drawnApprovals]) {
+      redrawApproval(drawn.wrapper, drawn.event, decidedApprovals.get(id))
+    }
+  }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
   /** ★ 由下面赋值（输入区那一段）—— `paint` 里会调它 ✓。
@@ -1062,6 +1223,12 @@ export function mountChat(options) {
       list.innerHTML = ''
       eventCount = 0
       pendingSwitch = false
+      /**
+       * ★ 那两本审批账**跟着清** ✓：它们记的是"屏幕上这几张卡"✓
+       *   （留着只会指向已经摘下来的 DOM 节点 ✓）。
+       */
+      decidedApprovals.clear()
+      drawnApprovals.clear()
       paintSessions()
     }
     if (Array.isArray(events) && events.length > 0) {
@@ -1070,7 +1237,17 @@ export function mountChat(options) {
       //   下一趟历史轮询**冲掉** ✓ —— 用户根本没看清就没了 ✓（与"字丢了"同一类伤害 ✓）。
       //   清空时机只有**用户的下一次动作**：再发一次 ✓ / 点刷新 ✓。
       eventCount += events.length
-      appendEvents(list, events)
+      /**
+       * ★★ 次序：**先记账、再画卡、最后就地摘按钮** ✗ ——
+       *   ① 这一批里的 `approval/decided` 先入账 ✓（同一批里 asked 也在时，
+       *      画卡那一步才查得到"它已经处理过了"✓）；
+       *   ② 画 ✓（`appendEvents` 内部的 `decidedFor` 读的就是那本账 ✓）；
+       *   ③ 裁决比卡晚到的那种 ⇒ 把**已经画出来**的卡就地改成"已处理"✓。
+       */
+      const freshDecided = collectDecided(events)
+      appendEvents(list, events, approvalContext())
+      registerDrawnApprovals(events)
+      settleDrawnApprovals(freshDecided)
     }
     loading = false
     paint()
@@ -1186,7 +1363,12 @@ export function mountChat(options) {
     drafts: () => ({ ...drafts }),
     /** 切换是否还等着替换 ✓。 */
     isSwitching: () => pendingSwitch,
-    appendEvents: (events) => appendEvents(list, events),
+    appendEvents: (events) => appendEvents(list, events, approvalContext()),
+    /**
+     * ★★ 裁决通道**探测结果**从外面喂进来 ✓（`app.js` 探一次 ✓）——
+     *   探到接通 ⇒ 卡片上那两颗按钮才可点 ✓；探不到 ⇒ 一直置灰 ✓（不假装能用 ✗）。
+     */
+    setApprovalChannel,
     setConnection: (next) => {
       connection = next === 'offline' ? 'offline' : next === 'online' ? 'online' : 'unknown'
       paint()
