@@ -10,12 +10,17 @@
     --line: #E2E5EA; --line-soft: #EDEFF3;
     --rail: #14161A; --accent: #2E9E6B; --code-bg: #F6F7F9;
     --danger: #B3261E; --danger-line: #E8C4C1;
+    /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
+    --send-bg: #679EFE; --send-ink: #FFFFFF;
   }
   :root {
     --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
     --ink: #14161A; --ink2: #5B6270; --ink3: #8D95A3;
     --line: #E2E5EA; --line-soft: #EDEFF3;
     --rail: #14161A; --accent: #2E9E6B; --code-bg: #F6F7F9;
+    --danger: #B3261E; --danger-line: #E8C4C1;
+    /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
+    --send-bg: #679EFE; --send-ink: #FFFFFF;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -24,12 +29,16 @@
       --line: #262A31; --line-soft: #21252B;
       --rail: #E9EBEF; --accent: #4FBF7F; --code-bg: #101317;
       --danger: #F2B8B5; --danger-line: #5A2A28;
+      --send-bg: #679EFE; --send-ink: #FFFFFF;
     }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; }
   body {
-    width: 400px; height: 869px; overflow: hidden; background: var(--bg); color: var(--ink);
+    /* ★ 铺满视口 ✓ —— 原来这里写死 `width: 400px; height: 869px` ✗（那是开发预览壳的窗口尺寸 ✓）：
+         它会让真机上"占满宽度"这条**依赖视口**的要求失效 ✗（432px 的屏上也只画 400px ✓，
+         只剩右边一条白边 ✓），也让键盘让位量算出来对不上 ✓。 */
+    width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink);
     font-family: -apple-system, "PingFang SC", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 15px; line-height: 1.5; font-variant-numeric: tabular-nums;
     -webkit-font-smoothing: antialiased;
@@ -94,17 +103,112 @@
   .ev-step::before, .ev-step::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   .dim { color: var(--ink3); }
   .small { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-  .composer { flex: none; display: flex; gap: 8px; align-items: flex-end; padding: 10px 14px 6px; border-top: 1px solid var(--line); background: var(--surface); }
-  .composer textarea {
-    flex: 1; min-height: 38px; max-height: 120px; resize: none; padding: 9px 11px;
-    border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--ink);
-    font: inherit; font-size: 14px;
+  /**
+   * ───────────────────────── 输入栏（1:1 复刻 DSH 手机端）─────────────────────────
+   *
+   * ## 几何是从**真图**上量的，不是照描述猜的
+   *
+   * 参照读数（无头 Chrome 打在 `/mobile/app` 上、412×915、dpr2 —— 见报告第 1 节 ✓）：
+   *   · 大圆角卡片 `border-radius: 22px` ✓、左右各 14px 边距 ✓；
+   *   · 左下两颗小圆按钮 **28×28**（`border-radius: 999px` ✓）；
+   *   · 右下那颗发送键 **34×34**（`border-radius: 999px` ✓，浅蓝底 + 白箭头 ✓）。
+   *
+   * ## ★★ 键盘：只用壳那一份，绝不自己再算一遍 ✗
+   *
+   * `--dshm-keyboard-pad` 由 `boot.js` 的 `syncKeyboardPad()` 写 ✓（`:1647-1748` ✓）——
+   * 它的语义是"**真正该让位多少**"✓：`adjustResize` 的壳已经把视口变矮过一次 ⇒ 它是 0 ✓，
+   * 这时**再让位就是算两遍** ✗（当年那个真回归：输入栏被顶到键盘上方 ~304px ✗）。
+   * ⇒ 这里写 `var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px))` ✓：
+   *   需要修正时用修正值 ✓、不需要时（变量不存在 ✓）自动退回壳报的 IME 高度 ✓。
+   * ★ **绝不用 `visualViewport` 自己算** ✗ —— 那是"一个概念两个含义"✗，正是被删掉的旧写法 ✓。
+   *
+   * ## 安全区：`boot.js:68` 那条本仓口径
+   *
+   * `max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px))` ✓
+   * （`--dshm-gesture-bottom` 由壳 + `applyShellInsets` 一起写 ✓，见 `boot.js:1797` ✓）。
+   */
+  .composer {
+    flex: none; display: flex; flex-direction: column; gap: 8px;
+    /* ★ 下留白**只留 8px 缝隙** ✓ —— 安全区由下面那条 `.homebar` 承担 ✓
+         （两处都算安全区就是"一个概念两个含义"✗，而且会多出一条空带 ✓）。 */
+    padding: 8px 14px 8px;
+    background: var(--bg);
   }
-  .composer button {
-    height: 38px; padding: 0 15px; border: 0; border-radius: 12px;
-    background: var(--rail); color: var(--bg); font: inherit; font-size: 14px; font-weight: 600;
+  /**
+   * ★★ 键盘弹起时**整块跟着上移** ✓ —— 让位恰好等于 `--dshm-keyboard-pad`（只算一次 ✓）。
+   *
+   * ## 为什么是"缩 body"而不是"给输入栏加下内边距"（★ 实测抓到的第一个坑）
+   *
+   * 第一版写的是 `.composer { padding-bottom: calc(8px + var(--dshm-keyboard-pad, …)) }` ✓ ——
+   * 无头 Chrome 实测（412×915、假壳报 IME=300 ✓）：内边距**确实**从 30px 变成了 308px ✓，
+   * 里面那张卡片也被抬起来了一截（底边 863 → 607 ✓）—— 而**输入栏盒子的底边从 893 变成 915** ✗
+   * （被钉在视口底边 ✓，而键盘上沿在 615 ✓）⇒ 读数上就是"让位没生效" ✓。
+   * 真因是**整个 `.app` 溢出了 body** ✓：`padding-bottom` 只是在盒子**内部**留白，
+   * flex 的 `main` 不会跟着缩 ✗ ⇒ 总高 915 + 308 > 915 ⇒ 盒子从顶端往下溢出，
+   * 它的**下边缘被顶到视口底边** ✓。
+   *
+   * ⇒ 改成**把 body 的高度减掉让位量** ✓ —— 这与 `adjustResize` 的壳做的事**一模一样** ✓
+   * （WebView 自己变矮 ✓），于是：
+   *   · `adjustNothing` 那一类壳（视口仍是 915 ✓）：body = 915 − 300 = 615 ✓
+   *     ⇒ 输入栏底边正好落在 615，就是键盘上沿 ✓；
+   *   · `adjustResize` 那一类壳（视口已经矮成 615 ✓）：`--dshm-keyboard-pad` 是 **0** ✓
+   *     ⇒ body 仍是 615 ✓ ⇒ **不会算两遍** ✓（这正是当年那个真回归 ✗）。
+   * ★ 高度这条**必须**写在能拿到"父高度"的元素上 ✓（`html` 有确定的 100% ✓，
+   *   `body` 的 `height: 100%` 才有基准 ✓ —— 所以 `html, body { height: 100% }` 那一条不能删 ✗）。
+   */
+  html[data-dshm-kb="1"] body {
+    height: calc(100% - var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px)));
   }
-  .homebar { height: 22px; flex: none; background: var(--surface); }
+  .composer-card {
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 22px;
+    padding: 8px 12px 8px;
+  }
+  #input {
+    display: block; width: 100%; min-height: 20px; max-height: 132px; resize: none;
+    padding: 6px 2px 0; margin: 0; border: 0; background: transparent; color: var(--ink);
+    font: inherit; font-size: 15px; line-height: 20px;
+  }
+  #input::placeholder { color: var(--ink3); }
+  #input:disabled { opacity: .6; }
+  #input:focus { outline: none; }
+  .composer-row { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+  .composer-tools { display: flex; align-items: center; gap: 8px; }
+  .composer-grow { flex: 1; }
+  /* ★ 两颗小圆按钮（**只做长相** ✓ —— 点了什么都不做，见报告第 4 节 ✓） */
+  .tool-btn {
+    width: 28px; height: 28px; flex: none; padding: 0; border: 0; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--tint); color: var(--ink2);
+  }
+  .tool-btn svg { width: 17px; height: 17px; display: block; }
+  .tool-btn:active { background: var(--line-soft); }
+  /* ★ 大圆发送键：换成圆形箭头 ✓（原来那颗方块文字「发送」✗ 已换掉 ✓） */
+  .send-btn {
+    position: relative; width: 34px; height: 34px; flex: none; padding: 0; border: 0; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--send-bg); color: var(--send-ink);
+    font: inherit; font-size: 12px; font-weight: 650;
+  }
+  .send-btn .send-icon { width: 19px; height: 19px; display: block; }
+  .send-btn .send-label { display: none; }
+  .send-btn:disabled { opacity: .45; }
+  /* 发送中 ⇒ 图标收起来、只留一句字（**形状不变** ✓，见报告第 3 节的断言口径 ✓） */
+  .composer[data-sending="1"] .send-icon { display: none; }
+  .composer[data-sending="1"] .send-label { display: block; }
+  /* ★ 输入框**正下方**那一行状态条：位置与字号照参照物 ✓，内容只写真读数 ✓ */
+  .stats-strip {
+    flex: none; padding: 0 20px; font-size: 11px; line-height: 16px;
+    color: var(--ink3); font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* ★ 安全区：**不再写死 22px** ✗ —— 用 boot.js:68 那条口径 ✓（键盘开着时它已经让过位了 ✓） */
+  .homebar {
+    flex: none; height: max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px));
+    background: var(--bg);
+  }
+  /* ★ 键盘弹起 ⇒ 这一条被键盘完全盖住 ⇒ 收掉它，免得它把输入栏顶得更高 ✓ */
+  html[data-dshm-kb="1"] .homebar { display: none; }
 
 /* ── 审批卡片 ✓（按钮一律置灰 —— 裁决通道还没接通，不假装能用 ✗）── */
 .approval { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }

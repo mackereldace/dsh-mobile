@@ -72,7 +72,7 @@ const escapeHtml = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').r
 const REAL_REASONING_HEAD = REAL_REASONING.slice(0, 24)
 
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 30
+const EXPECTED_MIN_CHECKS = 42
 
 let checks = 0
 let failed = 0
@@ -232,6 +232,49 @@ const FAKE_BOOT = `
       }
       if (phase2 !== 'create') {
         setTimeout(function () { document.documentElement.setAttribute('data-e2e', 'sent') }, 300)
+        /*
+         * ★★ 输入栏的**几何读数**（本单新增 ✓）—— dump-dom 只给 DOM，
+         *   所以把 getBoundingClientRect / getComputedStyle 的结果
+         *   序列化成一个属性挂在 documentElement 上 ✓（与 data-e2e-draft 同一套做法 ✓）。
+         *   ★ 量的是**关系**（相对视口宽 / 相对卡片）✗，不是写死的像素 ✓ ——
+         *     这个夹具跑在 Chrome 默认窗口宽上，写死像素会假红 ✓。
+         */
+        setTimeout(function () {
+          try {
+            var card = document.querySelector('.composer-card')
+            var tools = document.querySelectorAll('.tool-btn')
+            var send = document.querySelector('.send-btn')
+            var strip = document.querySelector('.stats-strip')
+            var home = document.querySelector('.homebar')
+            var composer = document.getElementById('composer')
+            var input = document.getElementById('input')
+            var box = function (e) {
+              if (e === null || e === undefined) return null
+              var r = e.getBoundingClientRect()
+              return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), bottom: Math.round(r.bottom), right: Math.round(r.right) }
+            }
+            var radiusOf = function (e) { return e === null || e === undefined ? null : getComputedStyle(e).borderRadius }
+            var g = {
+              vw: innerWidth, vh: innerHeight,
+              card: box(card), cardRadius: radiusOf(card),
+              toolCount: tools.length,
+              tools: [].slice.call(tools).map(function (b) { return box(b) }),
+              toolRadius: tools.length > 0 ? radiusOf(tools[0]) : null,
+              toolLabels: [].slice.call(tools).map(function (b) { return b.getAttribute('aria-label') }),
+              send: box(send), sendRadius: radiusOf(send),
+              sendIcon: box(document.querySelector('.send-btn .send-icon')),
+              strip: box(strip), stripFont: strip === null ? null : getComputedStyle(strip).fontSize,
+              stripText: strip === null ? null : strip.textContent,
+              home: box(home), homeHeight: home === null ? null : getComputedStyle(home).height,
+              composer: box(composer),
+              placeholder: input === null ? null : input.getAttribute('placeholder'),
+              sendLabel: (function () { var l = document.getElementById('send-label'); return l === null ? null : l.textContent })(),
+            }
+            document.documentElement.setAttribute('data-e2e-geometry', encodeURIComponent(JSON.stringify(g)))
+          } catch (error) {
+            document.documentElement.setAttribute('data-e2e-geometry-error', String((error && error.message) || error))
+          }
+        }, 320)
         return
       }
       // 会话列表可能还没到 ⇒ 等一拍再点开标题 ⇒ 再点「＋ 新会话」✓
@@ -442,6 +485,135 @@ try {
   check('★ 认不出的事件类型也画了出来（没有静默丢弃 ✓）', html.includes('someUnknownEvent'))
   check('★ 发出去的这条以用户气泡出现在页面上（走的是真实提交路径 ✓）', html.includes('这条是端到端检查发出去的'))
   check('发送之后输入框是空的（清空立刻 ✓）', !/id="input"[^>]*>这条是端到端检查发出去的</.test(html))
+
+  /**
+   * ─────────────── 输入栏：1:1 复刻 DSH 手机端（本单新增 ✓）───────────────
+   *
+   * ## 为什么把这些放在**这个脚本**里
+   *
+   * 这一块的几何是"输入栏长成什么样"那一半事实的**唯一**可判据点 ✓：
+   *   · 圆角 / 占满宽度 / 两颗小圆按钮的直径与位置 / 发送键是不是圆的 /
+   *     状态条在不在输入框正下方 / 安全区有没有被算两遍 ✓。
+   * ★ 只钉**几何与存在性** ✗ —— "好不好看"归用户看 ✓（本仓纪律：观感不进断言 ✓）。
+   * ★ 参照读数来自无头 Chrome 打在真 `/mobile/app` 上的实测（412×915、dpr2 ✓）：
+   *   卡片圆角 22px ✓、两颗小工具键 28×28 ✓（`border-radius:999px` ✓）、
+   *   发送键 34×34 ✓ 浅蓝 `rgb(103,158,254)` ✓ —— 见交付说明第 1 节 ✓。
+   *
+   * ★★ 两条**只许换口径、不许放松** ✗ 的地方写在各自那条断言旁边 ✓。
+   */
+  const geometryError = (html.match(/data-e2e-geometry-error="([^"]*)"/) ?? [])[1] ?? ''
+  const geometryRaw = decodeURIComponent((html.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
+  let g = null
+  try { g = geometryRaw.length > 0 ? JSON.parse(geometryRaw) : null } catch (error) { g = null }
+  check('夹具自检：输入栏几何读数拿到了（本来没有的话下面全是空转 ✓）', g !== null && geometryError === '', `夹具错误=${geometryError || '(无)'}`)
+  const gv = g ?? {}
+  const card = gv.card ?? null
+  const tools = Array.isArray(gv.tools) ? gv.tools : []
+  const send = gv.send ?? null
+  const stripBox = gv.strip ?? null
+  const homeBox = gv.home ?? null
+  const composerBox = gv.composer ?? null
+
+  /**
+   * ① 大圆角、占满宽度、两边留**统一**边距（= 视口宽 − 2×14 ✓）。
+   *    ★ 边距那条用关系式写 ✗（这个夹具跑在 Chrome 默认窗口宽上 ✓，写死像素会假红 ✓）。
+   */
+  check(
+    '★ 输入框：大圆角卡片（22px）+ 占满宽度（两边各留 14px）',
+    gv.cardRadius === '22px' && card !== null && Math.abs(card.x - 14) <= 1 && Math.abs(card.w - (gv.vw - 28)) <= 2,
+    `圆角=${gv.cardRadius}｜卡片 x=${card?.x} w=${card?.w}｜视口 ${gv.vw}`,
+  )
+  /** ② 占位语**照抄真图**（文案一个字都不许改 ✗）。 */
+  check(
+    '★ 输入框占位语照真图（发消息或创建任务，/ 调用指令，@ 文件或对话）',
+    gv.placeholder === '发消息或创建任务，/ 调用指令，@ 文件或对话',
+    `读到 ${JSON.stringify(gv.placeholder)}`,
+  )
+  /** ③ 左下**两颗**小圆按钮：都在卡片左半边、直径相等且 = 28、全圆。 */
+  check(
+    '★ 左下两颗小圆按钮：数量 2、全圆、直径 = 卡片高的 28×28、都在卡片左半边',
+    gv.toolCount === 2 && gv.toolRadius === '999px' && tools.length === 2 &&
+      tools.every((b) => b.w === tools[0].w && b.h === tools[0].h && b.w >= 24 && b.w <= 32) &&
+      tools.every((b) => b.x < (card?.x ?? 0) + (card?.w ?? 0) / 2),
+    `数量=${gv.toolCount}｜圆角=${gv.toolRadius}｜尺寸=${tools.map((b) => b.w + '×' + b.h).join('、')}`,
+  )
+  /** ④ 两颗按钮都要**念得出名字**（只做长相，但名字不能没有 ✓）。 */
+  check(
+    '★ 两颗小圆按钮各自有可念的名字（命令行 / 添加附件）',
+    Array.isArray(gv.toolLabels) && gv.toolLabels[0] === '命令行' && gv.toolLabels[1] === '添加附件',
+    `读到 ${JSON.stringify(gv.toolLabels)}`,
+  )
+  /**
+   * ⑤ 右侧大圆发送键：**圆形**（不是方块 ✗）。
+   *    ★★ 口径不许放松 ✗：判据是"宽高相等且 border-radius 是 999px" ✓ ——
+   *      把它改回方块（`border-radius:12px`、宽 62 高 38 ✓）时这一条**必须红** ✓（已做变异验证 ✓）。
+   */
+  check(
+    '★ 发送键：圆形（宽高相等、border-radius 999px）+ 贴着卡片右内缘',
+    gv.sendRadius === '999px' && send !== null && Math.abs(send.w - send.h) <= 1 && send.w >= 30 && send.w <= 40 &&
+      (card === null || send.right <= card.right) && (card === null || send.right >= card.right - 20),
+    `圆角=${gv.sendRadius}｜尺寸=${send?.w}×${send?.h}｜send.right=${send?.right} vs card.right=${card?.right}`,
+  )
+  /** ⑥ 发送键里是**箭头**（原来是方块文字「发送」✗）。 */
+  check(
+    '★ 发送键里是箭头（svg 真的有尺寸），平时不显示那行字',
+    gv.sendIcon !== null && gv.sendIcon.w > 8 && gv.sendIcon.h > 8 && (gv.sendLabel === '' || gv.sendLabel === null),
+    `图标=${gv.sendIcon?.w}×${gv.sendIcon?.h}｜那行字=${JSON.stringify(gv.sendLabel)}`,
+  )
+  /** ⑦ 状态条：在**输入框正下方**（卡片底之下 ✓、输入栏底之上 ✓）、字号 11px。 */
+  check(
+    '★ 状态条在输入框正下方（卡片底之下、输入栏底之上）、字号 11px',
+    gv.stripFont === '11px' && stripBox !== null && card !== null && composerBox !== null &&
+      stripBox.y >= card.bottom - 1 && stripBox.bottom <= composerBox.bottom + 1,
+    `字号=${gv.stripFont}｜strip.y=${stripBox?.y} card.bottom=${card?.bottom} composer.bottom=${composerBox?.bottom}`,
+  )
+  /**
+   * ⑧ ★★ **不编数字** ✗。
+   *    ★★ 这一条的**口径将来只许换、不许删** ✗：今天会话页拿不到
+   *       `sessionStats` / `tokenUsage` / `contextPressure` 三个投影 ✓
+   *       （`session/page` 的结果 schema 只有 records + hasMore ✓）；
+   *       等桥把那三个投影接出来（另一单 ✓），这里要**换成**
+   *       "百分比 = 宿主给的 used/window"✓ —— 不是把它松掉 ✓。
+   */
+  check(
+    '★★ 状态条写的是真读数：非空、且**没有编出来的**上下文百分比（今天没有数据源）',
+    typeof gv.stripText === 'string' && gv.stripText.length > 0 && !gv.stripText.includes('%'),
+    `读到 ${JSON.stringify(gv.stripText)}`,
+  )
+  /**
+   * ⑨ 安全区**只算一次**（这是本项目花钱最多的一条 ✓）：
+   *    输入栏底边 + 安全区那条 = 视口底边 ✓ —— 两处都算安全区就会多出一条空带 ✓。
+   */
+  check(
+    '★ 安全区只算一次：输入栏底边 + 安全区（homebar）高 = 视口高',
+    homeBox !== null && composerBox !== null && homeBox.h > 0 &&
+      Math.abs(composerBox.bottom + homeBox.h - gv.vh) <= 1 &&
+      Math.abs(homeBox.bottom - gv.vh) <= 1,
+    `输入栏底=${composerBox?.bottom} homebar=${homeBox?.h} 视口高=${gv.vh}`,
+  )
+  /**
+   * ⑩ ★★ 键盘让位**只引壳那一个变量** ✗（源码口径 ✓）——
+   *    "自己再算一套 visualViewport" 正是当年删掉的旧写法 ✗，
+   *    它会让 `adjustResize` 的壳把让位算两遍 ✓（变异验证过 ✓）。
+   *    ★ 判据要**先去掉注释** ✗：这段 CSS 的注释里正好写着"绝不用 visualViewport"✓
+   *      （不去注释就是自己把自己判红 ✓）。
+   */
+  const cssNoComments = readFileSync(join(ASSETS, 'theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  check(
+    '★★ 键盘让位只用壳那份（var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px))），且**没有**自己算 visualViewport',
+    cssNoComments.includes('var(--dshm-keyboard-pad, var(--dshm-keyboard, 0px))') &&
+      !cssNoComments.includes('visualViewport') && !cssNoComments.includes('vv.height'),
+  )
+  /**
+   * ⑪ ★★ 安全区**不许写死** ✗（原来 `.homebar { height: 22px }` 就是写死的 ✓）——
+   *    要用 `max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px))` ✓
+   *    （`boot.js:68` 那条本仓口径 ✓）。
+   */
+  check(
+    '★★ 安全区不写死：homebar 高走 max(env(safe-area-inset-bottom,0px), var(--dshm-gesture-bottom,22px))',
+    cssNoComments.includes('max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px))') &&
+      !/\.homebar\s*\{[^}]*height:\s*22px/.test(cssNoComments),
+  )
 
   console.log('\n── 正向（第二趟 · 新建会话之后）：切到空会话，旧内容必须让位 ──')
   const after = await dumpDom(`${base}/mobile/chat?phase=create`, 'data-e2e="done"', 40_000)

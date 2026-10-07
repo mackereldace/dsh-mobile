@@ -665,6 +665,43 @@ export function sendFailureHint(message) {
 }
 
 /**
+ * 输入框**正下方那一行状态条**该写什么 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## ★★ 为什么这里**不写**「45% · 488 轮 2525 步 · 1062M tok」✗
+ *
+ * 用户给的参照物上就是这三个数 ✓，而**今天这条路拿不到它们** ✗ —— 查证过程：
+ *   · `session/page` 的结果 schema（`dsh-api-session-controller/lib/typert.host.js:558-580` ✓）
+ *     只有 `records` + `hasMore` ✗（`projections` 在**单条会话**级别，
+ *     不是这个按页端点给的东西）⇒ 桥 `normalizePage` 里那份 `values` 白名单
+ *     （`packages/host/src/dsh-chat-bridge.ts:398-418` ✓）在真机上读到的是**不存在的字段** ✓；
+ *   · 那三个数的真身是 DSH 的三个**会话投影** ✓：`sessionStats`（轮/步 ✓）+
+ *     `tokenUsage`（token 总数 ✓）+ `contextPressure`（`pressureTokens / contextWindow` = 那个百分比 ✓）
+ *     —— 定义分别见 `dsh-session-stats/lib/types/projection.js` 与
+ *     `dsh-token-meter/lib/types/usage-projection.js` ✓；
+ *   · 而**唯一**能读到投影的现成入口是 `session/projections` ✓ —— 桥已经在
+ *     `resolveHeadSeq` 里调过它（`dsh-chat-bridge.ts:246-252` ✓），但**没有把值转给页面** ✗。
+ *
+ * ⇒ 规矩是**留空比编好** ✓（用户原话）。所以这一行只写页面**真的量到**的两样：
+ *   「窗口内已读 N 条」+ 连接状态 ✓ —— 而且**说清它是窗口内的** ✗，
+ *   免得被误读成"整个会话的 N 条"✓（那是另一个数 ✓）。
+ *
+ * ★ 接真数的方案（要改桥，不在本单范围 ✓）见报告第 4 节 ✓。
+ */
+export function statsStripText(input) {
+  const events = input !== null && typeof input === 'object' && typeof input.eventCount === 'number' && input.eventCount > 0
+    ? Math.floor(input.eventCount)
+    : 0
+  const connection = input !== null && typeof input === 'object' ? input.connection : 'unknown'
+  const parts = []
+  // ★ 一段都没有时**不留空串**（空串会让这一条塌成 0 高 ✓ ⇒ 几何就量不到了 ✗）
+  parts.push(events > 0 ? '窗口内已读 ' + events + ' 条' : '还没读到内容')
+  if (connection === 'offline') parts.push('断线')
+  else if (connection === 'online') parts.push('在线')
+  else parts.push('连接中…')
+  return parts.join(' · ')
+}
+
+/**
  * 状态行**该显示哪一句** ✓（纯函数 ✓）。
  *
  * ★★ 优先级：**错误/断线 > 一次性提示 > 正常读数** ✗ ——
@@ -750,6 +787,8 @@ export function mountChat(options) {
   const status = root.querySelector('#status')
   const stateBox = root.querySelector('#state')
   const refresh = root.querySelector('#refresh')
+  /** ★ 输入框正下方那一行状态条（位置与样式先留出来 ✓ —— 内容见 `statsStripText` ✓）。 */
+  const statsStrip = root.querySelector('#stats-strip')
 
   // 这一页的**输入**（三样 ✓）—— 状态完全由它们算出来 ✓（不在渲染里各写一份判断 ✗）
   let eventCount = 0
@@ -789,6 +828,10 @@ export function mountChat(options) {
       normal: pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText,
     })
     if (status !== null && status !== undefined) status.textContent = line
+    // ★ 输入框正下方那一行：**只写真读数** ✓（口径与"为什么不是那三个数"见 `statsStripText` ✓）
+    if (statsStrip !== null && statsStrip !== undefined) {
+      statsStrip.textContent = statsStripText({ eventCount, connection })
+    }
     if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true
@@ -968,13 +1011,19 @@ export function mountChat(options) {
 
   // ── 输入区：清空要立刻（手感 ✓），但失败**把字放回去**（见 canSend/sendBegin/sendSettled ✓）──
   let sending = false
+  /**
+   * ★ 发送键 = `form` 里那颗 `button` ✓ —— **取法与改前逐字相同** ✗
+   *   （原来那颗是方块文字「发送」✓，现在换成了圆形箭头 ✓，但那**不影响**这条取值 ✓）。
+   */
   const sendButton = form === null || form === undefined ? null : form.querySelector('button')
 
   const growInput = () => {
     if (input === null || input === undefined || input.style === undefined) return
     try {
       input.style.height = 'auto'
-      input.style.height = composerHeight(input.scrollHeight, 38, 132) + 'px'
+      // ★ 上下限跟着新几何走 ✓（原来是 38/132 ✓，那是旧方块输入框的高度 ✓）：
+      //   单行 min-height 20px（CSS 里那一条 ✓）、长到 132px 就自己滚 ✓ —— 不许把消息区挤没 ✗
+      input.style.height = composerHeight(input.scrollHeight, 20, 132) + 'px'
     } catch (error) {
       void error
     }
@@ -984,7 +1033,18 @@ export function mountChat(options) {
     if (input !== null && input !== undefined) input.disabled = sending
     if (sendButton !== null && sendButton !== undefined) {
       sendButton.disabled = sending || !canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection })
-      sendButton.textContent = sending ? '发送中…' : '发送'
+      /**
+       * ★★ 这里原来写的是 `sendButton.textContent = sending ? '发送中…' : '发送'` ✗。
+       *   新键子的**形状**是圆形箭头 ✓ ⇒ 那行字不能再当"按钮内容"写了 ✓（会把箭头抹掉 ✗）：
+       *   · 箭头与那行字**同时**在标记里 ✓（`page.html` ✓）；
+       *   · 显隐由 CSS 认这个 `data-sending` 标记 ✓（只显隐、不改内容 ✗）；
+       *   · 那行字写在 `#send-label` 里 ✓ —— 只有发送中那一下才看得见 ✓。
+       */
+      const label = sendButton.querySelector('#send-label')
+      if (label !== null && label !== undefined) label.textContent = sending ? '发送中…' : ''
+    }
+    if (form !== null && form !== undefined && form.dataset !== undefined) {
+      form.dataset.sending = sending ? '1' : '0'
     }
   }
 
