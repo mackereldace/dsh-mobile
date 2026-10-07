@@ -52,13 +52,29 @@ export function writeWorkspaceTable(dshHome, table) {
   writeFileSync(join(dshHome, 'storages', 'workspace.json'), JSON.stringify(table, null, 2))
 }
 
+/**
+ * 会话日志的文件名按**新到旧**排 ✓ —— 取第一个存在的那个。
+ *
+ * ★ 为什么不能只认 v3 ✗：DSH 的 `dsh-session-format-catalog` 一旦把当前格式推到
+ *   v4，新写出来的会话目录里就**只有** `session.v4.jsonl.zstd` ✓（本机实测：
+ *   最新的一批会话就是只有 v4 ✓）。只认 v3 的夹具于是把它们**静默跳过** ✗ ——
+ *   截图照样出、断言照样跑，只是"没有会话" ✓✓（与"假判据/静默"同一族 ✗）。
+ * ★ 为什么 v4 优先而**不是**取二者之一：DSH 自己读日志时"选数值最高的那代" ✓
+ *   （`dsh-session-persistence-jsonl` 的 README：*runtime 操作选择数值最高的规范
+ *   generation* ✓），两边必须一致；而且 v3、v4 同时存在时，v4 才是当前在用的那份 ✓。
+ * ★ v3 绝不能丢 ✗：老会话只有 v3 ✓（实测本机"只有 v3"的会话比"只有 v4"的还多 ✓）。
+ */
+export const SESSION_LOG_NAMES = ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd']
+
 /** 在 `~/.dsh/sessions/<workspace-slug>/session-<id>/` 里定位一个会话目录（只读）。 */
 export function findSessionDir(sourceRoot, sessionId) {
   if (!existsSync(sourceRoot)) return undefined
   for (const slug of readdirSync(sourceRoot)) {
     const dir = join(sourceRoot, slug, `session-${bareSessionId(sessionId)}`)
-    const log = join(dir, 'session.v3.jsonl.zstd')
-    if (existsSync(log)) return { dir, log, slug }
+    for (const name of SESSION_LOG_NAMES) {
+      const log = join(dir, name)
+      if (existsSync(log)) return { dir, log, slug }
+    }
   }
   return undefined
 }
