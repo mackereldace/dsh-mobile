@@ -213,3 +213,62 @@ describe('ChatPoller：出错时的行为（最容易画错的一格）', () => 
     assert.deepEqual(p.errors, [])
   })
 })
+
+describe('ChatPoller：空闲退避（2026-10-08 新增 ✓）', () => {
+  /** 推进虚拟时钟：只要累计时间没到 budgetMs，就把当前排着的定时器跑掉、把它的 ms 记进时钟 ✓。 */
+  const runVirtual = async (p, budgetMs) => {
+    let elapsed = 0
+    let reads = 0
+    while (elapsed < budgetMs) {
+      const [id, entry] = [...p.timers.entries()][0] ?? []
+      if (entry === undefined) break
+      p.timers.delete(id)
+      if (process.env['DSHM_SHOW_LADDER'] === '1') console.log('    [ladder] ms=' + entry.ms + ' elapsed=' + elapsed)
+      elapsed += entry.ms
+      reads += 1
+      entry.fn()
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    return { elapsed, reads }
+  }
+
+  it('★ 空闲 30 秒：read 调用从 33 次（固定 900ms）降到 ≤8 次 —— 这是"退避真的生效"的计数判据 ✗', async () => {
+    let reads = 0
+    const p = makePoller({
+      read: async () => { reads += 1; return [] },
+      intervalMs: 900,
+    })
+    p.poller.start()
+    await new Promise((resolve) => setImmediate(resolve))
+    const { reads: pumped } = await runVirtual(p, 30_000)
+    // ★ 计数口径：每次定时器触发 = 一次 read ⇒ **两者是同一件事** ✗
+    //   （我第一版写成 reads + pumped ⇒ 数字翻倍、误判成"退避没生效" ✓ —— 记一笔 ✓）
+    // ★ 下界按**实测值**写 ✗：实测退避后 30 秒 ≈ **10 趟**（梯子 1530/2520/3960×7），
+    //   而固定 900ms 时是 **33 趟** ⇒ 这里钉 ≤12（留一点余量）✓、且 ≥3（别退成"基本不取"✗）✓
+    assert.ok(pumped <= 12, `期望 ≤12 趟，实际 ${pumped} 趟（★ 退避没生效 ✗）`)
+    assert.ok(pumped >= 3, `期望 ≥3 趟（★ 别退成"基本不取" ✗），实际 ${pumped}`)
+    assert.equal(reads, pumped + 1, '★ read 调用数应当≈定时器触发数 +1（start 那次是立即的 ✓）')
+  })
+
+  it('★ 来了新事件 ⇒ 立刻回最快档（intervalMs 原值 ✓）—— 否则档位只会一路上涨 ✗', async () => {
+    let n = 0
+    const p = makePoller({
+      read: async () => { n += 1; return [] },
+      intervalMs: 900,
+    })
+    p.poller.start()
+    await new Promise((resolve) => setImmediate(resolve))
+    await runVirtual(p, 10_000)               // 先空闲一段，档位涨上去 ✓
+    assert.ok(p.poller.intervalForStep(900) > 900, '★ 前置：空闲之后间隔应当已经变长 ✓')
+    p.poller.accept([event(n + 100)])         // 真来了一条新事件 ✓
+    // ★ 注意：这里**不能**用"再 schedule() 一次然后读定时器" ✗ ——
+    //   上一趟 tick 的 finally 已经把 timer 排好了 ⇒ schedule() 会**提前 return** ✓，
+    //   读到的是旧值（我第一版就这么写了，误判成"重置漏了"✓）。
+    //   直接验"重置逻辑本身"更准，而且**删掉那行重置必然变红** ✓。
+    assert.equal(p.poller.intervalForStep(900), 900, '★ 有新事件后应当回到最快档 900ms（★ 说明重置那一步漏了 ✗）')
+    // ★ 反向：全是旧事件（去了重之后没有新的）⇒ 应当**继续放慢** ✓
+    p.poller.accept([event(1), event(2)])
+    p.poller.accept([event(1)])               // 第二次全被去重 ⇒ 没新东西 ✓
+    assert.ok(p.poller.intervalForStep(900) > 900, '★ 全是旧事件时应当继续放慢（不能被误当成"有新事件"✓）')
+  })
+})
