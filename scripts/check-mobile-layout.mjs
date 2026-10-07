@@ -853,7 +853,7 @@ if (fixtureTable === undefined) {
    *   它们是**真实入口**能不能出现的分水岭 ✓。
    *
    * 为什么 `copyWorkspaceSessions` 不够 ✗：它只复制**工作区表 `sessionIds` 里列出的**会话 ✓，
-   *   而子代理子会话**不在那张表里** ✓（它们靠 `session.v3.jsonl.zstd` 头部那两行
+   *   而子代理子会话**不在那张表里** ✓（它们靠会话日志（★ v4 优先、v3 保留 ✓）头部那两行
    *   `"origin":"subagent"` / `"parentSession":"session-…"` 归属到父会话 ✓）。
    *   少了它们 ⇒ 真实入口**一个都不会出现** ✗ ⇒ round 155/157 只能用"注入的同形元素"验 ✓
    *   —— 而**注入的那个形状与真机不一样** ✗✗（真机是
@@ -877,8 +877,12 @@ if (fixtureTable === undefined) {
         try { st = statSync(src) } catch { continue }
         if (!st.isDirectory()) continue
         if (existsSync(join(destDir, name))) continue
-        const log = join(src, 'session.v3.jsonl.zstd')
-        if (!existsSync(log)) continue
+        // ★ v4 优先、v3 保留（与 scripts/session-fixture.mjs 的 SESSION_LOG_NAMES 同一口径 ✓）：
+        //   DSH 自己读日志时选「数值最高的 generation」⇒ 两边必须一致；
+        //   只认 v3 会把「只有 v4」的子代理子会话静默跳过 ✗（本工作区实测少 7 条）。
+        const log = ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd']
+          .map((n) => join(src, n)).find((candidate) => existsSync(candidate))
+        if (log === undefined) continue
         if (statSync(log).size > 8_000_000) continue
         cpSync(src, join(destDir, name), { recursive: true, preserveTimestamps: true })
         extra += 1
