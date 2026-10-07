@@ -23364,6 +23364,11 @@
 
     // 注入诊断与配对界面所需的接口
     globalThis.__DSH_MOBILE_BOOT__ = {
+      // ★ 给会话页（/mobile/chat）用：它加载了本文件但设了 __DSH_MOBILE_NO_SHELL__，
+      //   所以外壳不装、这两个渲染函数仍在作用域里 —— 直接导出，免得会话页另写一套
+      //   （本仓规矩：不新造渲染器）。
+      renderMarkdownInto: renderMarkdownInto,
+      splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,
       getConfig: function () {
