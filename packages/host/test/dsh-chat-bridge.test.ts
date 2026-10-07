@@ -100,12 +100,30 @@ describe('mobile/dsh 桥：端点分发', () => {
     })
   })
 
-  it('★★ 页面给了 throughSeq ⇒ **一次网关调用都不多问**，照页面的用', async () => {
-    const { call, calls } = fakeGateway({ 'session/page': { ok: true, value: { records: [], hasMore: false } } })
+  it('★★ 页面给了 throughSeq ⇒ head 照页面的用（**不问网关**）；但**投影照读一次**（状态条那三个数只在它里面）', async () => {
+    // ★ 2026-10-08 改：以前这里断言"一次网关调用都不多问" ✓。现在多了一次 session/projections ✓ ——
+    //   因为状态条要的 `sessionStats` / `tokenUsage` / `contextPressure` **只有它这里有** ✗
+    //   （`session/page` 的返回里没有 ✗，生产实测 ✓）；实测这一次 3 KB / 3 ms ✓，
+    //   而页面每 900 ms 才轮询一次 ✓ ⇒ 划得来 ✓。
+    // ★ 投影里给一个**别的** asOfSeq（999 ✓）⇒ 证明 head 用的仍是页面给的 7 ✓（不是顺手拿投影的 ✗）。
+    const { call, calls } = fakeGateway({
+      'session/projections': { ok: true, value: { asOfSeq: 999, values: {} } },
+      'session/page': { ok: true, value: { records: [], hasMore: false } },
+    })
     await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1', throughSeq: 7 }))
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0]?.endpoint, 'session/page')
-    assert.equal((calls[0]?.payload as { args: { request: { throughSeq: number } } }).args.request.throughSeq, 7)
+    assert.deepEqual(calls.map((entry) => entry.endpoint), ['session/projections', 'session/page'])
+    assert.equal((calls[1]?.payload as { args: { request: { throughSeq: number } } }).args.request.throughSeq, 7)
+  })
+
+  it('★★ 页面给了 throughSeq、而投影读不到 ⇒ **照样读得出消息**，`values` 是空表（不编 ✗）', async () => {
+    const { call } = fakeGateway({
+      'session/projections': new Error('投影服务没起来'),
+      'session/page': { ok: true, value: { records: [{ type: 'event', event: { seq: 7, time: 1, type: 'turn/end', data: {} } }], hasMore: false } },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: 's-1', throughSeq: 7 }))) as Record<string, unknown>
+    assert.equal((page['events'] as unknown[]).length, 1)
+    // ★ 读不到状态条的数 ⇒ **画不出那一格** ✓；绝不许回一个 0 冒充"这个会话零轮" ✗
+    assert.deepEqual(page['values'], {})
   })
 
   it('★★ head = -1（这个会话一条事件都没有）⇒ 直接给空页，**不拿 -1 去调 session/page**', async () => {
@@ -163,6 +181,147 @@ describe('mobile/dsh 桥：端点分发', () => {
     await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.send, args({ sessionId: 's', text: 'x', mode: '胡说' }))
     assert.equal((calls[0]?.payload as { args: { request: { mode: string } } }).args.request.mode, 'steer')
     assert.equal((calls[1]?.payload as { args: { request: { mode: string } } }).args.request.mode, 'queue')
+  })
+})
+
+/**
+ * ★★ 状态条那三个投影（`sessionStats` / `tokenUsage` / `contextPressure`）✓。
+ *
+ * ## 夹具里的数字是**真机读数** ✓（不是编的 ✗）
+ *
+ * 2026-10-08 打本机生产实例（`127.0.0.1:19387` ✓，DSH `0.2.0-rc.2` ✓，只读 ✓）拿到的**原值** ✓，
+ * 逐字抄在下面：会话 `session-33308b4e-0a61-4706-bc5b-cee0c9400e33` ✓，
+ * 那一刻 `session/projections` 回的 `asOfSeq = 18589` ✓，`values` 一共 **19 个键** ✓。
+ *
+ * ★ 为什么夹具非要用真数字不可 ✗（第 106 / 108 轮的同一个教训 ✓）：
+ *   夹具里放"编的 3" ⇒ 只能证明代码把 3 搬过去了 ✓，证明不了**字段名对得上真机** ✗——
+ *   本仓因"照着想的字段名写"栽过四次（`id` ✗ `request` ✗ `throughSeq` ✗ `origin` ✗）✓。
+ */
+describe('★★ 会话页状态条：三个投影的真值（session/projections ⇒ values）', () => {
+  const SESSION_ID = 'session-33308b4e-0a61-4706-bc5b-cee0c9400e33'
+  /** 真机原值 ✓（`app.asar` 里的 wire view 字段名 + 生产实例读数 ✓）。 */
+  const realProjections = {
+    asOfSeq: 18589,
+    values: {
+      title: '查看dsh-mobile项目',
+      sessionStats: {
+        turns: 538,
+        steps: 2651,
+        llmMs: 16267642,
+        toolMs: 18945291,
+        ttftMs: 5451524,
+        ttftSteps: 2648,
+        decodeMs: 10816118,
+        decodeTokens: 2706002,
+      },
+      tokenUsage: { uncachedInputTokens: 4215496, outputTokens: 2706002, cacheReadTokens: 1123595776, cacheWriteTokens: 0 },
+      contextPressure: { pressureTokens: 259578, projectedTokens: 260433, contextWindow: 1000000 },
+      /** ★ 同层还有它 ✓ —— 它**不该**出现在我们的输出里 ✗（白名单见模块注释第 2 条 ✓）。 */
+      contextBreakdown: { systemTokens: 1452, toolsTokens: 5839, messageTokens: 142213 },
+    },
+  }
+  /** `session/page` 的真形状 ✓（实测只有这两个字段 ✓）。 */
+  const realPage = { records: [{ type: 'event', event: { seq: 18589, time: 1791388924259, type: 'turn/end', data: {} } }], hasMore: true }
+
+  it('★★ 三个投影都取到，且与投影里的原值**逐字段一致**（四个格子各自读得到）', async () => {
+    const { call, calls } = fakeGateway({
+      'session/projections': { ok: true, value: realProjections },
+      'session/page': { ok: true, value: realPage },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID, maxMessages: 60 }))) as Record<string, unknown>
+    const values = page['values'] as Record<string, unknown>
+    // ★ 逐值对照：**就是**投影里的那几个数 ✓（改错一个字段名 ⇒ 这条立刻红 ✓）
+    assert.deepEqual(values['sessionStats'], realProjections.values.sessionStats)
+    assert.deepEqual(values['tokenUsage'], realProjections.values.tokenUsage)
+    assert.deepEqual(values['contextPressure'], realProjections.values.contextPressure)
+    // ★ 状态条的四个格子分别读哪儿（页面侧照这个填 ✓）
+    const stats = values['sessionStats'] as Record<string, number>
+    const usage = values['tokenUsage'] as Record<string, number>
+    const pressure = values['contextPressure'] as Record<string, number>
+    assert.equal(stats['turns'], 538) // 「轮」
+    assert.equal(stats['steps'], 2651) // 「步」
+    assert.equal(
+      usage['uncachedInputTokens']! + usage['cacheReadTokens']! + usage['cacheWriteTokens']! + usage['outputTokens']!,
+      1130517274, // 「tok」= 四个桶的和 ✓（官方 `billedInputTokens + outputTokens` ✓）
+    )
+    assert.equal(Math.min(100, Math.round(((pressure['projectedTokens'] ?? pressure['pressureTokens'])! / pressure['contextWindow']!) * 100)), 26) // 「%」
+    // ★ head 也是从**这一次**投影读数里来的 ✓（`asOfSeq = 18589` ⇒ 那次 page 请求的 throughSeq ✓）
+    const pageCall = calls.find((entry) => entry.endpoint === 'session/page')
+    assert.equal((pageCall?.payload as { args: { request: { throughSeq: number } } }).args.request.throughSeq, 18589)
+    assert.equal(page['hasMore'], true)
+  })
+
+  it('★ 调 `session/projections` 的参数名就是真名 `request`（不是猜的 ✗）', async () => {
+    const { call, calls } = fakeGateway({
+      'session/projections': { ok: true, value: realProjections },
+      'session/page': { ok: true, value: realPage },
+    })
+    await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))
+    assert.deepEqual(calls[0], { endpoint: 'session/projections', payload: { args: { request: { sessionId: SESSION_ID } } } })
+  })
+
+  it('★★ 白名单：不在名单上的投影（`contextBreakdown`）一个都不许转出去', async () => {
+    const { call } = fakeGateway({
+      'session/projections': { ok: true, value: realProjections },
+      'session/page': { ok: true, value: realPage },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))) as Record<string, unknown>
+    const values = page['values'] as Record<string, unknown>
+    assert.equal('contextBreakdown' in values, false)
+  })
+
+  it('★★ 取不到投影 ⇒ 输出里**没有**那三个键（**不是 0** ✗ —— 不编 ✓）', async () => {
+    const { call, calls } = fakeGateway({
+      'session/projections': new Error('会话投影不可用'),
+      'session/list': realList(realSummary(SESSION_ID, { projections: { kind: 'cached', asOfSeq: 9, values: { title: '标题' } } })),
+      'session/page': { ok: true, value: realPage },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))) as Record<string, unknown>
+    const values = page['values'] as Record<string, unknown>
+    // ★ 一个编造的 0 都不能有 ✗：`turns: 0` 会被读成"这个会话零轮"——那是**假事实** ✗
+    assert.equal('sessionStats' in values, false)
+    assert.equal('tokenUsage' in values, false)
+    assert.equal('contextPressure' in values, false)
+    assert.deepEqual(values, {})
+    // head 走 session/list 的兜底 ✓（那次 page 请求的 throughSeq = 列表里的 9 ✓），消息照样读得出来 ✓
+    const pageCall = calls.find((entry) => entry.endpoint === 'session/page')
+    assert.equal((pageCall?.payload as { args: { request: { throughSeq: number } } }).args.request.throughSeq, 9)
+    assert.equal((page['events'] as unknown[]).length, 1)
+  })
+
+  it('★★ 投影在、但字段缺 / 不是数字 ⇒ **缺哪个就少哪个键**（不补 0 ✗）', async () => {
+    const { call } = fakeGateway({
+      'session/projections': {
+        ok: true,
+        value: {
+          asOfSeq: 5,
+          values: {
+            // 只给了一个桶 ✓；`cacheWriteTokens: '0'`（字符串 ✗）不是合法数字 ⇒ 也要丢掉 ✓
+            tokenUsage: { uncachedInputTokens: 7, cacheWriteTokens: '0', 内部字段: 42 },
+            // 三个字段**都可选** ✓：只给 contextWindow 也认 ✓
+            contextPressure: { contextWindow: 1000000 },
+            // 整块不是对象 ⇒ 连键都不输出 ✓
+            sessionStats: '不是对象',
+          },
+        },
+      },
+      'session/page': { ok: true, value: realPage },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))) as Record<string, unknown>
+    const values = page['values'] as Record<string, unknown>
+    assert.equal('sessionStats' in values, false)
+    assert.deepEqual(values['tokenUsage'], { uncachedInputTokens: 7 })
+    assert.deepEqual(values['contextPressure'], { contextWindow: 1000000 })
+  })
+
+  it('★★ 真数据赢：`session/page` 自带的老式 `values` 不许盖住真投影', async () => {
+    const { call } = fakeGateway({
+      'session/projections': { ok: true, value: realProjections },
+      'session/page': { ok: true, value: { ...realPage, values: { sessionStats: { turns: 999 }, title: '老式替身' } } },
+    })
+    const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))) as Record<string, unknown>
+    const values = page['values'] as Record<string, unknown>
+    assert.equal((values['sessionStats'] as Record<string, number>)['turns'], 538)
   })
 })
 
