@@ -19,21 +19,31 @@
  *                 （★ 真形状只有 items ✓ —— 从 `dsh-api-session-controller` 的 typert 描述符读的 ✓；
  *                   `sessions` 是我们为老式替身留的**回退** ✓，不是真形状 ✗）
  * session/page    参数 request = { address:{kind:"session",sessionId} | {kind:"subagent",…},
- *                                  throughSeq / beforeSeq / maxMessages / turnWindow / … }
- *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore, asOfSeq,
- *                        values{ title, todos, content, status, modelSelection, permissions, … } }
+ *                                  **throughSeq（必填）** / beforeSeq? / maxMessages? / turnWindow? }
+ *                 返回 { records:[{type:"event",event:{type,seq,time,data}}], hasMore }
+ *                 （★ 只有这两个字段 ✓ —— 2026-10-05 在生产实例上实测 ✓：返回的键是
+ *                   `[records, hasMore]` ✓；本文档早先写的 `asOfSeq` / `values` 在 0.2.0-rc.2
+ *                   的 `session/page` 里**根本不存在** ✗ —— `normalizePage` 那两处是**老式回退** ✓）
+ * session/projections  参数 request = { sessionId } ⇒ 返回 { asOfSeq, values } ✓
+ *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓）
  * session/prompt  参数 request = { requestId, sessionId, mode:"queue"|"steer", content:[…] }
  * ```
  *
- * ## ★ 两条**刻意**的克制（别顺手改 ✗）
+ * ## ★ 三条**刻意**的克制（别顺手改 ✗）
  *
- * 1. **不发明游标语义** ✓：`beforeSeq` / `throughSeq` **原样透传** ——
- *    "哪个是'取这之后'、哪个是'取这之前'"我**没在真机上验过** ✗（探针文档里如实标着 ✓）。
- *    在这一层自己编一个 `sinceSeq` 的翻译，等于把"没验过的语义"固化成一个更看不出来的假设 ✗。
- *    ⇒ 等会话页真跑起来、拿真会话验过语义，**再加**那层便利 API ✓。
+ * 1. **游标语义只到"验过的那一步"为止** ✓：`beforeSeq` 仍**原样透传**（"取这之前"这一层没在
+ *    真机上验过 ✗）；而 `throughSeq` 的语义**已经实测钉死** ✓ —— 它就是"**取到这一条为止**"
+ *    的**闭区间上界** ✓（2026-10-05，生产实例 0.2.0-rc.2，逐条读数见 `pageRequest` 的大雷注释 ✓）。
+ *    ⇒ 手机不传 `throughSeq` 时，**由本层补一个会话 head** ✓（`resolveHeadSeq` ✓）——
+ *    这不是"发明语义" ✓，是"补上 DSH 已经要求、而页面没有的必填项" ✓。
  * 2. **只暴露我们要用的字段** ✓：返回做**白名单归一化**（`records` 里的 `seq/time/type/data` ✓、
  *    `values` 里点名的那几个 ✓）—— 不把 DSH 的内部结构整坨转给手机 ✗
  *    （转过去就等于把它的形状变成了我们的契约 ✗）。
+ * 3. ★★ **子智能体的对话不进会话列表** ✗（用户 2026-10-06 定 ✓，**是刻意的** ✓，不是漏了 ✓）：
+ *    子智能体占列表多数（生产实测 388 条里 308 条 ✓），点进去读不到**是对的** ✓（本来也不该读 ✓）——
+ *    但让它们混在用户自己的会话里就是噪声 ✓ ⇒ 在 `normalizeSessions` 里按 `origin === 'subagent'` 滤掉 ✓
+ *    （判据与证据见 `isSubagentSession` ✓；★ **用户 fork 出来的分支保留** ✓，别一起杀掉 ✗）。
+ *    ★ 别顺手把它"还原" ✗：这看起来像 bug（列表凭空少了 308 条 ✓），其实是有意的 ✓。
  *
  * ## 与隧道的关系
  *
@@ -72,9 +82,32 @@ async function listSessions(deps, signal) {
     const value = unwrap(await deps.call('session/list', { args: { _request: {} } }, signal));
     return { ok: true, sessions: normalizeSessions(value) };
 }
-/** 读一页事件 ✓（**游标字段原样透传** ✓，见模块注释第 1 条）。 */
+/**
+ * 读一页事件 ✓（**游标必带** ✓，见 `pageRequest` 的大雷注释 ✓）。
+ *
+ * ## ★★ 为什么这里要先"问一次 head"（2026-10-05 的真机报错 ✗，已在生产实例上逐字复现 ✓）
+ *
+ * 会话页（`app.js` ✓，**本次一个字不许改** ✗）只传 `{ sessionId, maxMessages }` ✓
+ * ⇒ 桥改前是"页面没给 `throughSeq` 就不加" ✗ ⇒ DSH 的 zod 在**入口**就拒了：
+ * `typert gateway: session/page: wire field "request" failed boundary validation` ✓
+ * （用户真机报错原文 ✓，2026-10-05 在本机生产实例上逐字复现 ✓）。
+ * `throughSeq` 是 `SessionPageRequest` 的**必填**字段 ✗（`z.number()` ✓）——
+ * 而这一版（`0.2.0-rc.2`）的 `paginate` **没有**服务端默认值 ✗
+ * （本机全局装的 `0.1.5-rc.1` 那份 `paginate` 有默认参数 `throughSeq = events.at(-1)?.seq ?? -1` ✓，
+ *   而 `0.2.0-rc.2` 把那个默认值去掉了 ✗ —— 两边的 `history.js` 我都直接读过 ✓）。
+ * ⇒ 页面不传，就**由本层补 head** ✓（`resolveHeadSeq` ✓）。
+ */
 async function readPage(deps, args, signal) {
-    const request = pageRequest(args);
+    const headSeq = await resolveHeadSeq(deps, args, signal);
+    /**
+     * ★ `head < 0` ⇒ 这个会话**一条事件都没有** ✓ ⇒ 正确答案就是"空的一页" ✓。
+     *   ★ 这里**不再**拿 -1 去调 `session/page` ✗：那条路只会得到"不报错但永远空白" ✗
+     *     （见 `pageRequest` 的大雷注释 ✓）。外层形状与 `normalizePage` 的输出**保持一致** ✓。
+     */
+    if (headSeq < 0) {
+        return { ok: true, sessionId: requestSessionId(args), events: [], hasMore: false, asOfSeq: headSeq, values: {} };
+    }
+    const request = pageRequest(args, headSeq);
     const value = unwrap(await deps.call('session/page', { args: { request } }, signal));
     return { ok: true, ...normalizePage(value) };
 }
@@ -153,6 +186,20 @@ function stringField(source, key) {
     return typeof value === 'string' ? value : '';
 }
 /**
+ * ★ 透传一个**真形状里的可选字符串字段** ✓ —— 源里没有 / 不是字符串 ⇒ **连键都不输出** ✗。
+ *
+ * 为什么不用 `stringField` ✗：它给缺省值 `''` ✓ ⇒ 顶层会话会多出一个 `origin: ""` ✓，
+ * 而真形状（`SessionSummary` ✓）里**根本没有这个键** ✗ ⇒ 那是"编"出来的字段 ✗
+ * （与 `status` 那条不同 ✓：`status` 是**我们对外契约里一直在的**键 ✓，缺省空串是有意的 ✓）。
+ *
+ * @param key 纯 ASCII 键名 ✓（`origin` / `parentSessionId` 都是真形状的键 ✓）。
+ * @returns 有就 `{ [key]: value }` ✓，没有就 `{}` ✓（可直接展开进输出对象 ✓）。
+ */
+function optionalString(source, key) {
+    const value = source[key];
+    return typeof value === 'string' && value.length > 0 ? { [key]: value } : {};
+}
+/**
  * ★ 取投影值（`projections.values` ✓ —— `title` 的**真身在这里** ✓）。
  *
  * 真形状（`SessionListValue` 的 zod 描述符 ✓，从 `app.asar` 的
@@ -170,7 +217,55 @@ function projectionValues(record) {
     return values !== null && typeof values === 'object' ? values : {};
 }
 /**
+ * ★★ 这条条目是不是**子智能体会话** ✓（会话列表要**屏蔽**它们 ✗ —— 用户 2026-10-06 定的 ✓）。
+ *
+ * ## 判据为什么是 `origin` ✗（而不是"有 `parentSessionId` 就算"✗）
+ *
+ * 真形状里**两个**字段都可能出现在子智能体身上 ✓，但它们**不是同一个意思** ✗ ——
+ * `parentSessionId` 是"**这份日志是从哪个会话派生的**" ✓，而**派生有两种**：
+ *
+ * | 派生方式 | `parentSession` | `origin` | 是不是"子智能体对话" |
+ * |---|---|---|---|
+ * | 子智能体（`dsh-subagent` 的 `childSessionMeta` ✓） | 父会话 ✓ | **`'subagent'`** ✓ | **是** ✓ ⇒ 要屏蔽 ✓ |
+ * | 用户自己 fork 出来的分支（`session/fork` ✓） | 父会话 ✓ | **缺省** ✗ | **不是** ✗ ⇒ **不许误杀** ✗ |
+ *
+ * 证据（都是读出来的，不是想的 ✓）：
+ * · `dsh-subagent/lib/types/child-agent.js` 的 `childSessionMeta` 一并设
+ *   `parentSession: parentHeader.id` ✓ 与 `origin: 'subagent'` ✓
+ *   （同文件注释：`origin` 是「Navigation classification only」✓ = 专为"分类/导航"设的 ✓）；
+ * · `dsh-api-session-controller/lib/types/commands.js` 的 fork 分支**只**设 `parentSession` ✗、
+ *   **不设** `origin` ✗；
+ * · `dsh-api-session-controller/lib/types/list.js` 的 `listFields()` 把 `header` 上的这两个字段
+ *   **分别**透出（`...(header.origin === undefined ? {} : { origin: header.origin })` ✓）；
+ * · 生产实例实测（2026-10-06 ✓，437 份会话头 + `GET /mobile/chat/sessions` 的 388 条逐条对上 ✓）：
+ *   308 条 `origin:'subagent'` ✓、78 条两者皆无 ✓、**2 条只有 `parentSessionId` 没有 `origin`** ✗
+ *   —— 那 2 条标题带「(1)」后缀 ✓，是用户 fork 出来的分支 ✓，手机上照样要能点进去 ✓。
+ *
+ * ⇒ 判据取 **`origin === 'subagent'`**（**恰好** 308 条 ✓）；用 `parentSessionId` 当判据会**多杀 2 条** ✗。
+ *
+ * ★ 值就是字符串 `'subagent'`（`repr` 核过 ✓，磁盘上那份 JSON 里是 `'subagent'` ✓）；
+ *   只认**严格等值** ✗ —— 认不出就别屏蔽 ✓（宁可多留一条，不可误杀 ✓）。
+ */
+export function isSubagentSession(record) {
+    return record['origin'] === 'subagent';
+}
+/**
  * `session/list` 的返回 ⇒ 我们那套会话条目 ✓。
+ *
+ * ## ★★ 子智能体会话**不进这张表** ✗（用户 2026-10-06 定稿 ✓）
+ *
+ * 用户原话：「**我希望的是：屏蔽在会话的子智能体**」✓。
+ * 背景：这条列表现状是**按时间排序、且子智能体占多数** ✓（生产实测 388 条里 308 条是子智能体 ✓）
+ * ⇒ 手机上看到的前几条**全是主线发给子单的提示词** ✓，点进去只撞红字 ✓（读不到是**对的** ✓）。
+ *
+ * ★ 屏蔽放在**这一层**（而不是页面侧 ✓）：这张表有**两个**消费者 ✓ ——
+ *   手机原生「会话」标签（`native/android/…/ChatSessions.java` ✓）**和**我们的 chat 页
+ *   （`packages/host/assets/dsh-chat/app.js` ✓）⇒ 在这一层滤一次，两处一起对 ✓；
+ *   在页面侧滤就得滤两遍 ✓、还得指望两边都记得滤 ✗。
+ * ★ **只删"子智能体"这一类** ✗：用户 fork 出来的分支保留 ✓（判据见 `isSubagentSession` ✓）；
+ * ★ **排序不动** ✗（`session/list` 已经是 `updatedAt` 递减 ✓，见 `list.js` 的
+ *   `items.sort((left, right) => right.updatedAt - left.updatedAt)` ✓）；
+ * ★ **外层形状不动** ✗（仍是 `{ ok, sessions }` ✓）。
  *
  * ## 容器：`value.items` 是真形状 ✓、`value.sessions` 是**历史写法** ✓
  *
@@ -200,6 +295,8 @@ function projectionValues(record) {
  * | `status` | **不存在** ✗（`SessionSummary` 里没有这个字段 ✗） | 保留为老式回退 ⇒ 真机上恒为空串 ✓（**不编** ✗） |
  * | `awaitingApproval` | **不存在** ✗（同上 ✗） | 保留为老式回退 ⇒ 真机上恒为 `false` ✓（**不编** ✗） |
  * | `current` | **不存在** ✗（"当前会话"是**客户端**拿 `tunnel.sessionId` 比出来的 ✓，见 `boot.js` ✓） | 保留为老式回退 ✓（真机上不由网关给 ✓） |
+ * | `parentSessionId` | `parentSessionId` ✓（顶层 ✓ 可选 ✓，来自会话头的 `parentSession` ✓） | ★ **透传** ✓（判据不用它 ✗，但"被滤掉的到底是谁"要留个可查的痕 ✓） |
+ * | `origin` | `origin` ✓（顶层 ✓ 可选 ✓，目前只有 `'subagent'` 这一个取值 ✓） | ★ **透传** ✓ —— 它就是**屏蔽的判据** ✓；留在输出里是为了"页面/日志能看出为什么这条被滤" ✓（我们自己不画它 ✓） |
  */
 export function normalizeSessions(value) {
     const container = value !== null && typeof value === 'object' ? value : {};
@@ -217,6 +314,9 @@ export function normalizeSessions(value) {
         const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id');
         if (id.length === 0)
             continue; // 两个都没有的条目对界面没有意义（点不动）⇒ 丢掉
+        // ★ 子智能体的对话**不进这张表** ✗（用户 2026-10-06 定的 ✓ —— 判据与理由见 isSubagentSession ✓）
+        if (isSubagentSession(record))
+            continue;
         const values = projectionValues(record);
         const projectionTitle = stringField(values, 'title');
         out.push({
@@ -229,6 +329,19 @@ export function normalizeSessions(value) {
             current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
             updatedAt: typeof record['updatedAt'] === 'number' ? record['updatedAt'] : null,
             blank: record['blank'] === true,
+            /**
+             * ★ 两个**真形状里就有**的可选字段，原样透传 ✓（**都不是新造的名字** ✓）：
+             * · `origin` ✓ —— 子智能体的标记（`'subagent'` ✓）；进来的表里已经滤掉这一类 ✓，
+             *   留在这里是为了「**这条为什么没被滤掉**」查得动 ✓（例如 fork 出来的分支：`origin` 缺省 ✓）。
+             * · `parentSessionId` ✓ —— 派生自哪个会话 ✓。
+             * ★ 真形状里这两个键是**可选的** ⇒ 消息里**没有就根本不输出这个键** ✗（**不编** ✓）——
+             *   用 `stringField` 会补出一个 `''` ✓，那是**编**出来的值 ✗（顶层会话的 `origin` 会成为 `""` ✓，
+             *   与真形状「键不存在」对不上 ✓）。
+             * ★ 透传 ≠ 判据 ✗：屏蔽用的是 `record['origin']`（见上面那行 `continue` ✓）——
+             *   把透传删掉，屏蔽照样生效 ✓；把屏蔽删掉，透传也照样生效 ✓（两件事各测各的 ✓）。
+             */
+            ...optionalString(record, 'origin'),
+            ...optionalString(record, 'parentSessionId'),
         });
     }
     return out;
@@ -276,8 +389,46 @@ export function normalizeValues(value) {
     copyIfPresent(source, out, 'lastPromptAt');
     return out;
 }
-/** `session/page` 的请求：**只搬我们认识的字段** ✓（游标原样透传 ✓）。 */
-export function pageRequest(args) {
+/**
+ * `session/page` 的请求：**只搬我们认识的字段** ✓ + **`throughSeq` 必带** ✓。
+ *
+ * ## ★★★ 大雷：`throughSeq: -1` **不是**"取最新"的哨兵 ✗ —— 它会拿到**永远空白**的一页 ✗
+ *
+ * 这一版（`0.2.0-rc.2` ✓）的 `paginate` 是（`dsh-api-session-controller/lib/types/history.js` ✓）：
+ *
+ * ```js
+ * const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
+ * …
+ * return { events: events.slice(cut, end), hasMore: cut > 0 }
+ * ```
+ *
+ * ⇒ `throughSeq = -1` ⇒ `end = 0` ⇒ `slice(cut, 0)` ⇒ **恒空** ✓，而且**不报错** ✗。
+ * ★ 生产实例实测（2026-10-05，本机 `127.0.0.1:19387`，DSH `0.2.0-rc.2` ✓，
+ *   会话 `session-e52f9835-…` ✓，其 head = `asOfSeq` = **784** ✓）：
+ *
+ * | `throughSeq` | 结果 |
+ * |---|---|
+ * | **不带**（改前的写法 ✗） | `gateway/input-invalid`：`wire field "request" failed boundary validation` ✓ |
+ * | `784`（= head ✓） | `n=237`，`seqMin=548`，`seqMax=784`，`hasMore=true` ✓ |
+ * | `783` | `n=236`，`seqMax=783` ✓ |
+ * | `785` | `gateway/bad-request`：`session page through seq 785 is past cursor 784` ✓ |
+ * | **`-1`** ✗ | **`n=0`**，`hasMore=false` ✓ —— **不报错、永远空白** ✗（比红字更难查 ✗） |
+ * | `0` | `n=1`，`seqMin=seqMax=0` ✓ |
+ *
+ * ⇒ 纪律：**`throughSeq` 必须是 `>= 0` 的安全整数** ✓；只有"这个会话一条事件都没有"
+ *   （head = `-1` ✓）时才允许 `-1` —— 而那种情况由 `readPage` **提前返回空页** ✓，
+ *   根本不会走到这里 ✗。★ **别把这个字段写回"-1 = 取最新"** ✗。
+ *
+ * ## `-0` 也要挡 ✗
+ *
+ * DSH 自己的校验：`if (… || request.throughSeq < -1 || Object.is(request.throughSeq, -0)) throw …`
+ * ⇒ `-0` 会被它拒 ✓ —— `-0` 过得了 `>= 0` ✗，所以这里显式排除 ✓（`isSeqCursor` ✓）。
+ *
+ * @param args 调用方给的参数 ✓（`address` / `sessionId` / 各种游标 ✓）
+ * @param headSeq 页面**没给** `throughSeq` 时用的 head ✓（= 会话日志最后一条事件的 `seq` ✓）——
+ *   由 `resolveHeadSeq` 取 ✓（页面给了就用页面的 ✓，见下 ✓）。
+ */
+export function pageRequest(args, headSeq) {
     const sessionId = typeof args['sessionId'] === 'string' ? args['sessionId'] : '';
     /**
      * `address` 两种形状都支持 ✓（探针里读到的 ✓）：
@@ -298,13 +449,156 @@ export function pageRequest(args) {
     const request = { address };
     if (typeof args['beforeSeq'] === 'number')
         request['beforeSeq'] = args['beforeSeq'];
-    if (typeof args['throughSeq'] === 'number')
-        request['throughSeq'] = args['throughSeq'];
     if (typeof args['maxMessages'] === 'number')
         request['maxMessages'] = args['maxMessages'];
     if (typeof args['turnWindow'] === 'number')
         request['turnWindow'] = args['turnWindow'];
+    /**
+     * ★★ `throughSeq`：页面的（**非负** ✓）优先 ✓，否则用实测/兜底拿到的 head ✓。
+     *
+     * ★ 页面给负数（含 `-1`）**不算"给了"** ✗ ⇒ 走 head ✓ —— 因为 `-1` 只会得到空白页 ✗
+     *   （大雷见上 ✓），照搬它等于把"页面写错"变成"用户看到空会话" ✗。
+     * ★ 都拿不到 ⇒ **抛错** ✗（宁可红字点名，也不发一个缺必填项的请求：
+     *   那样用户看到的是 DSH 的 `boundary validation` ✗ —— 一句看不出该修哪儿的话 ✗）。
+     */
+    const throughSeq = providedThroughSeq(args) ?? (isSeqCursor(headSeq) ? headSeq : null);
+    if (throughSeq === null) {
+        throw Object.assign(new Error('取不到会话的 head 序号，读不了这一页（session/page 的 throughSeq 必填）'), {
+            code: ErrorCode.Internal,
+        });
+    }
+    request['throughSeq'] = throughSeq;
     return request;
+}
+/** 游标判定：**非负的安全整数** ✓（`-1` / `-0` / 小数 / `NaN` 一律不认 ✗，见 `pageRequest` 的大雷）。 */
+function isSeqCursor(value) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
+}
+/** 页面自己给的 `throughSeq` ✓ —— 只有 `isSeqCursor` 认的形状才算"给了" ✗（`-1` 不算 ✓）。 */
+function providedThroughSeq(args) {
+    const value = args['throughSeq'];
+    return isSeqCursor(value) ? value : null;
+}
+/** 这次请求说的是哪个会话 ✓（`address` 的两种形状 + 裸 `sessionId` 都认 ✓）。 */
+function requestSessionId(args) {
+    const address = args['address'];
+    if (address !== null && typeof address === 'object') {
+        const record = address;
+        const child = typeof record['childSessionId'] === 'string' ? record['childSessionId'] : '';
+        if (child.length > 0)
+            return child;
+        const id = typeof record['sessionId'] === 'string' ? record['sessionId'] : '';
+        if (id.length > 0)
+            return id;
+    }
+    return typeof args['sessionId'] === 'string' ? args['sessionId'] : '';
+}
+/** 从 `{ asOfSeq }` 形状里取序号 ✓（不是安全整数 ⇒ `null` ✓ —— **不猜** ✗）。 */
+function asOfSeqOf(value) {
+    if (value === null || typeof value !== 'object')
+        return null;
+    const asOfSeq = value['asOfSeq'];
+    return typeof asOfSeq === 'number' && Number.isSafeInteger(asOfSeq) ? asOfSeq : null;
+}
+/** 在 `session/list` 的返回里找一条会话的 `projections.asOfSeq` ✓（找不到 ⇒ `null` ✓）。 */
+function listAsOfSeq(value, sessionId) {
+    if (value === null || typeof value !== 'object')
+        return null;
+    const container = value;
+    const raw = Array.isArray(container['items'])
+        ? container['items']
+        : Array.isArray(container['sessions'])
+            ? container['sessions']
+            : [];
+    for (const item of raw) {
+        if (item === null || typeof item !== 'object')
+            continue;
+        const record = item;
+        const id = stringField(record, 'sessionId').length > 0 ? stringField(record, 'sessionId') : stringField(record, 'id');
+        if (id !== sessionId)
+            continue;
+        const projections = record['projections'];
+        return projections !== null && typeof projections === 'object' ? asOfSeqOf(projections) : null;
+    }
+    return null;
+}
+/**
+ * ★★ 取会话当前的 **head 序号** = "会话日志最后一条事件的 `seq`" ✓ ——
+ * `session/page` 的 `throughSeq` 要的就是它 ✓。
+ *
+ * ## 为什么是它 ✗（不是另一个数 ✓）—— 生产实例实测，2026-10-05
+ *
+ * DSH 自己的实现（`dsh-api-session-controller/lib/types/history.js` ✓）：
+ * `const sourceCursor = sourceLog.at(-1)?.seq ?? -1`，并且
+ * `if (throughSeq > sourceCursor) throw 'session page through seq N is past cursor M'` ✓
+ * ⇒ 那句错误里的 `M` 就是**真实 head** ✓ —— 我用它给 `asOfSeq` 做了**独立校验** ✓：
+ *
+ * | 会话（生产实例 ✓） | 列表里的 `asOfSeq` | `throughSeq = asOfSeq + 1` 的答复 | 结论 |
+ * |---|---|---|---|
+ * | `session-33308b4e-…`（`sequenced`） | 17626 | `past cursor 17626` | **相等** ✓ |
+ * | `session-4412ada5-…`（`sequenced`） | 393 | `past cursor 393` | 相等 ✓ |
+ * | `session-c16e3fbd-…`（`cached`） | 3844 | `past cursor 3844` | 相等 ✓ |
+ * | `session-d95bd77a-…`（`cached`） | 17702 | `past cursor 17702` | 相等 ✓ |
+ * | `session-f25af257-…`（`cached`） | 639 | `past cursor 639` | 相等 ✓ |
+ * | `session-1831f514-…`（`cached`） | 1272 | `past cursor 1272` | 相等 ✓ |
+ * | `session-b3206a33-…`（`cached`） | 9307 | `past cursor 9307` | 相等 ✓ |
+ *
+ * 另有磁盘上的**独立证词** ✓：`session-e52f9835-…` 的 `session.v4.jsonl.zstd` 解压后
+ * 最后一条事件就是 `{"type":"turn/end","seq":784,…}` ✓，而 `session/list` 与
+ * `session/projections` 给的都是 `asOfSeq = 784` ✓
+ * ⇒ **`asOfSeq` 与 `events.at(-1).seq` 是"相等"** ✓（**不是差 1** ✗）——
+ *   这正好答复了 `37-会话页数据面探针.md` §二点五 记的那笔欠账 ✓。
+ *
+ * ## 两个来源的次序（**实测定的** ✓，不是随手排的 ✗）
+ *
+ * 1. 页面自己给的 `throughSeq` ✓ ⇒ **不问**网关 ✓（页面说了算 ✓）；
+ * 2. `session/projections { sessionId }` ✓ ⇒ `asOfSeq` ✓
+ *    —— 只读一个会话 ✓，实测线上 `3 KB / 3 ms`（冷会话首次 `39 ms`）✓；
+ * 3. `session/list` ✓ ⇒ 该条 `projections.asOfSeq` ✓
+ *    —— 用户点名的来源 ✓，**但一次 815 KB / 120 ms**（387 条会话 ✓），
+ *    而会话页每 `900 ms` 就轮询一次 ✓ ⇒ 只作**兜底** ✓；
+ * 4. 都拿不到 ⇒ **抛错** ✓（原文带上两次失败的原因 ✓ —— 手机上要能念 ✓）。
+ *
+ * ★ 为什么**不能**用 `session/follow` 的开场快照 `cursor`（原计划的兜底 ✓）✗：
+ *   它是**流**端点 ✓，而本层的 `deps.call` 是**一问一答** ✓（生产里就是 `gateway.invoke(…)` ✓）——
+ *   流要走另一条入口 ✓，而那个入口在 `index.ts` 里 ✓（本单**不许碰** ✗）⇒ 本单不采用 ✓。
+ *
+ * ★ 覆盖情况（实测 ✓）：生产实例 387 条会话里 **372 条**列表里带 `projections` ✓、
+ *   357 条 `blank:false` 且 `asOfSeq` 是数字 ✓；剩下 **15 条列表里没有投影** ✓
+ *   —— 第 2 步对它们照样有效 ✓（实测 `asOfSeq = 3` ⇒ `page@3` 拿到 `n=4` ✓）。
+ */
+async function resolveHeadSeq(deps, args, signal) {
+    const provided = providedThroughSeq(args);
+    if (provided !== null)
+        return provided;
+    const sessionId = requestSessionId(args);
+    if (sessionId.length === 0) {
+        throw Object.assign(new Error('参数缺失：sessionId（或 address）'), { code: ErrorCode.Internal });
+    }
+    const failures = [];
+    try {
+        const value = unwrap(await deps.call('session/projections', { args: { request: { sessionId } } }, signal));
+        const asOfSeq = asOfSeqOf(value);
+        if (asOfSeq !== null)
+            return asOfSeq;
+        failures.push('session/projections 没给 asOfSeq');
+    }
+    catch (error) {
+        failures.push(`session/projections：${messageOf(error)}`);
+    }
+    try {
+        const value = unwrap(await deps.call('session/list', { args: { _request: {} } }, signal));
+        const asOfSeq = listAsOfSeq(value, sessionId);
+        if (asOfSeq !== null)
+            return asOfSeq;
+        failures.push('session/list 里没有这条会话的 projections.asOfSeq');
+    }
+    catch (error) {
+        failures.push(`session/list：${messageOf(error)}`);
+    }
+    throw Object.assign(new Error(`取不到会话「${sessionId}」的 head 序号（${failures.join('；')}）`), {
+        code: ErrorCode.Internal,
+    });
 }
 // ────────────────────────────── 工具 ──────────────────────────────
 /** 从 typert 信封里取业务参数（`{args:{…}}` ✓ —— 与 `codex-bridge` 同一套 ✓）。 */
@@ -339,6 +633,10 @@ function unwrap(result) {
         throw Object.assign(new Error(message), { code: ErrorCode.Internal });
     }
     return envelope.value;
+}
+/** 错误 ⇒ 一句能念给人听的话 ✓（非 `Error` 也认 ✓ —— 网关有时抛的是字符串 ✗）。 */
+function messageOf(error) {
+    return error instanceof Error ? error.message : String(error);
 }
 function requireString(args, key) {
     const value = args[key];

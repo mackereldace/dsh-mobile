@@ -5,10 +5,14 @@
 // "消息少了一条"在手机上完全查不出来 ✓）。而它们全是纯函数 ⇒ 在 Node 里钉死最划算。
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   MAX_VISIBLE_LINES,
+  assistantText,
   canSend,
   classify,
   composerHeight,
@@ -21,6 +25,7 @@ import {
   resolveStatusLine,
   shouldAutoScroll,
   sortSessions,
+  thinkingOf,
   toApprovalViewModel,
   isFailure,
   sendBegin,
@@ -30,6 +35,33 @@ import {
   titleFor,
   toViewModel,
 } from '../assets/dsh-chat/ui.js'
+
+/**
+ * ★★ 一条**真实**的 `assistant/message` 事件（从 `~/.dsh/sessions/**` 原样取出的 ✓，
+ * 一字未改 ✗）—— 就是手机页面实际收到的那一坨 ✓。
+ *
+ * 为什么要用真事件 ✗：这条 bug（真消息被整段画成 JSON）之所以活到今天，
+ * 正是因为夹具是**自造**的 `{data:{text}}` ✓ —— 形状与真实不符 ⇒ 断言全绿而线上错 ✓。
+ * 来源与重新提取的办法见同目录 `fixtures/README.md` ✓。
+ */
+const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'dsh-chat', 'fixtures')
+const REAL_EVENT = JSON.parse(readFileSync(join(FIXTURE_DIR, 'real-assistant-message-event.json'), 'utf8')) as {
+  readonly seq: number
+  readonly type: string
+  readonly data: { readonly message: { readonly content: readonly { readonly type: string; readonly text?: string }[] } }
+}
+/** 真事件里那段正文（`type:'text'` 块 ✓）—— 与页面上的期望一字不差 ✓。 */
+const REAL_PROSE = REAL_EVENT.data.message.content
+  .filter((part) => part.type === 'text')
+  .map((part) => part.text ?? '')
+  .join('\n')
+/** 真事件里那段思维链（`type:'reasoning'` 块 ✓）。 */
+const REAL_THINKING = REAL_EVENT.data.message.content
+  .filter((part) => part.type === 'reasoning')
+  .map((part) => part.text ?? '')
+  .join('\n')
+/** 夹具自检用的读数（**不算在断言里** ✗，断的是下面那些真判断 ✓）。 */
+const REAL_DATA_JSON_CHARS = JSON.stringify(REAL_EVENT.data).length
 
 describe('classify：事件类型 ⇒ 画法', () => {
   it('认得出常见几类', () => {
@@ -159,8 +191,8 @@ describe('textOf：尽量掏出一段能读的文字，掏不出就不编', () =
   it('字符串 / {text} / {message} / content parts 都认', () => {
     assert.equal(textOf({ data: '直接是字符串' }), '直接是字符串')
     assert.equal(textOf({ data: { text: '来自 text' } }), '来自 text')
-    assert.equal(textOf({ data: { message: '来自 message' } }), '来自 message')
-    assert.equal(textOf({ data: { content: [{ text: '甲' }, { text: '乙' }] } }), '甲\n乙')
+    assert.equal(textOf({ data: { message: { content: [{ type: 'text', text: '来自 message' }] } } }), '来自 message')
+    assert.equal(textOf({ data: { content: [{ type: 'text', text: '甲' }, { type: 'text', text: '乙' }] } }), '甲\n乙')
   })
 
   it('command / output / summary 也认（工具事件常有这几个键）', () => {
@@ -174,10 +206,81 @@ describe('textOf：尽量掏出一段能读的文字，掏不出就不编', () =
     assert.ok(text.includes('只有这个键'))
   })
 
+  it('★ 认出货真价实的正文时**绝不**退回 JSON（正文里不许出现 {"turn":）', () => {
+    assert.equal(textOf({ data: { message: { content: [{ type: 'text', text: '正文' }] } } }), '正文')
+  })
+
   it('null / 缺 data ⇒ 空串（不编）', () => {
     assert.equal(textOf(null), '')
     assert.equal(textOf({}), '')
     assert.equal(textOf({ data: null }), '')
+  })
+
+  it('★★ 真事件形状（`data.message.content[]`）⇒ 掏出来的是**正文**，不是整坨 JSON', () => {
+    // 夹具自检：真事件必须像样 ✓（否则下面几条是在空值上"通过" ✗）
+    assert.ok(REAL_DATA_JSON_CHARS > 1000, `真事件的 data 太小，不像真事件：${REAL_DATA_JSON_CHARS}`)
+    assert.ok(REAL_PROSE.length > 100, `真事件里的正文太短：${REAL_PROSE.length}`)
+    assert.ok(REAL_THINKING.length > 100, `真事件里的思维链太短：${REAL_THINKING.length}`)
+    const text = textOf(REAL_EVENT)
+    assert.equal(text, REAL_PROSE)
+    assert.equal(text.includes('{"turn":'), false)
+    assert.equal(text.includes('"reasoning"'), false)
+    assert.ok(text.length < REAL_DATA_JSON_CHARS / 4, `${text.length} vs ${REAL_DATA_JSON_CHARS}`)
+  })
+})
+
+describe('assistantText / thinkingOf：正文与思维链**分开**取（口径同官方客户端）', () => {
+  it('真事件：正文只取 text 块，思维链只取 reasoning 块', () => {
+    assert.equal(assistantText(REAL_EVENT.data), REAL_PROSE)
+    assert.equal(thinkingOf(REAL_EVENT.data), REAL_THINKING)
+    // ★ 两边**不许互相混** ✗（混进去就是把思维链当正文画 ✓ —— 这条 bug 的另一种死法 ✓）
+    assert.equal(assistantText(REAL_EVENT.data).includes(REAL_THINKING.slice(0, 24)), false)
+    assert.equal(thinkingOf(REAL_EVENT.data).includes(REAL_PROSE.slice(0, 24)), false)
+  })
+
+  it('★ `reasoning` 块不进正文（哪怕是**空**的 reasoning 也不许留空行）', () => {
+    const data = { message: { content: [{ type: 'reasoning', text: '思维链' }, { type: 'text', text: '正文' }] } }
+    assert.equal(assistantText(data), '正文')
+    const empty = { message: { content: [{ type: 'reasoning', text: '' }, { type: 'text', text: '正文' }] } }
+    assert.equal(assistantText(empty), '正文')
+    assert.equal(thinkingOf(empty), '')
+  })
+
+  it('没有正文块 ⇒ 空串（不编 ✗ —— 页面据此写"这条没有文字内容"）', () => {
+    assert.equal(assistantText({ message: { content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] } }), '')
+    assert.equal(assistantText({ message: { content: [] } }), '')
+    assert.equal(thinkingOf({ message: { content: [{ type: 'text', text: '正文' }] } }), '')
+  })
+
+  it('坏输入不抛', () => {
+    assert.equal(assistantText(null), '')
+    assert.equal(assistantText('x'), '')
+    assert.equal(assistantText({ content: 'x' }), '')
+    assert.equal(thinkingOf(null), '')
+    assert.equal(thinkingOf({ message: null, content: null }), '')
+  })
+
+  it('`data.content` 是**字符串**时：它本来就是整段正文（走 textOf ✓，不是块数组 ✗）', () => {
+    assert.equal(textOf({ data: { content: '就是一整段' } }), '就是一整段')
+    assert.equal(assistantText({ content: '就是一整段' }), '')
+  })
+})
+
+describe('toViewModel：真事件 ⇒ agent 气泡装正文、思维链另走 thinking', () => {
+  it('★★ 真事件：text === 正文（不是 JSON），thinking === 思维链，且**仍然不折**', () => {
+    const view = toViewModel(REAL_EVENT)
+    assert.equal(view.kind, 'agent')
+    assert.equal(view.text, REAL_PROSE)
+    assert.equal(view.thinking, REAL_THINKING)
+    assert.equal(view.collapsed, false)
+    assert.equal(view.hiddenLines, 0)
+    assert.equal(view.isError, false)
+  })
+
+  it('没有 reasoning 的普通消息：thinking 是空串（不编 ✗）', () => {
+    const view = toViewModel({ seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '就一句' }] } } })
+    assert.equal(view.text, '就一句')
+    assert.equal(view.thinking, '')
   })
 })
 
