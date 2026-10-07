@@ -12,6 +12,9 @@ import { fileURLToPath } from 'node:url'
 
 import {
   MAX_VISIBLE_LINES,
+  APPROVAL_OPTIONS,
+  approvalActionState,
+  approvalOptionsFor,
   assistantText,
   canSend,
   classify,
@@ -20,7 +23,6 @@ import {
   filterSessions,
   getDraft,
   putDraft,
-  parseOptions,
   resolveDelivery,
   resolveStatusLine,
   shouldAutoScroll,
@@ -510,45 +512,96 @@ describe('审批：★★ 会改变电脑上正在发生的事，所以比"发�
     assert.equal(classify('permission/request'), 'approval')
   })
 
-  it('选项从 options / choices / actions 里认，字符串与 {id,label} 都行', () => {
-    assert.deepEqual(parseOptions({ options: [{ id: 'a', label: '允许一次' }, { id: 'b' }] }), [
-      { id: 'a', label: '允许一次', kind: '' },
-      { id: 'b', label: 'b', kind: '' },
-    ])
-    assert.deepEqual(parseOptions({ choices: ['允许', '拒绝'] }), [
-      { id: '允许', label: '允许' },
-      { id: '拒绝', label: '拒绝' },
-    ])
-    assert.equal(parseOptions({ actions: [{ value: 'deny', text: '拒绝' }] })[0].id, 'deny')
-    assert.deepEqual(parseOptions({}), [])
-    assert.deepEqual(parseOptions(null), [])
+  /**
+   * ★★ 2026-10-08 改的判据 ✗：`approval/decided` / `approval/policy` **不是**审批卡 ✓。
+   *
+   * 为什么必须钉死 ✗：它们的 data 里也带 `approval` 字样 ✓ ⇒ 旧判据会把它们**再画一张卡** ✓
+   * —— 同一件事凭空多出一张、还带按钮 ✓（"凭空多一张卡"就是这么来的 ✓）。
+   * 变异：把 `classify` 改回 `text.includes('approval') ⇒ 'approval'` ⇒ 这两条**当场变红** ✓。
+   */
+  it('★ 只有"在问"的那一条是审批卡；decided / policy 是记账（不许再画一张）', () => {
+    assert.equal(classify('approval/asked'), 'approval')
+    assert.equal(classify('approval/decided'), 'approval-meta')
+    assert.equal(classify('approval/policy'), 'approval-meta')
   })
 
-  it('★ 解析不出选项 ⇒ **一颗按钮都不给** + 原文照摊（绝不默认摆"允许/拒绝"）', () => {
-    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { requestId: 'ap-2', tool: '写文件', 说不清: true } }, null)
+  /**
+   * ★★ 按钮**按事件类型**给 ✓（不再从 `data` 里解析选项 ✗）——
+   * 变异：把 `approvalOptionsFor` 改回"读 data.options" ⇒ 下面第一条**当场变红** ✓
+   * （真机上 `approval/asked` 里**根本没有 options** ✓）。
+   */
+  it('★★ 那两颗按钮来自封闭词汇的子集，且只有"在问"的事件才有', () => {
+    assert.deepEqual(
+      approvalOptionsFor('approval/asked').map((option) => option.id),
+      ['rejected', 'allowed-once'],
+    )
+    assert.deepEqual(approvalOptionsFor('approval/decided'), [])
+    assert.deepEqual(approvalOptionsFor('approval/policy'), [])
+    assert.deepEqual(approvalOptionsFor(''), [])
+    assert.deepEqual(approvalOptionsFor(null), [])
+    // ★★ **不许有「总是允许」** ✗（DSH 里不存在 ✓ —— 那是会话策略那个旋钮 ✓）
+    for (const option of APPROVAL_OPTIONS) {
+      assert.notEqual(option.id, 'allowed-always')
+      assert.notEqual(option.id, 'allow-always')
+      assert.notEqual(option.id, 'always')
+    }
+  })
+
+  it('★ 认不出是哪条请求（没有 id）⇒ 不给按钮 + 原文照摊', () => {
+    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { tool: '写文件', 说不清: true } }, null)
+    assert.equal(view.requestId, '')
     assert.equal(view.options.length, 0)
     assert.ok(view.raw.length > 0)
     assert.ok(view.raw.includes('说不清'))
   })
 
-  it('有选项 ⇒ 正常解析出 id 与 label，且 raw 不再需要', () => {
+  it('有 id ⇒ 两颗按钮就位，且 raw 不再需要', () => {
     const view = toApprovalViewModel(
-      { seq: 1, type: 'approval/asked', data: { requestId: 'ap-1', tool: '执行命令', detail: 'npm test', options: [{ id: 'allow', label: '允许一次' }] } },
+      { seq: 1, type: 'approval/asked', data: { id: 'ap-1', toolName: '执行命令', reason: 'npm test' } },
       null,
     )
     assert.equal(view.requestId, 'ap-1')
     assert.equal(view.title, '执行命令')
     assert.equal(view.detail, 'npm test')
-    assert.equal(view.options.length, 1)
+    assert.equal(view.options.length, 2)
     assert.equal(view.raw, '')
     assert.equal(view.decided, false)
   })
 
+  /**
+   * ★★ 已经裁决过 ⇒ 只显示结果、**不再给按钮** ✓。
+   * 变异：把 `renderEvent` 里那处 `toApprovalViewModel(event, null)` 的硬编码改回去 ⇒
+   * 这条**看不见差别**（它测的是纯函数 ✓）—— 所以另外用
+   * `decidedFor` 那条路钉住"页面真的把裁决传进去了"✓（见 `dsh-approval.test.ts` 的
+   * 「硬编码 null」那一条 ✓）。
+   */
   it('★ 已经裁决过 ⇒ 只显示结果，**不再给按钮**', () => {
-    const decided = { seq: 2, type: 'approval/decided', data: { requestId: 'ap-1', decision: 'allow' } }
-    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { requestId: 'ap-1' } }, decided)
+    const decided = { seq: 2, type: 'approval/decided', data: { id: 'ap-1', outcome: 'allowed-once' } }
+    const view = toApprovalViewModel({ seq: 1, type: 'approval/asked', data: { id: 'ap-1' } }, decided)
     assert.equal(view.decided, true)
-    assert.equal(view.decision, 'allow')
+    assert.equal(view.decision, 'allowed-once')
+  })
+
+  /**
+   * ★★ "按钮能不能按"这条判据 ✓（纯函数 ✓ —— 它是"不假装能用"那条纪律的落点 ✓）。
+   * 变异：把 `disabled` 写成恒 `false` ⇒ 第二条**当场变红** ✓。
+   */
+  it('★★ 按钮只在**通道探测到接通**时才可点（没接通一律置灰 + 说清理由）', () => {
+    const off = approvalActionState({ decided: false, channelConnected: false, sending: false })
+    assert.equal(off.showActions, true)
+    assert.equal(off.disabled, true)
+    assert.ok(off.why.includes('置灰'))
+    const on = approvalActionState({ decided: false, channelConnected: true, sending: false })
+    assert.equal(on.disabled, false)
+    assert.equal(on.why, '')
+    // ★ 已经裁决过 ⇒ 连按钮区都不摆 ✓
+    const decided = approvalActionState({ decided: true, channelConnected: true, sending: false })
+    assert.equal(decided.showActions, false)
+    // ★ 正在提交 ⇒ 先置灰（同一次审批不许提交两次 ✓）
+    const sending = approvalActionState({ decided: false, channelConnected: true, sending: true })
+    assert.equal(sending.disabled, true)
+    // ★ 坏输入不许抛 ✓（默认最保守：置灰 ✓）
+    assert.equal(approvalActionState(null).disabled, true)
   })
 
   it('坏输入不抛（null / 没 data / 没 requestId）', () => {
