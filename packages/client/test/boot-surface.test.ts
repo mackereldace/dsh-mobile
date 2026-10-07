@@ -4907,3 +4907,447 @@ test('★★ 行为：那颗顶栏键只在子单层级显示（子单 = 显示 
     '★ 主单上必须**不显示** ✗（常驻一颗按下去什么都不发生的键 = 用户以为它坏了 ✗）',
   )
 })
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ 本单：把上面 round 215 那条根因**从写路径上治掉** ✓
+ *
+ * 上一单（round 215 ✓）修的是"人在子单里时怎么回去"✓；本单修的是**病根** ✗：
+ *   `localStorage["dsh.sessions.current"]` 里带着 `subagentAddress` ✓ ⇒
+ *   DSH 的 `restoreSelection()` **每次加载都读** ✓ 并 `replaceMain(子单地址, …, "preserve")` ✓
+ *   ⇒ **自动跳回子单** ✓（手机上面板**整屏** ⇒ 看起来"回不到主会话"✓）。
+ *
+ * ★ 为什么只在**写路径**上治（上一单只读实测过 ✓，不许推翻 ✗）：
+ *   "只在加载时抹掉"**没用** ✗ —— DSH 的 store 在 hydrate 之后**按内存态立刻写回** ✓
+ *   （探针：变体 A 抹字段后 `after_head = {sessionId:"child-C"}` ✓，
+ *    但 `after_dsh_write = {sessionId:"child-C", subagentAddress:{…}}` ✗，**又长回来了** ✓）；
+ *   同一个探针的钩子版 ⇒ `after_dsh_write = {sessionId:"main-A"}` ✓。
+ * ★ 时机：`boot.js` 在 `<head>` 里同步跑 ✓，**早于** DSH 的 module bundle ✓
+ *   ⇒ 钩子必须是**同步顶层** ✓（不能进 `boot()` ✗、不能等 `DOMContentLoaded` ✗）。
+ * ★ 白名单管不到这里 ✓：`isIdentityKeyAllowed()` 只决定"要不要同步进外壳密钥库"✓，
+ *   不拦直写 localStorage ✓；**反过来说：绝不要把 DSH 的 key 塞进那个身份白名单** ✗
+ *   （会跨源进外壳密钥库 ⇒ 污染另一台宿主的"上次看哪儿"✓）。
+ *
+ * 这一组钉四件事 ✓（每条都注明**怎么把它打红** ✓）：
+ *   ① 结构：钩子确实装在**同步顶层**上 ✓（在 `boot()` 定义之前 ✓）、`setItem` 真被包装 ✓、
+ *      键名判据**逐字** ✓、`hasOwnProperty` 与 `[object Object]` 两道守卫都在 ✓；
+ *   ② 结构：钩子**只碰这一个键** ✓ —— 身份白名单那三条键一个都不许进去 ✓；
+ *   ③ 行为：三类真值夹具（有地址带父 / 有地址没父 / 坏 JSON ✓）的落盘值逐字节对照 ✓；
+ *   ④ 行为：别的键（`dsh-mobile.*` ✓）**逐字节**原样穿过 ✓。
+ * ★ 判据打在 `executableOnly()` 上 ✓（注释整行先滤掉 ✓ —— 不许只匹配注释里的字符串 ✗）。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/** DSH 那个键名 ✓（判据与夹具共用一份 ✓，避免两处写岔 ✗）。 */
+const DSH_SELECTION_KEY = 'dsh.sessions.current'
+
+/**
+ * 本单新增那一整块 ✓：起点 = 那个 `var` ✓、终点 = viewport 补写那段注释的开头 ✓。
+ * ★ 两个锚点都是**纯 ASCII** ✓（汉字一个都不进判据 ✗ —— 汉字只出现在**给人看的消息**里 ✓）。
+ */
+function selectionGuardRegion(): string {
+  const start = bootSource.indexOf("var DSH_SESSION_SELECTION_KEY = '")
+  assert.ok(start >= 0, '★ 必须能在 boot.js 里找到这一块的起点（DSH_SESSION_SELECTION_KEY ✓）')
+  const end = bootSource.indexOf('页面一加载就补 viewport', start)
+  assert.ok(end > start, '★ 必须能找到这一块的终点（viewport 补写那段 ✓）')
+  return executableOnly(bootSource.slice(start, end))
+}
+
+test('★★ 结构：会话选择写路径护栏 —— 装在同步顶层、包住 setItem、两道守卫齐全', () => {
+  // ── ① ★★ 必须在**同步顶层**（打红法：把这一块挪进 `boot()` 或 DOMContentLoaded ⇒ 必红 ✗）──
+  const guardAt = bootSource.indexOf('var DSH_SESSION_SELECTION_KEY = ')
+  assert.ok(guardAt > 0, '★ 必须能找到那个键名常量 ✓')
+  const bootAt = bootSource.indexOf('function boot(')
+  assert.ok(bootAt > 0, '★ 必须能找到 `function boot(` ✓')
+  assert.ok(
+    guardAt < bootAt,
+    '★★ 这一段必须在 `boot()` **之前**、同步顶层执行 ✓（进了 `boot()` 就晚于 DSH 的 module bundle ✗ ⇒ 钩子白装 ✓）',
+  )
+  /**
+   * ★★ 光量"在 `boot()` 之前"**不够** ✗ —— 把整块塞进**另一个**先声明的函数体里，
+   *   位置照样在前面 ✓，但那一刻**根本不会执行** ✗（变异 e 当场把这条判据试出来了 ✓）。
+   *   所以这里再钉一条**同步顶层**的机械证据 ✓：这一段之前**一个函数声明都没有** ✓
+   *   ⇒ 包着它的只可能是那个 IIFE 本身 ✓（不是函数体 ⇒ 顶层语句 ⇒ 装载时就跑 ✓）。
+   *   打红法：给这一段套一层 `function 外壳() { … }` ⇒ 本行必红 ✗。
+   */
+  const before = bootSource.slice(0, guardAt)
+  const firstFunctionAt = before.search(/\n\s*function [A-Za-z0-9_$]*\(/)
+  assert.equal(
+    firstFunctionAt,
+    -1,
+    '★★ 这一段之前**不许**有任何函数声明 ✓（有 ⇒ 它多半被套在函数体里 ⇒ 顶层那一刻不会执行 ✗）',
+  )
+  assert.ok(
+    before.lastIndexOf("'use strict'") > 0,
+    '★ 它必须在 `\'use strict\'` **之后** ✓（放进 IIFE 的作用域里 ✓ —— 落到 IIFE 外面就没有 `localStorage` 那一层保障 ✗）',
+  )
+  assert.ok(
+    guardAt < bootSource.indexOf("  var dshmViewportMeta = document.querySelector"),
+    '★ 必须在 viewport 补写之前 ✓（`\'use strict\'` 之后就是它 ✓）',
+  )
+
+  const region = selectionGuardRegion()
+  // ── ② 真的包了 setItem，而且**只**认那一个键 ✓（打红法：删掉 `localStorage.setItem =` 那一行 ⇒ 必红 ✗）──
+  assert.ok(
+    region.includes('var dshmRawSetItem = localStorage.setItem'),
+    '★ 必须先把**原生** setItem 存下来 ✓（不存 ⇒ 包装里没法把这次写真的落盘 ✗）',
+  )
+  assert.ok(region.includes('localStorage.setItem = function (key, value)'), '★ 必须真的把 setItem 换成包装 ✓')
+  assert.ok(
+    region.includes('return dshmRawSetItem.call(localStorage, key, value)'),
+    '★ 包装最后必须把这次写**原样**落盘 ✓（少了它 = 所有写都丢 ✗）',
+  )
+  assert.ok(
+    region.includes('if (key === DSH_SESSION_SELECTION_KEY)'),
+    '★ 键名判据必须**逐字**用那个常量 ✓（打红法：改成别的键名 ⇒ 行为那条必红 ✗）',
+  )
+  assert.ok(
+    region.includes("installShell") === false && region.includes('isIdentityKeyAllowed') === false,
+    '★ 这一段不许碰身份白名单 ✓（塞进去 ⇒ 跨源污染另一台宿主的"上次看哪儿"✗）',
+  )
+
+  // ── ③ 两道守卫缺一不可 ✓（打红法：删任一 ⇒ 行为那条必红 ✗）──
+  assert.ok(
+    region.includes("Object.prototype.toString.call(dshmParsed) === '[object Object]'"),
+    '★ 必须是**普通对象**才动手 ✓（数组 / 字符串 / null 一律原样放行 ✗）',
+  )
+  assert.ok(
+    region.includes("Object.prototype.hasOwnProperty.call(dshmParsed, 'subagentAddress')"),
+    '★ 必须**确实带** subagentAddress 才动手 ✓（判在**自有**属性上 ✓，不看原型链 ✓）',
+  )
+  assert.ok(region.includes('delete dshmParsed.subagentAddress'), '★ 病根那一行必须在 ✓（打红法：删它 ⇒ 行为那条必红 ✗）')
+  assert.ok(
+    region.includes("dshmParsed.sessionId = dshmAddress.parentSessionId"),
+    '★ 取得到父会话时要**改指父级** ✓（只删不改 ⇒ 下次落到"默认面"而非父那级 ✓）',
+  )
+  // ── ④ 保守的三条底线 ✓（打红法：改成"猜"或"抛" ⇒ 另两条行为断言必红 ✗）──
+  assert.ok(
+    region.includes("typeof dshmAddress.parentSessionId === 'string'") &&
+      region.includes('dshmAddress.parentSessionId.length > 0'),
+    '★ 父会话取不到字符串就**不猜** ✓（只删 ✓）',
+  )
+  assert.ok(region.includes('dshmNext = value'), '★ 解析 / 字符串化失败必须**原样放行** ✓（绝不吞掉这次写 ✗）')
+  assert.ok(
+    region.includes('localStorage.removeItem(key)'),
+    '★ 改空 ⇒ 直接删键 ✓（不留 "{}" 这种半成品 ✗）',
+  )
+})
+
+test('★★ 结构：删除分支里那行调试日志**调得动**（debugBoxLine 是函数声明 ⇒ 提升 ✓）', () => {
+  // ★ 这一条只证明"那句调用在顶层那一刻不会炸" ✓ —— 见交付说明里为什么保留它 ✓。
+  //   打红法：把 `debugBoxLine` 改成 `var debugBoxLine = function` ⇒ 本测试必红 ✗。
+  assert.ok(
+    selectionGuardRegion().includes("debugBoxLine('[boot] 会话选择里只有子单地址"),
+    '★ 那一行日志应当还在 ✓（它依赖 debugBoxLine 的函数声明提升 ✓）',
+  )
+  const body = functionBodyAtColumn2(bootSource, 'debugBoxLine')
+  assert.ok(
+    body.includes('if (!DEBUG_BOX_ON) return') && body.includes('document.body === null'),
+    '★★ 它的两道守卫必须在 ✓（`DEBUG_BOX_ON` 未初始化 ⇒ 顶层那一刻**只会早退**✓，不会抛 ✗）',
+  )
+  assert.ok(
+    bootSource.indexOf('  function debugBoxLine(text) {') > 0,
+    '★★ 必须是**函数声明** ✓（`var f = function` 不会被提升 ⇒ 顶层调用会 `undefined is not a function` ✗）',
+  )
+})
+
+test('★★ 结构：写到身份白名单那三条键上 ⇒ 本单一个字节都不许碰（跨源污染的护栏）', () => {
+  const region = selectionGuardRegion()
+  for (const name of ['IDENTITY_VAULT_KEYS', 'HOSTS_KEY', 'HOSTS_ACTIVE_KEY', 'writeIdentityKey', 'isIdentityKeyAllowed']) {
+    assert.ok(
+      !region.includes(name),
+      '★ 会话选择护栏里**不许**出现 ' + name + ' ✓（这四条是"必须跨源存活"那一套 ✓，与 DSH 的键无关 ✗）',
+    )
+  }
+  // ★ 反方向也要钉住 ✓：DSH 那个键名**不许**进身份白名单 ✓（打红法：把它塞进白名单 ⇒ 必红 ✗）。
+  const allowBody = functionBodyAtColumn2(bootSource, 'isIdentityKeyAllowed')
+  assert.ok(
+    !allowBody.includes(DSH_SELECTION_KEY),
+    '★★ DSH 的会话键**绝不许**进身份白名单 ✓（它进外壳密钥库 ⇒ 会污染另一台宿主的"上次看哪儿"✗）',
+  )
+})
+
+/**
+ * ★★ 行为夹具（三类真值 ✓，形状照 DSH 真实写法的裸对象给 ✓）：
+ *   ① 带 `subagentAddress` **且**带 `parentSessionId` ✓ ⇒ 删地址 + `sessionId` 改指父级 ✓；
+ *   ② 带 `subagentAddress` 但**没有**可用的 `parentSessionId` ✓ ⇒ **只删不猜** ✓；
+ *   ③ 不带 `subagentAddress` 的普通值 ✓ / 坏 JSON（`not-json{{` ✓）⇒ **逐字节不变** ✓。
+ *
+ * ★ 为什么自己不建 DOM 桩 ✗：本文件的 `bootOnSurface()` 已经把 boot.js 在**真 `node:vm`** 里跑起来 ✓
+ *   （生产的包装就是它装上去的那一份 ✓）；这里只在**跑完之后**把"字节要落到哪儿"换成一个记账桩 ✓
+ *   —— 于是写这一条路**一个字都没被替身顶掉** ✓，而落盘字节又看得见 ✓。
+ *
+ * ★ 为什么断言"**恰好落盘一次**"✗✗：这是防"石头里的虫子"那一条 —— 包装只要少写
+ *   `return dshmRawSetItem.call(localStorage, key, value)` ✓，所有写都会被**静默丢掉** ✓，
+ *   而"落盘值对不对"这几条会**全绿** ✓（因为键根本不在底表里、`get()` 回来是 `undefined` ✗）。
+ */
+function selectionWritePath(options?: {
+  /** ★ 给底表预置一个值 ✓（用来证明"这一笔不是原样穿过去的"✓）。 */
+  seed?: string
+}): {
+  /** ★ 生产装上去的那个包装 ✓（调用它就是"DSH 写了一次"✓）。 */
+  write: (key: string, value: string) => void
+  /** ★ 底表读了什么 ⇒ 手机下次加载会看到什么 ✓。 */
+  read: (key: string) => string | null
+  /** ★ 那个"原生 setItem"收到的每一笔 ✓（进不去 ⇒ 这次写丢了 ✗）。 */
+  writes: Array<{ key: string; value: unknown }>
+  /** ★ boot.js 顶层有没有抛 ✓。 */
+  thrown: unknown[]
+} {
+  const store = new Map<string, string>([['dsh-mobile.debug', '1']])
+  if (options?.seed !== undefined) store.set(DSH_SELECTION_KEY, options.seed)
+  const writes: Array<{ key: string; value: unknown }> = []
+  /**
+   * ★ `session` 那句是**故意的** ✗：它把"这个桩是**真的** localStorage 对象"这件事钉住 ✓ ——
+   *   生产那句 `dshmRawSetItem.call(localStorage, …)` 一旦把 `this` 绑错 ✓，这里就当场抛 ✓
+   *   （真浏览器的 `localStorage.setItem` 同理会抛 Illegal invocation ✗）。
+   */
+  const localStorageStub: {
+    getItem: (key: string) => string | null
+    setItem: (this: unknown, key: string, value: string) => void
+    removeItem: (key: string) => void
+    clear: () => void
+  } = {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: function (this: unknown, key: string, value: string) {
+      if (this !== localStorageStub) throw new TypeError('Illegal invocation（setItem 的 this 绑错了）')
+      writes.push({ key, value })
+      store.set(key, String(value))
+    },
+    removeItem: (key) => void store.delete(key),
+    clear: () => store.clear(),
+  }
+  const sandbox = bootSandbox(localStorageStub)
+  const thrown: unknown[] = []
+  try {
+    runInNewContext(bootSource, sandbox, { filename: 'boot.js' })
+  } catch (error) {
+    thrown.push(error)
+  }
+  // ★ 跑完之后把这一个方法换成**逐次记账**的桩 ✓ —— 生产的包装这时已经装好了 ✓
+  //   （它内部握着的是**原来那个** setItem ✓），所以换掉它只影响"包装最后那一跳落到哪儿"✓。
+  // ★ `session` 那句守卫**不动** ✗：生产包装自带 `dshmRawSetItem.call(localStorage, key, value)` ✓
+  //   ⇒ `this` 就是 localStorage ✓ ⇒ 过得了 ✓（绑错的话这里就红 ✓，正是要这样 ✓）。
+  const wrapped = localStorageStub.setItem as (key: string, value: string) => void
+  localStorageStub.setItem = function (this: unknown, key: string, value: string) {
+    if (this !== localStorageStub) throw new TypeError('Illegal invocation（setItem 的 this 绑错了）')
+    writes.push({ key, value })
+    store.set(key, String(value))
+  }
+  return {
+    write: (key, value) => {
+      wrapped.call(localStorageStub, key, value)
+    },
+    read: (key) => store.get(key) ?? null,
+    writes,
+    thrown,
+  }
+}
+
+/**
+ * ★★ 一次**同步顶层**跑完 boot.js 的最小沙箱 ✓（假 DOM 只给 boot.js 真的会碰、且**同步**碰的那些面 ✓）。
+ *
+ * ★ 为什么不复用文件开头那个 `bootOnSurface` ✗：本组要的是"**一个只干这一件事**的沙箱"✓ ——
+ *   它一个定时器都不会注册 ✓（`intervals` 是空的 ✓）、也不装端侧通道 ✓ ⇒ 测试跑完不用收尾 ✓。
+ *   两者验的是同一件事的两半 ✓（那一个验"整页装起来还对不对"✓，这一个验"这一笔写出去的字节"✓）。
+ */
+function bootSandbox(localStorageStub: {
+  getItem: (key: string) => string | null
+  setItem: (this: unknown, key: string, value: string) => void
+  removeItem: (key: string) => void
+  clear: () => void
+}): Record<string, unknown> {
+  const noop = (): void => {}
+  const makeElement = (tag: string): Record<string, unknown> => ({
+    tagName: tag,
+    id: '',
+    style: {},
+    dataset: {},
+    className: '',
+    children: [],
+    textContent: '',
+    setAttribute: noop,
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    removeAttribute: noop,
+    addEventListener: noop,
+    removeEventListener: noop,
+    appendChild: noop,
+    insertBefore: noop,
+    remove: noop,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+  })
+  const sandbox: Record<string, unknown> = {
+    console,
+    crypto: globalThis.crypto,
+    TextEncoder,
+    TextDecoder,
+    Response,
+    Request,
+    Headers,
+    URL,
+    URLSearchParams,
+    Blob: globalThis.Blob,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
+    btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
+    location: {
+      origin: 'https://10.34.221.181:3443',
+      protocol: 'https:',
+      host: '10.34.221.181:3443',
+      pathname: '/mobile/app',
+      search: '?debug=1',
+      href: 'https://10.34.221.181:3443/mobile/app?debug=1',
+    },
+    document: {
+      readyState: 'complete',
+      body: makeElement('body'),
+      head: makeElement('head'),
+      documentElement: makeElement('html'),
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: (tag: string) => makeElement(tag),
+      addEventListener: noop,
+      removeEventListener: noop,
+      createTextNode: (text: string) => ({ textContent: text }),
+    },
+    localStorage: localStorageStub,
+    history: { replaceState: noop, pushState: noop },
+    navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/129 Mobile Safari/537.36', vibrate: () => true },
+    Notification: { permission: 'granted', requestPermission: async () => 'granted' },
+    WebSocket: class {
+      readyState = 0
+      binaryType = 'blob'
+      send() {}
+      close() {}
+      addEventListener() {}
+      removeEventListener() {}
+    },
+    fetch: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    innerWidth: 412,
+    innerHeight: 915,
+    isSecureContext: true,
+    matchMedia: () => ({ matches: true, addEventListener: noop, removeEventListener: noop }),
+    addEventListener: noop,
+    removeEventListener: noop,
+    performance: globalThis.performance,
+  }
+  sandbox['globalThis'] = sandbox
+  sandbox['window'] = sandbox
+  sandbox['self'] = sandbox
+  return sandbox
+}
+
+test('★★ 行为：带 subagentAddress ⇒ 落盘的字节里没有它、sessionId 改指父级、且恰好落盘一次', () => {
+  const path = selectionWritePath()
+  assert.equal(path.thrown.length, 0, `★ boot.js 顶层不该抛：${String(path.thrown[0])}`)
+  const raw = JSON.stringify({ sessionId: 'child-C', subagentAddress: { parentSessionId: 'main-A', label: 'x' } })
+  // ★ 记账桩从**装载那一刻**就在了 ✓ ⇒ boot.js 自己那句 `dsh-mobile.debug` 也在账上 ✓
+  //   —— 所以这里先记下基数 ✓，只数**我这一笔**（数错基数会得到 2 ⇒ 假红 ✓）。
+  const before = path.writes.length
+  path.write(DSH_SELECTION_KEY, raw)
+
+  // ── ① 真的落盘了（不是"石头里的虫子"那条：包装把写丢掉 ⇒ 这里就红 ✓）──
+  assert.equal(path.writes.length - before, 1, '★ 这次写必须**恰好**交给原生 setItem 一次 ✓（丢掉 = 用户下次加载读到旧值 ✗）')
+  assert.equal(path.writes[before]?.key, DSH_SELECTION_KEY, '★ 落盘用的必须是**同一个**键 ✓')
+  const stored = path.read(DSH_SELECTION_KEY)
+  assert.notEqual(stored, null, '★ 键必须还在 ✓（这一笔不是"被清掉"那一支 ✓）')
+
+  // ── ② 病根那一个字段必须没了 ✓（打红法：删 `delete dshmParsed.subagentAddress` ⇒ 本行必红 ✗）──
+  const parsed = JSON.parse(String(stored)) as Record<string, unknown>
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed, 'subagentAddress'),
+    false,
+    '★★ 落盘值里**不许**再有 subagentAddress ✓（留着 ⇒ DSH 下次加载自动跳回子单 ✗ = 本单病根 ✓）',
+  )
+  assert.equal(parsed['sessionId'], 'main-A', '★ sessionId 必须改指**父会话** ✓（不是子单 ✓）')
+  assert.equal(parsed['label'], undefined, '★ 除了那一个字段，别的字段一个字都不许动 ✗')
+})
+
+test('★★ 行为：subagentAddress 在但取不到 parentSessionId ⇒ 只删不猜（sessionId 保持原值）', () => {
+  const withoutParent = JSON.stringify({ sessionId: 'child-C', subagentAddress: { note: 'no-parent' } })
+  const first = selectionWritePath()
+  first.write(DSH_SELECTION_KEY, withoutParent)
+  const firstStored = first.read(DSH_SELECTION_KEY)
+  assert.equal(first.writes.filter((entry) => entry.key === DSH_SELECTION_KEY).length, 1, '★ 这一笔同样必须真的落盘 ✓')
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(JSON.parse(String(firstStored)), 'subagentAddress'),
+    false,
+    '★ 地址还是必须删掉 ✓',
+  )
+  const firstParsed = JSON.parse(String(firstStored)) as Record<string, unknown>
+  assert.equal(firstParsed['sessionId'], 'child-C', '★★ 取不到父会话就**不许猜** ✗ ⇒ sessionId 保持原值 ✓')
+  assert.deepEqual(
+    Object.keys(firstParsed).sort(),
+    ['sessionId'],
+    '★ 除了 sessionId 一个字段都不许多出来 ✓（不许塞 undefined 之类的占位 ✗）',
+  )
+
+  // ── 空串（取得到、但不是"可用的父" ✓）⇒ 同样只删不猜 ✓ ──
+  const emptyParent = selectionWritePath()
+  emptyParent.write(DSH_SELECTION_KEY, JSON.stringify({ sessionId: 'child-C', subagentAddress: { parentSessionId: '' } }))
+  assert.equal(
+    (JSON.parse(String(emptyParent.read(DSH_SELECTION_KEY))) as Record<string, unknown>)['sessionId'],
+    'child-C',
+    '★ 空串不算父会话 ✓（`length > 0` 那道守卫就是为它写的 ✓）',
+  )
+})
+
+test('★★ 行为：值里只有子单地址 ⇒ 直接删键（不留 "{}" 这种半成品）', () => {
+  /**
+   * ★ 这一条专钉 `removeItem` 那一支 ✓ —— 它是本单唯一**改变键的存在性**的路径 ✗。
+   *   怎么才能走到它（两样一起才成立 ✓）：
+   *     ① 值里除了 `subagentAddress` **没有别的字段** ✓（所以既不能带 `sessionId` ✗）；
+   *     ② 那个地址里**取不到可用的** `parentSessionId` ✓（否则会补回一个 `sessionId` ⇒ 又不空了 ✗）。
+   *   ⇒ 所以这一条正是"只删不猜 + 空了就删键"两条规则的**交叉点** ✓。
+   * 打红法：把 `localStorage.removeItem(key)` 那一行去掉 ⇒ 本行必红 ✗
+   *   （落盘会变成 `"{}"` ✓ —— 那等于"让 DSH 自己去猜显示什么"✗，正是本单要避免的 ✓）。
+   */
+  const path = selectionWritePath({ seed: 'stale-child-selection' })
+  const writesBefore = path.writes.length
+  path.write(DSH_SELECTION_KEY, JSON.stringify({ subagentAddress: { note: 'nothing-else' } }))
+  assert.equal(
+    path.read(DSH_SELECTION_KEY),
+    null,
+    '★★ 改空之后那个键必须**不在**了 ✓（留着 `"{}"` ⇒ DSH 下次加载拿一个没有会话的选择去恢复 ✗）',
+  )
+  assert.equal(
+    path.writes.length,
+    writesBefore,
+    '★ 这一笔**不该**再交给原生 setItem ✓（该走 removeItem ✓，两件事别都做 ✗）',
+  )
+})
+
+test('★★ 行为：与本单无关的值**逐字节**原样穿过（不含地址 ✓ / 坏 JSON ✓ / 数组 ✓ / 非目标键 ✓）', () => {
+  const untouched = [
+    ['普通值（无地址）', JSON.stringify({ sessionId: 'main-A', theme: 'dark' })],
+    // ★ 上一单实测到的坏值形状，逐字照抄 ✓ —— 认不出来必须**原样放行** ✓，绝不许把它改成空 ✗。
+    ['坏 JSON', 'not-json{{'],
+    ['顶层不是对象的 JSON', '[1,2]'],
+    ['字符串 JSON', '"not-json{{"'],
+  ]
+  for (const [name, raw] of untouched) {
+    const path = selectionWritePath()
+    path.write(DSH_SELECTION_KEY, raw)
+    assert.equal(
+      path.writes.filter((entry) => entry.key === DSH_SELECTION_KEY).length,
+      1,
+      `★ ${name}：这一笔必须原样交给原生 setItem ✓（吞掉写 = 丢数据 ✗）`,
+    )
+    assert.equal(path.read(DSH_SELECTION_KEY), raw, `★ ${name}：本单不许动它一个字节 ✗（认不出来就放行 ✓）`)
+  }
+  // ── 非目标键：哪怕值是坏 JSON，也不许被碰 ✓ ──
+  const other = selectionWritePath({ seed: 'keep-me' })
+  other.write('dsh-mobile.identity', 'not-json{{')
+  assert.equal(other.read('dsh-mobile.identity'), 'not-json{{', '★ 别的键一律原样放行 ✓（判据只认那一个键名 ✓）')
+  assert.equal(other.read(DSH_SELECTION_KEY), 'keep-me', '★ 非目标键那一次写不许顺手把会话选择也动了 ✗')
+})
+
