@@ -709,7 +709,21 @@ const problems = []
  *   它们原来写的是"设计 token 已桥到我们这一层"✗，而那个桥已经删了 ✓（浅色整屏白字白底的根因 ✓）；
  *   现在量的是"**我们各面继承到的就是 DSH 定义在 `body` 上的真值**"✓（同一件事的更本质写法 ✓）。
  */
-const EXPECTED_MIN_CHECKS = 391
+/**
+ * ★★ round 195（2026-10-08）：**391 → 392**（**+1 条** ✓，只加不减 ✓）。
+ *   为什么加 ✗：主体那个 `try` **只有 `finally`、没有 `catch`** ✗（现已补 ✓，就是文件末尾那个 `catch (error)` ✓）——
+ *   实测崩在第 39 个 `check(...)` ⇒ 只跑 38 条（约 9.5% ✗）、后面 356 条一条没跑 ✗，
+ *   而屏幕上的观感却是"跑过了" ✓。⇒ 补 `catch`（报已跑条数 / 是否低于下界 / 堆栈 ✓ + 非 0 退出 ✓）、
+ *   并在**所有断言之后**加一条哨兵 `check(true, '套件跑到了最后（没有被异常中断）')` ✓。
+ *   下界为什么跟着 +1 ✗：哨兵**也走 `check()`** ✓ ⇒ 条数随之 +1 ✓；下界若不涨 ✗，
+ *   就是**白白放松一条** ✓（少跑一条也不再报红 ✗）—— 正是本单要防的"静默"✗
+ *   （本文件自己的规矩：**加断言就把这个数调大** ✓，见上面 round 118 那段 ✓）。
+ *   ★ 顺带**如实记一笔** ✓：按那两次事故读数反推，本轮之前**实跑条数可能已高于 391** ✓
+ *   （38 + 356 = 394 ✓）⇒ 下界当时可能已有约 3 条余量 ✗（余量 = 少跑几条也不会红 ✗）。
+ *   要让下界**紧贴实跑数** ✓，得等完整跑把实际条数读出来 ✓
+ *   （成功那行的 `${checkCount} 条` ✓ / 或崩溃时 catch 打的那行 ✓），再把它调到那个数 ✓。
+ */
+const EXPECTED_MIN_CHECKS = 392
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -1144,6 +1158,19 @@ const evaluate = async (expression) => {
   bump(T.cdp, line, Date.now() - at)
   return result.timeout === true ? '(超时)' : result.result?.result?.value
 }
+
+/**
+ * ★★ 崩溃路径也要**收尾** ✓（本轮补 ✓）：`process.exit()` 会**跳过 `finally`** ✗ ——
+ *   本机实测：`node -e "try{throw new Error('x')}catch(e){process.exit(3)}finally{console.log('FINALLY-RAN')}"`
+ *   ⇒ 退出码 3 ✓、而那句 `FINALLY-RAN` **一次都没打印** ✓（`finally` 确实没跑 ✓）。
+ *   ⇒ 若下面的 `catch` 直接 `exit(1)` ✓，`finally` 里那两笔账（进程组 / 临时目录 / Chrome 克隆 ✓）
+ *   就**全留在机器上** ✗ —— 正是 round 117 清掉的那笔债 ✓。
+ *   ⇒ 收尾提成 `finalizeRun()` ✓：**一份**代码 ✓（不是抄两遍 ✗，抄两遍迟早只改一处 ✗）、
+ *   带**一次性闸门** ✓ —— 崩溃路径与正常路径谁先到谁做 ✓、另一条不会再收一遍 ✗。
+ *   ★ 它自己的定义在**下面**（约 400 行之后 ✓）—— 用的是**函数声明**（会提升 ✓）✓，
+ *   所以这里（catch / finally）在它定义之前就能调 ✓，与文件末尾调 `printTiming()` 同理 ✓。
+ */
+let runFinalized = false
 
 try {
   const created = await post('/mobile/pair/code')
@@ -14552,7 +14579,45 @@ try {
     check(false, '★★ round 166：新增的这几条回归护栏自己跑完了（没被异常吞掉）', String(error && error.message ? error.message : error))
   }
 
+} catch (error) {
+  /**
+   * ★★ 主体那个 `try` 原来**只有 `finally`、没有 `catch`** ✗（本轮补 ✓）——
+   *   ⇒ 任何一句没被守住的抛错都会**冲出整份套件** ✗：后面的断言**一条都不跑** ✗，
+   *   而文件最末尾那条**条数下界**（`EXPECTED_MIN_CHECKS` ✓）**根本执行不到** ✗
+   *   ⇒ 屏幕上看起来"跑过了" ✓（实测那一回：崩在第 39 个 `check(...)` ✓ ⇒ 只跑了 38 条 ✓
+   *   （31 ✓ / 7 ✗）= 全量的约 9.5% ✗，后面 356 条**一次都没跑** ✗ ——
+   *   见 `EXPECTED_MIN_CHECKS` 那段事故注释 ✓）。
+   *   ⇒ 这里把它变成**响亮的红** ✓，三件事都报 ✓：
+   *     ① **已跑多少条**（`checkCount` ✓）；② **是否低于下界**（`EXPECTED_MIN_CHECKS` ✓）；③ **堆栈** ✓。
+   *   ★ `printTiming()` 是**函数声明** ⇒ **会提升** ✓，这一段在它定义之前也能调 ✓
+   *     （实测：崩在主体 `try` 开头时，`ML_TIMING=1` 下它照样打印了分段读数 ✓）；
+   *   ★ `finalizeRun()` 同理（函数声明 ✓、提升 ✓）—— **必须先收尾再 exit** ✗：
+   *     `process.exit()` 会跳过 `finally` ✓（见上面那个函数的说明 ✓）；
+   *   ★ **非 0 退出** ✓ —— 让 CI/人一眼看出"**它崩了**"✗，而不是"跑完了"✓；
+   *   ★ 正常路径（不抛错）**一行都不会走这里** ✓。
+   */
+  const belowBound = checkCount < EXPECTED_MIN_CHECKS
+  printTiming()
+  console.error('\n[check-mobile-layout] ✗✗ 套件被异常中断：主体 try 抛错 ⇒ 后面的断言一条都没跑 ✗')
+  console.error(`  - 已跑断言：${checkCount} 条（下界 ${EXPECTED_MIN_CHECKS}）⇒ ${belowBound ? '低于下界 ✗' : '条数够、但这一轮**没跑完** ✗'}`)
+  console.error(`  - 异常：${error && error.stack ? error.stack : String(error)}`)
+  await finalizeRun()
+  process.exit(1)
 } finally {
+  // ★ 收尾**只有这一份** ✓（见下面的 `finalizeRun` ✓）；崩溃路径也会先调它 ✓ 再 exit ✓
+  await finalizeRun()
+}
+
+/**
+ * ★★ `finally` 原来那一段收尾（进程组 + 临时目录 + Chrome 克隆 ✓）：**正常路径与崩溃路径共用** ✓
+ *   （本轮补 ✓）。`process.exit()` 会**跳过 `finally`** ✗（实测见上 ✓）⇒
+ *   提成**函数声明** ✓（会提升 ✓ ⇒ 上面 catch/finally 在它定义之前就能调 ✓）、
+ *   加**一次性闸门** ✓（谁先到谁做 ✓）。
+ *   ★ 收尾内容**一字未改** ✓ —— 下面这一段就是从原来那个 `finally` 里**原样搬进来**的 ✓。
+ */
+async function finalizeRun() {
+  if (runFinalized) return
+  runFinalized = true
   try {
     process.kill(-dsh.pid, 'SIGKILL')
     process.kill(-proxy.pid, 'SIGKILL')
@@ -14613,6 +14678,26 @@ function printTiming() {
   for (const g of gaps) console.log(`      L${g.line}  ${g.ms}ms  ← 上一条「${g.prev}」`)
   console.log('[timing] ══════════════════════')
 }
+
+/**
+ * ★★ 哨兵断言（本轮补 ✓）：**跑到这一行**才算"整份套件跑完了" ✓。
+ *
+ * 为什么需要它 ✗：上面那些断言是**散着**的 ✓ —— "少跑了几条"与"全跑完了"在屏幕上
+ *   只差一个数字 ✓，而数字少到多少才算少，全看最后那条下界 ✓；下界又只有跑到**文件末尾**
+ *   才会执行 ✗ ⇒ 中途被打断时它**根本不执行** ✗（这正是本单要堵的那条路 ✓，
+ *   主体 `try` 的 `catch` 已经先把它变成非 0 退出 ✓，这条哨兵是**第二层** ✓）。
+ *
+ * 它怎么起作用 ✓（两条都**不靠**"退出码是 0"这种间接证据 ✗）：
+ *   ① 它是**全文件最后一条 `check(...)`** ✓ ⇒ 正常跑完时它一定**绿着出现** ✓；
+ *      被异常中断时 ✓ 上面的 `catch` 已经 `exit(1)` ✓ ⇒ 这一行**一个字都不会出现** ✗
+ *      ⇒ 只读绿/红行就能判断"跑没跑到最后" ✓（不必去猜那个数字对不对 ✓）；
+ *   ② 它**也走 `check()`** ✓ ⇒ `checkCount` 随之 +1 ✓，`EXPECTED_MIN_CHECKS` 同步 +1 ✓
+ *      ⇒ 下界仍然是**紧贴实跑条数**的下界 ✓（不放松 ✓）——
+ *      也就是说"条数够"与"这条哨兵真的跑到了"**是同一件事** ✓。
+ *   ★ 反例（本单实测 ✓）：把它临时删掉、而中途抛错时，屏幕上照样只有 `catch` 那几行红 ✓，
+ *     没有任何一条**绿**能证明"跑到了最后" ✗ —— 这就是它补的位置 ✓。
+ */
+check(true, '套件跑到了最后（没有被异常中断）')
 
 if (problems.length > 0) {
   printTiming()
