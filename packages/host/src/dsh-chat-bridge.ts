@@ -71,17 +71,26 @@
 
 import { ErrorCode } from '@dsh-mobile/protocol'
 
+import type { ApprovalBroker } from './dsh-approval.ts'
 import { readHostRpcResult } from './gateway-rpc.ts'
 
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>
 
-/** 我们自己的路径 ✓（手机只认这三个 ✓）。 */
+/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
 export const DSH_CHAT_PATHS = {
   sessions: 'mobile/dsh/sessions',
   read: 'mobile/dsh/read',
   send: 'mobile/dsh/send',
   create: 'mobile/dsh/create',
+  /**
+   * ★ 手机**裁决** ✓（点了审批卡上那两颗按钮之一 ✓）。
+   *
+   * 它**不是** DSH 端点 ✗（全 asar 里带引号的 `"approval/decide"` 是 **0** 命中 ✓ ——
+   * 那几十处命中是 `approval/decided` 的**子串** ✓）⇒ 它只走本桥 ✓，
+   * 落到 `dsh-approval.ts` 那个中间人上 ✓（真正生效的地方是 `cordis.ts` 的 waterfall 应答者 ✓）。
+   */
+  approval: 'mobile/dsh/approval',
 } as const
 
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
@@ -101,6 +110,15 @@ export interface DshChatDeps {
     ref: { readonly sessionId: string; readonly rpcId: string },
     via: 'session/prompt' | 'mobile/dsh/send',
   ) => void
+  /**
+   * 手机**裁决**用的中间人 ✓（`mobile/dsh/approval` 那条路 ✓）。
+   *
+   * ★ **必须可选** ✗（理由与上面 `recordPrompt` 一模一样 ✓）：既有测试与调用方用
+   *   `{ call }` 构造 deps ✓ —— 改成必填会一次性弄红它们 ✓。
+   * ★ 没注入 ⇒ 那条端点**明确报错** ✓（**不静默成功** ✗）：
+   *   假装成功 ⇒ 手机上显示"已处理"✓ 而电脑上那张卡还挂着 ✓ —— 最难查的一类 ✗。
+   */
+  readonly approvalBroker?: ApprovalBroker
 }
 
 /**
@@ -119,7 +137,49 @@ export async function handleDshChatEndpoint(
   if (endpoint === DSH_CHAT_PATHS.read) return readPage(deps, args, signal)
   if (endpoint === DSH_CHAT_PATHS.send) return sendPrompt(deps, args, signal)
   if (endpoint === DSH_CHAT_PATHS.create) return createSession(deps, args, signal)
+  if (endpoint === DSH_CHAT_PATHS.approval) return settleApproval(deps, args)
   return undefined
+}
+
+/**
+ * 手机点了审批卡上的一颗按钮 ✓（`mobile/dsh/approval` ✓）。
+ *
+ * ## 入参为什么是 `{requestId, decision}` 而不是「允许/拒绝」✗
+ *
+ * · `requestId` **必须**是 DSH 那条 `approval/asked.id` ✓ —— 手机页那个 id 就是从会话日志里
+ *   读来的 ✓（认 id 的那本账在 `cordis.ts` 的 `lastAsked` ✓）；
+ * · `decision` 用**不是我们自造的词** ✓，就是 DSH 的**封闭词汇** ✓
+ *   （`dsh-approval.ts` 的 `APPROVAL_OUTCOMES` ✓）；词汇外的值由中间人规范化成
+ *   `unavailable` ✓（**不放行** ✓）—— 这一层**不替它兜底、也不替它翻译** ✗。
+ *
+ * ## 返回值（每个字段页面都要能说清 ✓）
+ *
+ * · `ok` / `accepted` —— 这一下**落到了**一条真在等的请求上 ✓（没落到 ⇒ `false` ✓：
+ *   重复点 / 已经超时 / id 不对 ✓ ⇒ 页面该说「这条已经处理过了」✓，而不是「操作成功」✗）；
+ * · `pending` —— 还剩几条在等 ✓；
+ * · `granted` —— 是否**放行** ✓（只有 `decision === 'allowed-once'` 才是 `true` ✓）；
+ * · `outcome` —— 真正交给 DSH 的那个词 ✓；
+ * · `vocabulary` —— 手机上发来的词在不在封闭词汇内 ✓（`false` ⇒ 已被规范化 ✓）。
+ */
+function settleApproval(deps: DshChatDeps, args: Record<string, unknown>): unknown {
+  const broker = deps.approvalBroker
+  if (broker === undefined) {
+    throw Object.assign(new Error('审批裁决通道未接通：宿主没有注入中间人'), { code: ErrorCode.Internal })
+  }
+  const requestId = typeof args['requestId'] === 'string' ? (args['requestId'] as string) : ''
+  if (requestId.trim().length === 0) {
+    throw Object.assign(new Error('参数缺失：requestId'), { code: ErrorCode.Internal })
+  }
+  const decision = typeof args['decision'] === 'string' ? (args['decision'] as string) : ''
+  const result = broker.settle(requestId, decision)
+  return {
+    ok: result.found,
+    accepted: result.found,
+    pending: result.pending,
+    granted: result.granted,
+    outcome: result.outcome,
+    vocabulary: result.vocabulary,
+  }
 }
 
 /** 列会话 ✓（归一成 `{ ok:true, sessions:[…] }` ✓）。 */
