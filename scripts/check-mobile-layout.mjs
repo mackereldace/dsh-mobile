@@ -2034,6 +2034,13 @@ try {
     await sleep(700)
     const withSwitcher = await lineageProbe()
     const switchBand = tabBandOf(withSwitcher)
+    // ★ 守卫（round 235 补）：探针失败时 withSwitcher.tabs / switchBand 可能是 undefined
+    //   —— 那时**必须让断言失败**（响亮地红 ✗），不能让它去取 .right 抛异常：
+    //   抛异常会**中断整份套件** ⇒ EXPECTED_MIN_CHECKS 的下界**形同虚设** ✗
+    //   （实测过：它崩在 §155，后面的断言一条都没跑，而脚本却"看起来跑完了"）。
+    const tabsRight = withSwitcher.tabs === undefined ? undefined : withSwitcher.tabs.right
+    const bandRightMost = switchBand === undefined ? undefined : switchBand.rightMost
+    const tabsReachable = tabsRight !== undefined && bandRightMost !== undefined
     check(
       injectedSwitcher.ok === true && withSwitcher.entryVariant === 'switcher' &&
         withSwitcher.entry !== null && withSwitcher.entry !== undefined && withSwitcher.entry.w > 0 &&
@@ -2042,12 +2049,13 @@ try {
       `基线 tab=${JSON.stringify(baseline.tabsBox)}｜有切换器=${JSON.stringify(withSwitcher.tabsBox)}｜切换器=${JSON.stringify(withSwitcher.entry)}`,
     )
     check(
-      withSwitcher.entry !== null && withSwitcher.entry !== undefined &&
-        withSwitcher.entry.x >= switchBand.rightMost &&
-        withSwitcher.entry.right <= withSwitcher.tabs.right + 1 &&
-        withSwitcher.entry.w <= withSwitcher.tabs.right - switchBand.rightMost + 1,
+      tabsReachable &&
+        withSwitcher.entry !== null && withSwitcher.entry !== undefined &&
+        withSwitcher.entry.x >= bandRightMost &&
+        withSwitcher.entry.right <= tabsRight + 1 &&
+        withSwitcher.entry.w <= tabsRight - bandRightMost + 1,
       '★ 155-⑥ 切换器形态：右缘**不越出标签行** ✓、与最右那个 tab **不重叠** ✓（名字再长也只在自己那块空地里截断 ✓）',
-      `入口=${JSON.stringify(withSwitcher.entry)}｜最右 tab 右缘=${switchBand.rightMost}｜标签行右缘=${withSwitcher.tabs.right}`,
+      `入口=${JSON.stringify(withSwitcher.entry)}｜最右 tab 右缘=${String(bandRightMost)}｜标签行右缘=${String(tabsRight)}`,
     )
 
     // ③ 撤掉夹具：标签行几何必须**逐点回到基线** ✓、外壳打的标记也要收干净 ✓
