@@ -1907,6 +1907,16 @@ export function createMobileHost(options) {
             //   顶部那一段是**别的单正在改的地方** ✗，插进去就会把两单搅在同一次提交里 ✓。
             //   动态 import 只加载一次（模块系统自己缓存 ✓），代价可以忽略 ✓。
             const { handleDshChatEndpoint } = await import("./dsh-chat-bridge.js");
+            /**
+             * ★ 手机裁决那个中间人也走**同一种**动态 import 姿势 ✓（理由同上 ✓，顶部不动 ✓）。
+             *
+             * ★★ 为什么取的是 `sharedApprovalBroker()` 而**不是** `createApprovalBroker()` ✗：
+             *   「等」在 `cordis.ts`（waterfall 应答者 ✓）、「答」在这条路由 ✓ ——
+             *   两处**必须**是**同一个实例** ✗，否则各在一个空表里自说自话 ✓：
+             *   手机上点下去只会得到 `ok:false`✓，而两边看起来都"挂载成功"✓（最难查的一类 ✗）。
+             *   `sharedApprovalBroker()` 是模块级单例 ✓ ⇒ 两处 `import` 到同一个文件 ⇒ 同一个实例 ✓。
+             */
+            const { sharedApprovalBroker } = await import("./dsh-approval.js");
             return handleDshChatEndpoint({
                 call: (target, payload, bridgeSignal) => invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
                 /**
@@ -1918,6 +1928,7 @@ export function createMobileHost(options) {
                  * 不从别处猜 ✗（猜错就是给 agent 一个假来源）。
                  */
                 recordPrompt: (ref, via) => recordPrompt(ref, via, device),
+                approvalBroker: sharedApprovalBroker(),
             }, endpoint, payload, signal);
         }
         if (endpoint === 'mobile/openInApp/apps') {

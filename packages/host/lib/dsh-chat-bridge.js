@@ -25,9 +25,27 @@
  *                   `[records, hasMore]` ✓；本文档早先写的 `asOfSeq` / `values` 在 0.2.0-rc.2
  *                   的 `session/page` 里**根本不存在** ✗ —— `normalizePage` 那两处是**老式回退** ✓）
  * session/projections  参数 request = { sessionId } ⇒ 返回 { asOfSeq, values } ✓
- *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓）
+ *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓；
+ *                   ★★ 也是**状态条那三个数唯一的来源** ✓ —— 2026-10-08 加上 ✓，
+ *                   字段逐个抄自 `app.asar` ✓，见 `normalizeValues` 上面那段 ✓）
  * session/prompt  参数 request = { requestId, sessionId, mode:"queue"|"steer", content:[…] }
  * ```
+ *
+ * ## ★★ 状态条那三个数在哪儿（2026-10-08 生产实例实测 ✓）
+ *
+ * 会话页要画「45% · 488 轮 2525 步 · 1062M tok」✓，四个格子分别来自：
+ *
+ * | 格子 | 来源 | 字段 |
+ * |---|---|---|
+ * | `45%` | `session/projections` ⇒ `values.contextPressure` ✓ | `projectedTokens ?? pressureTokens` ÷ `contextWindow` ✓（**要页面自己算** ✓） |
+ * | `488 轮` | 同上 ⇒ `values.sessionStats.turns` ✓ | `turns` ✓ |
+ * | `2525 步` | 同上 ⇒ `values.sessionStats.steps` ✓ | `steps` ✓ |
+ * | `1062M tok` | 同上 ⇒ `values.tokenUsage` ✓ | `uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens` ✓（四个桶求和 ✓） |
+ *
+ * ★ **`session/page` 里一个都没有** ✗（实测它的返回只有 `[records, hasMore]` ✓）——
+ *   改前 `normalizePage` 读的那个 `values` 在真机上**永远不存在** ✓ ⇒ 状态条永远是空的 ✗。
+ * ★ 三个投影的**真字段名**一个都不许改 ✗（本仓因"照着想的字段名写"栽过四次 ✓：
+ *   `id` ✗ `request` ✗ `throughSeq` ✗ `origin` ✗）—— 名字、类型、语义见 `normalizeValues` ✓。
  *
  * ## ★ 三条**刻意**的克制（别顺手改 ✗）
  *
@@ -52,12 +70,20 @@
  */
 import { ErrorCode } from './protocol/index.js';
 import { readHostRpcResult } from "./gateway-rpc.js";
-/** 我们自己的路径 ✓（手机只认这三个 ✓）。 */
+/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
 export const DSH_CHAT_PATHS = {
     sessions: 'mobile/dsh/sessions',
     read: 'mobile/dsh/read',
     send: 'mobile/dsh/send',
     create: 'mobile/dsh/create',
+    /**
+     * ★ 手机**裁决** ✓（点了审批卡上那两颗按钮之一 ✓）。
+     *
+     * 它**不是** DSH 端点 ✗（全 asar 里带引号的 `"approval/decide"` 是 **0** 命中 ✓ ——
+     * 那几十处命中是 `approval/decided` 的**子串** ✓）⇒ 它只走本桥 ✓，
+     * 落到 `dsh-approval.ts` 那个中间人上 ✓（真正生效的地方是 `cordis.ts` 的 waterfall 应答者 ✓）。
+     */
+    approval: 'mobile/dsh/approval',
 };
 /**
  * 处理一条 `mobile/dsh/*` 调用 ✓。
@@ -74,7 +100,49 @@ export async function handleDshChatEndpoint(deps, endpoint, payload, signal) {
         return sendPrompt(deps, args, signal);
     if (endpoint === DSH_CHAT_PATHS.create)
         return createSession(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.approval)
+        return settleApproval(deps, args);
     return undefined;
+}
+/**
+ * 手机点了审批卡上的一颗按钮 ✓（`mobile/dsh/approval` ✓）。
+ *
+ * ## 入参为什么是 `{requestId, decision}` 而不是「允许/拒绝」✗
+ *
+ * · `requestId` **必须**是 DSH 那条 `approval/asked.id` ✓ —— 手机页那个 id 就是从会话日志里
+ *   读来的 ✓（认 id 的那本账在 `cordis.ts` 的 `lastAsked` ✓）；
+ * · `decision` 用**不是我们自造的词** ✓，就是 DSH 的**封闭词汇** ✓
+ *   （`dsh-approval.ts` 的 `APPROVAL_OUTCOMES` ✓）；词汇外的值由中间人规范化成
+ *   `unavailable` ✓（**不放行** ✓）—— 这一层**不替它兜底、也不替它翻译** ✗。
+ *
+ * ## 返回值（每个字段页面都要能说清 ✓）
+ *
+ * · `ok` / `accepted` —— 这一下**落到了**一条真在等的请求上 ✓（没落到 ⇒ `false` ✓：
+ *   重复点 / 已经超时 / id 不对 ✓ ⇒ 页面该说「这条已经处理过了」✓，而不是「操作成功」✗）；
+ * · `pending` —— 还剩几条在等 ✓；
+ * · `granted` —— 是否**放行** ✓（只有 `decision === 'allowed-once'` 才是 `true` ✓）；
+ * · `outcome` —— 真正交给 DSH 的那个词 ✓；
+ * · `vocabulary` —— 手机上发来的词在不在封闭词汇内 ✓（`false` ⇒ 已被规范化 ✓）。
+ */
+function settleApproval(deps, args) {
+    const broker = deps.approvalBroker;
+    if (broker === undefined) {
+        throw Object.assign(new Error('审批裁决通道未接通：宿主没有注入中间人'), { code: ErrorCode.Internal });
+    }
+    const requestId = typeof args['requestId'] === 'string' ? args['requestId'] : '';
+    if (requestId.trim().length === 0) {
+        throw Object.assign(new Error('参数缺失：requestId'), { code: ErrorCode.Internal });
+    }
+    const decision = typeof args['decision'] === 'string' ? args['decision'] : '';
+    const result = broker.settle(requestId, decision);
+    return {
+        ok: result.found,
+        accepted: result.found,
+        pending: result.pending,
+        granted: result.granted,
+        outcome: result.outcome,
+        vocabulary: result.vocabulary,
+    };
 }
 /** 列会话 ✓（归一成 `{ ok:true, sessions:[…] }` ✓）。 */
 async function listSessions(deps, signal) {
@@ -96,20 +164,49 @@ async function listSessions(deps, signal) {
  * （本机全局装的 `0.1.5-rc.1` 那份 `paginate` 有默认参数 `throughSeq = events.at(-1)?.seq ?? -1` ✓，
  *   而 `0.2.0-rc.2` 把那个默认值去掉了 ✗ —— 两边的 `history.js` 我都直接读过 ✓）。
  * ⇒ 页面不传，就**由本层补 head** ✓（`resolveHeadSeq` ✓）。
+ *
+ * ## ★★ 状态条那三个数**不在这一页里** ✗（2026-10-08 生产实例实测 ✓）
+ *
+ * 会话页输入栏下面那条状态条要画「45% · 488 轮 2525 步 · 1062M tok」✓，
+ * 但 `session/page` 的返回**只有** `[records, hasMore]` ✓（本机生产实例逐字核过 ✓：
+ * `Object.keys(value) === ['records','hasMore']` ✓，`'values' in value === false` ✓）——
+ * 那份**白名单 `values` 在真机上永远是空的** ✗（改前的 `normalizePage` 读的就是它 ✓：
+ * 想接也接不到 ✓）。
+ *
+ * **真数据在 `session/projections`** ✓ —— 它的 `values` 里有 `sessionStats` / `tokenUsage` /
+ * `contextPressure` 三个投影 ✓（生产实测：一条真会话的 `values` 键有 19 个 ✓，
+ * 详见 `normalizeValues` 上面那段「三个投影的真形状」✓）。
+ *
+ * ⇒ 于是 `resolveHeadSeq` **一次调用两个用途** ✓：`asOfSeq` 当 `throughSeq` ✓ ＋
+ *   `values` 供状态条 ✓（同一次读数 ✓，不额外多打一次网关 ✓）。
+ *   ★ 代价：页面**自己给了** `throughSeq` 时，以前是一次网关调用都不问 ✗，
+ *     现在仍会读一次 `session/projections` ✓ —— 因为那三个数只有这里有 ✓；
+ *     实测这一次是 `3 KB / 3 ms` ✓（冷会话首次 `39 ms` ✓），而页面每 `900 ms` 才轮询一次 ✓。
  */
 async function readPage(deps, args, signal) {
-    const headSeq = await resolveHeadSeq(deps, args, signal);
+    const { headSeq, values } = await resolveHeadSeq(deps, args, signal);
     /**
      * ★ `head < 0` ⇒ 这个会话**一条事件都没有** ✓ ⇒ 正确答案就是"空的一页" ✓。
      *   ★ 这里**不再**拿 -1 去调 `session/page` ✗：那条路只会得到"不报错但永远空白" ✗
-     *     （见 `pageRequest` 的大雷注释 ✓）。外层形状与 `normalizePage` 的输出**保持一致** ✓。
+     *     （见 `pageRequest` 的大雷注释 ✓）。外层形状与 `normalizePage` 的输出**保持一致** ✓
+     *     （`values` 照样是那份**白名单归一化**过的投影值 ✓，拿不到 ⇒ 空表 ✓）。
      */
     if (headSeq < 0) {
-        return { ok: true, sessionId: requestSessionId(args), events: [], hasMore: false, asOfSeq: headSeq, values: {} };
+        return { ok: true, sessionId: requestSessionId(args), events: [], hasMore: false, asOfSeq: headSeq, values };
     }
     const request = pageRequest(args, headSeq);
     const value = unwrap(await deps.call('session/page', { args: { request } }, signal));
-    return { ok: true, ...normalizePage(value) };
+    const page = normalizePage(value);
+    return {
+        ok: true,
+        ...page,
+        /**
+         * ★ 投影值**盖在** `session/page` 自带的那份之上 ✓：
+         * 真机上后者根本不存在 ✗（实测 ✓），这份是刚读到的真投影 ✓；
+         * 老式替身两处都有时，**真数据赢** ✓（不是"后写的赢"这种偶然次序 ✓）。
+         */
+        values: { ...page['values'], ...values },
+    };
 }
 /** 发一条消息 ✓（`requestId` 由**这里**生成 ✓ —— 手机不用操心 ✓）。 */
 async function sendPrompt(deps, args, signal) {
@@ -374,7 +471,77 @@ export function normalizePage(value) {
         values: normalizeValues(page['values']),
     };
 }
-/** 界面值：**白名单** ✓（只转我们真的要画的那些 ✓ —— 见模块注释第 2 条）。 */
+/**
+ * 界面值：**白名单** ✓（只转我们真的要画的那些 ✓ —— 见模块注释第 2 条）。
+ *
+ * ## ★★ 状态条那三个投影的真形状（★ 逐个字段抄自 `app.asar` ✓，**不是想出来的** ✗）
+ *
+ * 三个键的名字与里面每一个字段名，都是从本机 `app.asar`（`0.2.0-rc.2` ✓）里**读**出来的 ✓，
+ * 且在**生产实例**上**读到了真值** ✓（2026-10-08 ✓，见每条下面的读数 ✓）。
+ *
+ * ### 1. `sessionStats` ✓ —— 「轮」与「步」
+ *
+ * 定义：`@deepseek-ai/dsh-session-stats/lib/types/projection.js` ✓
+ * （`sessionStatsSchema` 与 `wire.view`：**同一份 8 个字段** ✓，`z.object({…}).strict()` ✓）：
+ *
+ * ```
+ * turns: int ≥ 0        ← 真机读数 538  ✓（= 截图里那个「488 轮」那一格 ✓）
+ * steps: int ≥ 0        ← 真机读数 2651 ✓（= 「2525 步」✓）
+ * llmMs / toolMs / ttftMs / decodeMs / decodeTokens : number ≥ 0
+ * ttftSteps : int ≥ 0
+ * ```
+ *
+ * ★ 语义（同文件头注释 ✓）：「**整份持久日志**」的计数 ✓ —— **不是**窗口里那几条 ✓：
+ *   `steps` 数的是 `step/end`（**不是** assistant 消息 ✗ —— 文件头把这条理由写死了 ✓：
+ *   数消息会把 max-tokens 的空消息多算、把被取消的步骤少算 ✓）；
+ *   `turns` 数的是"见过几个不同的 `turn`"✓（同文件 `step/end` 分支的 `lastTurn` 去重 ✓）。
+ *   ★ 所以**绝不能**拿"消息条数"冒充「轮」✗（页面的窗口是分页的、压缩还会重写它 ✗）。
+ *
+ * ### 2. `tokenUsage` ✓ —— 「tok」
+ *
+ * 定义：`@deepseek-ai/dsh-token-meter/lib/types/usage-projection.js` ✓
+ * （`projectionSchema` ✓，它的 `wire.view` 就是 `state.totals` ✓）：
+ *
+ * ```
+ * uncachedInputTokens: int ≥ 0   ← 真机读数 4215496
+ * outputTokens:        int ≥ 0   ← 真机读数 2706002
+ * cacheReadTokens:     int ≥ 0   ← 真机读数 1123595776
+ * cacheWriteTokens:    int ≥ 0   ← 真机读数 0
+ * ```
+ *
+ * ★ DSH 官方客户端把「tok」那一格算成 **这四个桶的和** ✓
+ *   （`dsh-client-ui-chat/lib/client.js` ✓：`billedInputTokens(usage) = uncached + cacheRead + cacheWrite` ✓，
+ *   而用量那颗药丸是 `billedInputTokens(usage) + usage.outputTokens` ✓；格式化成 `1.1M tok` ✓）——
+ *   ★ 桥只**原样给这四个数** ✓，求和是页面的事 ✓（这里求和就是"替页面定格式"✗，本层不做 ✗）。
+ *
+ * ### 3. `contextPressure` ✓ —— 「45%」那个百分比
+ *
+ * 定义：同上的 `usage-projection.js` ✓（`pressureSchema` + `wire.view` ✓）。**三个字段都可选** ✓：
+ *
+ * ```
+ * contextWindow?:  int > 0    ← 真机读数 1000000
+ * pressureTokens?: int ≥ 0    ← 真机读数 259578（提供方报告的最新提示词规模 ✓）
+ * projectedTokens?: int ≥ 0   ← 真机读数 260433（下一次请求的提示词预计花费 ✓）
+ * ```
+ *
+ * ★ 百分比**不是**投影里的字段 ✗ —— 官方是**算**出来的 ✓（`dsh-client-ui-conversation/lib/client.js` ✓）：
+ *
+ * ```js
+ * const usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens
+ * if (usedTokens === undefined || pressure?.contextWindow === undefined) return null   // ← 画不出来就不画 ✓
+ * percent = Math.min(100, Math.round(usedTokens / pressure.contextWindow * 100))
+ * ```
+ *
+ * ★ 桥**不替页面算这个百分比** ✗：算出来就是往数据层里塞显示口径 ✓（四舍五入/封顶都是画法 ✓）；
+ *   而**缺字段时返回 `null` 而不是 `0`** 这条纪律，写在报告里交给页面 ✓。
+ *
+ * ## 白名单纪律（为什么三个投影要**逐字段**过一遍 ✗）
+ *
+ * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
+ *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
+ * · 这三个投影外面还有 `contextBreakdown` / `turnOutline` / `goal` / `subagent*` 等 16 个键 ✓
+ *   （生产实测 `values` 一共 19 个键 ✓）—— **一个都不转** ✗，理由同模块注释第 2 条 ✓。
+ */
 export function normalizeValues(value) {
     const source = value !== null && typeof value === 'object' ? value : {};
     const out = {};
@@ -387,7 +554,78 @@ export function normalizeValues(value) {
     copyIfPresent(source, out, 'permissions');
     copyIfPresent(source, out, 'subagentCatalog');
     copyIfPresent(source, out, 'lastPromptAt');
+    copyView(source, out, 'sessionStats', sessionStatsView);
+    copyView(source, out, 'tokenUsage', tokenUsageView);
+    copyView(source, out, 'contextPressure', contextPressureView);
     return out;
+}
+/**
+ * 转一个投影视图 ✓：源里没这个键 / 认不出 / 一个合法字段都没有 ⇒ **连键都不输出** ✗。
+ *
+ * ★ 这条就是"**取不到就是取不到**"的落点 ✓：真机上没有这个投影（插件没装 ✓、会话太新还没有
+ *   投影 ✓）⇒ 输出里**没有**这个键 ✓ ⇒ 页面画不出那一格 ✓，而**不是**画一个 `0` ✗。
+ */
+function copyView(source, target, key, view) {
+    const normalized = view(source[key]);
+    if (normalized !== null)
+        target[key] = normalized;
+}
+/** `sessionStats` 的视图 ✓（字段与语义见 `normalizeValues` ✓）。 */
+function sessionStatsView(value) {
+    const source = asRecord(value);
+    if (source === null)
+        return null;
+    const out = {};
+    countField(source, out, 'turns');
+    countField(source, out, 'steps');
+    measureField(source, out, 'llmMs');
+    measureField(source, out, 'toolMs');
+    measureField(source, out, 'ttftMs');
+    countField(source, out, 'ttftSteps');
+    measureField(source, out, 'decodeMs');
+    measureField(source, out, 'decodeTokens');
+    return Object.keys(out).length === 0 ? null : out;
+}
+/** `tokenUsage` 的视图 ✓（四个桶都是 `int ≥ 0` ✓）。 */
+function tokenUsageView(value) {
+    const source = asRecord(value);
+    if (source === null)
+        return null;
+    const out = {};
+    countField(source, out, 'uncachedInputTokens');
+    countField(source, out, 'outputTokens');
+    countField(source, out, 'cacheReadTokens');
+    countField(source, out, 'cacheWriteTokens');
+    return Object.keys(out).length === 0 ? null : out;
+}
+/** `contextPressure` 的视图 ✓（三个字段**都可选** ✓ —— 缺哪个就少哪个键 ✓，不补 0 ✗）。 */
+function contextPressureView(value) {
+    const source = asRecord(value);
+    if (source === null)
+        return null;
+    const out = {};
+    countField(source, out, 'pressureTokens');
+    countField(source, out, 'projectedTokens');
+    const window = source['contextWindow'];
+    if (typeof window === 'number' && Number.isSafeInteger(window) && window > 0)
+        out['contextWindow'] = window;
+    return Object.keys(out).length === 0 ? null : out;
+}
+/** 只认**真对象** ✓（数组 / `null` / 标量一律不认 ✗ —— 认不出就别猜 ✓）。 */
+function asRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+/** 计数字段：**非负的安全整数**才认 ✓（真形状是 `z.number().int().nonnegative()` ✓）。 */
+function countField(source, target, key) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+        target[key] = value;
+}
+/** 毫秒 / token 这类**非整数也合法**的量：有限且非负才认 ✓（真形状是 `z.number().nonnegative()` ✓）。 */
+function measureField(source, target, key) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+        target[key] = value;
 }
 /**
  * `session/page` 的请求：**只搬我们认识的字段** ✓ + **`throughSeq` 必带** ✓。
@@ -551,13 +789,22 @@ function listAsOfSeq(value, sessionId) {
  *
  * ## 两个来源的次序（**实测定的** ✓，不是随手排的 ✗）
  *
- * 1. 页面自己给的 `throughSeq` ✓ ⇒ **不问**网关 ✓（页面说了算 ✓）；
- * 2. `session/projections { sessionId }` ✓ ⇒ `asOfSeq` ✓
+ * 1. `session/projections { sessionId }` ✓ ⇒ `asOfSeq` ✓ **＋ 状态条那三个投影** ✓
  *    —— 只读一个会话 ✓，实测线上 `3 KB / 3 ms`（冷会话首次 `39 ms`）✓；
- * 3. `session/list` ✓ ⇒ 该条 `projections.asOfSeq` ✓
+ * 2. 页面自己给的 `throughSeq` ✓ ⇒ head **以页面为准** ✓（页面说了算 ✓）
+ *    —— ★ 但这一次 `session/projections` 还是要打的 ✓：状态条那三个数**只有它这里有** ✗
+ *      （`session/page` 的返回里没有 ✗，实测 ✓），不读 ⇒ 那一格永远是空的 ✗；
+ * 3. `session/list` ✓ ⇒ 该条 `projections.asOfSeq` ✓（**只在第 1 步拿不到 head 时**）
  *    —— 用户点名的来源 ✓，**但一次 815 KB / 120 ms**（387 条会话 ✓），
  *    而会话页每 `900 ms` 就轮询一次 ✓ ⇒ 只作**兜底** ✓；
  * 4. 都拿不到 ⇒ **抛错** ✓（原文带上两次失败的原因 ✓ —— 手机上要能念 ✓）。
+ *
+ * ## ★ 返回值里为什么多了一个 `values`（2026-10-08 加 ✓）
+ *
+ * 第 1 步那次调用本来就是**为了 head** 打的 ✓ ⇒ 顺手把它带回的 `values` 归一化后交出去 ✓
+ * （`normalizeValues` ✓：三个投影 + 原有的界面值白名单 ✓）。
+ * ★ 第 1 步失败 ⇒ `values` 是**空表** ✓（`normalizeValues(undefined)` ⇒ `{}` ✓）——
+ *   **不许**在这条路上编出 `{turns: 0}` ✗（"这个会话零轮"是个**假事实** ✗）。
  *
  * ★ 为什么**不能**用 `session/follow` 的开场快照 `cursor`（原计划的兜底 ✓）✗：
  *   它是**流**端点 ✓，而本层的 `deps.call` 是**一问一答** ✓（生产里就是 `gateway.invoke(…)` ✓）——
@@ -565,27 +812,62 @@ function listAsOfSeq(value, sessionId) {
  *
  * ★ 覆盖情况（实测 ✓）：生产实例 387 条会话里 **372 条**列表里带 `projections` ✓、
  *   357 条 `blank:false` 且 `asOfSeq` 是数字 ✓；剩下 **15 条列表里没有投影** ✓
- *   —— 第 2 步对它们照样有效 ✓（实测 `asOfSeq = 3` ⇒ `page@3` 拿到 `n=4` ✓）。
+ *   —— 第 1 步对它们照样有效 ✓（实测 `asOfSeq = 3` ⇒ `page@3` 拿到 `n=4` ✓）。
  */
 async function resolveHeadSeq(deps, args, signal) {
-    const provided = providedThroughSeq(args);
-    if (provided !== null)
-        return provided;
     const sessionId = requestSessionId(args);
     if (sessionId.length === 0) {
         throw Object.assign(new Error('参数缺失：sessionId（或 address）'), { code: ErrorCode.Internal });
     }
     const failures = [];
+    const snapshot = await readProjections(deps, sessionId, signal, failures);
+    // ★ 页面给的游标优先 ✓；但投影**这一次照读** ✓（状态条的三个数只在它里面 ✗）
+    const provided = providedThroughSeq(args);
+    if (provided !== null)
+        return { headSeq: provided, values: projectionValuesOf(snapshot) };
+    if (snapshot !== null) {
+        if (snapshot.asOfSeq !== null)
+            return { headSeq: snapshot.asOfSeq, values: projectionValuesOf(snapshot) };
+        failures.push('session/projections 没给 asOfSeq');
+    }
+    const fromList = await headSeqFromList(deps, sessionId, signal, failures);
+    if (fromList !== null) {
+        // ★ head 是从**列表**里拿的 ⇒ 投影没读到 ⇒ `values` 空表 ✓（不编 ✗）
+        return { headSeq: fromList, values: projectionValuesOf(snapshot) };
+    }
+    throw Object.assign(new Error(`取不到会话「${sessionId}」的 head 序号（${failures.join('；')}）`), {
+        code: ErrorCode.Internal,
+    });
+}
+/**
+ * 读一次 `session/projections` ✓ —— ★ 状态条那三个数**只有这里有** ✗（见 `readPage` 的注释 ✓）。
+ *
+ * ★ 失败**不抛** ✓、只把原因记进 `failures` 并回 `null` ✓：
+ *   这份读数是"**顺路**"要的 ✓（head 是主线 ✓），head 还有 `session/list` 兜底 ✓
+ *   ⇒ 在这里抛会把"状态条取不到"升级成"整页读不出来" ✗（用户在手机上看到红字，
+ *     而其实消息是好的 ✓）。★ 但**也绝不**回一个编造的值 ✗ —— 回 `null` ✓。
+ */
+async function readProjections(deps, sessionId, signal, failures) {
     try {
         const value = unwrap(await deps.call('session/projections', { args: { request: { sessionId } } }, signal));
-        const asOfSeq = asOfSeqOf(value);
-        if (asOfSeq !== null)
-            return asOfSeq;
-        failures.push('session/projections 没给 asOfSeq');
+        const container = value !== null && typeof value === 'object' ? value : {};
+        const values = container['values'];
+        return {
+            asOfSeq: asOfSeqOf(value),
+            values: values !== null && typeof values === 'object' && !Array.isArray(values) ? values : {},
+        };
     }
     catch (error) {
         failures.push(`session/projections：${messageOf(error)}`);
+        return null;
     }
+}
+/** 投影读数 ⇒ 白名单归一化后的界面值 ✓（读不到 ⇒ **空表** ✓ —— 不编 ✗）。 */
+function projectionValuesOf(snapshot) {
+    return normalizeValues(snapshot?.values);
+}
+/** `session/list` 兜底取 head ✓（拿不到 ⇒ `null` ✓ ＋ 记原因 ✓）。 */
+async function headSeqFromList(deps, sessionId, signal, failures) {
     try {
         const value = unwrap(await deps.call('session/list', { args: { _request: {} } }, signal));
         const asOfSeq = listAsOfSeq(value, sessionId);
@@ -596,9 +878,7 @@ async function resolveHeadSeq(deps, args, signal) {
     catch (error) {
         failures.push(`session/list：${messageOf(error)}`);
     }
-    throw Object.assign(new Error(`取不到会话「${sessionId}」的 head 序号（${failures.join('；')}）`), {
-        code: ErrorCode.Internal,
-    });
+    return null;
 }
 // ────────────────────────────── 工具 ──────────────────────────────
 /** 从 typert 信封里取业务参数（`{args:{…}}` ✓ —— 与 `codex-bridge` 同一套 ✓）。 */

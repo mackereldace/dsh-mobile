@@ -19,6 +19,72 @@
   'use strict'
 
   /**
+   * ★★ 让"进了子智能体会话就回不到主会话"从根上不再发生（本单新增 ✓）。
+   *
+   * DSH 把"当前主视图的选择"持久化在 localStorage 的这一个键上（形状 = JSON.stringify 的
+   * 裸对象，见 dsh-client-store 的 attachPersistence）。值里出现 subagentAddress
+   * 就等价于"下一次加载直接恢复进子单"——手机上面板整屏，于是看起来"回不到主会话"。
+   *
+   * 为什么只能在**写路径**上治（实测过 ✓）：DSH 的 store 在 hydrate 之后会按内存态把它
+   * 立刻写回，我们赶在它读之前抹掉没有用（抹完又被写回来）。
+   *
+   * 保守到什么程度（每一条都是为了"最坏只失效、不损坏"）：
+   *   · 只在**完全一致**的键名上动手；别的键一律原样放行；
+   *   · 值必须是能完整解析的**普通对象**且**确实带 subagentAddress**，否则原样放行；
+   *   · 只动两个字段：删 subagentAddress；把 sessionId 改成 subagentAddress.parentSessionId
+   *     （后者取不到字符串就**不猜**，只删）；
+   *   · 解析 / 字符串化失败 ⇒ **不改、也绝不吞掉这次写**（先落盘再补一行日志）；
+   *   · 把值改空 ⇒ 直接 removeItem（不留 "{}" 这种半成品）。
+   *
+   * ★ 它依赖的 DSH 内部结构（升级时照这张表退化 ✓）：
+   *   · 键名 `dsh.sessions.current`；
+   *   · 值里的 `sessionId` = "默认面恢复哪个会话"、`subagentAddress` = "这次要恢复进子单"；
+   *   · 地址对象里的 `parentSessionId`；
+   *   · 我们这一侧永远不读它 —— 只做"写出去的字节"这一道闸，不替 DSH 解释状态。
+   *
+   * ★ 已知边界（**不是**"从此再也不会看到子单" ✗）：嵌套子单（主 → 子 → 孙）时
+   *   parentSessionId 只向上一级，于是下次加载会落在"父那级的对话"；那级的面包屑仍在，
+   *   ★ 顶栏那颗「回到主会话」仍然显示、仍然可用 ✓。要连这一层也消掉，得**逐级上行**（本单不做 ✗）。
+   */
+  var DSH_SESSION_SELECTION_KEY = 'dsh.sessions.current'
+
+  try {
+    var dshmRawSetItem = localStorage.setItem
+    if (typeof dshmRawSetItem === 'function') {
+      localStorage.setItem = function (key, value) {
+        if (key === DSH_SESSION_SELECTION_KEY) {
+          var dshmNext = value
+          try {
+            var dshmParsed = JSON.parse(String(value))
+            if (dshmParsed !== null && typeof dshmParsed === 'object' && Object.prototype.toString.call(dshmParsed) === '[object Object]'
+                && Object.prototype.hasOwnProperty.call(dshmParsed, 'subagentAddress')) {
+              var dshmAddress = dshmParsed.subagentAddress
+              delete dshmParsed.subagentAddress
+              if (dshmAddress !== null && typeof dshmAddress === 'object'
+                  && typeof dshmAddress.parentSessionId === 'string' && dshmAddress.parentSessionId.length > 0) {
+                dshmParsed.sessionId = dshmAddress.parentSessionId
+              }
+              if (Object.keys(dshmParsed).length === 0) {
+                localStorage.removeItem(key)
+                debugBoxLine('[boot] 会话选择里只有子单地址 ⇒ 已清掉（下次加载停在默认面）')
+                return
+              }
+              dshmNext = JSON.stringify(dshmParsed)
+            }
+          } catch (dshmError) {
+            /* ★ 认不出来就**原样放行** ✗ —— 绝不让"修 bug 的代码"变成新的丢数据来源 */
+            dshmNext = value
+          }
+          value = dshmNext
+        }
+        return dshmRawSetItem.call(localStorage, key, value)
+      }
+    }
+  } catch (dshmHookError) {
+    try { console.warn('[dsh-mobile] 会话选择写路径护栏装不上（不影响页面）：', dshmHookError) } catch (ignored) { void ignored }
+  }
+
+  /**
    * ★ 页面一加载就补 viewport（**无条件执行** ✓，不能放进调试框那种条件块里 ✗）。
    *
    * 为什么必须最早做：APK（targetSdk 35）被系统**强制 edge-to-edge** ✓，
@@ -9524,7 +9590,20 @@
        * 它们就按各自的时长跑 ✓ —— 顶栏总是早到 20ms，看起来就是"顶栏自己滑了一下" ✓。
        * 抽成一个变量之后，"同一帧写入"与"同一时长动画"两条合起来才真正同步 ✓。
        */
-      ':root { --dshm-top-h: ' + TOPBAR_HEIGHT + 'px; --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: var(--dshm-drawer-w); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }',
+      /**
+       * ★★ round 216：加三个变量，全为"那颗「回到主会话」的**宽度账**"服务 ✓
+       *   （下面 `#dsh-mobile-back-main` 与 `#dsh-mobile-title` 两条都读它们 ✓ ——
+       *   0.17 的 `readyState/refCount` 那个坑的教训 ✓：同一个数字只许有一处事实来源 ✗）。
+       *
+       * · `--dshm-bar-btn` = 顶栏里每颗图标键的宽 = 高 = `44px` ✓
+       *   （下面 `#dsh-mobile-top > button` 那条的 `width/height` 用的就是它 ✓）；
+       * · `--dshm-bar-gap` = 顶栏 flex 自己的 `gap` ✓；
+       * · `--dshm-back-left` = 那颗键的**左边界** = 间距 + 一颗键 ✓
+       *   = 它上一版在流里时所在的那个位置 ✓（横坐标与上一版**逐像素相同** ✓）；
+       * · `--dshm-back-slot` = 它**连同间距**占掉的那条带子（44+2+2 = 48px ✓）——
+       *   标题**左右各让这么宽** ✓ ⇒ 文字永远不会滑到它底下 ✓（见下面标题那条的说明 ✓）。
+       */
+      ':root { --dshm-top-h: ' + TOPBAR_HEIGHT + 'px; --dshm-bar-btn: 44px; --dshm-bar-gap: 2px; --dshm-back-left: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap)); --dshm-back-slot: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap) * 2); --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: var(--dshm-drawer-w); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }',
 
       /* ── 点按反馈里两样"外来物"一起去掉（round 160，用户 B ✓）──────────────
          用户原文："点击的时候会出现蓝色框框住字（我注意到点击对话，轨迹也会有），
@@ -9570,7 +9649,7 @@
       '  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.07));',
       '}',
       '#dsh-mobile-top > button {',
-      '  flex: 0 0 auto; width: 44px; height: 44px; padding: 0;',
+      '  flex: 0 0 auto; width: var(--dshm-bar-btn); height: var(--dshm-bar-btn); padding: 0;',
       '  display: flex; align-items: center; justify-content: center;',
       '  border: 0; background: transparent; cursor: pointer;',
       '  color: var(--dsw-alias-label-primary, #e8eaed);',
@@ -9608,11 +9687,13 @@
        */
       '#dsh-mobile-back-main {',
       /**
-       * ★ 左侧 = 顶栏自己的 `gap: 2px` + ☰ 那颗的 `44px` ✓（下面 `#dsh-mobile-top > button` 那条）。
-       *   两颗导航键因此**仍然紧挨着** ✓ —— 与上一版那份"不许打乱肌肉记忆"的约定一致 ✓
-       *   （文件夹键在右边，位置一个像素都没动 ✓）。
+       * ★ 左侧 = `--dshm-back-left` = `2px`(gap) + `44px`(☰ 那颗的宽) ✓ ——
+       *   与上一版它在 flex 流里时落到的横坐标**逐像素相同** ✓：
+       *   两颗导航键仍然紧挨着 ✓、"不许打乱肌肉记忆"那条约定一个字都没变 ✓
+       *   （右边那颗文件夹键的位置更是一个像素都没动 ✓）。
+       * ★ 而"它在流里"这件事**已经不存在了** ✓ ⇒ 标题不再被它挤 ✓（本轮的重点 ✓）。
        */
-      '  position: absolute; left: calc(var(--dshm-top-h) + 2px); top: 50%; translate: 0 -50%;',
+      '  position: absolute; left: var(--dshm-back-left); top: 50%; translate: 0 -50%;',
       '}',
       '#dsh-mobile-back-main[data-dshm-shown="0"] { visibility: hidden; pointer-events: none; }',
       /* 打开抽屉时顶栏跟着主页面一起右移（推挤式）。
@@ -9623,6 +9704,24 @@
       /* 标题：flex:1 + text-align:center → 相对**可用宽度**居中（两侧各 44px 按钮，
          所以视觉上真的居中，而不是被按钮挤偏）。 */
       '#dsh-mobile-title {',
+      /**
+       * ★★ round 216：左右各让出 `--dshm-back-slot`（48px ✓）—— 为什么非要不可 ✗：
+       *   那颗键现在**绝对定位**（不在流里 ✓，这是本轮的正事 ✓），于是它**会压在标题盒的左端** ✓
+       *   （实测：标题盒从 `46` 起、那颗键占 `54..98` ✓）。若不管，**长标题**的文字就会滑到它底下 ✗
+       *   （实测：长标题的文字盒 `46..481`，与那颗键相交 `44×21` ✗）。
+       *   给**内容盒**留出这条带子之后：文字最左只能到 `98` ✓ = 正好是那颗键的右边界 ✓ ⇒
+       *   两者**永不相交** ✓（实测相交面积 = `0` ✓）。
+       *
+       * ★ 为什么**左右都留** ✗（而不是只留左边 ✓）：只留左边会让文字在**整行**里右偏 26px ✗
+       *   （= 又变成"标题偏了"✓，正是本轮要修掉的那个观感 ✓）；两侧都留 ⇒
+       *   文字仍然落在**这一行的正中** ✓（`padding` 与 `flex` 一起，内容盒左右对称 ✓）。
+       *
+       * ★ 它**逐像素固定** ✓ —— 上面所有变量都与"那颗键在不在"无关 ✓ ⇒
+       *   主会话（键隐藏 ✓）与子单（键可见 ✓）两种状态下，标题盒与文字盒**完全相同** ✓：
+       *   本轮"主会话标题位置 = 与没有这颗键时逐像素一致"那条几何断言量的是同一个数 ✓
+       *   （它是**恒定**的 ✓ ⇒ 无论怎么切、跳都为 0 ✓）。
+       */
+      '  padding: 0 var(--dshm-back-slot);',
       '  flex: 1 1 auto; min-width: 0; height: 44px; line-height: 44px;',
       '  text-align: center; font-size: 15px; font-weight: 500;',
       '  color: var(--dsw-alias-label-primary, #e8eaed);',
@@ -23364,6 +23463,11 @@
 
     // 注入诊断与配对界面所需的接口
     globalThis.__DSH_MOBILE_BOOT__ = {
+      // ★ 给会话页（/mobile/chat）用：它加载了本文件但设了 __DSH_MOBILE_NO_SHELL__，
+      //   所以外壳不装、这两个渲染函数仍在作用域里 —— 直接导出，免得会话页另写一套
+      //   （本仓规矩：不新造渲染器）。
+      renderMarkdownInto: renderMarkdownInto,
+      splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,
       getConfig: function () {
@@ -24582,7 +24686,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1007155948'
+    var BOOT_STAMP = 'BUILD-1007162613'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

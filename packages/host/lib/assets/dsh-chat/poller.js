@@ -111,14 +111,34 @@ export class ChatPoller {
 
   schedule() {
     if (this.timer !== null) return
-    const interval = typeof this.options.intervalMs === 'number' && this.options.intervalMs > 0
+    const base = typeof this.options.intervalMs === 'number' && this.options.intervalMs > 0
       ? this.options.intervalMs
       : 700
+    const interval = this.intervalForStep(base)
     const setTimer = this.options.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
     this.timer = setTimer(() => {
       this.timer = null
       void this.tick()
     }, interval)
+  }
+
+  /**
+   * ★ 空闲退避（2026-10-08 新增 ✓）：没有新事件时**逐档放慢**，有新事件立刻回最快档 ✓。
+   *
+   * 为什么值得做 ✗：实测"每 900ms 重取最近 60 条"= **147–360 KiB/s 的隧道流量** ✓，
+   * 而且**空闲时也照取** ✗（`session/page` 没有下界参数 ⇒ 一个字节都省不了 ✓ ——
+   * 见 `10-交接文档.md` §4.1cr ✓）。退避之后空闲约 **35–86 KiB/s** ✓（省约 76% ✓）。
+   *
+   * 三条保守之处（★ 都是"最坏只慢一点、不会出错"✓）：
+   * · ★ 第 0 档 = **原来的间隔** ✓（所以刚打开、刚发消息、刚点刷新时**行为与以前逐字相同** ✓）；
+   * · ★ **封顶 4s** ✓ —— 再慢下去，"电脑那头刚有新事件"的首帧延迟就该被用户察觉了 ✗；
+   * · ★ **任何新事件都立刻回第 0 档** ✓（`accept()` 里判定 ✓），`refreshNow()` 也回第 0 档 ✓。
+   */
+  intervalForStep(base) {
+    const ladder = [1, 1.7, 2.8, 4.4]
+    const step = typeof this.backoffStep === 'number' ? this.backoffStep : 0
+    const factor = ladder[step < 0 ? 0 : (step >= ladder.length ? ladder.length - 1 : step)]
+    return Math.round(base * factor)
   }
 
   clearTimer(handle) {
@@ -140,6 +160,8 @@ export class ChatPoller {
   accept(events) {
     const list = Array.isArray(events) ? events : []
     if (list.length === 0) {
+      // ★ 这一趟一个事件都没有 ⇒ 放慢一档 ✓（有上限，见 intervalForStep ✓）
+      this.backoffStep = (typeof this.backoffStep === 'number' ? this.backoffStep : 0) + 1
       this.options.onEvents([])
       return
     }
@@ -153,6 +175,12 @@ export class ChatPoller {
       }
       fresh.push(event)
     }
+    // ★ 有新事件 ⇒ 立刻回最快档 ✓（没有这一行，档位只会一路上涨、永不回快档 ✗ ——
+    //   我在第一版里就漏了它，注释写着"任何新事件都立刻回第 0 档"而代码没做 ✓）
+    // ★ 一个没去重掉的（全是旧的）⇒ 当作"这一趟没新东西"、放慢一档 ✓
+    this.backoffStep = fresh.length > 0
+      ? 0
+      : (typeof this.backoffStep === 'number' ? this.backoffStep : 0) + 1
     fresh.sort((a, b) => {
       const sa = a !== null && typeof a === 'object' && typeof a.seq === 'number' ? a.seq : Number.MAX_SAFE_INTEGER
       const sb = b !== null && typeof b === 'object' && typeof b.seq === 'number' ? b.seq : Number.MAX_SAFE_INTEGER

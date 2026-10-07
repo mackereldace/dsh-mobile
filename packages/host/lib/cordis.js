@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateP256KeyPair } from './protocol/index.js';
+import { APPROVAL_ANSWERER_OPTIONS, createPhoneAnswerer, DEFAULT_APPROVAL_TTL_MS, sharedApprovalBroker, } from "./dsh-approval.js";
 import { DeviceStore } from "./devices.js";
 import { machineDisplayName, notifyTextFor, questionTextFor, shouldNotifyEvent } from "./notify-text.js";
 import { localMachineName } from "./lan-trust.js";
@@ -765,8 +766,27 @@ export function apply(ctx, config = {}) {
             }
         };
         const channels = [];
+        /** ★ 手机裁决那条水路挂上没有 ✓ —— 与"推送"**分开记** ✗（两件事 ✓；混在一起会互相掩盖 ✓）。 */
+        let answererMounted = false;
         try {
             const anyCtx = ctx;
+            /**
+             * ★★ 最近一次 `approval/asked`（按会话 ✓）—— 这是**唯一**能把 waterfall 里那个
+             *   `request` 和"会话日志里那条 asked 的 id"对上号的线索 ✗。
+             *
+             * 为什么非要这个 id ✗：`approval/request` 的载荷里**没有 id** ✓
+             *   （只有 agent / toolName / callId / reason / signal ✓ —— id 是在
+             *    `dsh-user-approval/lib/index.js:131` 才生成、`:132` 才 append 进日志的 ✓）；
+             *   而手机页上那个 id 是**从会话日志读到的** ✓（`approval/asked.data.id` ✓）
+             *   ⇒ 认不出同一个 id，手机点的那一下就**永远落不到**这条请求上 ✓。
+             *
+             * 为什么**不会有竞态** ✗：`session.append()` 是**同步**派发观察者的 ✓
+             *   （`dsh-session/lib/index.js:1471-1473` ✓：先 `this.log.push(event)` ✓、
+             *    紧接着 `invokeContainedSessionObservers(…)` ✓），
+             *   而 waterfall 要**下一跳微任务**才跑 ✓（`dsh-user-approval/lib/index.js:176`
+             *   的 `Promise.resolve().then(…)` ✓）⇒ 应答者跑起来时这张表**一定**已经写好了 ✓。
+             */
+            const lastAsked = new Map();
             if (typeof anyCtx.on === 'function') {
                 // ★ 正确的观察方式是 `session/event`（DSH 自己的宿主插件都这么写：
                 //   dsh-agent-instructions / dsh-agent-loop / dsh-agent-presets ✓✓），
@@ -837,6 +857,34 @@ export function apply(ctx, config = {}) {
                         }
                         return;
                     }
+                    /**
+                     * ★★ 审批的**记账**（不是推送 ✓）：记下这条会话最近一条 ask 的 id ✓；
+                     *   裁决一落地就按 id 清掉 ✓ —— **桌面答的也算** ✓（桌面答完 DSH 同样会 append
+                     *   `approval/decided` ✓ ⇒ 两条路共用这一本账 ✓，「手机答过的不再给按钮」也就有了依据 ✓）。
+                     *
+                     * ★★ 这里**不许 return** ✗：`approval/asked` 还要继续走下面的推送 ✓
+                     *   （`shouldNotifyEvent` 认它 ✓ —— `notify-text.ts` 的 `NOTIFY_EVENT_TYPES` ✓）；
+                     *   一旦在这里提前返回，手机上就**再也收不到审批通知**了 ✓。
+                     */
+                    if (kind === 'approval/asked' || kind === 'approval/decided') {
+                        const sessionId = sessionIdOf(_session, event);
+                        const data = (record.data ?? {});
+                        const id = typeof data.id === 'string' ? data.id : '';
+                        if (sessionId !== undefined && id.length > 0) {
+                            if (kind === 'approval/decided') {
+                                if (lastAsked.get(sessionId)?.id === id)
+                                    lastAsked.delete(sessionId);
+                            }
+                            else {
+                                lastAsked.set(sessionId, {
+                                    id,
+                                    toolName: typeof data.toolName === 'string' ? data.toolName : '',
+                                    callId: typeof data.callId === 'string' && data.callId.length > 0 ? data.callId : undefined,
+                                    reason: typeof data.reason === 'string' && data.reason.length > 0 ? data.reason : undefined,
+                                });
+                            }
+                        }
+                    }
                     if (!shouldNotifyEvent(kind))
                         return;
                     notify(kind, { ...(record.data ?? {}), sessionId: sessionIdOf(_session, event) });
@@ -844,11 +892,49 @@ export function apply(ctx, config = {}) {
                 anyCtx.on('session/event', onSessionEvent);
                 channels.push(['ctx.on(session/event)', undefined]);
             }
-            // 兼容另外两个可能的事件名（不同 DSH 版本暴露的名字不一样；
-            // 多订一个的代价只是"可能多推一条"，而漏订的代价是"功能完全不工作" ✗）
+            /**
+             * ★★ 手机裁决的**唯一**接线点 ✗✓ —— 把原先那两行**假推送**换成**真应答者** ✓。
+             *
+             * 改前是这两行 ✓：
+             *
+             * ```
+             * anyCtx.on('approval/asked', (payload) => notify('approval/asked', payload))
+             * anyCtx.on('approval/request', (payload) => notify('approval/asked', payload))
+             * ```
+             *
+             * 两条都**没用** ✗：
+             * · `approval/asked` **不是** cordis 事件名 ✓（Cordis 对未知事件名**静默接受** ✓
+             *   ⇒ "注册成功"却永不触发 ✓）；
+             * · `approval/request` **确实是** waterfall ✓，可那个处理器既不调 `next()` 也不返回值 ✓
+             *   ⇒ 只要它排到链首，就会**把官方审批卡一起吞掉** ✓（今天没炸，只因为它被 `push` 到最后 ✓）。
+             * ★ 推送**不靠这两行** ✓：`approval/asked` 本来就走上面的 `session/event` ✓
+             *   ⇒ 删掉它们**不会丢推送** ✓。
+             *
+             * ★★ `prepend: true` **不是可选项** ✗：cordis 的 waterfall 是**严格顺序、外层先跑** ✓
+             * （`cordis/src/events.ts:228` ✓；落点是同一文件 `:255` 的 `prepend ? 'unshift' : 'push'` ✓），
+             * 而本插件由 `cordis.patch.yml` 的 insert 挂在**所有 bundle 之后** ✓
+             * ⇒ 默认（`push`）会排在上游那个转发器**下游** ✗ ⇒ 手机**永远轮不到** ✓。
+             * 先例：DSH 自己的 ACP 插件同样是 `ctx.on('approval/request', (request, next) => …)` ✓
+             * （`dsh-acp/lib/index.js:1116-1139` ✓）。
+             *
+             * ★★ `broker.open()` 的 `null` 是**契约** ✗：超时 / 被替换 ⇒ 我们必须 `return next()` ✓，
+             * 把这次审批**交回下游**（官方那张桌面卡 ✓）—— 不这么做，手机不答就把官方 UI 一起卡死 ✓。
+             */
             if (typeof anyCtx.on === 'function') {
-                anyCtx.on('approval/asked', (payload) => notify('approval/asked', payload));
-                anyCtx.on('approval/request', (payload) => notify('approval/asked', payload));
+                /**
+                 * ★ 应答者本体在 `dsh-approval.ts` ✓（纯逻辑 ✓ ⇒ 能拿**真** cordis 在单测里跑 ✓）——
+                 *   这里只做**接线** ✓：给它 broker ✓、给它那本账 ✓、把 `prepend` 那条铁律交给
+                 *   同一个常量（`APPROVAL_ANSWERER_OPTIONS` ✓ ⇒ "去掉 prepend"一定会被打红 ✓）。
+                 */
+                const answerFromPhone = createPhoneAnswerer({
+                    broker: sharedApprovalBroker(),
+                    asked: lastAsked,
+                    onError: (error) => {
+                        console.warn('[dsh-mobile] 手机裁决这条路出错（交回桌面卡，不影响审批本身）：', error);
+                    },
+                });
+                anyCtx.on('approval/request', answerFromPhone, APPROVAL_ANSWERER_OPTIONS);
+                answererMounted = true;
             }
         }
         catch (error) {
@@ -859,6 +945,16 @@ export function apply(ctx, config = {}) {
         }
         else {
             console.log(`[dsh-mobile] 审批推送已挂载（通道：${channels.map(([name]) => name).join(' + ')}）`);
+        }
+        /**
+         * ★ 这一行是排障的第一站 ✓（真机现象："手机上点了没反应"✗ 时，先看它在不在 ✓）：
+         *   在 ⇒ 水路挂上了 ✓，问题在"等/答"那一段 ✓；不在 ⇒ 根本没挂上 ✓，看上面那行警告 ✓。
+         */
+        if (answererMounted) {
+            console.log(`[dsh-mobile] 手机裁决已挂载（approval/request, prepend；${Math.round(DEFAULT_APPROVAL_TTL_MS / 1000)} 秒无人应答 ⇒ 交回桌面卡）`);
+        }
+        else {
+            console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效');
         }
     }
     void import(__rewriteRelativeImportExtension(TOOLS_MODULE))

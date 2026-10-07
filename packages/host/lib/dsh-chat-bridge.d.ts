@@ -25,9 +25,27 @@
  *                   `[records, hasMore]` ✓；本文档早先写的 `asOfSeq` / `values` 在 0.2.0-rc.2
  *                   的 `session/page` 里**根本不存在** ✗ —— `normalizePage` 那两处是**老式回退** ✓）
  * session/projections  参数 request = { sessionId } ⇒ 返回 { asOfSeq, values } ✓
- *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓）
+ *                 （★ 会话当前 head 的**取法之一** ✓ —— 见 `resolveHeadSeq` 的实测记录 ✓；
+ *                   ★★ 也是**状态条那三个数唯一的来源** ✓ —— 2026-10-08 加上 ✓，
+ *                   字段逐个抄自 `app.asar` ✓，见 `normalizeValues` 上面那段 ✓）
  * session/prompt  参数 request = { requestId, sessionId, mode:"queue"|"steer", content:[…] }
  * ```
+ *
+ * ## ★★ 状态条那三个数在哪儿（2026-10-08 生产实例实测 ✓）
+ *
+ * 会话页要画「45% · 488 轮 2525 步 · 1062M tok」✓，四个格子分别来自：
+ *
+ * | 格子 | 来源 | 字段 |
+ * |---|---|---|
+ * | `45%` | `session/projections` ⇒ `values.contextPressure` ✓ | `projectedTokens ?? pressureTokens` ÷ `contextWindow` ✓（**要页面自己算** ✓） |
+ * | `488 轮` | 同上 ⇒ `values.sessionStats.turns` ✓ | `turns` ✓ |
+ * | `2525 步` | 同上 ⇒ `values.sessionStats.steps` ✓ | `steps` ✓ |
+ * | `1062M tok` | 同上 ⇒ `values.tokenUsage` ✓ | `uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens` ✓（四个桶求和 ✓） |
+ *
+ * ★ **`session/page` 里一个都没有** ✗（实测它的返回只有 `[records, hasMore]` ✓）——
+ *   改前 `normalizePage` 读的那个 `values` 在真机上**永远不存在** ✓ ⇒ 状态条永远是空的 ✗。
+ * ★ 三个投影的**真字段名**一个都不许改 ✗（本仓因"照着想的字段名写"栽过四次 ✓：
+ *   `id` ✗ `request` ✗ `throughSeq` ✗ `origin` ✗）—— 名字、类型、语义见 `normalizeValues` ✓。
  *
  * ## ★ 三条**刻意**的克制（别顺手改 ✗）
  *
@@ -50,14 +68,23 @@
  * 调用走**已有的通用网关透传**（`invokeGatewayEndpoint` ✓）—— 不新造协议 ✓；
  * 与 `mobile/codex/*` 一样放在**能力门禁之前** ✓（设备身份已由隧道握手保证 ✓）。
  */
+import type { ApprovalBroker } from './dsh-approval.ts';
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>;
-/** 我们自己的路径 ✓（手机只认这三个 ✓）。 */
+/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
 export declare const DSH_CHAT_PATHS: {
     readonly sessions: "mobile/dsh/sessions";
     readonly read: "mobile/dsh/read";
     readonly send: "mobile/dsh/send";
     readonly create: "mobile/dsh/create";
+    /**
+     * ★ 手机**裁决** ✓（点了审批卡上那两颗按钮之一 ✓）。
+     *
+     * 它**不是** DSH 端点 ✗（全 asar 里带引号的 `"approval/decide"` 是 **0** 命中 ✓ ——
+     * 那几十处命中是 `approval/decided` 的**子串** ✓）⇒ 它只走本桥 ✓，
+     * 落到 `dsh-approval.ts` 那个中间人上 ✓（真正生效的地方是 `cordis.ts` 的 waterfall 应答者 ✓）。
+     */
+    readonly approval: "mobile/dsh/approval";
 };
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
@@ -76,6 +103,15 @@ export interface DshChatDeps {
         readonly sessionId: string;
         readonly rpcId: string;
     }, via: 'session/prompt' | 'mobile/dsh/send') => void;
+    /**
+     * 手机**裁决**用的中间人 ✓（`mobile/dsh/approval` 那条路 ✓）。
+     *
+     * ★ **必须可选** ✗（理由与上面 `recordPrompt` 一模一样 ✓）：既有测试与调用方用
+     *   `{ call }` 构造 deps ✓ —— 改成必填会一次性弄红它们 ✓。
+     * ★ 没注入 ⇒ 那条端点**明确报错** ✓（**不静默成功** ✗）：
+     *   假装成功 ⇒ 手机上显示"已处理"✓ 而电脑上那张卡还挂着 ✓ —— 最难查的一类 ✗。
+     */
+    readonly approvalBroker?: ApprovalBroker;
 }
 /**
  * 处理一条 `mobile/dsh/*` 调用 ✓。
@@ -166,7 +202,77 @@ export declare function isSubagentSession(record: Record<string, unknown>): bool
 export declare function normalizeSessions(value: unknown): unknown[];
 /** `session/page` 的返回 ⇒ 事件 + 我们点名要的那几个界面值 ✓。 */
 export declare function normalizePage(value: unknown): Record<string, unknown>;
-/** 界面值：**白名单** ✓（只转我们真的要画的那些 ✓ —— 见模块注释第 2 条）。 */
+/**
+ * 界面值：**白名单** ✓（只转我们真的要画的那些 ✓ —— 见模块注释第 2 条）。
+ *
+ * ## ★★ 状态条那三个投影的真形状（★ 逐个字段抄自 `app.asar` ✓，**不是想出来的** ✗）
+ *
+ * 三个键的名字与里面每一个字段名，都是从本机 `app.asar`（`0.2.0-rc.2` ✓）里**读**出来的 ✓，
+ * 且在**生产实例**上**读到了真值** ✓（2026-10-08 ✓，见每条下面的读数 ✓）。
+ *
+ * ### 1. `sessionStats` ✓ —— 「轮」与「步」
+ *
+ * 定义：`@deepseek-ai/dsh-session-stats/lib/types/projection.js` ✓
+ * （`sessionStatsSchema` 与 `wire.view`：**同一份 8 个字段** ✓，`z.object({…}).strict()` ✓）：
+ *
+ * ```
+ * turns: int ≥ 0        ← 真机读数 538  ✓（= 截图里那个「488 轮」那一格 ✓）
+ * steps: int ≥ 0        ← 真机读数 2651 ✓（= 「2525 步」✓）
+ * llmMs / toolMs / ttftMs / decodeMs / decodeTokens : number ≥ 0
+ * ttftSteps : int ≥ 0
+ * ```
+ *
+ * ★ 语义（同文件头注释 ✓）：「**整份持久日志**」的计数 ✓ —— **不是**窗口里那几条 ✓：
+ *   `steps` 数的是 `step/end`（**不是** assistant 消息 ✗ —— 文件头把这条理由写死了 ✓：
+ *   数消息会把 max-tokens 的空消息多算、把被取消的步骤少算 ✓）；
+ *   `turns` 数的是"见过几个不同的 `turn`"✓（同文件 `step/end` 分支的 `lastTurn` 去重 ✓）。
+ *   ★ 所以**绝不能**拿"消息条数"冒充「轮」✗（页面的窗口是分页的、压缩还会重写它 ✗）。
+ *
+ * ### 2. `tokenUsage` ✓ —— 「tok」
+ *
+ * 定义：`@deepseek-ai/dsh-token-meter/lib/types/usage-projection.js` ✓
+ * （`projectionSchema` ✓，它的 `wire.view` 就是 `state.totals` ✓）：
+ *
+ * ```
+ * uncachedInputTokens: int ≥ 0   ← 真机读数 4215496
+ * outputTokens:        int ≥ 0   ← 真机读数 2706002
+ * cacheReadTokens:     int ≥ 0   ← 真机读数 1123595776
+ * cacheWriteTokens:    int ≥ 0   ← 真机读数 0
+ * ```
+ *
+ * ★ DSH 官方客户端把「tok」那一格算成 **这四个桶的和** ✓
+ *   （`dsh-client-ui-chat/lib/client.js` ✓：`billedInputTokens(usage) = uncached + cacheRead + cacheWrite` ✓，
+ *   而用量那颗药丸是 `billedInputTokens(usage) + usage.outputTokens` ✓；格式化成 `1.1M tok` ✓）——
+ *   ★ 桥只**原样给这四个数** ✓，求和是页面的事 ✓（这里求和就是"替页面定格式"✗，本层不做 ✗）。
+ *
+ * ### 3. `contextPressure` ✓ —— 「45%」那个百分比
+ *
+ * 定义：同上的 `usage-projection.js` ✓（`pressureSchema` + `wire.view` ✓）。**三个字段都可选** ✓：
+ *
+ * ```
+ * contextWindow?:  int > 0    ← 真机读数 1000000
+ * pressureTokens?: int ≥ 0    ← 真机读数 259578（提供方报告的最新提示词规模 ✓）
+ * projectedTokens?: int ≥ 0   ← 真机读数 260433（下一次请求的提示词预计花费 ✓）
+ * ```
+ *
+ * ★ 百分比**不是**投影里的字段 ✗ —— 官方是**算**出来的 ✓（`dsh-client-ui-conversation/lib/client.js` ✓）：
+ *
+ * ```js
+ * const usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens
+ * if (usedTokens === undefined || pressure?.contextWindow === undefined) return null   // ← 画不出来就不画 ✓
+ * percent = Math.min(100, Math.round(usedTokens / pressure.contextWindow * 100))
+ * ```
+ *
+ * ★ 桥**不替页面算这个百分比** ✗：算出来就是往数据层里塞显示口径 ✓（四舍五入/封顶都是画法 ✓）；
+ *   而**缺字段时返回 `null` 而不是 `0`** 这条纪律，写在报告里交给页面 ✓。
+ *
+ * ## 白名单纪律（为什么三个投影要**逐字段**过一遍 ✗）
+ *
+ * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
+ *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
+ * · 这三个投影外面还有 `contextBreakdown` / `turnOutline` / `goal` / `subagent*` 等 16 个键 ✓
+ *   （生产实测 `values` 一共 19 个键 ✓）—— **一个都不转** ✗，理由同模块注释第 2 条 ✓。
+ */
 export declare function normalizeValues(value: unknown): Record<string, unknown>;
 /**
  * `session/page` 的请求：**只搬我们认识的字段** ✓ + **`throughSeq` 必带** ✓。

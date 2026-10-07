@@ -97,12 +97,76 @@ export function toViewModel(event) {
 }
 
 /**
+ * 手机上那两颗按钮 ✓ —— DSH **封闭词汇**的**子集** ✓。
+ *
+ * 权威：`dsh-user-approval/lib/index.js:30-35` ✓
+ * （`["allowed-once","rejected","cancelled","unavailable"]` ✓），
+ * 官方客户端的按钮是**硬编码**这两颗 ✓（`dsh-client-ui-approval/lib/client.js:119-133` ✓：
+ * `answer("rejected")` ✓ 与 `answer("allowed-once")` ✓），文案逐字抄自同一处
+ * （`:261-262` 的 `reject: "拒绝"` ✓、`allowOnce: "允许一次"` ✓）。
+ *
+ * ★★ **没有「总是允许」** ✗（DSH 里不存在 ✓ —— 那是**会话策略**那个旋钮 ✓，
+ *   走 `/permission <preset>` ✓，与一次裁决无关 ✗）。
+ * ★ 这里是**复制**了一份 ✓（浏览器资产读不到宿主那个模块 ✓）⇒ 由单测钉住"两边不许漂移" ✓
+ *   （见 `packages/host/test/dsh-approval.test.ts` 的"两张表必须一致" ✓）。
+ */
+export const APPROVAL_OPTIONS = Object.freeze([
+  Object.freeze({ id: 'rejected', label: '拒绝' }),
+  Object.freeze({ id: 'allowed-once', label: '允许一次' }),
+])
+
+/** 没有按钮时用的空表 ✓（冻结的**同一个**实例 ✓）。 */
+const NO_APPROVAL_OPTIONS = Object.freeze([])
+
+/**
+ * 按**事件类型**给按钮 ✓ —— 不再从 `data.options` / `choices` / `actions` 里猜 ✗。
+ *
+ * ★★ 为什么必须按类型给 ✗（2026-10-08 改 ✓）：DSH 的 `approval/asked` 里
+ *   **根本没有 options** ✓ —— 官方客户端那两颗按钮是硬编码的 ✓
+ *   （`dsh-client-ui-approval/lib/client.js:119-133` ✓）⇒ 原来那条"解析选项"的路
+ *   在真机上**永远是空的** ✓ ⇒ 按钮永远画不出来 ✓（这就是置灰那一步的真正原因 ✓）。
+ *
+ * ★ 只有**"在问"**的那一条给按钮 ✓：`approval/decided` / `approval/policy` 是记账 ⇒ 一颗都不给 ✓
+ *   （它们连卡都不该画 ✓ —— 见 `classify` 与 `renderEvent` ✓）。
+ */
+export function approvalOptionsFor(type) {
+  const text = typeof type === 'string' ? type.toLowerCase() : ''
+  return text === 'approval/asked' || text.endsWith('/asked') ? APPROVAL_OPTIONS : NO_APPROVAL_OPTIONS
+}
+
+/**
+ * 一张审批卡**该不该给能按的按钮** ✓（纯函数 ✓ —— 这一条错了，在手机上只会表现为
+ * "按不动"或"按下去是在撒谎" ✗，都是最难查的那类 ✓）。
+ *
+ * ★★ 判据只有一条：**通道真的接通了吗** ✗ —— 没接通就**一律置灰** ✓（不假装能用 ✓）。
+ *   通道状态由页面**探测**出来的（`app.js` 探一次 ⇒ `setApprovalChannel` ✓），
+ *   不是"我们觉得它应该通了"✗。
+ *
+ * @param {object} input `{decided, channelConnected, sending}` ✓
+ */
+export function approvalActionState(input) {
+  const source = input !== null && typeof input === 'object' ? input : {}
+  const decided = source.decided === true
+  const connected = source.channelConnected === true
+  const sending = source.sending === true
+  return {
+    /** 已经裁决过 ⇒ 连按钮区都不摆 ✓（只显示结果 ✓）。 */
+    showActions: !decided,
+    /** 按不按得动 ✓。 */
+    disabled: !connected || sending,
+    /** 置灰的理由 ✓（空串 = 不必解释 ✓）。 */
+    why: decided || connected ? '' : '裁决通道还没接通，所以这里的按钮先置灰（不假装能用）',
+  }
+}
+
+/**
  * 一条**审批**事件 ⇒ view model ✓（纯函数 ✓）。
  *
  * ★★ 三条自我约束（"审批"是**会改变电脑上正在发生的事**的按钮 ✗，比"发送"更该保守 ✓）：
  *
- * 1. **解析不出选项 ⇒ 一颗按钮都不给** ✗ —— 页面上写清"选项没解析出来" + 把原文摊开 ✓。
- *    绝不默认摆一个「允许 / 拒绝」✗：把没看懂的审批按下去，可能会让智能体做用户没同意的事 ✓；
+ * 1. **认不出是哪一条请求 ⇒ 一颗按钮都不给** ✗（没有 `id` ⇒ 按下去也无从提交 ✓）+ 原文摊开 ✓。
+ *    ★ 注意：按钮**不是**从事件里"解析"出来的 ✓ —— 它来自 `APPROVAL_OPTIONS` ✓
+ *    （封闭词汇的子集 ✓，见 `approvalOptionsFor` ✓）；
  * 2. **已经裁决过的**（有对应 `approval/decided` ✓）⇒ 只显示结果，**不再给按钮** ✗；
  * 3. 认不出的形状 ⇒ **原文照摊** ✓（`raw` ✓）—— 绝不因为"看不懂"就什么都不显示 ✗。
  *
@@ -112,47 +176,37 @@ export function toViewModel(event) {
 export function toApprovalViewModel(event, decided) {
   const data = event !== null && typeof event === 'object' && event.data !== null && typeof event.data === 'object' ? event.data : {}
   const text = textOf(event)
+  const type = event !== null && typeof event === 'object' ? String(event.type || '') : ''
   const requestId = firstString(data, ['requestId', 'request_id', 'id', 'approvalId'])
   const title = firstString(data, ['title', 'tool', 'toolName', 'name', 'command']) || '需要你确认'
   const detail = firstString(data, ['detail', 'description', 'message', 'reason', 'prompt']) || text
-  const options = parseOptions(data)
+  /**
+   * ★★ 按钮来自**事件类型** ✓（封闭词汇的子集 ✓），不是从 data 里解析出来的 ✗
+   *   —— 这一行原来是 `parseOptions(data)` ✓，那个函数在真机上**永远返回空表** ✓。
+   */
+  const options = approvalOptionsFor(type)
   const decision = decided !== null && decided !== undefined
     ? firstString(decided.data !== null && typeof decided.data === 'object' ? decided.data : {}, ['decision', 'option', 'choice', 'result', 'answer']) || '已处理'
     : ''
+  const dump = safeJson(data)
   return {
     kind: 'approval',
+    type,
     requestId,
     title,
     detail,
     options,
     decided: decision.length > 0,
     decision,
-    raw: options.length > 0 ? '' : safeJson(data),
+    /**
+     * ★ 什么时候摊原文 ✗：① 这条**不是"在问"**（认不出该给什么按钮 ✓）；
+     *   ② 或者**认不出是哪一条请求**（没有 id ⇒ 按下去也无从提交 ✓）。
+     *   两种都要让人看得见原始形状 ✓ —— 静默变成一张空卡是最难查的 ✗。
+     */
+    raw: options.length > 0 && requestId.length > 0 ? '' : (typeof dump === 'string' ? dump : ''),
   }
 }
 
-/** 选项：`options` / `choices` / `actions` 里挑一个数组 ✓；元素可以是字符串或 `{id,label}` ✓。 */
-export function parseOptions(data) {
-  if (data === null || typeof data !== 'object') return []
-  for (const key of ['options', 'choices', 'actions', 'buttons']) {
-    const value = data[key]
-    if (!Array.isArray(value)) continue
-    const out = []
-    for (const item of value) {
-      if (typeof item === 'string' && item.length > 0) {
-        out.push({ id: item, label: item })
-        continue
-      }
-      if (item !== null && typeof item === 'object') {
-        const id = firstString(item, ['id', 'value', 'key', 'action'])
-        const label = firstString(item, ['label', 'title', 'text', 'name']) || id
-        if (id.length > 0) out.push({ id, label: label.length > 0 ? label : id, kind: firstString(item, ['kind', 'tone', 'style']) })
-      }
-    }
-    if (out.length > 0) return out
-  }
-  return []
-}
 
 function firstString(source, keys) {
   if (source === null || typeof source !== 'object') return ''
@@ -176,8 +230,20 @@ export function classify(type) {
   const text = typeof type === 'string' ? type.toLowerCase() : ''
   if (text.includes('usermessage') || text.includes('user/') || text.includes('prompt')) return 'user'
   if (text.includes('agentmessage') || text.includes('assistant') || text.includes('message')) return 'agent'
-  // ★ 审批要**排在工具之前**判 ✓ —— `approval/asked` 里没有 tool 字样，但审批常被包在工具事件里 ✓
-  if (text.includes('approval') || text.includes('permission')) return 'approval'
+  /**
+   * ★★ 审批要**排在工具之前**判 ✓ —— `approval/asked` 里没有 tool 字样 ✓，
+   *   但审批常被包在工具事件里 ✓。
+   *
+   * ★★ 但**只有"在问"的那一条才是一张卡** ✗（2026-10-08 改 ✓）：
+   *   `approval/decided`（裁决落地 ✓）与 `approval/policy`（会话策略 ✓）的 data 里
+   *   同样带 `approval` 字样 ✓ ⇒ 旧判据会把它们**再画一张审批卡** ✓
+   *   —— 同一件事凭空多出一张、还带按钮 ✗（这就是"凭空多一张卡"的来源 ✓）。
+   *   ⇒ 它们单独一类 `approval-meta` ✓，由 `renderEvent` **不画** ✗（只当记账用 ✓：
+   *     卡片据此变成"已处理"✓）。
+   */
+  if (text === 'approval/asked' || text.endsWith('/asked')) return 'approval'
+  if (text.startsWith('approval/')) return 'approval-meta'
+  if (text.includes('permission')) return 'approval'
   if (text.includes('reasoning') || text.includes('thinking')) return 'reasoning'
   if (text.includes('command') || text.includes('tool') || text.includes('exec')) return 'tool'
   if (text.includes('error') || text.includes('failed')) return 'error'
@@ -279,8 +345,10 @@ export function textOf(event) {
  *
  * @param {HTMLElement} container
  * @param {Array} events 已经排好序、去过重的事件（来自 `poller.js` ✓）
+ * @param {object} [context] 画审批卡要的上下文 ✓（`{decidedFor, answer, channelConnected}` ✓）——
+ *   **可选** ✓：不给 ⇒ 按钮按"通道没接通"处理 ✓（置灰 ✓，不假装能用 ✗）。
  */
-export function appendEvents(container, events) {
+export function appendEvents(container, events, context) {
   if (container === null || container === undefined) return
   /**
    * ★ 要滚的是**真正的滚动容器** ✗，不是消息列表本身 ✓ ——
@@ -297,16 +365,35 @@ export function appendEvents(container, events) {
     80,
   )
   for (const event of Array.isArray(events) ? events : []) {
-    const node = renderEvent(event)
+    const node = renderEvent(event, context)
     if (node !== null) container.appendChild(node)
   }
   // ★ 用户手动往上翻的时候**不许把他拽回去** ✗（`follow` 是在追加之前量的 ✓）
   if (follow && typeof scroller.scrollTop === 'number') scroller.scrollTop = scroller.scrollHeight
 }
 
+/**
+ * 这张审批卡对应的那条 `approval/decided` ✓（没有 ⇒ `null` ✓）。
+ *
+ * ★ 为什么由**调用方**给 ✗（而不是在这里自己找 ✓）：裁决事件可能比那张卡**晚到** ✓
+ *   （页面是分批轮询的 ✓）⇒ 只有页面那一层知道"这颗 id 后来被裁决了"✓
+ *   （`mountChat` 里那本账 ✓）。
+ */
+function decidedEventFor(context, event) {
+  if (context === null || context === undefined || typeof context.decidedFor !== 'function') return null
+  const value = context.decidedFor(event)
+  return value === undefined ? null : value
+}
+
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
-export function renderEvent(event) {
+export function renderEvent(event, context) {
   const view = toViewModel(event)
+  /**
+   * ★★ 记账事件**不画** ✗（`approval/decided` / `approval/policy` ✓）：
+   *   它们的 data 里也带 `approval` 字样 ✓，旧判据会把它们**再画一张审批卡** ✓
+   *   —— 同一件事凭空多出一张、还带按钮 ✗。它们只用来把那张**真卡**标成"已处理" ✓。
+   */
+  if (view.kind === 'approval-meta') return null
   const wrapper = document.createElement('div')
   wrapper.className = 'ev ev-' + view.kind + (view.isError ? ' is-error' : '')
   wrapper.setAttribute('data-type', view.type)
@@ -357,7 +444,7 @@ export function renderEvent(event) {
   }
 
   if (view.kind === 'approval') {
-    wrapper.appendChild(approvalCard(toApprovalViewModel(event, null)))
+    wrapper.appendChild(approvalCard(toApprovalViewModel(event, decidedEventFor(context, event)), context))
     return wrapper
   }
 
@@ -665,6 +752,43 @@ export function sendFailureHint(message) {
 }
 
 /**
+ * 输入框**正下方那一行状态条**该写什么 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## ★★ 为什么这里**不写**「45% · 488 轮 2525 步 · 1062M tok」✗
+ *
+ * 用户给的参照物上就是这三个数 ✓，而**今天这条路拿不到它们** ✗ —— 查证过程：
+ *   · `session/page` 的结果 schema（`dsh-api-session-controller/lib/typert.host.js:558-580` ✓）
+ *     只有 `records` + `hasMore` ✗（`projections` 在**单条会话**级别，
+ *     不是这个按页端点给的东西）⇒ 桥 `normalizePage` 里那份 `values` 白名单
+ *     （`packages/host/src/dsh-chat-bridge.ts:398-418` ✓）在真机上读到的是**不存在的字段** ✓；
+ *   · 那三个数的真身是 DSH 的三个**会话投影** ✓：`sessionStats`（轮/步 ✓）+
+ *     `tokenUsage`（token 总数 ✓）+ `contextPressure`（`pressureTokens / contextWindow` = 那个百分比 ✓）
+ *     —— 定义分别见 `dsh-session-stats/lib/types/projection.js` 与
+ *     `dsh-token-meter/lib/types/usage-projection.js` ✓；
+ *   · 而**唯一**能读到投影的现成入口是 `session/projections` ✓ —— 桥已经在
+ *     `resolveHeadSeq` 里调过它（`dsh-chat-bridge.ts:246-252` ✓），但**没有把值转给页面** ✗。
+ *
+ * ⇒ 规矩是**留空比编好** ✓（用户原话）。所以这一行只写页面**真的量到**的两样：
+ *   「窗口内已读 N 条」+ 连接状态 ✓ —— 而且**说清它是窗口内的** ✗，
+ *   免得被误读成"整个会话的 N 条"✓（那是另一个数 ✓）。
+ *
+ * ★ 接真数的方案（要改桥，不在本单范围 ✓）见报告第 4 节 ✓。
+ */
+export function statsStripText(input) {
+  const events = input !== null && typeof input === 'object' && typeof input.eventCount === 'number' && input.eventCount > 0
+    ? Math.floor(input.eventCount)
+    : 0
+  const connection = input !== null && typeof input === 'object' ? input.connection : 'unknown'
+  const parts = []
+  // ★ 一段都没有时**不留空串**（空串会让这一条塌成 0 高 ✓ ⇒ 几何就量不到了 ✗）
+  parts.push(events > 0 ? '窗口内已读 ' + events + ' 条' : '还没读到内容')
+  if (connection === 'offline') parts.push('断线')
+  else if (connection === 'online') parts.push('在线')
+  else parts.push('连接中…')
+  return parts.join(' · ')
+}
+
+/**
  * 状态行**该显示哪一句** ✓（纯函数 ✓）。
  *
  * ★★ 优先级：**错误/断线 > 一次性提示 > 正常读数** ✗ ——
@@ -750,6 +874,8 @@ export function mountChat(options) {
   const status = root.querySelector('#status')
   const stateBox = root.querySelector('#state')
   const refresh = root.querySelector('#refresh')
+  /** ★ 输入框正下方那一行状态条（位置与样式先留出来 ✓ —— 内容见 `statsStripText` ✓）。 */
+  const statsStrip = root.querySelector('#stats-strip')
 
   // 这一页的**输入**（三样 ✓）—— 状态完全由它们算出来 ✓（不在渲染里各写一份判断 ✗）
   let eventCount = 0
@@ -789,6 +915,10 @@ export function mountChat(options) {
       normal: pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText,
     })
     if (status !== null && status !== undefined) status.textContent = line
+    // ★ 输入框正下方那一行：**只写真读数** ✓（口径与"为什么不是那三个数"见 `statsStripText` ✓）
+    if (statsStrip !== null && statsStrip !== undefined) {
+      statsStrip.textContent = statsStripText({ eventCount, connection })
+    }
     if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true
@@ -968,13 +1098,19 @@ export function mountChat(options) {
 
   // ── 输入区：清空要立刻（手感 ✓），但失败**把字放回去**（见 canSend/sendBegin/sendSettled ✓）──
   let sending = false
+  /**
+   * ★ 发送键 = `form` 里那颗 `button` ✓ —— **取法与改前逐字相同** ✗
+   *   （原来那颗是方块文字「发送」✓，现在换成了圆形箭头 ✓，但那**不影响**这条取值 ✓）。
+   */
   const sendButton = form === null || form === undefined ? null : form.querySelector('button')
 
   const growInput = () => {
     if (input === null || input === undefined || input.style === undefined) return
     try {
       input.style.height = 'auto'
-      input.style.height = composerHeight(input.scrollHeight, 38, 132) + 'px'
+      // ★ 上下限跟着新几何走 ✓（原来是 38/132 ✓，那是旧方块输入框的高度 ✓）：
+      //   单行 min-height 20px（CSS 里那一条 ✓）、长到 132px 就自己滚 ✓ —— 不许把消息区挤没 ✗
+      input.style.height = composerHeight(input.scrollHeight, 20, 132) + 'px'
     } catch (error) {
       void error
     }
@@ -984,7 +1120,18 @@ export function mountChat(options) {
     if (input !== null && input !== undefined) input.disabled = sending
     if (sendButton !== null && sendButton !== undefined) {
       sendButton.disabled = sending || !canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection })
-      sendButton.textContent = sending ? '发送中…' : '发送'
+      /**
+       * ★★ 这里原来写的是 `sendButton.textContent = sending ? '发送中…' : '发送'` ✗。
+       *   新键子的**形状**是圆形箭头 ✓ ⇒ 那行字不能再当"按钮内容"写了 ✓（会把箭头抹掉 ✗）：
+       *   · 箭头与那行字**同时**在标记里 ✓（`page.html` ✓）；
+       *   · 显隐由 CSS 认这个 `data-sending` 标记 ✓（只显隐、不改内容 ✗）；
+       *   · 那行字写在 `#send-label` 里 ✓ —— 只有发送中那一下才看得见 ✓。
+       */
+      const label = sendButton.querySelector('#send-label')
+      if (label !== null && label !== undefined) label.textContent = sending ? '发送中…' : ''
+    }
+    if (form !== null && form !== undefined && form.dataset !== undefined) {
+      form.dataset.sending = sending ? '1' : '0'
     }
   }
 

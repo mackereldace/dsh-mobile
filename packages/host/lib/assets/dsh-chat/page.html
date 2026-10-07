@@ -24,9 +24,63 @@
     <div id="state" hidden></div>
     <div id="messages"></div>
   </main>
+  <!--
+    ★★ 输入栏：1:1 复刻 DSH 手机端（参照物与读数见报告第 1 节 ✓）。
+
+    · **大圆角卡片**：圆角 22px、占满宽度、两边各留 14px（与真机读数一致 ✓）；
+    · **左下两颗小圆按钮**：命令行「>_」+ 附件「回形针」✓ —— ★ 本轮**只做长相** ✗，
+      功能不接（接哪条通道的方案见报告第 4 节 ✓）；
+    · **右下大圆发送键**：圆形、中间是**上箭头** ✓（原来那颗方块文字「发送」✗ 已换掉 ✓）；
+    · ★ **发送那条路一行没改** ✗：仍然是 `#composer` 的 `submit` + 它里面的 `button[type=submit]`
+      （`ui.js` 里那句 `form.querySelector('button')` 取到的**还是**这颗 ✓）。
+  -->
   <form class="composer" id="composer">
-    <textarea id="input" placeholder="给 DSH 发一条消息…" rows="1"></textarea>
-    <button type="submit">发送</button>
+    <div class="composer-card">
+      <textarea id="input" rows="1" placeholder="发消息或创建任务，/ 调用指令，@ 文件或对话"></textarea>
+      <div class="composer-row">
+        <div class="composer-tools">
+          <!-- ★ 命令行（长相）：`>_` = 一个「›」折线 + 一条下划线 ✓ -->
+          <button type="button" class="tool-btn" data-tool="command" aria-label="命令行" title="命令行">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M3.2 4.6 L6.6 8 L3.2 11.4" fill="none" stroke="currentColor" stroke-width="1.5"
+                    stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M8.4 11.6 H12.8" fill="none" stroke="currentColor" stroke-width="1.5"
+                    stroke-linecap="round"></path>
+            </svg>
+          </button>
+          <!-- ★ 附件（长相）：回形针 ✓ -->
+          <button type="button" class="tool-btn" data-tool="attach" aria-label="添加附件" title="添加附件">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M10.6 4.1 5.6 9.1a2.05 2.05 0 0 0 2.9 2.9l5.2-5.2a3.4 3.4 0 0 0-4.8-4.8L3.6 7.3a4.75 4.75 0 0 0 6.7 6.7l4.1-4.1"
+                    fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
+                    stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        </div>
+        <span class="composer-grow"></span>
+        <button type="submit" class="send-btn" aria-label="发送" title="发送">
+          <svg class="send-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="M10 16.6 V4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+            <path d="M4.8 9.2 10 4 L15.2 9.2" fill="none" stroke="currentColor" stroke-width="1.9"
+                  stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+          <!-- ★ 发送中才出现的那行字（由 ui.js 的 paintComposer 写 ✓）—— 平时是空的、不占视觉 ✓ -->
+          <span class="send-label" id="send-label"></span>
+        </button>
+      </div>
+    </div>
+    <!--
+      ★★ 输入框**正下方**那一行状态条 ✓（位置与样式先留出来 ✓）。
+
+      ★ 它**在 `.composer` 里面** ✓（不是它的兄弟 ✗）—— 这样"输入框 → 状态条 → 安全区"
+        这个顺序只由 `.composer` 的 gap 与 `.homebar` 两处决定 ✓，安全区不会被算两遍 ✓。
+
+      ★ **不编数字** ✗：现在写的两样都是页面**真的量到**的 —— 窗口内已读条数 + 连接状态 ✓；
+        「45% · 488 轮 2525 步 · 1062M tok」那三个数的真身在 DSH 的
+        `sessionStats` / `tokenUsage` / `contextPressure` 三个投影里 ✓，**今天这条路拿不到** ✗
+        （`session/page` 的结果 schema 只有 `records` + `hasMore` ✓）⇒ 方案见报告第 4 节 ✓。
+    -->
+    <div class="stats-strip" id="stats-strip" aria-live="polite"></div>
   </form>
   <div class="homebar"></div>
 </div>
