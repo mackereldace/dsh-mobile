@@ -25,8 +25,12 @@ whenToUse: 在 工程设计/dsh-mobile 下开发、验收、或记录改动
 
 ```bash
 npm run build                          # 生成 packages/*/lib（含打包 boot.js / 内联 TEMPL / 构建戳）
-npm test                               # 单测（当前 130/130）
-node scripts/check-mobile-layout.mjs   # 真机验收（起临时实例 + 无头 Chrome，5–7 分钟）
+npm test                               # 单测（★ 条数会变 ✗ —— 2026-10-08 实测 762/763：唯一那条红是
+                                       #   某个单正在改的 boot-surface WIP；★ 别照这里的数字判断"有没有回归" ✗，
+                                       #   要看"我这次改动相关的那些文件"是不是全绿 ✓）
+node scripts/check-mobile-layout.mjs   # 真机验收（起临时实例 + 无头 Chrome）
+                                       # ★ 耗时别照抄 ✗ —— 2026-10-08 实测跑到 7:24 仍未结束 ✓
+                                       #   （硬超时也未触发：脚本里是 ?? 1_500_000，见下）
 node scripts/check-apk.mjs             # APK 专项（14 条：包信息/权限/dex 符号/CA 指纹/链校验）
 node scripts/check-production.mjs      # 生产自检
 node scripts/check-device-channel.mjs  # 端侧通道端到端
