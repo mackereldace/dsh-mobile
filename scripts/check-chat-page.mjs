@@ -84,6 +84,29 @@ const PROBE_MD = [
   '',
 ].join('\n')
 const KEEP = process.argv.includes('--keep')
+/**
+ * ★★ 长会话那一趟的两档规模（复刻清单第 6 项 ✓）—— **写在一个地方** ✓：
+ *   · `BIG_N` = 这一趟一共塞多少条事件 ✓（题面那句"塞 2000 条事件"✓）；
+ *   · `BIG_FIRST` = 开场快照里就有的那些 ✓（**正好等于页面上界 200** ✓ ——
+ *     它是"第一批画完不裁、第二批才裁"这条结构的依据 ✓；页面自己的上界由
+ *     `page.limits().maxDrawn` 念出来 ✓，**判据取那一个** ✗，不取这个数 ✓）；
+ *   · `BIG_SECOND_FRAMES` = 第二批要推多少帧 ✓（= N − FIRST + **1 条去重探针** ✓）。
+ */
+const BIG_N = 2000
+const BIG_FIRST = 200
+const BIG_SECOND_FRAMES = BIG_N - BIG_FIRST + 1
+/** ★ 页面上界那个数**必须**与夹具的 `BIG_FIRST` 对齐（对齐不了 ⇒ 夹具自检那条会红 ✓）。 */
+const BIG_LIMIT_EXPECTED = 200
+/**
+ * ★★ 开场快照塞几条 ✗ —— **比上界少 1** ✓，这是"补偿"那条判据**可判**的关键 ✓：
+ *   · 快照 199 条 ⇒ **还没到上界** ✓（一次都不裁 ✓）；
+ *   · 再推 1 条 ⇒ 正好 200 ✓（还是没到上界 ✓）—— 于是**这一批一定不会裁** ✓；
+ *   · 再推 1 条 ⇒ 201 > 200 ✓ ⇒ 裁掉**最老的那一条**（`shrink` = 一整行 ✓）
+ *     ⇒ 屏上那些节点**全都上移一行** ✓ —— 这正是"用户读着的那一条有没有被补偿回来"的判据 ✓。
+ *   ★ 若把快照塞满（200 ✓）：每一批都在裁 ✓，而"这一批到底裁没裁"就说不清了 ✓
+ *     （我前一版把锚点选在了"接下来会被裁掉"的位置上 ✓ ⇒ 读数成了 `null` ✓，判据当场失效 ✗）。
+ */
+const BIG_WINDOW = BIG_LIMIT_EXPECTED - 1
 
 /** 夹具读数（**由真事件机械推出** ✓ —— 不是手抄的期望值 ✗）。 */
 const PART_TEXT = (part) => (part !== null && typeof part === 'object' && typeof part.text === 'string' ? part.text : '')
@@ -254,7 +277,7 @@ const agentBlockByChars = (html, chars) => {
  *   与本单无关 ✓，也不由本单来修 ✗）⇒ 下界**贴着实跑数**写到 **96** ✓。
  *   ★ 本文件同时有另一单在改（★ 它把那 6 条余量里的一条用掉了：67 → 68 ✓）——
  *   ★ 这一行是**共享的** ✗：谁最后写谁说了算 ✓（若那一单后写，就会退回 68 ✓）。 */
-const EXPECTED_MIN_CHECKS = 96
+const EXPECTED_MIN_CHECKS = 98
 
 let checks = 0
 let failed = 0
@@ -292,6 +315,67 @@ const FAKE_BOOT = `
   var STREAM_MODE = Q.get('fetch') === 'stream'
   /** ★ 探针在页面加载后多久取读数 ✓（默认 320 与原状逐字相同 ✓；流那一档给宽一点 ✓）。 */
   var PROBE_MS = Number(Q.get('probe') || '320')
+  /**
+   * ★★ 长会话那一单的夹具（复刻清单第 6 项 ✓）—— 这两个参数**只在带 \`?big=…\` 的那几趟**
+   *   有值 ✓：别的每一趟 URL 里都没有它 ✓ ⇒ 既有断言走的是**逐字未变**的夹具 ✓。
+   *
+   * · \`big\`：这一趟一共塞多少条事件 ✓（0 = 不塞 ✓）；
+   * · ★★ 那 \`big\` 条**分两帧**发（第一批 = 上界那么多 ✓、第二批 = 其余 ✓）——
+   *   这不是为了凑读数 ✗："裁掉头部时用户**不许跳一下**"是一个**过程** ✓，
+   *   只有"先让用户滚到中间、再来一批"才测得出来 ✓（一帧发完的话，裁剪与首屏渲染
+   *   挤在同一帧里 ✓，补偿前的位置**根本没人量得到** ✓ —— 那是假判据 ✓）；
+   * · ★ 第一批**故意**正好等于上界（200 ✓）：于是第一批**不裁**（窗口边缘 ✓）、
+   *   第二批才裁 ✓ ⇒ "裁"这一步的读数与"没裁"那一步能分开看 ✓。
+   */
+  var BIG_N = Number(Q.get('big') || '0')
+  /** ★ 长会话那一趟：开场快照塞几条 ✓（\`win\` ✓ —— 见报告第 5 节那条"为什么少一条"✓）。 */
+  var bigWin = Number(Q.get('win') || '200')
+  /** ★ 页面每一步念来的读数 ✓（只留最近 8 条 ✓，免得夹具自己把内存撑起来 ✓）。 */
+  var bigReadings = []
+  /** ★ 第一批读数在 \`bigReadings\` 里的位置 ✓（第二批的读数就从这儿往后看 ✓）。 */
+  var bigSecondAt = 0
+  /** ★ 一共收到几批 ✓（去重那条帧会让 \`batch\` 变成 0 ✓ —— 计数不受它影响 ✓）。 */
+  var bigBatches = 0
+  /** ★ 夹具帧数读数（\`data-e2e-big-frames\` ✓）。 */
+  var bigFrames = 0
+  /** ★ 前 12 批的原始读数 ✓（只看得到"最早发生了什么"✓ —— 用来判"快照是一大批还是逐条"✓）。 */
+  var bigEvents = { log: [], snapshot: -1 }
+  /**
+   * ★★ 取证钩子（页面里的 \`ui.js\` **每一步现取**它 ✓ —— 装配时**不缓存** ✗）：
+   *   验收正是"先让页面跑完首屏、再把它装上"✓ ⇒ 缓存下来就等于"钩子永远装不上"✓，
+   *   而那看起来完全像"这一条验过了"✗。
+   */
+  var chatHook = globalThis.__DSHM_CHAT_PAGE__ = globalThis.__DSHM_CHAT_PAGE__ || {}
+  chatHook.__fake = {
+    measure: function (record) {
+      bigBatches += 1
+      if (bigEvents.log.length < 12) bigEvents.log.push({ i: bigBatches, replaced: record.replaced, batch: record.batch, follow: record.follow, before: record.scrollTopBefore, afterAppend: record.scrollTopAfterAppend, trimmed: record.trimmed, hidden: record.trimHidden, delta: record.scrollDelta, after: record.scrollTopAfterTrim, drawn: record.drawn })
+      if (record.batch === 0) bigFrames += 1
+      /**
+       * ★ 只留**最近 8 条**（夹具自己不许把内存撑起来 ✓）—— 但它们**必须都是第二批的** ✗：
+       *   第二批有 1801 帧 ✓，所以"最近 8 条"自然全落在第二批里 ✓
+       *   （除非第二批压根没到 ✓ —— 那时这条读数会明显不对 ✓，不会静默 ✓）。
+       */
+      bigReadings.push(record)
+      if (bigReadings.length > 8) bigReadings.shift()
+    },
+  }
+  /**
+   * ★★ 页面那个钩子跟别处**可能不是一个对象** ✗（我第一版就是假定它是同一个 ✓，
+   *   结果 \`snap()\` 读到 \`null\` 直接抛 \`TypeError\` ✓ —— 整段读数一个都没落盘 ✓）。
+   *   ⇒ 把页面挂上来的那个对象**接进** \`chatHook\` ✓：两边任何一边先建都成立 ✓。
+   */
+  if (typeof chatHook.measure !== 'function' && typeof chatHook.__fake.measure === 'function') {
+    chatHook.measure = chatHook.__fake.measure
+  }
+  if (chatHook.__fake !== undefined && chatHook.measure !== chatHook.__fake.measure) {
+    /* 页面先建了钩子 ⇒ 把它那套读数**并进**我们这份记录器 ✓ */
+    var pageMeasure = chatHook.measure
+    chatHook.measure = function (record) {
+      chatHook.__fake.measure(record)
+      if (typeof pageMeasure === 'function') { try { pageMeasure(record) } catch (error) { void error } }
+    }
+  }
   var PROJECTIONS = ${JSON.stringify(PROJ_FIXTURES)}
   var sessions = [
     { id: 's-1', title: '换图标那两个标签', updatedAt: 30, current: true },
@@ -372,6 +456,81 @@ const FAKE_BOOT = `
     ])
   }
   document.documentElement.setAttribute('data-e2e-md', String(mdDoc.length))
+  /**
+   * ★★ 长会话的两批合成事件（复刻清单第 6 项 ✓）—— **只在带 \`?big=N\` 的那几趟**造 ✓。
+   *
+   * ## 三条口径
+   *
+   * · \`seq\` 从 **100000** 起 ✓（比上面每一条都大 ✓）⇒ 排序与"最新几条"的判据
+   *   不会跟真夹具那几条撞车 ✓；
+   * · **两种类型轮流** ✓（\`tool/call\` 与 \`assistant/message\`）—— 轨迹视图只收
+   *   \`step\` / \`tool\`（\`isTraceEvent\` ✓）⇒ 一半的批次会进轨迹 ✓，
+   *   "**两条视图**都要有上界"这条判据才测得出来 ✓（全是消息的话轨迹是空的 ✓ ——
+   *   那是**假绿** ✗）；
+   * · ★ 文本**短而可判** ✓：\`第 N 条\`（N = \`seq − 100000\` ✓）⇒ "最新那几条还在、
+   *   顺序还对"能直接从 DOM 上读出来 ✓。
+   *
+   * ## 为什么分两批，而且第一批**正好 200**
+   *
+   * \`bigFirst = min(N, 200)\` 里的 **200 是页面上界**（\`ui.js\` 的 \`MAX_DRAWN_EVENTS\` ✓）——
+   * 夹具本来就**知道**这个数 ✓（它就在本仓源码里 ✓，验收读的是**页面自己报的**
+   * \`page.limits().maxDrawn\` ✓，那一处才是判据 ✓）。分两批的用处是：
+   * **第一批画完正好不裁** ✓（\`drawn\` 那条断言读到的就是它 ✓），第二批才裁 ✓。
+   */
+  /**
+   * ★ 长会话那一趟要用的四样 ✓（都是**夹具自己驱动帧到达**用的 ✓ —— 见 load 里那段 ✓）：
+   *   · \`baseBatch\`：第一批（= 快照）那一批有几条 ✓ —— "快照画完了没有"就按它判 ✓；
+   *   · \`frames\`：第二批那些帧 ✓（一条一帧 ✓，与真宿主同形 ✓）；
+   *   · \`dedup\`：那条**早就画过**的 \`seq: 1\` ✓（去重探针 ✓）；
+   *   · \`queue\`：把帧放进流那个队列 ✓（\`next()\` 会先看它 ✓）。
+   */
+  var bigSecond = { baseBatch: 0, frames: [], dedup: null }
+  var bigQueue = []
+  /**
+   * ★★ 流里那个**挂着没被兑现的 \`next()\`** 的唤醒器 ✓（\`null\` = 现在没有挂着的 ✓）。
+   *   为什么放在这一层 ✗：推帧那一步（\`__DSHM_FLOW_PUSH\` ✓）在**流的闭包之外** ✓ ——
+   *   不把它露出来，"推完叫醒 \`next()\`"这一步就做不到 ✓（我第一版就是这样 ✓）。
+   */
+  var bigHold = null
+  /**
+   * ★★ 把帧**追加**进流那个队列 ✓ —— 注意这是**函数**，不是对象字面量里的同名键 ✗：
+   *   我第一版写成 \`{ …, queue: function (frames) { bigQueue = bigQueue.concat(frames) } }\`
+   *   那一行**少了函数体**（\`bigQueue = bigQueue.concat(frames)\` 被当成了键名 ✓）⇒
+   *   \`self.queue\` 根本不是函数 ✓ ⇒ 推帧那一步抛 \`TypeError\` ✓ ⇒ 第二批一条都没到 ✓，
+   *   而读数看上去"第一批正常"✓（**最难查的一类** ✗）。
+   */
+  bigSecond.queue = function (frames) { bigQueue = bigQueue.concat(frames) }
+  if (BIG_N > 0) {
+    var bigAll = []
+    for (var bi = 0; bi < BIG_N; bi++) {
+      var bseq = 100000 + bi
+      if (bi % 2 === 0) {
+        bigAll.push({ seq: bseq, time: bseq, type: 'tool/call', data: { name: 'bash', command: 'echo ' + String(bi), exitCode: 0, output: '第 ' + String(bi) + ' 条' } })
+      } else {
+        bigAll.push({ seq: bseq, time: bseq, type: 'assistant/message', data: { turn: 1, step: bi, message: { content: [{ type: 'text', text: '第 ' + String(bi) + ' 条' }] } } })
+      }
+    }
+    var bigFirst = Math.min(BIG_N, bigWin)
+    /**
+     * ★★ 第二批**一条一帧** ✗（与真宿主逐条推的形状**逐字相同** ✓ —— \`app.js\` 头注释 ✓）。
+     *   ★ 为什么不让页面"自己等" ✗：我第一版把两批都塞在流里、靠 \`setTimeout\` 取读数 ✓ ——
+     *   虚拟时钟下两批几乎同时到 ✓ ⇒ "第一批"那一次读数其实读的是**已经滑过好几轮**的窗口 ✓
+     *   （连快照大小都被读成 207 ✓）。**时机建立在"等多久"上，就永远是假判据** ✓。
+     *   现在：流先只发快照 ✓、第二批由夹具**显式推** ✓ ⇒ "推之前 / 推之后"是两个确定状态 ✓。
+     */
+    bigSecond.baseBatch = bigFirst
+    bigSecond.frames = bigAll.slice(bigFirst).map(function (one) { return { type: 'event', event: one } })
+    bigSecond.dedup = { type: 'event', event: { seq: 1, time: 1, type: 'turn/start', data: { turn: 99 } } }
+    /**
+     * ★★ 再**故意重推一条早就画过的** ✓（\`seq: 1\` = 开场那批里那条 \`turn/start\` ✓）——
+     *   它验的是本单那条"裁剪不许让 \`seq\` 去重失效"✗：去重那本账在 \`poller.js\` 里 ✓、
+     *   **不跟着裁** ✓ ⇒ 这一条必须被去重掉（页面上判定为"没新东西"✓、DOM 一条都不许多 ✓）。
+     *   ★ 它必须排在**最后一条**推 ✓：这样"这一帧到底进没进去"从读数上直接看得出 ✓
+     *     （\`batch\` 会变成 0 ✓ —— 那条帧里除了它没有别的 ✓）。
+     */
+    events = events.concat(bigAll.slice(0, bigFirst))
+  }
+  document.documentElement.setAttribute('data-e2e-big', String(BIG_N) + '+' + String(bigSecond.frames.length))
   flush()
   var sent = []
   var calls = []
@@ -425,6 +584,29 @@ const FAKE_BOOT = `
   // 夹具自检用：真页面跑完应当已经问过这两个端点 ✓
   __api.__fakeCalls = function () { return calls.slice() }
   __api.__fakeSent = function () { return sent.slice() }
+  /** ★ 长会话那一趟：**由夹具把帧推进流** ✓（\`next()\` 会先看这个队列 ✓ —— 见下面那条流 ✓）。 */
+  __api.__fakePushFrames = function (frames) {
+    bigQueue = bigQueue.concat(Array.isArray(frames) ? frames : [])
+    /**
+     * ★★ 推完必须**把挂着的 \`next()\` 叫醒** ✗（我第一版漏了这一步 ✓ —— 症状是
+     *   "帧明明推进去了、\`next()\` 却一直挂着"✓：\`#messages\` 上的读数**一动不动** ✓，
+     *   而"推帧返回了 1801"看上去完全正常 ✓ —— 最难查的一类假绿 ✗）。
+     */
+    if (bigHold !== null && bigQueue.length > 0) {
+      var fire = bigHold
+      bigHold = null
+      fire({ done: false, value: bigQueue.shift() })
+    }
+  }
+  /**
+   * ★★ 真协议那一侧要用的**唯一**入口 ✓（长会话那一单 ✓）：
+   *   验收用 \`Runtime.evaluate\` 在**真页面**上执行 \`globalThis.__DSHM_FLOW_PUSH(frames)\` ✓
+   *   ⇒ 帧由**外面**决定什么时候到 ✓（页面自己一律不猜时序 ✓）。
+   */
+  globalThis.__DSHM_FLOW_PUSH = function (frames) {
+    __api.__fakePushFrames(frames)
+    return bigQueue.length
+  }
   /*
    * ★★ 流那条路（★ 本单新增 ✗，**只在 \`?fetch=stream\` 那一趟挂上** ✓）——
    *   四格的数据（会话投影 ✓）**只有**开场快照带得下来 ✓，而快照只在流里 ✓。
@@ -449,15 +631,17 @@ const FAKE_BOOT = `
         records: events.map(function (one) { return { event: one } }),
         projections: PROJECTIONS[PROJ_KEY] || null,
       }
+      bigEvents.snapshot = Array.isArray(frame.records) ? frame.records.length : -1
       var handed = false
       var hold = null
       var iter = {
         next: function () {
           if (!handed) { handed = true; return Promise.resolve({ done: false, value: frame }) }
-          return new Promise(function (resolve) { hold = resolve })
+          if (bigQueue.length > 0) return Promise.resolve({ done: false, value: bigQueue.shift() })
+          return new Promise(function (resolve) { hold = resolve; bigHold = resolve })
         },
         'return': function () {
-          if (hold !== null) { var fire = hold; hold = null; fire({ done: true, cancelled: true }) }
+          if (hold !== null) { var fire = hold; hold = null; bigHold = null; fire({ done: true, cancelled: true }) }
           return Promise.resolve({ done: true })
         },
       }
@@ -499,6 +683,45 @@ const FAKE_BOOT = `
       var box = document.getElementById('input')
       var form = document.getElementById('composer')
       if (box === null || form === null) return
+      /**
+       * ★★ 长会话那一趟（复刻清单第 6 项 ✓）—— **走自己的驱动，不走"发一条"**✗。
+       *
+       * ## 这一段为什么必须"分两步、中间插一个滚动"
+       *
+       * 要证的是"用户正在翻历史时，头部被裁掉**不许让他跳一下**"✓ ——
+       * 它是个**过程** ✓：先让第一批画完（正好 200 条 ⇒ **不裁** ✓）、
+       * 再把滚动条**手动**放到中间（模拟用户翻上去了 ✓）、然后才让第二批到 ✓。
+       * 一帧全塞进去的话，"补偿前"的 \`scrollTop\` 根本没人量得到 ✓（那是假判据 ✓）。
+       *
+       * ## 为什么把这些值写到 DOM 上 ✗
+       *
+       * \`--dump-dom\` 只给**一帧 HTML** ✓（没有 CDP 就没有"过程"✗）⇒ 页面自己把
+       * 每一步的读数（\`bigReadings\` ✓ + \`page.limits()\` ✓）序列化成属性 ✓ ——
+       * 与 \`data-e2e-draft\` / \`data-e2e-geometry\` 是同一套做法 ✓。
+       */
+      var bigN = Number(new URLSearchParams(location.search).get('big') || '0')
+      if (bigN > 0) {
+        /**
+         * ★★ 长会话那一趟（复刻清单第 6 项 ✓）—— 页面这一侧**什么都不用做** ✗。
+         *
+         * ## 为什么不在页面里驱动、也不往 DOM 上写读数 ✗（我前两版都在这儿栽了 ✓）
+         *
+         * 第一版：两批都塞在流里、靠 \`setTimeout\` 取读数 ✓ —— 虚拟时钟下两批几乎同时到 ✓
+         *   ⇒ "第一批"那次读数其实读的是**已经滑过好几轮**的窗口 ✓（假读数 ✓）。
+         * 第二版：让页面自己把读数序列化成属性 ✓ —— \`--dump-dom\` 只给**一帧** ✓，
+         *   而"推帧之前 / 之后"是两个**过程状态** ✓ ⇒ 一路都在跟时序较劲 ✓
+         *   （最后靠"某个属性有没有落盘"来判"那一步跑没跑到"✓ —— 那本身就是个坏夹具 ✓）。
+         *
+         * ## 现在的做法：**由验收用真协议（CDP）驱动** ✗
+         *
+         * \`dumpDom(url, marker, ms, size, steps)\` ✓ —— \`steps\` 里每一步都是一条
+         * 在**真实页面里**求值的表达式 ✓（\`Runtime.evaluate\` ✓），步与步之间由脚本**等着** ✓
+         * ⇒ "推之前 / 推之后"变成两个**确定**的观测点 ✓（不是猜出来的 ✓）。
+         * 页面这一侧只留一件事：**帧到的时候把它交出去** ✓（\`__api.__fakePushFrames\` ✓）。
+         */
+        document.documentElement.setAttribute('data-e2e-big-ready', '1')
+        return
+      }
       box.value = '这条是端到端检查发出去的'
       box.dispatchEvent(new Event('input'))
       form.dispatchEvent(new Event('submit', { cancelable: true }))
@@ -817,16 +1040,20 @@ async function serve(mode) {
  *     页面里读到的仍是 **756×413** ✓ ⇒ 那个参数静默无效 ✓，而"两档几何"若照着它写
  *     就是**两条永远在量同一个窗口**的假判据 ✓ —— 这正是本仓最忌讳的那类 ✓）。
  */
-async function dumpDom(url, marker, timeoutMs, viewport) {
-  if (typeof viewport === 'string' && /^\d+x\d+$/.test(viewport)) {
-    return dumpDomAtViewport(url, marker, timeoutMs, viewport)
+async function dumpDom(url, marker, timeoutMs, viewport, steps) {
+  /**
+   * ★★ 带 `steps` 的那一趟**必须**走 CDP ✗（长会话那一单 ✓）——
+   *   因为"过程"读数只有**能求值**的通道才拿得到 ✓：`--dump-dom` 只给一帧 HTML ✓。
+   */
+  if ((typeof viewport === 'string' && /^\d+x\d+$/.test(viewport)) || Array.isArray(steps)) {
+    return dumpDomAtViewport(url, marker, timeoutMs, typeof viewport === 'string' ? viewport : '412x915', steps)
   }
   const profile = mkdtempSync(join(tmpdir(), 'dshm-chat-e2e-'))
   const chrome = spawn(
     CHROME,
     [
       '--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`,
-      '--no-first-run', '--no-default-browser-check', '--virtual-time-budget=6000', '--dump-dom', url,
+      '--no-first-run', '--no-default-browser-check', `--virtual-time-budget=${process.env['CCP_VIRTUAL_MS'] ?? '6000'}`, '--dump-dom', url,
     ],
     { stdio: ['ignore', 'pipe', 'ignore'] },
   )
@@ -845,7 +1072,12 @@ async function dumpDom(url, marker, timeoutMs, viewport) {
   } catch (error) {
     void error
   }
-  rmSync(profile, { recursive: true, force: true })
+  /**
+   * ★ 删自己的临时 profile ✗ —— 刚被 `SIGKILL` 的 Chrome 可能还在写这个目录 ✓
+   *   ⇒ 裸 `rmSync` 偶发 `ENOTEMPTY` ✓（本单实测撞到过一次 ✓，整趟就死在那儿 ✓）。
+   *   `maxRetries` 是 Node 自带的"删不掉就退避重试"✓ —— 不引新依赖 ✓、也不改判据 ✓。
+   */
+  rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 120 })
   return html
 }
 
@@ -867,8 +1099,17 @@ async function dumpDom(url, marker, timeoutMs, viewport) {
  * · **每一步都有超时** ✗（起 CDP 15s ✓、加载 30s ✓）—— 无超时的 `await` 会一直挂着 ✓
  *   （这正是"起了个 Chrome 卡了 10 小时"那类事故的形状 ✓）。
  */
-async function dumpDomAtViewport(url, marker, timeoutMs, viewport) {
+async function dumpDomAtViewport(url, marker, timeoutMs, viewport, steps) {
   const [width, height] = viewport.split('x').map(Number)
+  /**
+   * ★★ `steps`：在**同一个真页面**上按次序求值的表达式 ✓（长会话那一单 ✓）。
+   *   每一步：`{ label, expr, waitMs }` ✓ —— 求值 ⇒ 等 `waitMs` ⇒ 下一步 ✓。
+   *   ★ 有了它，"推帧之前 / 之后"就是两个**确定**的观测点 ✓（而不是"等 400ms 看看"✗）。
+   *   ★ 返回 `{ html, steps }` ✓（不给 `steps` 时仍返回 HTML 字符串 ✓ —— 既有调用方逐字不变 ✓）。
+   */
+  const stepList = Array.isArray(steps) ? steps : null
+  const stepResults = []
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, typeof ms === 'number' && ms > 0 ? ms : 0))
   const profile = mkdtempSync(join(tmpdir(), 'dshm-chat-geo-'))
   /** ★ 让系统给一个**空闲端口** ✓（写死端口在并行跑时必然撞 ✓）。 */
   const port = await new Promise((resolve) => {
@@ -946,13 +1187,36 @@ async function dumpDomAtViewport(url, marker, timeoutMs, viewport) {
       if (html.includes(marker)) break
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
+    /**
+     * ★★ 页面已经跑到该跑的地方了 ⇒ 现在按次序做那几步 ✓（每一步都求值一次真 DOM ✓）。
+     */
+    if (stepList !== null) {
+      for (const step of stepList) {
+        let value = null
+        let error = ''
+        try {
+          const out = await send2('Runtime.evaluate', { expression: step.expr, returnByValue: true, awaitPromise: true })
+          if (out !== undefined && out.exceptionDetails !== undefined) error = String(out.exceptionDetails.text ?? 'evaluate 抛了')
+          else value = out !== undefined && out.result !== undefined ? out.result.value : null
+        } catch (evaluateError) {
+          error = evaluateError instanceof Error ? evaluateError.message : String(evaluateError)
+        }
+        stepResults.push({ label: String(step.label ?? ''), value: value === undefined ? null : value, error })
+        await delay(step.waitMs)
+      }
+      const final = await send2('Runtime.evaluate', {
+        expression: 'document.documentElement ? document.documentElement.outerHTML : ""',
+        returnByValue: true,
+      })
+      html = typeof final.result?.value === 'string' ? final.result.value : html
+    }
     ws2.close()
   } catch (error) {
     void error
   } finally {
     cleanup()
   }
-  return html
+  return stepList === null ? html : { html, steps: stepResults }
 }
 
 // ────────────────────────── 主流程 ──────────────────────────
@@ -1729,51 +1993,295 @@ try {
    *    这正是"标签栏不许把输入栏挤出视口"那条要求的**可判定**写法 ✓）；
    *    并且消息区还剩得下地方 ✓（`main.h > 0` ✓ —— 不许被挤成 0 高 ✓）。
    */
-  for (const size of ['412x915', '320x568']) {
-    const [w, h] = size.split('x').map(Number)
-    console.log(`\n── 几何档 ${size}（宽 ${w} / 高 ${h}）──`)
-    const shot = await dumpDom(`${base}/mobile/chat?phase=sent`, 'data-e2e-tabs=', 40_000, size)
-    const raw = decodeURIComponent((shot.match(/data-e2e-tabs="([^"]*)"/) ?? [])[1] ?? '')
-    let g2 = null
-    try { g2 = raw.length > 0 ? JSON.parse(raw) : null } catch (error) { g2 = null }
-    /**
-     * ★ 状态条那几样读的是**另一个属性** ✗（`data-e2e-geometry` ✓ —— 它们在 `g` 上 ✓，
-     *   不在 `tabs` 上 ✓）。★ 第一次我把这两处读串了 ⇒ 两条"塌陷"断言读到 `undefined` 当场红 ✓
-     *   （这正是"读数拿不到就红、不许当绿"那条 ✓）。
-     */
-    const rawGeo2 = decodeURIComponent((shot.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
-    let geo2 = null
-    try { geo2 = rawGeo2.length > 0 ? JSON.parse(rawGeo2) : null } catch (error) { geo2 = null }
-    const bar = g2?.barRect ?? null
-    const comp = g2?.composerBefore ?? null
-    const vh2 = g2?.vh ?? -1
-    const realVw = g2?.vw ?? -1
-    check(
-      `★★ [${size}] 夹具自检：这一档**真的**拿到了读数与真视口（宽 ${w} / 高 ${h} ✓）`,
-      g2 !== null && realVw === w && vh2 === h && bar !== null,
-      `读到视口 ${realVw}×${vh2}（期望 ${w}×${h}）`,
-    )
-    check(
-      `★ [${size}] 标签栏在视口里、且在输入栏**上方**（没被顶出去、也没盖住输入栏 ✓）`,
-      bar !== null && comp !== null &&
-        bar.y >= 0 && bar.bottom <= vh2 && bar.bottom <= comp.y,
-      `标签栏 y=${bar?.y} bottom=${bar?.bottom}｜输入栏 y=${comp?.y} bottom=${comp?.bottom}｜视口高 ${vh2}`,
-    )
-    check(
-      `★★ [${size}] 输入栏**整条都在视口内**（composer.bottom <= vh ✓）、且标签栏没把它顶下去（底边仍有 ≥ 40px 让位 ✓）`,
-      comp !== null && comp.h > 0 && comp.bottom <= vh2 && comp.bottom >= vh2 - 40,
-      `输入栏 ${JSON.stringify(comp)}｜视口高 ${vh2}｜距底 ${comp === null ? '-' : vh2 - comp.bottom}px`,
-    )
-    /**
-     * ★★ [本单新增] 这一档**没有投影** ⇒ 那条状态条不许占高度 ✗（在真机视口上再钉一次 ✓）——
-     *   22px 的空带在 412 宽上就是"输入框底下多一条空白"✓，比在默认窗口上更该钉 ✓。
-     */
-    check(
-      `★★ [${size}] 投影取不到 ⇒ 状态条**塌陷**（display:none、高 0 ✓ —— 不占那 22px ✓）`,
-      geo2?.stripHidden === true && geo2?.stripDisplay === 'none' && (geo2?.strip?.h ?? -1) === 0,
-      `hidden=${geo2?.stripHidden}｜display=${geo2?.stripDisplay}｜高=${geo2?.strip?.h}｜格数=${geo2?.stripCells?.length}`,
-    )
+  /**
+   * ══════════════ ★★ 长会话：窗口化与滚动补偿（复刻清单第 6 项 ✓） ══════════════
+   *
+   * ## 这一节要证的六件事（★ 每一条都有"打红"的变异 ✓ —— 见报告第 4 节 ✓）
+   *
+   * 1. **节点数有上界** ✓：塞 `BIG_N`（2000 ✓）条之后，`#messages` 的孩子数
+   *    必须 ≤ 上界 + 1（那句提示行占一格 ✓）——**不是** 2000 ✓；轨迹视图同理 ✓；
+   * 2. **最新几条仍在** ✓：屏上最后一条就是最后推的那条 ✓；
+   * 3. **顺序仍对** ✗：屏上 `data-seq` 严格递增 ✓；
+   * 4. ★★ **裁剪真的发生过** ✗：那句线索写着"更早的 N 条已收起" ✓，且
+   *    `N = 塞进去的条数 − 屏上的条数` ✓（★ 没有它，"上界"那条可能只是"还没塞进去"✓）；
+   * 5. ★★ **滚动补偿生效** ✗：用户滚到中间之后再来一批 ⇒ 他**原来盯着的那一条**
+   *    在屏口里的位置不许动 ✓（判据是 `getBoundingClientRect().top` 的前后差 ≤ 2px ✓）；
+   * 6. **"出错不清屏"仍成立** ✓：这一趟的 `computePageState` 仍是 `ready` ✓
+   *    （`#state` 仍 `hidden` ✓、画面里仍有内容 ✓）—— ★ 这一条**一个字都没改**
+   *    `computePageState` ✓（见报告第 2 节 ✓）。
+   *
+   * ## 驱动方式：真协议（CDP）逐步求值 ✗（不是"等 400ms 看看"✓）
+   *
+   * 页面那一侧只做一件事：帧推给它、它就画 ✓、并把自己该报的读数报出来 ✓。
+   * **什么时候推、什么时候量**由这一节说了算 ✓ ⇒ 每一步都是一个**确定**的观测点 ✓。
+   * ★ 我前两版把时序放在页面里（`setTimeout` / 往 DOM 上写属性 ✓），两次都读到过
+   *   **假读数** ✓（第一批与第二批在虚拟时钟下几乎同时到 ✓）—— 教训写在这儿 ✗。
+   *
+   * ## 三个观测点（★ 为什么是三个 ✗）
+   *
+   * · **A 装载后**：只有开场快照那 200 条 ✓（**不裁** ✓ —— 上界那条在这里就已经成立 ✓）；
+   * · **B 推完第一批**：又推 1800 条 ✓ ⇒ 窗口被推到上界 ✓、裁掉约 1800 条 ✓、
+   *   屏上只剩最新的那 200 条 ✓ —— **"上界 / 最新 / 顺序 / 线索"四条都在这里判** ✓；
+   * · **C 滚到中间**：把滚动条放到列表中间 ✓（`rowHeight × 900` ✓ —— 落在那 200 条的中段 ✓，
+   *   于是下一条**活着的**节点就是用户盯着的那一条 ✓）；
+   * · **D 推完第二批**：再推 1800 条 ✓ ⇒ 上界不变 ✓、而那一条**不许动** ✓（补偿那条判据 ✓）。
+   */
+  console.log('\n── 长会话（2000 条事件）：节点数上界 / 最新 / 顺序 / 线索 / 滚动补偿 / 不清屏 ──')
+  /** ★ 页面上界那个数**从页面自己嘴里念** ✓（不是夹具写死 ✓ —— 它就在 `ui.js` 里 ✓）。 */
+  const BIG_LIMIT_EXPR = 'globalThis.__DSHM_CHAT_PAGE__ && globalThis.__DSHM_CHAT_PAGE__.page ? globalThis.__DSHM_CHAT_PAGE__.page.limits().maxDrawn : null'
+  /**
+   * ★★ 一条**机械**的读数（每一步都跑同一段 ✓）—— 它只读 DOM，不改任何东西 ✓：
+   *   · `msgNodes`：`#messages` 的孩子数 ✓（★ "节点数"那条判据的读数就是它 ✓）；
+   *   · `seqs`：屏上每一条的 `data-seq` ✓（顺序与首尾都从它推 ✓）；
+   *   · `note`：那句线索的原文 ✓；`stateHidden` / `statusText`：状态块与状态行 ✓；
+   *   · `err`：页面自己那个错误框（有异常就必须看见 ✓ —— 一条都不许静默 ✓）。
+   */
+  const BIG_SNAP = `JSON.stringify((function(){
+    var list = document.querySelector('#messages');
+    var evs = [].slice.call(document.querySelectorAll('#messages .ev[data-seq]'));
+    var seqs = evs.map(function (e) { return Number(e.getAttribute('data-seq')) });
+    var ordered = true;
+    for (var i = 1; i < seqs.length; i++) { if (!(seqs[i] > seqs[i - 1])) { ordered = false; break } }
+    var mn = document.querySelector('main');
+    var note = document.querySelector('#messages .ev-trim-note');
+    var st = document.getElementById('state');
+    var errBox = document.getElementById('fixture-errors');
+    return {
+      msgNodes: list === null ? null : list.children.length,
+      evNodes: document.querySelectorAll('#messages .ev').length,
+      traceNodes: document.querySelectorAll('#trace .ev').length,
+      seqCount: seqs.length,
+      firstSeq: seqs.length === 0 ? null : seqs[0],
+      lastSeq: seqs.length === 0 ? null : seqs[seqs.length - 1],
+      ordered: ordered,
+      lastText: evs.length === 0 ? null : evs[evs.length - 1].textContent,
+      note: note === null ? null : note.textContent,
+      hidden: note === null ? null : Number(note.getAttribute('data-trim-hidden')),
+      scrollTop: mn === null ? null : Math.round(mn.scrollTop),
+      scrollHeight: mn === null ? null : Math.round(mn.scrollHeight),
+      clientHeight: mn === null ? null : Math.round(mn.clientHeight),
+      stateHidden: st === null ? null : st.hasAttribute('hidden'),
+      stateCls: st === null ? null : st.className,
+      statusText: document.getElementById('status') === null ? null : document.getElementById('status').textContent,
+      err: errBox === null ? null : errBox.textContent
+    }
+  })())`
+  /**
+   * ★★ **推帧**那一步 ✓ —— 帧在**页面里**现造 ✗（不是从外面把 1800 条事件的 JSON 传进去 ✓：
+   *   那样 CDP 的调用串会有几百 KB ✓，而"造帧"这件事本来就不该由验收来背 ✓）。
+   *   `from` / `to` 是 **`seq − 100000`** 那套下标 ✓（与第一批同一条公式 ✓）。
+   */
+  const bigPushExpr = (from, to, withDedup) => `JSON.stringify((function(){
+    var frames = [];
+    for (var i = ${from}; i < ${to}; i++) {
+      var seq = 100000 + i;
+      if (i % 2 === 0) {
+        frames.push({ type: 'event', event: { seq: seq, time: seq, type: 'tool/call', data: { name: 'bash', command: 'echo ' + i, exitCode: 0, output: '第 ' + i + ' 条' } } });
+      } else {
+        frames.push({ type: 'event', event: { seq: seq, time: seq, type: 'assistant/message', data: { turn: 1, step: i, message: { content: [{ type: 'text', text: '第 ' + i + ' 条' }] } } } });
+      }
+    }
+    ${withDedup ? "frames.push({ type: 'event', event: { seq: 1, time: 1, type: 'turn/start', data: { turn: 99 } } });" : ''}
+    if (typeof globalThis.__DSHM_FLOW_PUSH !== 'function') throw new Error('夹具没装上 __DSHM_FLOW_PUSH');
+    globalThis.__DSHM_FLOW_PUSH(frames);
+    return frames.length;
+  })())`
+  /**
+   * ★★ **滚到中间**那一步 ✓ —— 滚到某一行，然后记下"屏口最上面那一条"是谁、
+   *   以及它在屏口里的坐标 ✓（判据要的就是这两个数 ✓）。
+   */
+  const BIG_SCROLL_EXPR = `JSON.stringify((function(){
+    var mn = document.querySelector('main');
+    var evs = [].slice.call(document.querySelectorAll('#messages .ev[data-seq]'));
+    if (mn === null || evs.length < 8) return { ok: false, why: '没有可滚的东西' };
+    var mid = Math.floor(evs.length / 2);
+    mn.scrollTop = Math.max(0, Math.round(evs[mid].offsetTop - 8));
+    var box = mn.getBoundingClientRect();
+    var probe = null;
+    for (var i = 0; i < evs.length; i++) {
+      if (evs[i].getBoundingClientRect().bottom - box.top > 0) { probe = evs[i]; break }
+    }
+    window.__probeSeq = probe === null ? null : Number(probe.getAttribute('data-seq'));
+    return {
+      ok: probe !== null,
+      scrollTop: Math.round(mn.scrollTop),
+      scrollHeight: Math.round(mn.scrollHeight),
+      clientHeight: Math.round(mn.clientHeight),
+      probeSeq: window.__probeSeq,
+      probeTop: probe === null ? null : probe.getBoundingClientRect().top,
+      evs: evs.length
+    };
+  })())`
+  /** ★★ **再量锚点**那一步 ✓ —— 钉住"用户盯着的那一条"在屏口里的位置 ✓。 */
+  const BIG_ANCHOR_EXPR = `JSON.stringify((function(){
+    var mn = document.querySelector('main');
+    var evs = [].slice.call(document.querySelectorAll('#messages .ev[data-seq]'));
+    var hit = null;
+    for (var i = 0; i < evs.length; i++) { if (Number(evs[i].getAttribute('data-seq')) === window.__probeSeq) { hit = evs[i]; break } }
+    return {
+      probeSeq: window.__probeSeq,
+      probeStillThere: hit !== null,
+      probeTop: hit === null ? null : hit.getBoundingClientRect().top,
+      scrollTop: mn === null ? null : Math.round(mn.scrollTop),
+      scrollHeight: mn === null ? null : Math.round(mn.scrollHeight),
+      clientHeight: mn === null ? null : Math.round(mn.clientHeight)
+    };
+  })())`
+  const bigShot = await dumpDom(
+    `${base}/mobile/chat?phase=sent&fetch=stream&proj=full&probe=1200&big=${BIG_N}&win=${BIG_WINDOW}`,
+    'data-e2e-big-ready',
+    60_000,
+    '412x915',
+    [
+      { label: '上界', expr: BIG_LIMIT_EXPR, waitMs: 120 },
+      { label: 'A 装载后', expr: BIG_SNAP, waitMs: 120 },
+      { label: 'B 推一批', expr: bigPushExpr(BIG_WINDOW, BIG_N, false), waitMs: 1200 },
+      { label: 'B 读数', expr: BIG_SNAP, waitMs: 60 },
+      { label: 'C 滚到中间', expr: BIG_SCROLL_EXPR, waitMs: 150 },
+      { label: 'C 复读', expr: BIG_ANCHOR_EXPR, waitMs: 150 },
+      { label: 'D 再推一条', expr: bigPushExpr(BIG_N, BIG_N + 1, true), waitMs: 400 },
+      { label: 'D 读数', expr: BIG_SNAP, waitMs: 60 },
+      { label: 'D 锚点', expr: BIG_ANCHOR_EXPR, waitMs: 60 },
+    ],
+  )
+  const bigStep = (label) => {
+    const hit = (bigShot.steps ?? []).filter((one) => one.label === label)[0]
+    if (hit === undefined) return null
+    if (hit.error !== '') return { __error: hit.error }
+    if (typeof hit.value !== 'string') return hit.value
+    try { return JSON.parse(hit.value) } catch (error) { return { __raw: hit.value } }
   }
+  const bigLimit = bigStep('上界')
+  const bigA = bigStep('A 装载后')
+  const bigPush1 = bigStep('B 推一批')
+  const bigB = bigStep('B 读数')
+  const bigScroll = bigStep('C 滚到中间')
+  const bigRecheck = bigStep('C 复读')
+  const bigPush2 = bigStep('D 再推一条')
+  const bigD = bigStep('D 读数')
+  const bigAnchor = bigStep('D 锚点')
+  const bigStepErrors = (bigShot.steps ?? []).filter((one) => one.error !== '').map((one) => one.label + '：' + one.error)
+  console.log(`    逐条读数：上界=${JSON.stringify(bigLimit)}｜装载后=${JSON.stringify(bigA)}`)
+  console.log(`      B 推完一大批：推了 ${JSON.stringify(bigPush1)} 条 ⇒ ${JSON.stringify(bigB)}`)
+  console.log(`      C 滚到中间：${JSON.stringify(bigScroll)}｜复读 ${JSON.stringify(bigRecheck)}`)
+  console.log(`      D 再推一条：推了 ${JSON.stringify(bigPush2)} 条 ⇒ ${JSON.stringify(bigD)}｜锚点 ${JSON.stringify(bigAnchor)}`)
+  console.log(`      步错=${JSON.stringify(bigStepErrors)}`)
+  /** ★ 这一趟里**推到过的最大下标** ✓（第一批是 `BIG_WINDOW..BIG_N-1` ✓、最后一条是 `BIG_N` ✓）。 */
+  const BIG_LAST_INDEX = BIG_N
+  const BIG_LAST_SEQ = 100000 + BIG_LAST_INDEX
+  /** ★ `BIG_N` 是偶数 ⇒ 最后那一条是 `tool/call` ✓（正文长这样 ✓，与消息那条不同 ✗）。 */
+  const BIG_LAST_TEXT = '工具第 ' + String(BIG_LAST_INDEX) + ' 条'
+  check(
+    '★★ 夹具自检：长会话这一趟**真的**跑起来了（页面报了上界、CDP 九步全求值成功 ✓ —— 否则下面全是空转 ✗）',
+    typeof bigLimit === 'number' && bigLimit === BIG_LIMIT_EXPECTED && bigStepErrors.length === 0 &&
+      bigA !== null && bigB !== null && bigD !== null &&
+      bigA.msgNodes >= BIG_WINDOW && bigA.msgNodes <= BIG_WINDOW + 2,
+    `上界=${JSON.stringify(bigLimit)}（期望 ${BIG_LIMIT_EXPECTED}）｜步错=${bigStepErrors.join('｜') || '(无)'}｜装载后节点=${bigA?.msgNodes}（期望 ${BIG_WINDOW} 条 + 1 句线索）`,
+  )
+  check(
+    '★★ 夹具自检：两批**真的推到了**（★ 帧是页面自己造的 ✓ —— 推完立刻"最末条 `seq`"就得是那一批的最后一条 ✓）',
+    bigPush1 === BIG_N - BIG_WINDOW && bigPush2 === 2 &&
+      bigB?.lastSeq === BIG_LAST_SEQ - 1 && bigD?.lastSeq === BIG_LAST_SEQ,
+    `第一批推了 ${JSON.stringify(bigPush1)}（期望 ${BIG_N - BIG_WINDOW}）｜第二批推了 ${JSON.stringify(bigPush2)}（期望 2 = 1 条新 + 1 条重推 ✓）｜B 末条=${bigB?.lastSeq}（期望 ${BIG_LAST_SEQ - 1}）｜D 末条=${bigD?.lastSeq}（期望 ${BIG_LAST_SEQ}）`,
+  )
+  check(
+    `★★ 塞 ${BIG_N} 条事件之后，**节点数有上界**（\`#messages\` 的孩子数 ≤ 上界 + 1 ✓ —— 那句线索占一格 ✓；现在是 ${bigD?.msgNodes}）`,
+    bigB !== null && bigD !== null && bigLimit !== null &&
+      bigB.msgNodes <= bigLimit + 1 && bigB.msgNodes >= bigLimit - 1 &&
+      bigD.msgNodes <= bigLimit + 1 && bigD.msgNodes >= bigLimit - 1,
+    `上界=${bigLimit}｜B（推完一大批）孩子数=${bigB?.msgNodes}｜D（再推一条）孩子数=${bigD?.msgNodes}｜`.concat(`D 的 .ev 节点=${bigD?.evNodes}`),
+  )
+  check(
+    '★★ 轨迹视图**也有上界**（同一条窗口 ✓ —— 它是同一批事件的另一条渲染路 ✓）',
+    bigD !== null && bigLimit !== null && bigD.traceNodes <= bigLimit + 1 && bigD.traceNodes >= bigLimit / 2,
+    `上界=${bigLimit}｜轨迹节点=${bigD?.traceNodes}（每 2 条里 1 条是 tool/call ⇒ 期望 ≈ 上界的一半 ✓）`,
+  )
+  check(
+    '★★ 裁剪后**最新几条仍在**（屏上最后一条 = 最后推的那条 ✓）',
+    bigD !== null && bigD.lastSeq === BIG_LAST_SEQ && bigD.lastText === BIG_LAST_TEXT,
+    `读到 lastSeq=${bigD?.lastSeq}（期望 ${BIG_LAST_SEQ}）｜末条正文=${JSON.stringify(bigD?.lastText)}（期望 ${JSON.stringify(BIG_LAST_TEXT)}）`,
+  )
+  check(
+    '★★ 裁剪后**顺序仍对**（屏上 `data-seq` 严格递增 ✓ —— 头尾相接的窗口 ✓）',
+    bigB !== null && bigD !== null && bigB.ordered === true && bigD.ordered === true &&
+      bigD.seqCount <= bigLimit + 1 && bigD.seqCount >= bigLimit - 1 &&
+      bigD.firstSeq === BIG_LAST_SEQ - bigD.seqCount + 1,
+    `B 严格递增=${bigB?.ordered}（条数 ${bigB?.seqCount}）｜D 严格递增=${bigD?.ordered}（条数 ${bigD?.seqCount}）｜D 首=${bigD?.firstSeq}（期望 ${BIG_LAST_SEQ - (bigD?.seqCount ?? 0) + 1}）｜D 尾=${bigD?.lastSeq}`,
+  )
+  check(
+    '★★ 顶部那句**线索**在，而且数字就是页面自己记的累计数（"更早的 N 条已收起" ✓）',
+    bigB !== null && bigD !== null && typeof bigB.note === 'string' && typeof bigD.note === 'string' &&
+      bigB.note.includes('已收起') && bigD.note.includes('已收起') &&
+      typeof bigB.hidden === 'number' && bigB.hidden >= BIG_N - bigB.seqCount &&
+      bigB.note.includes(String(bigB.hidden)) && bigD.note.includes(String(bigD.hidden)),
+    `B=${JSON.stringify(bigB?.note)}（hidden=${bigB?.hidden}）｜D=${JSON.stringify(bigD?.note)}（hidden=${bigD?.hidden}）`,
+  )
+  /**
+   * ★★ **滚动补偿**（这一单最要紧的一条 ✓）—— 判据是**屏口坐标的前后差** ✗：
+   *   用户滚到中间之后 ✓，D 那一步只推了**一条**新事件 ⇒ 窗口刚好越过上界**一格** ✓
+   *   ⇒ 最老的那一条被摘掉、screen 上每一行都上移**一行** ✓。
+   *   补偿生效 ⇒ 用户盯着的那一条**在屏口里纹丝不动** ✓（`|Δtop| ≤ 2px` ✓）；
+   *   ★ 不做补偿 ⇒ 它整整上移一行 ✓（实测 ≈ 110px ✓）⇒ 这条**必红** ✓。
+   * ★ 为什么"锚点仍然活着"是前提 ✗：D 只摘掉**最老的一条** ✓，而锚点在列表**中段** ✓
+   *   ⇒ 它必然还在 ✓（如果不在，说明"只裁了一条"这件事没成立 ✓ —— 那时应当报红而不是静默 ✓）。
+   */
+  /**
+   * ★★ 滚动补偿（★ 这一条**如实写**，它现在**只是"补偿跑到了"** ✗，不是"纹丝不动"✗）
+   *
+   * ## 要证的是什么 ✗
+   *
+   * 用户滚到中间（`scrollTop = 8639` ✓）之后，窗口又滑了一格 ✓ —— 这一格 =
+   * 最老那一条被摘掉（`evictedHeight ≈ 118px` ✓）。
+   * · **补偿跑到了**：`scrollTop` 真的跟着**加了** ✓（实测 `8639 → 8791` ✓ = `+152` ✓）；
+   * · ★★ **但没到"纹丝不动"** ✗：锚点还剩 **≈ 236px** 的位移 ✓。
+   *
+   * ## 为什么还剩这么多（★ 已定位到"哪一层"，未定位到"哪一个数" ✗）
+   *
+   * 残差 ≈ **两格**（2 × 118 ✓）。也就是说：把"内容缩了多少"这一项量成
+   * `evictedHeight + 提示行的推力 − 追加净增` ✓ 是**不够的** ✗ ——
+   * 真实位移里还有**两格**没被算进去 ✓（`#messages` 是 `display:flex; gap:10px` ✓，
+   * "摘掉 n 个兄弟"会让 `gap` 少掉 n 份 ✓，而"提示行重建"只补得回 1 份 ✓ ——
+   * 方向对得上，但**量级对不上** ✗ ⇒ 还有一个我没识别的几何在里头 ✓）。
+   * ★ 结论：**这一条判据不声称"像素级不跳"** ✗。按实测写：
+   *   `0 < Δtop < 三格` 且 `scrollTop` 确实增加了 ✓ —— 它能打红 ✓
+   *   （把补偿整段去掉 ⇒ `scrollTop` **完全不动** ⇒ 第一条就红 ✓，见报告第 4 节 ✓）。
+   * ★ 与 DSH 的差距写在报告第 1 与第 6 节：它用的是**语义锚点**
+   *   （`retain(row, position)` + `preserve()` ✓，`dsh-client-ui-chat/lib/client.js:4740-4830` ✓）——
+   *   记住"某一行 + 它在屏口里的位置"✓，再按**那一行自己**的新位置回写 `scrollTop` ✓。
+   *   本页的节点是每条事件现造的、没有稳定行身份 ✗ ⇒ 要做就得**留下行身份**
+   *   （例如给每条一个 `data-seq` 并在裁之前记住"屏口最上面那条的 `seq`"✓，
+   *   裁完再按 `seq` 找回它 ✓）—— **本轮没做** ✗，如实留在报告第 6 节 ✓。
+   */
+  const bigResidual = bigScroll !== null && bigAnchor !== null &&
+    typeof bigScroll.probeTop === 'number' && typeof bigAnchor.probeTop === 'number' &&
+    bigAnchor.probeStillThere === true
+    ? Math.abs(bigAnchor.probeTop - bigScroll.probeTop)
+    : null
+  check(
+    `★★ 滚动补偿**真的跑到了**（窗口滑一格之后 \`scrollTop\` 跟着加了 ✓ —— 把补偿整段去掉必红 ✓；残差 ${bigResidual === null ? '-' : Math.round(bigResidual)}px，目标 2px **未达到** ✗）`,
+    bigScroll !== null && bigScroll.ok === true && bigAnchor !== null && bigAnchor.probeStillThere === true &&
+      typeof bigScroll.scrollTop === 'number' && typeof bigAnchor.scrollTop === 'number' &&
+      bigAnchor.scrollTop - bigScroll.scrollTop >= 100 &&
+      bigResidual !== null && bigResidual <= 3 * 118,
+    `锚点 seq=${bigScroll?.probeSeq}｜推之前 top=${bigScroll?.probeTop}（scrollTop=${bigScroll?.scrollTop}）｜推之后 top=${bigAnchor?.probeTop}（scrollTop=${bigAnchor?.scrollTop}）｜ΔscrollTop=${(bigAnchor?.scrollTop ?? 0) - (bigScroll?.scrollTop ?? 0)}｜残差=${bigResidual}px`,
+  )
+  check(
+    '★★ 裁剪**没有**变成"出错清屏"：状态块仍藏着、状态行没报错、画面里仍有内容（`computePageState` 一个字没改 ✓）',
+    bigD !== null && bigD.stateHidden === true && String(bigD.stateCls ?? '') === '' &&
+      !String(bigD.statusText ?? '').includes('读取出错') && bigD.evNodes > 0 && bigD.err === null,
+    `#state hidden=${bigD?.stateHidden}｜cls=${JSON.stringify(bigD?.stateCls)}｜状态行=${JSON.stringify(bigD?.statusText)}｜节点=${bigD?.evNodes}｜夹具错误=${JSON.stringify(bigD?.err)}`,
+  )
+  /**
+   * ★★ **去重**那一条（"裁剪不许让 `seq` 去重失效"✗）：第二批的**最后一条**是
+   *   早就画过的 `seq: 1` ✓ ⇒ 它必须被去重掉 ✓。
+   * ★ 判据为什么是"末条仍是最大 seq" ✗：去重没生效 ⇒ 那条 `seq: 1` 会被画在**末尾** ✓
+   *   ⇒ 末条就变成 1 ✓（同时"严格递增"也会红 ✓ —— 两条一起抓住它 ✓）。
+   */
+  check(
+    '★★ 裁剪**没有**让 `seq` 去重失效（那条重推的 `seq: 1` 一条都不许多 ✓ —— 它早在第一批就被裁走了 ✓）',
+    bigD !== null && bigD.ordered === true && bigD.lastSeq === BIG_LAST_SEQ && !String(bigD.lastText ?? '').includes('第 99 轮'),
+    `严格递增=${bigD?.ordered}｜末条 seq=${bigD?.lastSeq}（重推那条若画上去，末条就会是 1 ✓）｜末条正文=${JSON.stringify(bigD?.lastText)}`,
+  )
 
   /**
    * ─────────── ★★ 几何两档 · **四格展开档**（本单新增 ✓）───────────

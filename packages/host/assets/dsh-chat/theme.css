@@ -185,6 +185,21 @@
    * ★ 教训与 §4.1ct 里那条同款 ✗：**先说结论、后看读数** ✓ —— 读数一列出来就知道自己错了 ✓。
    */
   main { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+  /**
+   * ★★ 关掉浏览器的**滚动锚定**（`overflow-anchor` ✓）✗（长会话那一单 ✓）
+   *
+   * ## 为什么非关不可 ✗（★ 这是本轮实测抓到的 ✗）
+   *
+   * 那一层是长会话的滚动容器 ✓，而长会话的**头部一直在被回收** ✗ ⇒ Chrome 的
+   * scroll anchoring 会把"锚定节点被摘掉"当成"内容变了"✓，然后**自己**改 `scrollTop` ✓
+   * —— 而页面里那条"补偿"（记录并还原滚动位置 ✓）**也算了一遍** ✓
+   * ⇒ 两个东西互相打架：实测读数里 `scrollTop` 会**一路往 0 漂** ✓
+   * （用户正读历史，却被慢慢拽回顶部 ✓ —— 比"跳一下"更糟 ✓，而且看起来完全不像 bug ✗）。
+   * ⇒ 本仓那条铁律：**同一个概念只能有一个含义** ✓ —— 滚动位置由**我们**负责 ✓，
+   *   浏览器不许再插一手 ✓（这也正是 DSH 自己那条路的样子：它用语义锚点 + `retain/preserve`
+   *   自己补偿 ✓，见 `dsh-client-ui-chat/lib/client.js:4740-4830` ✓）。
+   */
+  main { overflow-anchor: none; }
   #state { padding: 28px 26px 0; }
   #state[hidden] { display: none; }
   .state { text-align: center; }
@@ -218,6 +233,28 @@
   .ev-tool .tool-body { margin: 0; padding: 10px 12px; background: var(--code-bg); font-size: 12px; line-height: 1.45; color: var(--ink2); white-space: pre-wrap; word-break: break-all; }
   .ev-step { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--ink3); }
   .ev-step::before, .ev-step::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  /**
+   * ★★ 「更早的 N 条已收起」那句提示（复刻清单第 6 项 ✓ —— 长会话的窗口 ✓）。
+   *
+   * ## 为什么它**不是一颗按钮** ✗
+   *
+   * DSH 自己那个位置是**能点的**（`chat.loadOlder` = 「加载更早」✓ —— 源码：
+   * `dsh-client-ui-chat/lib/client.js:5272-5280` 那颗 `<button onClick={scroll.loadEarlier}>` ✓），
+   * 因为**它有那条通道**（`SessionPage` 的 `beforeSeq` 分页 ✓，`session.js:20` 的
+   * `maxMessages: 500` ✓）。我们这一页**没有**那条通道 ✗
+   * （页面只认 `mobile/dsh/follow` ✓，没有"往前取一页"的本地路由 ✓）
+   * ⇒ 按本仓那条铁律「**不假装能用**」✗：这里就**只写一句实话** ✓，
+   *   没有 `cursor`、没有 `:active`、没有 `click` ✓ —— 与四格状态条同一条口径 ✓。
+   *
+   * ## 几何：与 `.dim.small` 同族（★ 不新造一套字号 ✗）
+   *
+   * 12px / `--ink3` / 居中 ✓ —— 它是列表里的**一行说明**，不是一条消息 ✓；
+   * 上下各留一点，免得它跟第一条气泡粘在一起 ✓。
+   */
+  .ev-trim-note {
+    text-align: center; font-size: 12px; line-height: 1.5; color: var(--ink3);
+    padding: 2px 0 4px;
+  }
   .dim { color: var(--ink3); }
   .small { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   /**

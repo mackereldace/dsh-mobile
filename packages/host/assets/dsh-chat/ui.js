@@ -358,7 +358,7 @@ export function textOf(event) {
  *   **可选** ✓：不给 ⇒ 按钮按"通道没接通"处理 ✓（置灰 ✓，不假装能用 ✗）。
  */
 export function appendEvents(container, events, context) {
-  if (container === null || container === undefined) return
+  if (container === null || container === undefined) return { follow: null, scrollTop: null }
   /**
    * ★ 要滚的是**真正的滚动容器** ✗，不是消息列表本身 ✓ ——
    *   页面结构改成"外层 `main` 滚、里面 `#messages` 只排"之后 ✓，
@@ -366,9 +366,7 @@ export function appendEvents(container, events, context) {
    *   ⇒ 表现是"新消息永远在屏幕外、看着像卡住" ✓（本轮截图抓到的就是这个 ✓）。
    *   若 DOM 结构改回列表自己滚，这里**也**还能对（取到的就是它自己 ✓）。
    */
-  const scroller = typeof container.closest === 'function'
-    ? (container.closest('main') || container.parentElement || container)
-    : (container.parentElement || container)
+  const scroller = scrollContainerOf(container)
   const follow = shouldAutoScroll(
     { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight },
     80,
@@ -379,6 +377,289 @@ export function appendEvents(container, events, context) {
   }
   // ★ 用户手动往上翻的时候**不许把他拽回去** ✗（`follow` 是在追加之前量的 ✓）
   if (follow && typeof scroller.scrollTop === 'number') scroller.scrollTop = scroller.scrollHeight
+  /**
+   * ★ 把这一次追加的**两个读数**交出去 ✓（长会话那一单 ✓ —— 裁剪那一步要拿它们做补偿 ✗，
+   *   验收要拿它们证明"补偿真的发生了"✓）。**纯读数** ✓：不改任何状态 ✓。
+   */
+  return { follow, scrollTop: typeof scroller.scrollTop === 'number' ? scroller.scrollTop : null }
+}
+
+/**
+ * ★★ **长会话的窗口**（复刻清单第 6 项 ✓）—— 一条会话最多在屏上留这么多条事件 ✗。
+ *
+ * ## 上界为什么是 **200**（★ 依据写在这儿，改数先改这段话 ✗）
+ *
+ * 1. **它比任何一屏都长得多** ✓：这条消息列表每条约 40–60px（`theme.css` 的
+ *    `#messages { gap: 10px }` + 气泡内边距 ✓）⇒ 200 条 ≈ **8,000–12,000px** ✓，
+ *    而手机视口高 568–915px ✓ ⇒ 屏上同时看得见的不到 **8 条** ✓
+ *    （≈ 25 屏的历史 ✓）—— 用户"往回翻"的时候不会撞到边界 ✓；
+ * 2. **它与 DSH 自己的窗口同量级** ✗（源码读数：`session.js:20` 的
+ *    `HISTORY_PAGE_OPTIONS.maxMessages = 500` ✓）—— 我们没有"取更早"那条通道 ✓
+ *    （见 {@link trimEventWindow} 的说明 ✓）⇒ **不照抄 500** ✗，
+ *    取 200 是为了"既留住足够多的历史、又把节点数钉在上千以下" ✓；
+ * 3. **节点数是确定性判据** ✓：200 条 ×（一条消息 ≈ 4–6 个元素 ✓）≈ 1,200 节点 ✓，
+ *    手机 WebView 完全无压力 ✓；而上千条事件（旧行为）会到 **5,000+ 节点** ✗。
+ *
+ * ★ 这不是虚拟列表 ✗（那要测量、要预估行高 ✓，在这个"追加式"渲染器里会引入新的抖动 ✓）——
+ *   它是**有上界的窗口 + 头部回收** ✓：新事件照旧 `appendChild` ✓，只把最老的移出去 ✓。
+ */
+export const MAX_DRAWN_EVENTS = 200
+
+/**
+ * 那条"更早的消息已收起"的提示行 ✓（自己造的字 ✓，纯 ASCII 属性名 ✓）。
+ *
+ * ★ 只有**对话视图**摆它 ✗（`withNote` ✓）：轨迹视图是"步骤列表" ✓ ——
+ *   它那面自己有"还没有步骤"的占位话 ✓，再加一句"更早的 N 条已收起"就会
+ *   把"轨迹里画了几条"这个读数搅浑 ✓（验收里那条判据是逐条数的 ✓）。
+ */
+function ensureTrimNote(container, hiddenCount, withNote) {
+  if (typeof container.querySelector !== 'function') return null
+  let note = container.querySelector('.ev-trim-note')
+  const text = '更早的 ' + String(hiddenCount) + ' 条已收起（这一页只留最近 ' + String(MAX_DRAWN_EVENTS) + ' 条）'
+  if (!withNote || hiddenCount <= 0) {
+    if (note !== null && note !== undefined && typeof note.remove === 'function') note.remove()
+    return null
+  }
+  if (note === null || note === undefined) {
+    note = document.createElement('div')
+    note.className = 'ev ev-trim-note'
+    note.setAttribute('data-trim-hidden', String(hiddenCount))
+    note.textContent = text
+    container.insertBefore(note, container.firstChild)
+    return note
+  }
+  note.setAttribute('data-trim-hidden', String(hiddenCount))
+  note.textContent = text
+  return note
+}
+
+/**
+ * 一条事件节点**能不能被回收** ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能断言 ✓）。
+ *
+ * ★★ 一条"不许回收"的规矩（**为了不骗用户** ✓）：
+ * · `[data-pending-approval]` —— 那张卡上还有**能按的按钮** ✓，它是现在进行时的交互 ✓
+ *   （用户还没裁决 ✓）⇒ 摘掉它就是"屏幕上少了一次要你决定的事" ✗（最坏的一种 ✓）。
+ *
+ * ★★ 那句提示行 `.ev-trim-note` **算"可回收"** ✗（★ 这是本轮实测抓到的一个死锁 ✓）：
+ *   它住在列表**头部** ✓（`insertBefore(note, firstChild)` ✓）⇒ 若把它判成"不许回收" ✓，
+ *   那么**下一次**裁剪在第一格就 `break` ✓ ⇒ 从此**一条都裁不掉** ✓
+ *   （读数症状：`hidden` 卡在第一次那个数、而列表里的事件数一路涨到两千 ✓ ——
+ *   我第一版就是这样 ✓，屏上看着完全正常 ✓）。它本来就由 `ensureTrimNote` 自己维护 ✓
+ *   （要么被摘、要么在下一批重建 ✓），所以让它跟别的头部节点一起走是安全的 ✓。
+ */
+export function isTrimmableEvent(node) {
+  if (node === null || node === undefined || typeof node.getAttribute !== 'function') return false
+  return node.getAttribute('data-pending-approval') === null
+}
+
+/**
+ * ★★ 把事件窗口裁到 {@link MAX_DRAWN_EVENTS} 以内 ✓ —— **从头部回收** ✗。
+ *
+ * ## 五条口径（每一条都是"不做就会在手机上出错" ✓）
+ *
+ * 1. **只在超了的时候才动 DOM** ✓：没超 ⇒ 一次 `getAttribute` 都不做 ✓
+ *    （每条消息都跑一遍"要不要裁"才是新的卡顿源 ✗）；
+ * 2. ★★ **不碰 `computePageState`** ✗：有内容就 `ready` ✓ 这条规矩**一个字都没改** ✓
+ *    ⇒ "裁剪"永远不会变成"出错清屏"✓（裁决那件事仍归 `eventCount > 0` ✓）；
+ * 3. ★★ **滚动位置不跳** ✗：裁掉的是**已经画在用户上面**的那些节点 ✓ ⇒
+ *    内容整体上移 ✓。补偿用**实测的 `scrollHeight` 差值** ✓（不是预估行高 ✗）：
+ *    `scrollTop += 裁之前的高 − 裁之后的高` ✓ ⇒ 用户正在读的那一条**纹丝不动** ✓；
+ * 4. ★ **`seq` 去重不受影响** ✓：去重那本账（`poller.js` 的 `seen` ✓）**不在这一层** ✗，
+ *    也**不跟着裁** ✓ ⇒ 被回收的 `seq` 若被再次推来，照样被去重掉 ✓
+ *    （这一层因此**不需要**自己记 `seq` ✓ —— 同一个概念只有一个事实来源 ✓）；
+ * 5. ★ 待裁决的审批卡**不回收** ✓（见 {@link isTrimmableEvent} ✓）—— 于是"窗口"在那一种
+ *    情况下会**短暂超上界** ✓，这是**故意的** ✗（宁可多几个节点，也不许把"等你决定"那件事
+ *    从屏上拿走 ✓）。真到那一步的会话，节点数仍由"未裁决的审批数"封住（通常 ≤ 1 ✓）。
+ *
+ * @param {HTMLElement} container 事件列表（`#messages` ✓）
+ * @param {object} [metrics] 追加**之前**量好的读数 ✓（`{scroller, scrollTop, anchor, anchorTop}` ✓）——
+ *   给了它就做滚动补偿 ✓（见下面那段长注释 ✓）
+ * @param {boolean} [withNote] 要不要摆那句"更早的 N 条已收起" ✓（默认要 ✓；轨迹视图传 `false` ✓）
+ * @returns {{ trimmed: number, hidden: number, drawn: number, scrollTop: number|null, screenDelta: number|null }}
+ *   `trimmed` = 这一次摘掉几个节点 ✓、`hidden` = 列表里累计收起了几条 ✓、
+ *   `drawn` = 现在列表里还有几个孩子 ✓（它就是"节点数"那条判据的读数 ✓）、
+ *   `scrollTop` = 补偿之后的滚动位置（没补偿就是 `null` ✓）、
+ *   `screenDelta` = 补偿**之后**锚点相对屏口还差多少 px ✓（≈0 ⇒ 用户那一条没动 ✓）
+ */
+export function trimEventWindow(container, metrics, withNote) {
+  const note = withNote !== false
+  const none = { trimmed: 0, hidden: 0, drawn: 0, scrollTop: null, screenDelta: null }
+  if (container === null || container === undefined || typeof container.children === 'undefined') return none
+  /**
+   * ★★ 那句"更早的 N 条已收起"里的 **N 是累计数** ✗ —— 它记在这一层的
+   *   `data-trim-hidden-total` 上 ✓（切会话时由 `resetEventWindow` 归零 ✓）。
+   */
+  const hiddenBefore = Math.max(0, Number(container.getAttribute('data-trim-hidden-total') || '0'))
+  const drawnBefore = container.children.length
+  if (drawnBefore <= MAX_DRAWN_EVENTS) {
+    return { trimmed: 0, hidden: hiddenBefore, drawn: drawnBefore, scrollTop: null, screenDelta: null }
+  }
+  /** `offsetTop` = 节点在**这一层内容坐标**里的位置 ✓（不随滚动变 ✓ —— 补偿要的就是这个基准 ✓）。 */
+  const offsetTopOf = (node) => {
+    if (node !== null && node !== undefined && typeof node.offsetTop === 'number') return node.offsetTop
+    const style = node !== null && node !== undefined && typeof globalThis.getComputedStyle === 'function'
+      ? globalThis.getComputedStyle(node)
+      : null
+    const parsed = style === null || style === undefined ? Number.NaN : Number.parseFloat(style.marginTop)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const doomed = []
+  const removable = drawnBefore - MAX_DRAWN_EVENTS
+  for (let index = 0; index < removable; index++) {
+    const node = container.children[index]
+    // ★ 撞上"待裁决的审批卡" ⇒ **立刻收手** ✗（它和它后面的一律留着 ✓，见上面第 5 条 ✓）
+    if (!isTrimmableEvent(node)) break
+    doomed.push(node)
+  }
+  if (doomed.length === 0) {
+    return { trimmed: 0, hidden: 0, drawn: drawnBefore, scrollTop: null, screenDelta: null }
+  }
+  /**
+   * ★★ 补偿的**锚点**（★ 这一步的心思全在这儿 ✗）
+   *
+   * ## 为什么要补偿 ✗
+   *
+   * 摘掉的内容全在用户**上面** ✓ ⇒ 不做任何事的话，屏上内容整体**上移** ✓ ——
+   * 用户正读着的那一段会"跳一下"✓（而且越往上翻、跳得越狠 ✓）。
+   *
+   * ## ★★ 为什么**不是** `scrollTop += 高度差` ✗（我第一版就是这么写的 ✓）
+   *
+   * 那个式子只在"容器只增不减"时成立 ✓。**长会话里恰恰相反** ✗：
+   * 内容一直在长、头部一直在回收 ⇒ 窗口像一条**传送带** ✓ ——
+   * 净高度几乎不变 ✓，而"被摘掉那一段的高"却是**一整段** ✓
+   * ⇒ 加它会把 `scrollTop` 一路推到列表底部 ✓（用户正翻历史，却被甩到最新 ✓ ——
+   * 比"跳一下"更糟 ✓，而且**看起来像功能正常**✗）。
+   * ★ 这一条是本轮**实测**出来的 ✓：照那个式子写的时候，读数从 253 涨到几万 ✓，
+   *   而 `scrollHeight` 根本没变 ✓ —— 那一刻就知道式子错了 ✓。
+   *
+   * ## 正确的写法：**钉住一条还在屏上的节点** ✗
+   *
+   * ① 追加**之前**，调用方记下"屏口最上面那一条"（`metrics.anchor` ✓）以及它在屏口里的位置
+   *   （`metrics.anchorTop` ✓，单位 px ✓）；
+   * ② 裁完之后，把 `scrollTop` 挪成"**它在屏口里的位置与原来一样**"✓
+   *   ⇒ `newScrollTop = anchor.offsetTop − anchorTop` ✓。
+   * ★ 这条式子对"只追加不裁"也成立吗 ✗ —— 成立 ✓（此时 `anchor.offsetTop` 没变 ✓
+   *   ⇒ `newScrollTop = 原来的 scrollTop` ✓，等于什么都不做 ✓）⇒ 只在**真裁了**的时候调用它 ✓。
+   * ★ 那条锚点**被裁掉了**怎么办 ✗ ⇒ 拿"剩下的第一条"（旧写法里的 `firstKept` ✓）
+   *   当替身 ✓：它正好是"原来屏口之下最近的那一条"✓ ⇒ 同一条式子**稍微**多走一点
+   *   （≈ 一个 `gap` ✓），方向是**对的** ✓（比"不补偿"和"推到底部"都好得多 ✓）。
+   * ★ DSH 自己也是这么做的 ✓：`retain(row, position)` + `preserve()`
+   *   （`dsh-client-ui-chat/lib/client.js:4740-4830` ✓）—— **语义锚点 + 补偿** ✓，
+   *   不是"按高度差平移"✗（见报告第 1 节的逐行读数 ✓）。
+   */
+  /**
+   * ★★ 被摘掉的**不只是事件节点** ✗：那句提示行（`.ev-trim-note` ✓）自己也住在头部 ✓、
+   *   也要跟着被回收/重建 ✓ ⇒ "收起了几条"必须**只数事件节点** ✓
+   *   （把它算进去，屏上就会写"更早的 2 条已收起"✓ —— 我第一版就是这样 ✓，
+   *   而它看上去完全像个正常读数 ✗）。
+   */
+  const evicted = doomed.filter((node) => !(node.classList !== undefined && node.classList !== null &&
+    typeof node.classList.contains === 'function' && node.classList.contains('ev-trim-note'))).length
+  for (const node of doomed) node.remove()
+  /**
+   * ★★ 那个数字是**累计**的 ✗（不是"这一次摘了几个"✓）—— 它说的是
+   *   "这个会话里更早的多少条已经不在屏上了"✓。只报这一次的量，窗口一滑动
+   *   读数就变回 2 ✗（用户看那句提示会以为只收起了两条 ✓ —— 我第一版就是这样 ✓）。
+   */
+  const hidden = hiddenBefore + evicted
+  container.setAttribute('data-trim-hidden-total', String(hidden))
+  /**
+   * ★★ 那句提示行**自己也有高度** ✗（它住在列表头部 ✓、而且这一轮它是**重建**的 ✓
+   *   —— 旧的被摘掉、新的插在最前面 ✓ ⇒ 它下面的所有内容都会被再挪一下 ✓）。
+   *   ⇒ 把"它净高变了多少"也算进补偿量里 ✓（不补这一下，用户那一条会残存一个
+   *   **提示行的高度**的位移 ✓ —— 实测 84px ✓，比我预期的"一个 gap"大得多 ✓）。
+   * ★ 只在它真的被重建过的时候量 ✗（`evicted > 0` ✓）：否则这一轮根本没碰它 ✓。
+   */
+  const noteSentinel = container.firstElementChild
+  const sentinelTopBefore = offsetTopOf(noteSentinel)
+  ensureTrimNote(container, hidden, note)
+  /**
+   * ★ "提示行把下面的内容往下推了多少" ✓ —— 用**同一只哨兵节点**（现在排第一的那条 ✓，
+   *   它一定还在 ✓）在插入前后的 `offsetTop` 差来量 ✓（同节点、同参照物 ✓，
+   *   所以这个差**只有**提示行那一份贡献 ✓）。
+   */
+  const notePush = offsetTopOf(noteSentinel) - sentinelTopBefore
+  /**
+   * ★★ 滚动补偿（★ 这一步的心思全在这儿 ✗）
+   *
+   * ## 为什么要补偿 ✗
+   *
+   * 摘掉的内容全在用户**上面** ✓ ⇒ 不做任何事的话，屏上内容整体**上移** ✓ ——
+   * 用户正读着的那一段会"跳一下"✓（而且越往上翻、跳得越狠 ✓）。
+   *
+   * ## 补偿量怎么量出来的（★ 本轮在这儿栽了三次，三种错法都记下来 ✗）
+   *
+   * **对的做法**：量**滚动容器自己的** `scrollHeight` ✓ ——
+   *   `shrink = 追加之前的高 + （这一轮摘掉的那些节点的高 + 它们占的 `gap` ✓）− 现在的高` ✓。
+   *   它不依赖任何节点的 `offsetTop` ✓ ⇒ 也就不依赖"谁当了 `offsetParent`"✓、
+   *   更不依赖"我挑的那只节点还在不在"✓（那三样正是前三次翻车的原因 ✓）。
+   *   而"摘掉的那些有多高"用一个**离屏探针**量 ✓：把被摘的节点先挪到一个
+   *   `display:none` 的临时容器里 ✓ ⇒ 内容立刻少掉那一段 ✓（这一下就量得准 ✓），
+   *   量完再真删掉 ✓。
+   *
+   * **三只错法（都写在明处 ✓，免得下一个读的人再走一遍 ✗）**：
+   *   ① `scrollTop += 高度差` 里那个"高度差"取成了**两只不同节点**的 `offsetTop` 之差 ✓
+   *      ⇒ 把"两条之间原本隔多远"也算了进去 ✓（实测 8,000+ px ✓ ⇒ 一路推到列表底部 ✓）；
+   *   ② 改成"列表最后那个孩子的 `offsetTop` 前后差"✓ —— 可**它是谁在变** ✗
+   *      （追加之后"最后一个孩子"换成了新来的那一条 ✓）⇒ 量出来是负数 ✓
+   *      ⇒ 被自己的守卫挡掉 ✓ ⇒ 等于**没补偿**（读数 `top: 91.9 → 7.5` ✓）；
+   *   ③ 改成"那只一定会活下来的节点的 `offsetTop` 前后差"✓ —— 它被**那句提示行**
+   *      的重建（摘掉旧的、插上新的 ✓）带着挪了 ✓ ⇒ 量到的不是"内容缩了多少"✓
+   *      而是"提示行净高变了多少"（负数 ✓，实测 −118 ✓）。
+   *
+   * ## 一条纪律（学自 DSH 自己那条路 ✓）
+   *
+   * DSH 用**语义锚点**（记住某一行 + 它在屏口里的位置 ✓，见
+   * `dsh-client-ui-chat/lib/client.js:4740-4830` 的 `retain` / `preserve` ✓）。
+   * 我们这一页没有"行身份"这种稳定锚点 ✗（节点是每条事件现造的 ✓）
+   * ⇒ 退一步用**容器自己的几何** ✓：判据是"用户看的那一条动没动"✓，
+   *   而"容器矮了多少"与它**等价** ✓（只要补偿量算对 ✓）。
+   * ★ 而且这一层**不许**再引入第二个滚动真相来源 ✗：
+   *   `theme.css` 里那条 `overflow-anchor: none` ✓ 就是为了让"滚动位置"只有一个owner ✓
+   *   （浏览器的 scroll anchoring 会自己改 `scrollTop` ✓ —— 实测读数会一路往 0 漂 ✓）。
+   */
+  let applied = null
+  let screenDelta = null
+  const scroller = metrics !== null && metrics !== undefined ? metrics.scroller : null
+  if (scroller !== null && scroller !== undefined && typeof scroller.scrollTop === 'number') {
+    const base = typeof metrics.scrollTop === 'number' ? metrics.scrollTop : scroller.scrollTop
+    const passed = metrics !== null && metrics !== undefined && typeof metrics.scrollHeight === 'number'
+      ? metrics.scrollHeight
+      : null
+    const floor = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+    const clamp = (value) => Math.min(floor, Math.max(0, Math.round(value)))
+    let shrink = 0
+    if (passed !== null && typeof metrics.evictedHeight === 'number') {
+      /**
+       * ★★ 这一行就是"内容缩了多少" ✗ —— 两个量都来自**滚动容器自己** ✓：
+       *   · `evictedHeight` = 这一轮摘掉的那些节点（+ 它们的 `gap` ✓）有多高 ✓
+       *     —— **在真正摘掉之前**塞进一个离屏容器量出来的 ✓（`handleEvents` 里量的 ✓）；
+       *   · `scroller.scrollHeight − passed` = 现在比"追加之前"净高多少 ✓
+       *     （既是"新事件撑起来的" ✓、也是"摘掉那些塌下去的"✓，两项合在一起 ✓）。
+       *   ⇒ 两者之差就是**净缩量** ✓。
+       * ★ 它**只能是正数**（正常情况 ✓）；算出来是负的说明量歪了 ✓ ⇒ 宁可
+       *   **不补偿**（`shrink = 0` ✓）也不许把用户往反方向推 ✓ ——"宁可不动，不许推错方向" ✓。
+       */
+      shrink = Math.max(0, metrics.evictedHeight + notePush - (scroller.scrollHeight - passed))
+    }
+    applied = clamp(base + shrink)
+    scroller.scrollTop = applied
+  }
+  return { trimmed: doomed.length, hidden, drawn: container.children.length, scrollTop: applied, screenDelta }
+}
+
+export function resetEventWindow(container) {
+  if (container === null || container === undefined || typeof container.querySelector !== 'function') return
+  container.setAttribute('data-trim-hidden-total', '0')
+  const note = container.querySelector('.ev-trim-note')
+  if (note !== null && note !== undefined && typeof note.remove === 'function') note.remove()
+}
+
+/** 事件列表真正在滚的那一层 ✓（`main` ✓；没有它时退回父节点 / 自己 ✓）。 */
+function scrollContainerOf(container) {
+  return typeof container.closest === 'function'
+    ? (container.closest('main') || container.parentElement || container)
+    : (container.parentElement || container)
 }
 
 /**
@@ -510,6 +791,22 @@ export function renderEvent(event, context) {
   // ★ 逐字符编 ✓（空格也编成 `%20` ⇒ `decodeURIComponent` 能**原样**还原 ✓）
   wrapper.setAttribute('data-text-head', view.text.slice(0, 64).split('').map((ch) =>
     /[A-Za-z0-9\-_.~]/.test(ch) ? ch : encodeURIComponent(ch)).join(''))
+  /**
+   * ★★ 这条事件自己的 `seq`（长会话那一单 ✓）—— **只有数值型的才写** ✗。
+   *
+   * 为什么要它 ✗：裁剪之后，"屏上那几条**还是不是原来那几条、顺序还对不对**"
+   * 必须**能从 DOM 上直接读出来** ✓ —— 拿 `textContent` 去撞正文是"判据比被判断的
+   * 东西软"（正文里有引号 / 换行 / `<` ✓，本仓今天栽过 9+ 次 ✓）。
+   * 有了它，"最新几条仍在、顺序仍对"就是一条**机械可判**的读数 ✓。
+   * ★ 数值才写 ✗：`seq` 缺失的事件（`poller.js` 允许 ✓）写一个 `"null"` 进去，
+   *   读的人会以为它真有条号 ✓。
+   * ★ 放在**最后**写 ✗ —— 属性顺序就是 DOM dump 里的字符顺序 ✓，
+   *   既有断言里那两条正则（`class="ev ev-user"[^>]*>` 与
+   *   `data-type="assistant/message"[^>]*>`）都是**前缀匹配** ✓，
+   *   插在它们前面就会把既有断言打红 ✓（那是本单绝不许发生的事 ✓）。
+   */
+  const seq = event !== null && typeof event === 'object' ? event.seq : null
+  if (typeof seq === 'number') wrapper.setAttribute('data-seq', String(seq))
 
   if (view.kind === 'user' || view.kind === 'agent') {
     // ★ 思维链**默认折叠** ✓（口径同官方客户端的"思考"行 ✓）—— 点开才看全文 ✓
@@ -621,6 +918,12 @@ function approvalCard(view, context) {
   })
 
   if (state.showActions) {
+    /**
+     * ★★ 这张卡**还在等用户决定** ✗（长会话那一单 ✓）—— 裁剪那一层看见这个标记就**收手** ✓
+     *   （见 `isTrimmableEvent` ✓）：屏幕上少一次要你决定的事，比多几个 DOM 节点坏得多 ✓。
+     * ★ 只在 `showActions` 为真时写 ✗（已裁决的卡可以照常回收 ✓ —— 它已经没有可点的东西了 ✓）。
+     */
+    card.setAttribute('data-pending-approval', '1')
     const actions = document.createElement('div')
     actions.className = 'approval-actions'
     if (view.options.length > 0) {
@@ -1130,6 +1433,23 @@ export function computePageState(input) {
 export function mountChat(options) {
   const root = options.root
   const list = root.querySelector('#messages')
+  /**
+   * ★ 钩子是**外面装的** ✓（`globalThis.__DSHM_CHAT_PAGE__.measure` ✓）——
+   *   页面自己**不定义**它 ✓：没装的时候 `typeof measure !== 'function'` ⇒ 一个字节都不做 ✓
+   *   （生产页面上不花这份钱 ✓，而验收与真机调试框装得上 ✓）。
+   * ★★ **每次现取，不许在装配时缓存** ✗：验收那一套是**先让页面跑完一整帧、
+   *   再把钩子装上**的 ✓（`--dump-dom` 只给一帧 ✓，见本文件头那两条实测 ✓）——
+   *   缓存下来就是"钩子永远装不上"✓，而那看起来完全像"这一条验过了"✗。
+   */
+  const measure = (record) => {
+    const hook = globalThis.__DSHM_CHAT_PAGE__
+    if (hook === null || hook === undefined || typeof hook.measure !== 'function') return
+    try {
+      hook.measure(record)
+    } catch (error) {
+      void error
+    }
+  }
   const form = root.querySelector('#composer')
   const input = root.querySelector('#input')
   const status = root.querySelector('#status')
@@ -1663,6 +1983,11 @@ export function mountChat(options) {
        */
       decidedApprovals.clear()
       drawnApprovals.clear()
+      /**
+       * ★★ 裁剪那件事的状态**跟着换会话一起归零** ✗（长会话那一单 ✓）——
+       *   见 `resetEventWindow`：只摘那句"更早的 N 条已收起"✓（清屏上面已经做过了 ✓）。
+       */
+      resetEventWindow(list)
       paintSessions()
     }
     if (Array.isArray(events) && events.length > 0) {
@@ -1679,12 +2004,114 @@ export function mountChat(options) {
        *   ③ 裁决比卡晚到的那种 ⇒ 把**已经画出来**的卡就地改成"已处理"✓。
        */
       const freshDecided = collectDecided(events)
-      appendEvents(list, events, approvalContext())
+      /**
+       * ★★ 追加**之前**量一次读数 ✓ —— 裁剪那一步要用它做滚动补偿 ✗
+       *   （长会话那一单 ✓：见 `trimEventWindow` ✓）。两样东西：
+       *   · 滚动容器与它当下的 `scrollTop` ✓；
+       *   · **锚点**：现在屏口最上面那一条事件 ✓，以及它在屏口里的位置 ✓
+       *     （裁完之后要靠这一对把它**钉回原地** ✓ —— 这是"补偿"的全部机制 ✓）。
+       */
+      const scrollerNow = scrollContainerOf(list)
+      const windowMetrics = {
+        scroller: scrollerNow,
+        scrollTop: scrollerNow.scrollTop,
+        /**
+         * ★★ **追加之前**的 `scrollHeight` ✓ —— 补偿那个式子里的基准 ✓
+         *   （少喂这一个字段 ⇒ 补偿静默地不生效 ✓：我实测过这一种，
+         *   读数只是"没补偿"✓，而代码看起来完全正常 ✗）。
+         */
+        scrollHeight: scrollerNow.scrollHeight,
+        anchor: null,
+        anchorTop: null,
+        follow: null,
+        evictedHeight: 0,
+      }
+      if (typeof scrollerNow.getBoundingClientRect === 'function') {
+        /**
+         * ★ 锚点取法：**第一条"下沿还在屏口里面"的节点** ✓（`bottom - box.top > 0` ✓）——
+         *   屏口之上那些已经完全看不见了 ✓，拿它们当锚点会让补偿从"用户看不到的地方"起算 ✓。
+         * ★ 判据只用**几何** ✗（不认 `data-seq`、不认事件类型 ✓）——
+         *   这一层不该知道"哪种事件更重要"✓（那是 `classify` 的事 ✓）。
+         */
+        const box = scrollerNow.getBoundingClientRect()
+        for (const node of Array.prototype.slice.call(list.children)) {
+          if (node.getBoundingClientRect().bottom - box.top > 0) {
+            windowMetrics.anchor = node
+            windowMetrics.anchorTop = node.getBoundingClientRect().top - box.top
+            break
+          }
+        }
+      }
+      const appended = appendEvents(list, events, approvalContext())
+      windowMetrics.follow = appended.follow
+      windowMetrics.scrollTop = windowMetrics.scrollTop
       /**
        * ★★ 轨迹视图走**同一条批次** ✓（同一批事件的另一条渲染路 ✓ ——
        *   `renderTraceEvent` 只挑 `step` / `tool` ✓，画法**复用** `renderEvent` ✓）。
        */
       appendTrace(events)
+      /**
+       * ★★ 长会话：**画完之后**才回收头部 ✗（先回收的话，新事件就会补在空出来的位置上 ✓
+       *   —— 那既丢内容、又让滚动补偿的差值算不准 ✓）。
+       * ★ 这一步**不管** `computePageState` ✗：`eventCount` 是"一共收到过多少条" ✓
+       *   （只增不减 ✓），所以"有内容 ⇒ ready"那条规矩**一个字都没动** ✓ ——
+       *   裁剪**不可能**变成"出错清屏"✓。
+       */
+      /**
+       * ★★ 量"这一轮会被摘掉的那些有多高" ✗（补偿要用的那个数 ✓）——
+       *   在这之前**先把它们挪进一个 `display:none` 的离屏容器** ✓：
+       *   内容立刻少掉那一段 ✓ ⇒ 之后量 `scrollHeight` 的差就只剩"新事件撑起来的" ✓。
+       *   ★ 为什么不在 `trimEventWindow` 里自己量 ✗：那一步只该做"摘 + 补偿"✓，
+       *     而"摘哪几个"（窗口上界 / 待裁决的审批卡不摘 ✓）的规则在那儿 ✓ ——
+       *     这里只按**同一个判据**（`isTrimmableEvent` ✓）预演一遍 ✓，不另立规则 ✗。
+       */
+      const parked = document.createElement('div')
+      parked.style.display = 'none'
+      document.body.appendChild(parked)
+      const doomedCandidates = []
+      for (let index = 0; index < Math.max(0, list.children.length - MAX_DRAWN_EVENTS); index++) {
+        const node = list.children[index]
+        if (!isTrimmableEvent(node)) break
+        doomedCandidates.push(node)
+      }
+      const heightBeforePark = scrollerNow.scrollHeight
+      for (const node of doomedCandidates) parked.appendChild(node)
+      const evictedHeight = Math.max(0, heightBeforePark - scrollerNow.scrollHeight)
+      windowMetrics.evictedHeight = evictedHeight
+      /**
+       * ★★ 量完**必须原样放回去** ✗（顺序也要对 ✓）：`trimEventWindow` 那一步是
+       *   "按 DOM 顺序摘头部"✓ —— 不还回去，它就无头可摘 ✓
+       *   （症状：那句线索从此不再出现 ✓、`data-trim-hidden-total` 也不涨 ✓ ——
+       *   我第一版就是这样 ✓，而读数看上去只是"这次没裁"✗，最难查的一类 ✓）。
+       */
+      for (let back = doomedCandidates.length - 1; back >= 0; back--) {
+        list.insertBefore(doomedCandidates[back], list.firstChild)
+      }
+      parked.remove()
+      const trim = trimEventWindow(list, windowMetrics)
+      const traceTrim = trimEventWindow(traceView, null, false)
+      traceSteps = Math.max(0, traceSteps - traceTrim.trimmed)
+      refreshTraceEmpty()
+      /**
+       * ★ 把这一步的**读数**交出去 ✓（给验收与真机调试框 ✓ —— 见 `measure` ✓）。
+       *   纯读数、不改任何状态 ✓；没装钩子时一个字节都不做 ✓。
+       */
+      measure({
+        replaced: willReplace === true,
+        batch: events.length,
+        follow: appended.follow,
+        scrollTopBefore: windowMetrics.scrollTop,
+        anchorTop: windowMetrics.anchorTop,
+        hasAnchor: windowMetrics.anchor !== null,
+        scrollTopAfterAppend: appended.scrollTop,
+        trimmed: trim.trimmed,
+        trimHidden: trim.hidden,
+        scrollDelta: trim.screenDelta,
+        scrollTopAfterTrim: trim.scrollTop,
+        traceTrimmed: traceTrim.trimmed,
+        drawn: trim.drawn,
+        note: trim.hidden > 0,
+      })
       registerDrawnApprovals(events)
       settleDrawnApprovals(freshDecided)
     }
@@ -1791,7 +2218,7 @@ export function mountChat(options) {
   }
 
   paint()
-  return {
+  const api = {
     /** ★ 交给 `new ChatPoller({ …page.handlers })` ✓ */
     handlers: { onEvents: handleEvents, onError: handleError },
     /** 喂会话列表 ✓（第三个参数是标题栏文字 ✓）。 */
@@ -1812,6 +2239,26 @@ export function mountChat(options) {
      */
     switchView: showView,
     traceSteps: () => traceSteps,
+    /**
+     * ★★ 长会话那一单的**纯读数** ✓（不碰任何状态 ✓）—— 验收与真机调试框都念得出来 ✓。
+     *   · `maxDrawn`：屏上**最多**留多少条事件 ✓（上界的**唯一**真身处 = `MAX_DRAWN_EVENTS` ✓）；
+     *   · `trimNote`：那句"更早的 N 条已收起"**现在在不在屏上** ✓（`null` = 不在 ✓）；
+     *   · `drawn`：现在屏上真有几条事件节点 ✓（`#messages` 的孩子数 ✓ —— 它就是"节点数"那条判据 ✓）；
+     *   · `liveSeqs`：屏上这几条的 `data-seq` ✓（顺序即 DOM 顺序 ✓ ⇒ "最新几条仍在、顺序仍对"可判 ✓）。
+     */
+    limits: () => ({
+      maxDrawn: MAX_DRAWN_EVENTS,
+      drawn: list === null || list === undefined ? -1 : list.children.length,
+      trimNote: (() => {
+        const note = list === null || list === undefined || typeof list.querySelector !== 'function'
+          ? null
+          : list.querySelector('.ev-trim-note')
+        return note === null || note === undefined ? null : { text: note.textContent, hidden: note.getAttribute('data-trim-hidden') }
+      })(),
+      liveSeqs: list === null || list === undefined || typeof list.querySelectorAll !== 'function'
+        ? []
+        : Array.prototype.slice.call(list.querySelectorAll('.ev[data-seq]')).map((node) => Number(node.getAttribute('data-seq'))),
+    }),
     appendEvents: (events) => {
       appendEvents(list, events, approvalContext())
       appendTrace(events)
@@ -1831,4 +2278,19 @@ export function mountChat(options) {
     },
     state: () => computePageState({ loading, eventCount, error, connection }),
   }
+  /**
+   * ★★ 把这套读数挂到那个**取证钩子**上 ✓（长会话那一单 ✓）——
+   *   `globalThis.__DSHM_CHAT_PAGE__` 由**外面**建（验收的夹具 ✓ / 真机调试框 ✓）；
+   *   没建的时候一个字节都不做 ✓（生产页面上不花这份钱 ✓）。
+   *
+   * ★ 为什么在这儿挂、而不是在 `app.js` 里 ✗：`app.js` 这一单里**不许改** ✓
+   *   （它已经发货了 ✓）；而"页面自己报出屏上有几条"这件事本来就属于**画**那一半 ✓。
+   */
+  try {
+    const hook = globalThis.__DSHM_CHAT_PAGE__
+    if (hook !== null && hook !== undefined && typeof hook === 'object') hook.page = api
+  } catch (error) {
+    void error
+  }
+  return api
 }
