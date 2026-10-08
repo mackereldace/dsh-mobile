@@ -18,11 +18,50 @@
     <span class="grow"></span>
     <button id="refresh" class="icon" type="button" title="刷新">&#8635;</button>
   </header>
+  <!--
+    ★★ 「对话｜轨迹」标签栏 —— 1:1 复刻 DSH 自己那条（复刻清单第 3 项 ✓）。
+
+    ## 参照物与读数来源（★ 二阶取证，写清楚是哪一种 ✗）
+
+    DSH 桌面/手机客户端里这条标签栏是 `@deepseek-ai/dsh-client-ui-conversation` 渲染的 ✓。
+    它**不在**我们这一页上（我们是自己写的会话页 ✓），所以读数是分两层拿到的：
+      ① **真机读数**：隔离无头 Chrome 打在 DSH 自己的页上量 `getBoundingClientRect` /
+         `getComputedStyle` ✓ —— 逐条数字见报告第 1 节 ✓；
+      ② **源码印证**：`app.asar` 里那个包的 `lib/client.js` ✓ —— 它把这条标签栏的
+         DOM 结构与 **CSS 原文**（未压缩的 `Story` 常量 ✓）都写死了 ✓，见报告第 1 节 ✓。
+    ★ 两处对得上才算数 ✗（对不上就写在报告里 ✗）。
+
+    ## 结构（★ 照源码 ✓ —— 不发明）
+
+    源码里是 `div[data-conversation-tabs][role=tablist]` 里放 `button[role=tab]` ✓，
+    选中那颗带 `aria-selected="true"` ✓。这里逐条照抄 ✓（属性名一个不改 ✗）。
+
+    ## ★★ 为什么**不画**子智能体数徽标 ✗
+
+    数据到不了这一页 ✗ —— 桥在 `normalizeSessions` 里就把 `origin === 'subagent'` 的会话
+    **滤掉了** ✓（`dsh-chat-bridge.ts:458` ✓，用户 2026-10-06 定的规矩 ✓），
+    而事件里也没有 `origin`（`normalizePage` 只透出 `seq/time/type/data` 四个键 ✓）。
+    ⇒ 页面手上**根本数不到**子智能体 ✗ ⇒ 按本仓纪律**宁可不画** ✓，不编一个恒为 0 的徽标 ✗。
+    ★ 详见报告第 2 节 / 第 6 节 ✓。
+  -->
+  <div class="tabs" id="tabs" role="tablist" data-conversation-tabs>
+    <button type="button" role="tab" id="tab-chat" class="tab is-active" aria-selected="true" aria-controls="view-chat">对话</button>
+    <button type="button" role="tab" id="tab-trace" class="tab" aria-selected="false" aria-controls="view-trace">轨迹</button>
+  </div>
   <div id="status"></div>
   <div id="sessions" hidden></div>
   <main>
     <div id="state" hidden></div>
-    <div id="messages"></div>
+    <!--
+      ★★ 两条渲染路，**同一批事件** ✗（复刻清单第 3 项的"切换行为"那一半 ✓）。
+
+      · `#messages`  = 对话视图 ✓（原样，一个字没动 ✗）；
+      · `#trace`     = 轨迹视图 ✓ —— 由 `ui.js` 的 `renderTraceEvent()` 画 ✓，
+        它**复用的是同一套** `classify()` / `renderEvent()` ✓（不新写一套渲染器 ✗）。
+      · 两层的显隐由根节点 `data-dshm-view` 一个属性决定 ✓（不靠改 DOM 结构 ✗）。
+    -->
+    <div id="messages" data-view="chat"></div>
+    <div id="trace" data-view="trace" hidden></div>
   </main>
   <!--
     ★★ 输入栏：1:1 复刻 DSH 手机端（参照物与读数见报告第 1 节 ✓）。

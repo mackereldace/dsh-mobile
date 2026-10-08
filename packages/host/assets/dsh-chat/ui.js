@@ -382,6 +382,45 @@ export function appendEvents(container, events, context) {
 }
 
 /**
+ * ★★ 「轨迹」视图要摊开哪些事件 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## 这判据是从哪来的（★ 不是我定的 ✗）
+ *
+ * 复刻清单第 3 项的原话 ✓：轨迹视图 = **同一批事件的另一条渲染路** ✓，
+ * 「把 **`step` / `tool` 那类事件**按**步骤列表**摊开」✓ ——
+ * 而 `step` / `tool` 正是 {@link classify} 已经有的两个种类 ✓
+ * ⇒ 这里**只做挑选** ✓，**不新造分类** ✗（同一件事只有一个真相来源 ✓）。
+ *
+ * ★ 为什么不换一套判据 ✗：`classify()` 是本文件里"什么事件长什么样"的**唯一**判据 ✓
+ *   （审批、思维链、认不出的类型全在它里面 ✓）。在这儿再写一遍 `text.includes('tool')`
+ *   就是第二个真相来源 ✓ —— 改一处漏一处，而且**改错了在屏幕上完全看不出来** ✗。
+ *
+ * @param {object} event 一条事件（`{seq,time,type,data}` ✓）
+ */
+export function isTraceEvent(event) {
+  const view = toViewModel(event)
+  return view.kind === 'step' || view.kind === 'tool'
+}
+
+/**
+ * 一条事件 ⇒ 轨迹视图里那个节点 ✓（`null` = 这条不进轨迹视图 ✓）。
+ *
+ * ## 复用，不是重写（★ 本仓规矩 ✓）
+ *
+ * 认种类走 {@link classify} ✓（在 `toViewModel` 里 ✓）、画法走 {@link renderEvent} ✓ ——
+ * **一个字都没新写** ✗（渲染分支：工具卡 / 一轮分隔线 / 出错 / 认不出的兜底 全在原处 ✓）。
+ * 这一层只回答"哪些进得来"✓（见 {@link isTraceEvent} ✓）。
+ *
+ * ★ 为什么不另写一套"更漂亮的步骤列表" ✗：那正是"两个渲染器"✗ ——
+ *   工具卡上的「展开 / 收起」、出错标记、思维链折叠这些**已经修好的行为**
+ *   会在轨迹视图里**全部消失** ✓（而且消失得看不出来 ✓）。
+ */
+export function renderTraceEvent(event, context) {
+  if (!isTraceEvent(event)) return null
+  return renderEvent(event, context)
+}
+
+/**
  * 这张审批卡对应的那条 `approval/decided` ✓（没有 ⇒ `null` ✓）。
  *
  * ★ 为什么由**调用方**给 ✗（而不是在这里自己找 ✓）：裁决事件可能比那张卡**晚到** ✓
@@ -998,6 +1037,25 @@ export function mountChat(options) {
   const refresh = root.querySelector('#refresh')
   /** ★ 输入框正下方那一行状态条（位置与样式先留出来 ✓ —— 内容见 `statsStripText` ✓）。 */
   const statsStrip = root.querySelector('#stats-strip')
+  /**
+   * ★★ 「对话｜轨迹」标签栏（复刻清单第 3 项 ✓）—— 三样东西：两个 tab、两个视图层、一个读数 ✓。
+   *
+   * ★ 视图**不是两套数据** ✗：同一批事件同时喂给 `#messages`（对话 ✓）与 `#trace`（轨迹 ✓），
+   *   只是两条**渲染路**不同 ✓（轨迹那条见 `renderTraceEvent` ✓）。
+   *   ⇒ 切标签**不重画、不清屏、不重新取数** ✓ —— 切回去时对话视图还是原来那一屏 ✓
+   *     （"切一下就白屏"是本仓零容忍的那一类 ✓）。
+   */
+  const tabs = root.querySelector('#tabs')
+  const tabChat = root.querySelector('#tab-chat')
+  const tabTrace = root.querySelector('#tab-trace')
+  const chatView = root.querySelector('#messages')
+  const traceView = root.querySelector('#trace')
+  /**
+   * ★ 轨迹视图里现在**画了几条** ✓（`0` ⇒ 摆一句"还没有步骤"✓）。
+   *   ★ 为什么不用 `traceView.childElementCount` ✗：那就是"拿 DOM 当变量"✓ ——
+   *     那句占位话自己也是一个孩子 ✓ ⇒ 数出来恒 ≥1 ⇒ 占位话**再也撤不掉** ✓。
+   */
+  let traceSteps = 0
 
   // 这一页的**输入**（三样 ✓）—— 状态完全由它们算出来 ✓（不在渲染里各写一份判断 ✗）
   let eventCount = 0
@@ -1241,6 +1299,75 @@ export function mountChat(options) {
     })
   }
 
+  // ── ★★ 标签栏：对话｜轨迹（复刻清单第 3 项 ✓）──────────────────────────
+  /**
+   * 轨迹视图**空的时候**那句话 ✓。
+   *
+   * ★ 为什么非有不可 ✗：切过去看到**一片空白**，与"页面坏了"在手机上是同一件事 ✓
+   *   （本仓口径：认不出的也要看得见 ✓、空也要说话 ✓ —— 与 `computePageState` 的
+   *   「还没有内容」同一条规矩 ✓）。
+   */
+  const traceEmpty = document.createElement('div')
+  traceEmpty.className = 'trace-empty'
+  traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
+
+  /** 轨迹视图的占位话：只在**真的一条都没有**时摆着 ✓（有内容就摘掉 ✓）。 */
+  const refreshTraceEmpty = () => {
+    if (traceView === null || traceView === undefined || typeof traceView.appendChild !== 'function') return
+    const has = traceSteps > 0
+    const attached = traceEmpty.parentElement !== null && traceEmpty.parentElement !== undefined
+    if (!has && !attached) traceView.appendChild(traceEmpty)
+    if (has && attached) traceEmpty.remove()
+  }
+
+  /**
+   * 这一批事件里的 `step` / `tool` 追加进轨迹视图 ✓（**复用** `renderTraceEvent` ✓）。
+   *
+   * ★ 与对话视图**同一个 `context`** ✓ —— 审批那两本账（`decidedFor` ✓）也要在这条路上生效 ✓，
+   *   否则轨迹里那张卡与对话里的那张会说两套话 ✓。
+   */
+  const appendTrace = (events) => {
+    if (traceView === null || traceView === undefined || typeof traceView.appendChild !== 'function') return
+    for (const event of Array.isArray(events) ? events : []) {
+      const node = renderTraceEvent(event, approvalContext())
+      if (node === null) continue
+      traceView.appendChild(node)
+      traceSteps += 1
+    }
+    refreshTraceEmpty()
+  }
+
+  /**
+   * 切到哪一面 ✓（`'chat'` / `'trace'` ✓）。
+   *
+   * ★★ 这就是"切换行为"那一条的**唯一**真身处 ✗：
+   *   · 两个视图层的 `hidden` 互斥 ✓（**不是**"按钮变个色"✗ —— 断言判的是**换了一屏** ✓）；
+   *   · `aria-selected` 跟着走 ✓（`role=tab` 的可访问性语义 ✓ —— 与 DSH 自己那条一致 ✓）。
+   * ★ 只改这两个层的显隐 ✗：**不动 DOM 结构、不重画、不清屏、不重新取数** ✓。
+   */
+  const showView = (which) => {
+    const trace = which === 'trace'
+    if (chatView !== null && chatView !== undefined) chatView.hidden = trace
+    if (traceView !== null && traceView !== undefined) traceView.hidden = !trace
+    if (tabChat !== null && tabChat !== undefined) {
+      tabChat.classList.toggle('is-active', !trace)
+      tabChat.setAttribute('aria-selected', trace ? 'false' : 'true')
+    }
+    if (tabTrace !== null && tabTrace !== undefined) {
+      tabTrace.classList.toggle('is-active', trace)
+      tabTrace.setAttribute('aria-selected', trace ? 'true' : 'false')
+    }
+    // ★ 从没有过步骤 ⇒ 切过去的时候才第一次摆那句占位话 ✓
+    if (trace) refreshTraceEmpty()
+  }
+
+  if (tabs !== null && tabs !== undefined) {
+    if (tabChat !== null && tabChat !== undefined) tabChat.addEventListener('click', () => showView('chat'))
+    if (tabTrace !== null && tabTrace !== undefined) tabTrace.addEventListener('click', () => showView('trace'))
+  }
+  // ★ 开场就按标记定一次 ✓ —— 页面上写死的 `is-active` / `aria-selected` 与这段必须一致 ✓
+  showView('chat')
+
   /** 外面喂列表 ✓（`currentId` 变了就顺手把草稿换过来 ✓）。 */
   const setSessions = (next, currentId, titleText) => {
     sessions = Array.isArray(next) ? next : []
@@ -1271,6 +1398,18 @@ export function mountChat(options) {
       // ★ 第一趟回应到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓；空会话也该清 ✓）
       list.innerHTML = ''
       eventCount = 0
+      /**
+       * ★★ 轨迹视图**跟着一起换** ✓（同一个会话的另一条渲染路 ✓）——
+       *   只清对话那一层、留着上一任会话的步骤列表，就是"两条视图说两件不同的事"✓
+       *   （在手机上表现为"切了会话，轨迹里还是上一个会话"✗，而且完全看不出来 ✓）。
+       */
+      if (traceView !== null && traceView !== undefined && typeof traceView.replaceChildren === 'function') {
+        traceView.replaceChildren()
+      } else if (traceView !== null && traceView !== undefined) {
+        traceView.textContent = ''
+      }
+      traceSteps = 0
+      refreshTraceEmpty()
       pendingSwitch = false
       /**
        * ★ 那两本审批账**跟着清** ✓：它们记的是"屏幕上这几张卡"✓
@@ -1295,6 +1434,11 @@ export function mountChat(options) {
        */
       const freshDecided = collectDecided(events)
       appendEvents(list, events, approvalContext())
+      /**
+       * ★★ 轨迹视图走**同一条批次** ✓（同一批事件的另一条渲染路 ✓ ——
+       *   `renderTraceEvent` 只挑 `step` / `tool` ✓，画法**复用** `renderEvent` ✓）。
+       */
+      appendTrace(events)
       registerDrawnApprovals(events)
       settleDrawnApprovals(freshDecided)
     }
@@ -1412,7 +1556,20 @@ export function mountChat(options) {
     drafts: () => ({ ...drafts }),
     /** 切换是否还等着替换 ✓。 */
     isSwitching: () => pendingSwitch,
-    appendEvents: (events) => appendEvents(list, events, approvalContext()),
+    /**
+     * ★★ 切到「对话」/「轨迹」✓（复刻清单第 3 项 ✓）。
+     *
+     * ★ 为什么把它交出去 ✗：那一单的验收要能**按真实点击路径**切 ✓ ——
+     *   夹具里 `dispatchEvent(new Event('click'))` 打的就是这颗键 ✓，
+     *   与用户手指按下去走的是同一条路 ✓（不是"直接调内部函数"那种假判据 ✓）。
+     * ★ 轨迹视图当前摊开了几条 ✓（纯读数 ✓ —— 验收要能证明"换了一屏"而不是"按钮变了色"✗）。
+     */
+    switchView: showView,
+    traceSteps: () => traceSteps,
+    appendEvents: (events) => {
+      appendEvents(list, events, approvalContext())
+      appendTrace(events)
+    },
     /**
      * ★★ 裁决通道**探测结果**从外面喂进来 ✓（`app.js` 探一次 ✓）——
      *   探到接通 ⇒ 卡片上那两颗按钮才可点 ✓；探不到 ⇒ 一直置灰 ✓（不假装能用 ✗）。

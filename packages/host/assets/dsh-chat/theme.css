@@ -12,6 +12,11 @@
     --danger: #B3261E; --danger-line: #E8C4C1;
     /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
     --send-bg: #679EFE; --send-ink: #FFFFFF;
+    /* ★ 标签栏（复刻清单第 3 项 ✓）：未选中 = tertiary 一档灰 ✓、选中 = 品牌主色 ✓
+       两个值是 `app.asar` 里 `dsh-client-ui-theme` 的真身 ✓：
+       `--dsw-alias-state-business-primary` = `--dsw-static-deepseek-500` = **#4176e6** ✓、
+       `--dsw-alias-label-tertiary` = `--dsw-static-neutral-bluish-600` = **#81858c** ✓。 */
+    --tab-ink: #81858c; --tab-ink-active: #4176e6;
   }
   :root {
     --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
@@ -21,6 +26,8 @@
     --danger: #B3261E; --danger-line: #E8C4C1;
     /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
     --send-bg: #679EFE; --send-ink: #FFFFFF;
+    /* ★ 标签栏的两个颜色 ✓（取值与出处见上面 light 那一块 ✓） */
+    --tab-ink: #81858c; --tab-ink-active: #4176e6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -30,6 +37,9 @@
       --rail: #E9EBEF; --accent: #4FBF7F; --code-bg: #101317;
       --danger: #F2B8B5; --danger-line: #5A2A28;
       --send-bg: #679EFE; --send-ink: #FFFFFF;
+      /* ★ 暗色：同一两个语义槽 = 亮一档的静态色 ✓
+         （`--dsw-static-deepseek-400` = **#7aaaff** ✓、`--dsw-static-neutral-bluish-400` = **#adb2b8** ✓） */
+      --tab-ink: #adb2b8; --tab-ink-active: #7aaaff;
     }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -66,8 +76,85 @@
   header .sub { margin: 3px 0 0; font-size: 12px; color: var(--ink3); }
   header .grow { flex: 1; }
   header button { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--ink2); font-size: 17px; }
+  /**
+   * ─────────────── 「对话｜轨迹」标签栏（复刻清单第 3 项 ✓）───────────────
+   *
+   * ## 参照读数（★ 两路取证，逐条见报告第 1 节 ✓）
+   *
+   * ① **真机读数**：隔离无头 Chrome + 移动视口，量 DSH 自己那条标签栏 ✓；
+   * ② **源码印证**：`app.asar` ⇒ `@deepseek-ai/dsh-client-ui-conversation/lib/client.js`
+   *    里那条**未压缩的 CSS 原文** ✓（逐字抄在这里，改一个数都要先改报告 ✗）：
+   *
+   * ```
+   * .…_tabs { z-index:1; grid-column:1/-1; gap:36px; margin-top:10px; padding-left:8px;
+   *            display:flex; position:relative }
+   * .…_tab  { color:var(--dsw-alias-label-tertiary); cursor:pointer; background:0 0; border:none;
+   *            padding:0 0 9px; font-size:13px; font-weight:500; line-height:16px; position:relative }
+   * .…_tab:after { content:""; background:0 0; border-radius:2px; height:2px;
+   *            position:absolute; bottom:-1px; left:0; right:0 }
+   * .…_tabActive { color: var(--dsw-alias-state-business-primary) }
+   * .…_tabActive:after { background: var(--dsw-alias-state-business-primary) }
+   * ```
+   *
+   * ⇒ 逐项落到本页 ✓：**指示条 2px / 圆角 2px / 压在底线下方 1px** ✓、
+   *   **字号 13px / 字重 500 / 行高 16px / 下内边距 9px** ✓、
+   *   **两标签间距 36px / 左缩进 8px / 距标题 10px** ✓、
+   *   未选中是 **tertiary 一档灰**、选中换成 **品牌主色** ✓（本页写成变量 ✓，浅/暗各一套 ✓）。
+   *
+   * ## ★ 两处**故意的**偏差（★ 写在明处，不许当没看见 ✗）
+   *
+   * 1. **没有 `grid-column: 1/-1`** ✓ —— 那是 DSH 那套 `display:grid` 页头的产物 ✓；
+   *    我们这一页的页头是 `flex` ✓ ⇒ 这条属性在这儿**没有意义** ✗（照抄反而会误导下一个读的人 ✓）。
+   * 2. **指示条的基线**：DSH 那条 `bottom:-1px` 是压在它自己页头的 1px 分隔线上 ✓；
+   *    我们页头没有那条线 ✓ ⇒ 用页头自己的 `border-bottom` 当基线 ✓（同一条视觉规则 ✓）。
+   */
+  .tabs {
+    flex: none; display: flex; position: relative; z-index: 1;
+    gap: 36px; margin: 0; padding: 0 0 0 8px;
+  }
+  .tab {
+    position: relative; margin: 0; padding: 0 0 9px; border: 0; background: transparent;
+    color: var(--tab-ink); font: inherit; font-size: 13px; font-weight: 500; line-height: 16px;
+    cursor: pointer;
+  }
+  .tab::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; border-radius: 2px; background: transparent;
+  }
+  .tab.is-active { color: var(--tab-ink-active); }
+  .tab.is-active::after { background: var(--tab-ink-active); }
+  /* ★ 轨迹视图：同一批事件的另一条渲染路 ✓（渲染分支全在 ui.js 里复用 ✓，这里只管排布 ✓） */
+  #trace { padding: 6px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+  #trace[hidden] { display: none; }
+  #trace .trace-empty { padding: 18px 6px 0; font-size: 12.5px; line-height: 1.6; color: var(--ink3); }
+  /**
+   * ★★ 对话那一层的 `hidden` 要**显式写出来** ✗（不能只靠浏览器默认的 `display:none` ✓）。
+   *
+   * 为什么 ✗：`#messages` 自己是 `display:flex` ✓，而 `display` 是**作者样式** ⇒
+   * 它会盖掉 `[hidden]` 的 UA 默认值 ✓ —— 表现就是"切到轨迹以后，对话那一屏
+   * **还在底下**"✓（两屏叠在一起、滚动也串 ✓，而且看起来完全不像切换 ✓）。
+   * ★ 与 `#sessions[hidden]` / `#state[hidden]` 是同一个坑、同一条修法 ✓。
+   */
+  #messages[hidden] { display: none; }
   #status { padding: 0 20px 8px; font-size: 11px; color: var(--ink3); min-height: 22px; }
-  main { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+  /**
+   * ★★ `min-height: 0`：让 `main` 真正成为**滚不动就自己滚**的那一层 ✗。
+   *
+   * flex 项默认 `min-height: auto` ⇒ 它**不肯缩到比内容还矮** ✓
+   * （`overflow: auto` 在这种情况下形同虚设 ✓ —— 它会把底栏顶下去 ✓）。
+   * 两个视图层（对话 / 轨迹）都住在这个滚动容器里 ✓ ⇒ 这一行是"轨迹再长也不许动输入栏"
+   * 的**结构性**保证 ✓（与下面那条断言 `#composer` 逐像素不动 ✓ 一起成立 ✓）。
+   *
+   * ## ★ 一处**我自己判错的现场**（写在明处 ✗）
+   *
+   * 我第一版把断言写成"里面那张 `.composer-card` 的底边不动"✓，读到 **391 → 359** ✗
+   * ⇒ 当场判定"输入栏被顶上去了" ✓ 并写了"实测"两个字 ✗。
+   * **那是假红** ✓：卡片高度跟着 `textarea` **自己长**✓（`growInput` ✓，夹具刚往框里写过字 ✓），
+   * 两次读数之间它本来就会差几像素 ✓。稳的那一层是 `#composer` ✓（实测两次都是
+   * `y=271 / h=120 / bottom=391` ✓）⇒ 判据已改成它 ✓。
+   * ★ 教训与 §4.1ct 里那条同款 ✗：**先说结论、后看读数** ✓ —— 读数一列出来就知道自己错了 ✓。
+   */
+  main { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
   #state { padding: 28px 26px 0; }
   #state[hidden] { display: none; }
   .state { text-align: center; }

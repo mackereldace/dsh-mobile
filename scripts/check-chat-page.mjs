@@ -23,7 +23,7 @@
  * node scripts/check-chat-page.mjs --keep     # 保留临时目录便于查看
  * ```
  */
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -152,7 +152,7 @@ const agentBlockByChars = (html, chars) => {
 }
 
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 58
+const EXPECTED_MIN_CHECKS = 67
 
 let checks = 0
 let failed = 0
@@ -399,6 +399,89 @@ const FAKE_BOOT = `
               sendLabel: (function () { var l = document.getElementById('send-label'); return l === null ? null : l.textContent })(),
             }
             document.documentElement.setAttribute('data-e2e-geometry', encodeURIComponent(JSON.stringify(g)))
+            /*
+             * ★★ 标签栏「对话｜轨迹」的读数（本单新增 ✓）。
+             *
+             * 判据要能证明**换了一屏**✗（不是"按钮变了色"✓）⇒ 两样都记：
+             *   1. 点之前两个视图层各自的 hidden 与几何（对话层可见、轨迹层不可见 ✓）；
+             *   2. 按**真实点击路径**点「轨迹」之后，再记一次 ✓ + 轨迹层画出来几条 ✓。
+             * ★ 轨迹层那几条**不带 [hidden] 也量得到几何**✓（量的是盒子、不是可见性 ✓）——
+             *   所以"换了一屏"那条判据必须看 hidden / display✗，不能看"轨迹层有没有尺寸"✓。
+             */
+            var tabBar = document.getElementById('tabs')
+            var chatLayer = document.getElementById('messages')
+            var traceLayer = document.getElementById('trace')
+            var tabBtns = [].slice.call(document.querySelectorAll('#tabs button[role=tab]'))
+            var tbox = function (e) { return box(e) }
+            var stateOf = function (el) {
+              if (el === null || el === undefined) return null
+              return {
+                hidden: el.hasAttribute('hidden'),
+                display: getComputedStyle(el).display,
+                tabIndex: el.getAttribute('aria-selected'),
+                cls: el.className,
+                text: el.textContent,
+                rect: box(el),
+              }
+            }
+            var tabs = {
+              vw: innerWidth, vh: innerHeight,
+              barFound: tabBar !== null, barRole: tabBar === null ? null : tabBar.getAttribute('role'),
+              barRect: tbox(tabBar),
+              barGap: tabBar === null ? null : getComputedStyle(tabBar).gap,
+              barPaddingLeft: tabBar === null ? null : getComputedStyle(tabBar).paddingLeft,
+              barMarginTop: tabBar === null ? null : getComputedStyle(tabBar).marginTop,
+              btnCount: tabBtns.length,
+              btns: tabBtns.map(function (el) {
+                var r = el.getBoundingClientRect()
+                var c = getComputedStyle(el)
+                var after = getComputedStyle(el, '::after')
+                return {
+                  id: el.id, text: el.textContent, selected: el.getAttribute('aria-selected'),
+                  rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), bottom: Math.round(r.bottom), right: Math.round(r.right) },
+                  fontSize: c.fontSize, fontWeight: c.fontWeight, lineHeight: c.lineHeight, color: c.color,
+                  paddingBottom: c.paddingBottom,
+                  afterHeight: after.height, afterBottom: after.bottom, afterRadius: after.borderRadius,
+                }
+              }),
+              headerRect: tbox(document.querySelector('header')),
+              before: { chat: stateOf(chatLayer), trace: stateOf(traceLayer) },
+              badgeCount: document.querySelectorAll('.tab-badge, .tabs .badge, [data-tab-badge]').length,
+              barHTML: tabBar === null ? '' : tabBar.outerHTML.slice(0, 900),
+            }
+            /*
+             * ★★ 切标签**不许动布局** ✗ —— 判据取**输入栏那一层**（#composer ✓）
+             * 而不是里面那张卡片 ✓。
+             *
+             * ★ 为什么不是卡片 ✗（本单**实测**出来的 ✓）：卡片的高度跟着 textarea
+             * **自己长**✓（growInput ✓ —— 夹具刚往输入框写了字 ✓）⇒ 它的 bottom
+             * 在两次读数之间本来就会差几像素 ✓ ⇒ 拿它当判据是**假红** ✓
+             * （我第一版就是这么写的 ✓，读到 "391 → 359" ✓，红得毫无道理 ✓）。
+             * 稳的那一层是 #composer：它的盒子只由页头 / 标签栏 / main 决定 ✓。
+             */
+            tabs.composerBefore = (function () {
+              var cp0 = document.getElementById('composer')
+              return cp0 === null ? null : box(cp0)
+            })()
+            var traceBtn = document.getElementById('tab-trace')
+            if (traceBtn !== null) traceBtn.dispatchEvent(new Event('click'))
+            tabs.after = { chat: stateOf(chatLayer), trace: stateOf(traceLayer) }
+            tabs.traceSteps = (traceLayer === null ? 0 : traceLayer.querySelectorAll('.ev').length)
+            tabs.traceHasTool = traceLayer !== null && traceLayer.querySelector('.ev-tool') !== null
+            tabs.traceHasStep = traceLayer !== null && traceLayer.querySelector('.ev-step') !== null
+            tabs.traceHasUser = traceLayer !== null && traceLayer.querySelector('.ev-user') !== null
+            tabs.selectedAfterClick = tabBtns.map(function (el) { return el.getAttribute('aria-selected') })
+            tabs.inputVisibleAfter = (function () {
+              var out2 = { vh: innerHeight }
+              var mn2 = document.querySelector('main')
+              if (mn2 !== null) out2.main = box(mn2)
+              var cp3 = document.getElementById('composer')
+              if (cp3 !== null) out2.composer = box(cp3)
+              var app2 = document.querySelector('.app')
+              if (app2 !== null) out2.app = box(app2)
+              return out2
+            })()
+            document.documentElement.setAttribute('data-e2e-tabs', encodeURIComponent(JSON.stringify(tabs)))
           } catch (error) {
             document.documentElement.setAttribute('data-e2e-geometry-error', String((error && error.message) || error))
           }
@@ -513,13 +596,23 @@ async function serve(mode) {
 }
 
 /**
- * 跑一次 Chrome 拿 `--dump-dom` 的 HTML。
+ * 跑一次 Chrome 拿 DOM 的 HTML。
  *
  * ★ 两个老坑（都写在这儿，别再重走 ✓）：
  *   ① Chrome 打完 DOM **不退出** ✗ ⇒ 这里拿到标记（或超时）就 SIGKILL ✓；
  *   ② 本机文件沙箱里必须 `--no-sandbox` ✗（否则 GPU 进程直接 FATAL ✓）。
+ *
+ * ★ 第三个参数 `viewport`（本单新增 ✓，形如 `'412x915'` ✓）：
+ *   · **不带** ⇒ 走 `--dump-dom` ✓，还是**原来的默认窗口** ✓（第一趟那些读数一个字都没变 ✗）；
+ *   · **带上** ⇒ 改走 CDP ✓（见 `dumpDomAtViewport` ✓）—— 因为 `--window-size` 在
+ *     新版 headless Chrome 上**不决定视口** ✗（本轮实测：传 `--window-size=412x915` ✓，
+ *     页面里读到的仍是 **756×413** ✓ ⇒ 那个参数静默无效 ✓，而"两档几何"若照着它写
+ *     就是**两条永远在量同一个窗口**的假判据 ✓ —— 这正是本仓最忌讳的那类 ✓）。
  */
-async function dumpDom(url, marker, timeoutMs) {
+async function dumpDom(url, marker, timeoutMs, viewport) {
+  if (typeof viewport === 'string' && /^\d+x\d+$/.test(viewport)) {
+    return dumpDomAtViewport(url, marker, timeoutMs, viewport)
+  }
   const profile = mkdtempSync(join(tmpdir(), 'dshm-chat-e2e-'))
   const chrome = spawn(
     CHROME,
@@ -545,6 +638,112 @@ async function dumpDom(url, marker, timeoutMs) {
     void error
   }
   rmSync(profile, { recursive: true, force: true })
+  return html
+}
+
+/**
+ * ★★ 在**指定视口**上跑一次，拿 DOM 的 HTML（本单新增 ✓ —— 「几何两档」那条判据的**唯一**办法 ✓）。
+ *
+ * ## 为什么非走 CDP 不可 ✗
+ *
+ * `--window-size` 在 headless Chrome 上**不决定视口** ✗（**实测**：传 `412x915` ✓、
+ * 页面里 `innerWidth×innerHeight` 仍是 **756×413** ✓ —— 与不传时逐字相同 ✓）。
+ * 而 `Emulation.setDeviceMetricsOverride` 是**真·视口覆盖** ✓：
+ * `innerWidth` / `innerHeight` / `devicePixelRatio` / `matchMedia` 全跟着它走 ✓
+ * —— 与输入栏那一单量真 DSH 页面时用的是同一条路 ✓。
+ *
+ * ## 纪律（与全仓其它起 Chrome 的脚本同一条 ✓）
+ *
+ * · profile 用 `mkdtempSync` 自建 ✓、回收**只按自己那个完整路径** `pkill -f --user-data-dir=<它>` ✓
+ *   （**绝不按名字或端口** ✗ —— 会误伤用户自己开着的 Chrome ✓）；
+ * · **每一步都有超时** ✗（起 CDP 15s ✓、加载 30s ✓）—— 无超时的 `await` 会一直挂着 ✓
+ *   （这正是"起了个 Chrome 卡了 10 小时"那类事故的形状 ✓）。
+ */
+async function dumpDomAtViewport(url, marker, timeoutMs, viewport) {
+  const [width, height] = viewport.split('x').map(Number)
+  const profile = mkdtempSync(join(tmpdir(), 'dshm-chat-geo-'))
+  /** ★ 让系统给一个**空闲端口** ✓（写死端口在并行跑时必然撞 ✓）。 */
+  const port = await new Promise((resolve) => {
+    const probe = createServer()
+    probe.listen(0, '127.0.0.1', () => {
+      const p = probe.address().port
+      probe.close(() => resolve(p))
+    })
+  })
+  const chrome = spawn(
+    CHROME,
+    [
+      '--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`,
+      '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${port}`,
+      '--ignore-certificate-errors', 'about:blank',
+    ],
+    { stdio: 'ignore', detached: true },
+  )
+  let html = ''
+  const cleanup = () => {
+    try { process.kill(-chrome.pid, 'SIGKILL') } catch (error) { void error }
+    try {
+      execFileSync('pkill', ['-f', `--user-data-dir=${profile}`], { stdio: 'ignore' })
+    } catch (error) { void error }
+    rmSync(profile, { recursive: true, force: true })
+  }
+  try {
+    // ① 等 CDP 端点（★ 有超时 ✓）
+    const versionDeadline = Date.now() + 15_000
+    let pageWs = ''
+    while (Date.now() < versionDeadline && pageWs.length === 0) {
+      try {
+        const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
+        const page = (Array.isArray(list) ? list : []).filter((t) => t.type === 'page')[0]
+        pageWs = page !== undefined && typeof page.webSocketDebuggerUrl === 'string' ? page.webSocketDebuggerUrl : ''
+      } catch (error) { void error }
+      if (pageWs.length === 0) await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    if (pageWs.length === 0) return html
+    // ② 连上去、把视口打准（★ 连接也有超时 ✓）
+    const ws2 = new WebSocket(pageWs)
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('CDP 连接超时')), 10_000)
+      ws2.addEventListener('open', () => { clearTimeout(timer); resolve() })
+      ws2.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP 连接失败')) })
+    })
+    let nextId = 0
+    const waiting = new Map()
+    ws2.addEventListener('message', (event) => {
+      const data = JSON.parse(event.data)
+      const slot = waiting.get(data.id)
+      if (slot === undefined) return
+      waiting.delete(data.id)
+      if (data.error !== undefined) slot.reject(new Error(JSON.stringify(data.error)))
+      else slot.resolve(data.result)
+    })
+    const send2 = (method, params) => new Promise((resolve, reject) => {
+      const id = (nextId += 1)
+      waiting.set(id, { resolve, reject })
+      ws2.send(JSON.stringify({ id, method, params: params ?? {} }))
+    })
+    await send2('Page.enable')
+    await send2('Emulation.setDeviceMetricsOverride', {
+      width, height, deviceScaleFactor: 2, mobile: true, screenWidth: width, screenHeight: height,
+    })
+    await send2('Page.navigate', { url })
+    // ③ 等标记（★ 有超时 ✓）
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const probe = await send2('Runtime.evaluate', {
+        expression: 'document.documentElement ? document.documentElement.outerHTML : ""',
+        returnByValue: true,
+      })
+      html = typeof probe.result?.value === 'string' ? probe.result.value : ''
+      if (html.includes(marker)) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    ws2.close()
+  } catch (error) {
+    void error
+  } finally {
+    cleanup()
+  }
   return html
 }
 
@@ -897,6 +1096,161 @@ try {
       !/\.homebar\s*\{[^}]*height:\s*22px/.test(cssNoComments),
   )
 
+  /**
+   * ─────────── ★★ 标签栏「对话｜轨迹」（复刻清单第 3 项 ✓）───────────
+   *
+   * ## 参照读数从哪来 ✗（★ 写清楚，别把两路取证混成一路 ✓）
+   *
+   * · ① **真机读数**：隔离无头 Chrome + 移动视口（412×915 dpr2 ✓）打在 **DSH 自己的页**上，
+   *   用 `getBoundingClientRect` / `getComputedStyle` 量那条标签栏 ✓ —— 逐条见报告第 1 节 ✓；
+   * · ② **源码印证**：`app.asar` ⇒ `@deepseek-ai/dsh-client-ui-conversation/lib/client.js`
+   *   里那条**未压缩的 CSS 原文** ✓（`.…_tabs` / `.…_tab` / `.…_tab:after` / `.…_tabActive` ✓）——
+   *   几何与色值的**逐字**出处都在那里 ✓。
+   *
+   * ## 这一组断言为什么这么写 ✗
+   *
+   * 「点了轨迹」这件事**不能**用"按钮变了色"当判据 ✓（那是观感 ✓）；
+   * 判据必须是**换了一屏**：轨迹层从 `display:none` 变成真的排出来 ✓、
+   * 而对话层被藏起来 ✓ —— 两条都要成立 ✓（只查一条的话，"两层叠在一起"会静默通过 ✗）。
+   */
+  const tabsError = (html.match(/data-e2e-tabs-error="([^"]*)"/) ?? [])[1] ?? ''
+  const tabsRaw = decodeURIComponent((html.match(/data-e2e-tabs="([^"]*)"/) ?? [])[1] ?? '')
+  let tb = null
+  try { tb = tabsRaw.length > 0 ? JSON.parse(tabsRaw) : null } catch (error) { tb = null }
+  check(
+    '夹具自检：标签栏读数拿到了（本来没有的话下面全是空转 ✓）',
+    tb !== null && tabsError === '',
+    `夹具错误=${tabsError || '(无)'}`,
+  )
+  const tv = tb ?? {}
+  const tabBtns = Array.isArray(tv.btns) ? tv.btns : []
+  const barRect = tv.barRect ?? null
+  const beforeChat = tv.before?.chat ?? null
+  const beforeTrace = tv.before?.trace ?? null
+  const afterChat = tv.after?.chat ?? null
+  const afterTrace = tv.after?.trace ?? null
+
+  /** ① 两颗标签**存在**、字面就是「对话」「轨迹」✓、`role=tab` ✓。 */
+  check(
+    '★★ 标签栏两颗标签存在且字面就是「对话」「轨迹」（`role=tab` + 可念的名字 ✓）',
+    tv.barFound === true && tv.barRole === 'tablist' && tv.btnCount === 2 &&
+      tabBtns[0]?.text === '对话' && tabBtns[1]?.text === '轨迹' &&
+      tabBtns[0]?.id === 'tab-chat' && tabBtns[1]?.id === 'tab-trace',
+    `角色=${tv.barRole}｜颗数=${tv.btnCount}｜字面=${JSON.stringify(tabBtns.map((b) => b.text))}`,
+  )
+  /**
+   * ② ★★ **默认选中「对话」** ✓ —— 判两处，缺一不可 ✗。
+   *
+   * ## ★ 为什么一处不够 ✗（本轮**变异验证**逼出来的 ✓）
+   *
+   * 我第一版只判运行时读数（`aria-selected` + 两层的 `hidden` ✓）。
+   * 然后把 `page.html` 里两颗标签的默认标记**对调**（让「轨迹」一开场就是选中 ✓）——
+   * **它没红** ✗！原因很实在 ✓：`mountChat` 里那句 `showView('chat')` 是**开场就重写一遍** ✓
+   * ⇒ 运行时读数永远是对的 ✓（**不管 HTML 里写的是什么** ✗）。
+   * ⇒ 那条断言当时只证明了"JS 兜住了"✓，**没**证明"HTML 标记是对的"✗ ——
+   *   而 HTML 标记**真的有后果** ✗：`.tab::after` 的底色默认是 `transparent` ✓，
+   *   下划线只认 `.is-active` ✓ ⇒ 标记写错的那一瞬（脚本还没跑完）屏幕上**没有指示条** ✓。
+   *
+   * ⇒ 补齐：**HTML 源头**（字面 `class="tab is-active"` + `aria-selected="true"` 只能在「对话」那颗上 ✓）
+   *   **和**运行时读数（两句都对 ✓）一起判 ✓ —— 任一处写反 ⇒ 这条红 ✓。
+   */
+  const PAGE_HTML_TEXT = readFileSync(join(ASSETS, 'page.html'), 'utf8')
+  /** 从**源头**取某颗标签的标记 ✓（`<button … id="tab-chat" …>` 那一段 ✓）。 */
+  const tabSourceTag = (id) => (PAGE_HTML_TEXT.match(new RegExp('<button[^>]*id="' + id + '"[^>]*>')) ?? [])[0] ?? ''
+  const sourceChatTag = tabSourceTag('tab-chat')
+  const sourceTraceTag = tabSourceTag('tab-trace')
+  check(
+    '★★ 默认选中「对话」（★ **HTML 源头 + 运行时**两处一起判 ✓ —— 只判运行时会被 JS 兜住 ⇒ 假绿 ✓）',
+    tabBtns[0]?.selected === 'true' && tabBtns[1]?.selected === 'false' &&
+      beforeChat?.hidden === false && beforeTrace?.hidden === true &&
+      sourceChatTag.includes('is-active') && sourceChatTag.includes('aria-selected="true"') &&
+      !sourceTraceTag.includes('is-active') && sourceTraceTag.includes('aria-selected="false"'),
+    `运行时 aria-selected=${JSON.stringify(tabBtns.map((b) => b.selected))}｜对话层 hidden=${beforeChat?.hidden}｜轨迹层 hidden=${beforeTrace?.hidden}｜源头 对话=${JSON.stringify(sourceChatTag.slice(0, 120))}｜轨迹=${JSON.stringify(sourceTraceTag.slice(0, 120))}`,
+  )
+  /**
+   * ③ ★★ **点「轨迹」⇒ 真的切过去** ✗（这一条就是"不许只做样子"✓）。
+   *
+   * 判据三样一起 ✓：轨迹层**从没排到排**（display 变了 ✓）、对话层被藏起来 ✓、
+   * 而 `aria-selected` 跟着换 ✓。★ 缺任何一样都说明"切换"没真的发生 ✓。
+   * ★ 变异：把两颗标签的 `click` 监听删掉 ⇒ 这一条必须红 ✓（已做 ✓）。
+   */
+  check(
+    '★★ 点「轨迹」真的切过去了：轨迹层从 display:none 变成真排出来、对话层被藏起来（换了一屏 ✓）',
+    beforeTrace?.display === 'none' && afterTrace?.display !== 'none' &&
+      afterTrace?.hidden === false && afterChat?.hidden === true &&
+      Array.isArray(tv.selectedAfterClick) && tv.selectedAfterClick[1] === 'true' && tv.selectedAfterClick[0] === 'false',
+    `轨迹层 ${beforeTrace?.display} → ${afterTrace?.display}｜对话层 hidden=${beforeChat?.hidden} → ${afterChat?.hidden}｜aria-selected=${JSON.stringify(tv.selectedAfterClick)}`,
+  )
+  /** ④ ★ 轨迹视图的内容 = **同一批事件的另一条渲染路** ✓（复用 `classify`/`renderEvent` ✓）。 */
+  check(
+    '★ 轨迹视图摊开的是 `step` / `tool` 那类事件（对话层里的用户气泡**不该**跟过来 ✓）',
+    tv.traceSteps >= 1 && tv.traceHasStep === true && tv.traceHasUser === false,
+    `轨迹层 .ev ${tv.traceSteps} 条｜有 ev-step=${tv.traceHasStep}｜有 ev-user=${tv.traceHasUser}`,
+  )
+  /**
+   * ⑤ ★★ 徽标：**没有子智能体来源 ⇒ 一个徽标都不画** ✗。
+   *
+   * ★ 为什么是"判它不在"而不是"判它在" ✗（★ 报告第 2 节会写全 ✓）：
+   *   子智能体的会话**到不了这一页** —— 桥在 `normalizeSessions` 里就按
+   *   `origin === 'subagent'` 滤掉了 ✓（`dsh-chat-bridge.ts:458` ✓），事件里也没有 `origin` ✓。
+   *   ⇒ 页面数不到 ⇒ 按纪律**宁可不画**✓、**绝不编一个恒为 0 的徽标** ✗。
+   * ★ 这条**能被打红** ✓：只要有人加一个 `.tab-badge` 元素（哪怕写死 0 ✓）就红 ✓。
+   */
+  check(
+    '★★ 徽标：数据到不了这一页 ⇒ **一个徽标都不画**（写了就是编数据 ✓ —— 加了 .tab-badge 必红）',
+    tv.badgeCount === 0,
+    `标签栏里的徽标元素 ${tv.badgeCount} 个`,
+  )
+  /**
+   * ⑥ ★★ 几何：标签栏的**高度 / 位置 / 两颗标签的字号字重间距**与真值一致到 ±2px ✓。
+   *
+   * 真值有两路来源 ✓（见本节开头 ✓），逐项：
+   *   · 标签栏高 **27** ✓ = 标签高 25（行高 16 + 下内边距 9 ✓）+ 2（指示条压在底线下面 1px ✓）；
+   *   · 字号 **13px** / 字重 **500** / 行高 **16px** / 下内边距 **9px** ✓；
+   *   · 两颗标签间距 **36px** ✓、左缩进 **8px** ✓；
+   *   · 指示条 **2px** 高、**2px** 圆角、`bottom:-1px` ✓ —— 选中那颗才有底色 ✓。
+   * ★ 位置那条用**关系式**写 ✗（夹具跑在默认窗口宽上 ✓，写死 x 会假红 ✓）：
+   *   标签栏在页头**正下方**（`bar.top >= header.bottom - 2` ✓）且**在消息区上方** ✓。
+   */
+  const tab0 = tabBtns[0] ?? null
+  const tab1 = tabBtns[1] ?? null
+  check(
+    '★★ 标签栏几何照真值 ±2px（高 27 / 字号 13 / 字重 500 / 行高 16 / 下内边距 9 / 间距 36 / 左缩进 8 / 指示条 2px+圆角2px）',
+    barRect !== null && Math.abs(barRect.h - 27) <= 2 &&
+      Math.abs(Number.parseFloat(tv.barGap ?? '0') - 36) <= 2 &&
+      Math.abs(Number.parseFloat(tv.barPaddingLeft ?? '0') - 8) <= 2 &&
+      tab0?.fontSize === '13px' && tab0?.fontWeight === '500' && tab0?.lineHeight === '16px' &&
+      tab0?.paddingBottom === '9px' && tab1?.afterHeight === '2px' &&
+      tab1?.afterRadius === '2px' && tab1?.afterBottom === '-1px',
+    `高=${barRect?.h}（真值 27）｜gap=${tv.barGap}｜padding-left=${tv.barPaddingLeft}｜字号=${tab0?.fontSize}/${tab0?.fontWeight}/${tab0?.lineHeight}｜下内边距=${tab0?.paddingBottom}｜指示条=${tab1?.afterHeight} r=${tab1?.afterRadius} bottom=${tab1?.afterBottom}`,
+  )
+  /** ⑦ ★ 位置：在**页头下面**（不是上面 ✗）、且在消息区之上 ✓。 */
+  check(
+    '★ 标签栏在页头**正下方**（不是页头上面 ✓）、高度不吃掉消息区（≤ 底栏的 1/3 ✓）',
+    tv.headerRect !== null && barRect !== null && composerBox !== null &&
+      barRect.y >= tv.headerRect.bottom - 2 &&
+      barRect.bottom <= (composerBox.y ?? 0) &&
+      barRect.h <= (composerBox.y ?? 0) / 3,
+    `页头底=${tv.headerRect?.bottom}｜标签栏 y=${barRect?.y} bottom=${barRect?.bottom}｜输入栏 y=${composerBox?.y}`,
+  )
+  /**
+   * ⑧ ★★ 切到轨迹以后**输入栏那一层一个像素都没动** ✓、也没有被挤出视口 ✓ ——
+   *   "切一屏把输入栏顶掉"是这一单最容易犯、也最难看的错 ✓。
+   *
+   * ★ 判据取 `#composer`（稳的那一层 ✓），不取里面那张卡片 ✓ ——
+   *   卡片高度跟着 textarea 自己长 ✓（见夹具里那段说明 ✓）。
+   */
+  const composerBefore = tv.composerBefore ?? null
+  const composerAfter = tv.inputVisibleAfter?.composer ?? null
+  check(
+    '★★ 切到轨迹后输入栏**那一层**不动（底边仍在视口内、与切之前逐像素同一位置 ✓）',
+    composerBefore !== null && composerAfter !== null &&
+      composerBefore.y === composerAfter.y && composerBefore.h === composerAfter.h &&
+      composerBefore.bottom === composerAfter.bottom &&
+      composerAfter.bottom <= (tv.inputVisibleAfter?.vh ?? 0),
+    `切之前 ${JSON.stringify(composerBefore)}｜切之后 ${JSON.stringify(composerAfter)}｜视口高=${tv.inputVisibleAfter?.vh}`,
+  )
+
   console.log('\n── 正向（第二趟 · 新建会话之后）：切到空会话，旧内容必须让位 ──')
   const after = await dumpDom(`${base}/mobile/chat?phase=create`, 'data-e2e="done"', 40_000)
   check('夹具自检：第二趟也跑完了（DOM 上有 data-e2e=done）', after.includes('data-e2e="done"'))
@@ -969,6 +1323,54 @@ try {
   check('★ 反向断言：没有隧道时页面显示"读不出来"（证明这个夹具能发现"没接上" ✓）', broken.includes('读不出来'))
   check('★ 反向断言：错误态下"已读到的都还在"这种内容不许出现（本来就没有内容 ✓）', !broken.includes('把首页那两颗图标的圆角再收一点'))
   noTunnelSetup.server.close()
+
+  /**
+   * ─────────── ★★ 几何两档：412×915 与 320×568（本单新增 ✓）───────────
+   *
+   * ## 为什么非要两档 ✗
+   *
+   * 第一趟跑在 Chrome 的**默认窗口**上（756×413 ✓ —— 又宽又矮 ✓），
+   * 它证明不了"窄屏 / 正常手机屏"上的事 ✓：
+   *   · **320 宽**是这一页最窄的真机档 ✓ —— 标签栏 + 满宽输入栏是否还排得下 ✓；
+   *   · **915 高**才是手机的正常高度 ✓ —— 默认窗口只有 413 ✓，
+   *     "标签栏会不会把输入栏挤出视口"在那上面**量不出真值** ✗。
+   * ⇒ 两档各量一次 ✓（`--window-size` ✓，与输入栏那一单量真图同一条路 ✓）。
+   *
+   * ## 两条判据（★ 都只判**几何与不被遮挡** ✗ —— 观感归用户 ✓）
+   *
+   * 1. **标签栏在视口里、且在输入栏上方** ✓（没被顶出去、也没盖住输入栏 ✓）；
+   * 2. ★★ **输入栏整条都在视口内** ✗（`composer.bottom <= vh` ✓ ——
+   *    这正是"标签栏不许把输入栏挤出视口"那条要求的**可判定**写法 ✓）；
+   *    并且消息区还剩得下地方 ✓（`main.h > 0` ✓ —— 不许被挤成 0 高 ✓）。
+   */
+  for (const size of ['412x915', '320x568']) {
+    const [w, h] = size.split('x').map(Number)
+    console.log(`\n── 几何档 ${size}（宽 ${w} / 高 ${h}）──`)
+    const shot = await dumpDom(`${base}/mobile/chat?phase=sent`, 'data-e2e-tabs=', 40_000, size)
+    const raw = decodeURIComponent((shot.match(/data-e2e-tabs="([^"]*)"/) ?? [])[1] ?? '')
+    let g2 = null
+    try { g2 = raw.length > 0 ? JSON.parse(raw) : null } catch (error) { g2 = null }
+    const bar = g2?.barRect ?? null
+    const comp = g2?.composerBefore ?? null
+    const vh2 = g2?.vh ?? -1
+    const realVw = g2?.vw ?? -1
+    check(
+      `★★ [${size}] 夹具自检：这一档**真的**拿到了读数与真视口（宽 ${w} / 高 ${h} ✓）`,
+      g2 !== null && realVw === w && vh2 === h && bar !== null,
+      `读到视口 ${realVw}×${vh2}（期望 ${w}×${h}）`,
+    )
+    check(
+      `★ [${size}] 标签栏在视口里、且在输入栏**上方**（没被顶出去、也没盖住输入栏 ✓）`,
+      bar !== null && comp !== null &&
+        bar.y >= 0 && bar.bottom <= vh2 && bar.bottom <= comp.y,
+      `标签栏 y=${bar?.y} bottom=${bar?.bottom}｜输入栏 y=${comp?.y} bottom=${comp?.bottom}｜视口高 ${vh2}`,
+    )
+    check(
+      `★★ [${size}] 输入栏**整条都在视口内**（composer.bottom <= vh ✓）、且标签栏没把它顶下去（底边仍有 ≥ 40px 让位 ✓）`,
+      comp !== null && comp.h > 0 && comp.bottom <= vh2 && comp.bottom >= vh2 - 40,
+      `输入栏 ${JSON.stringify(comp)}｜视口高 ${vh2}｜距底 ${comp === null ? '-' : vh2 - comp.bottom}px`,
+    )
+  }
 } finally {
   setup.server.close()
   /**
