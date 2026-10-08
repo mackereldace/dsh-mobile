@@ -430,3 +430,34 @@
 .approval .approval-option[disabled] { opacity: .55; }
 .approval .approval-why { padding: 0 12px 10px; font-size: 11px; color: var(--ink3); }
 .approval .approval-raw { margin: 0; padding: 9px 12px; background: var(--code-bg); border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.45; color: var(--ink3); white-space: pre-wrap; word-break: break-all; }
+
+/* chat 页顶栏遵循壳的安全区与 52px 高度；本页自行拥有导航 DOM。 */
+.app { padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px)); }
+.chat-top { height: var(--dshm-top-h, 52px); padding: 0 10px; border-bottom: 1px solid var(--line); gap: 8px; }
+.chat-top > .icon { flex: none; }
+.chat-top .title { text-align: center; font-size: 16px; }
+.chat-top .title::after { content: none; }
+#sessions { position: absolute; z-index: 30; left: 0; right: 20%; top: calc(var(--dshm-top-h, 52px) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))); max-height: 65%; box-shadow: 0 8px 20px #0003; }
+.stats-progress { display: inline-block; flex: none; width: 56px; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); }
+.stats-progress-fill { display: block; height: 100%; background: var(--tab-ink-active); border-radius: inherit; }
+.stats-strip { padding-left: 0; padding-right: 0; }
+@media (max-width: 360px) { .stats-strip { gap: 3px; font-size: 11px; } .stats-strip .stats-cell { gap: 3px; } }
+.tool-btn:disabled { opacity: .4; }
+.subagent-count { margin-left: auto; padding-right: 14px; color: var(--ink2); font-size: 12px; }
+.subagent-count[hidden] { display: none; }
+/* Markdown 排版仅作用于正文；审美由用户判断。 */
+.bubble { white-space: normal !important; }
+.bubble[data-render-fallback] { white-space: pre-wrap !important; }
+.bubble > :first-child { margin-top: 0; }
+.bubble > :last-child { margin-bottom: 0; }
+.bubble p { margin: 0 0 8px; }
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: 14px 0 8px; font-size: 1.1em; line-height: 1.45; }
+.bubble ul, .bubble ol { margin: 6px 0 10px; padding-left: 1.5em; }
+.bubble code { font-size: .88em; padding: 1px 4px; border-radius: 4px; background: var(--code-bg); overflow-wrap: anywhere; }
+.bubble .dshm-md-code { margin: 8px 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; white-space: pre; max-width: 100%; }
+.bubble .dshm-md-code code { padding: 0; background: transparent; overflow-wrap: normal; }
+.bubble .dshm-md-lang { display: block; color: var(--ink3); font-size: 11px; margin-bottom: 5px; }
+.bubble .dshm-md-table { display: block; overflow-x: auto; border-collapse: collapse; margin: 8px 0; max-width: 100%; }
+.bubble .dshm-md-table th, .bubble .dshm-md-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.bubble blockquote { margin: 8px 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--ink2); }
+.bubble .dshm-md-math { max-width: 100%; overflow-x: auto; }

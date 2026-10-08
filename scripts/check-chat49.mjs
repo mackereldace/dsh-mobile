@@ -42,7 +42,7 @@ window.__DSH_MOBILE_BOOT__={renderMarkdownInto:(el,text)=>{el.textContent=text},
 }};
 `
 let total=0,failed=0
-function check(name,ok,detail=''){total++;if(!ok)failed++;console.log((ok?'✓ ':'✗ ')+name+(ok?'':' '+JSON.stringify(detail)))}
+function check(name,ok,detail=''){ok=ok===true;total++;if(!ok)failed++;console.log((ok?'✓ ':'✗ ')+name+(ok?'':' '+JSON.stringify(detail)))}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 const server=createServer((req,res)=>{
  const path=new URL(req.url,'http://localhost').pathname
@@ -63,7 +63,7 @@ try{
  ws=new WebSocket(target.webSocketDebuggerUrl);await new Promise((r,j)=>{ws.addEventListener('open',r,{once:true});ws.addEventListener('error',j,{once:true})})
  let next=0;const pending=new Map();ws.addEventListener('message',e=>{const m=JSON.parse(e.data),p=pending.get(m.id);if(p){pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(m.error.message)):p.resolve(m.result)}})
  const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP 超时 '+method))},10000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}))})
- const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.text);return r.result?.value}
+ const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)return {__error:r.exceptionDetails.text};return r.result?.value}
  await send('Emulation.setDeviceMetricsOverride',{width:412,height:915,deviceScaleFactor:1,mobile:true})
  await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/mobile/chat?session=s1`})
  for(let n=0;n<100;n++){if(await evaluate('!!document.querySelector(".ev-tool")'))break;await sleep(50)}
@@ -74,8 +74,24 @@ try{
  check('真实点击展开还原长命令全文',readable.after?.includes('x'.repeat(800))&&readable.after.endsWith('timeoutMs: 3000'),readable.after?.length)
  check('工具标题采用真实工具名',readable.title==='bash',readable.title)
  check('工具结果采用 message.content 正文',await evaluate(`document.querySelector('[data-seq="7"] .tool-body')?.textContent === '真实工具输出'`))
- // 新行为按组添加在这里；每条都能由相应实现回退打红。
- const EXPECTED_MIN_CHECKS=7
+ const shell=await evaluate(`(()=>{document.documentElement.style.setProperty('--dshm-safe-top','48px');const h=document.querySelector('header').getBoundingClientRect(), t=document.querySelector('#tabs').getBoundingClientRect();return {top:h.top,height:h.height,tabsTop:t.top,bottom:h.bottom}})()`)
+ check('顶栏按壳安全区48px让位且高52px',shell.top===48&&shell.height===52,shell)
+ check('标签栏位于顶栏下方且未被覆盖',shell.tabsTop>=shell.bottom,shell)
+ check('菜单真实点击显示会话并同步展开状态',await evaluate(`(()=>{document.querySelector('#session-menu').click();return !document.querySelector('#sessions').hidden&&document.querySelector('#session-menu').getAttribute('aria-expanded')==='true'})()`))
+ check('再次点击能关闭会话菜单',await evaluate(`(()=>{document.querySelector('#session-menu').click();return document.querySelector('#sessions').hidden})()`))
+ const command=await evaluate(`(()=>{const input=document.querySelector('#input');input.value='保留草稿';input.dispatchEvent(new Event('input'));document.querySelector('[data-tool=command]').click();return {value:input.value,focus:document.activeElement===input,start:input.selectionStart,disabled:document.querySelector('[data-tool=command]').disabled}})()`)
+ check('命令键插入斜杠且保留草稿',command.value==='/保留草稿',command)
+ check('命令键聚焦并把光标放在斜杠后',command.focus&&command.start===1&&!command.disabled,command)
+ check('重复命令点击不叠加斜杠',await evaluate(`(()=>{document.querySelector('[data-tool=command]').click();return document.querySelector('#input').value==='/保留草稿'})()`))
+ check('空草稿禁用发送键但命令键可用',await evaluate(`(()=>{const i=document.querySelector('#input');i.value='';i.dispatchEvent(new Event('input'));return document.querySelector('button[type=submit]').disabled&&!document.querySelector('[data-tool=command]').disabled})()`))
+ const progress=await evaluate(`(()=>{const b=document.querySelector('.stats-progress'),f=b?.firstElementChild;return {w:b?.getBoundingClientRect().width,h:b?.getBoundingClientRect().height,v:b?.getAttribute('aria-valuenow'),fill:f?.getBoundingClientRect().width}})()`)
+ check('进度条56×6且45%映射到真实填充宽度',progress.w===56&&progress.h===6&&progress.v==='45'&&Math.abs(progress.fill/56-.45)<.002,progress)
+ await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true})
+ const compact=await evaluate(`(()=>{const s=document.querySelector('#stats-strip'),c=document.querySelector('#composer');return {clipped:s.scrollWidth>s.clientWidth+1,bottom:c.getBoundingClientRect().bottom,height:innerHeight}})()`)
+ check('窄视口状态条不截断且输入栏在屏内',!compact.clipped&&compact.bottom<=compact.height,compact)
+ await send('Emulation.setDeviceMetricsOverride',{width:412,height:915,deviceScaleFactor:1,mobile:true})
+ await evaluate(`document.documentElement.style.setProperty('--dshm-safe-top','0px')`)
+ const EXPECTED_MIN_CHECKS=17
  check('下界等于实跑总数',total+1===EXPECTED_MIN_CHECKS,{total:total+1,expected:EXPECTED_MIN_CHECKS})
 }finally{
  if(ws)ws.close();if(chrome){try{process.kill(-chrome.pid,'SIGKILL')}catch{}try{execFileSync('pkill',['-f',`--user-data-dir=${profile}`],{stdio:'ignore'})}catch{}}

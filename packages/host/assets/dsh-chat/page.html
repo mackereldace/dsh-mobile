@@ -9,147 +9,67 @@
 </head>
 <body>
 <div class="app">
-  <div class="status">v1·2026-10-04</div>
-  <header>
+  <!-- 页面拥有自己的 DOM；顶部沿用现有壳的 52px 与 safe-top 契约。 -->
+  <header class="chat-top">
+    <button id="session-menu" class="icon" type="button" aria-label="会话列表" aria-expanded="false" aria-controls="sessions">☰</button>
     <div>
       <button id="title" class="title" type="button">会话</button>
-      <p class="sub" id="sub">正在读取…</p>
+      <p class="sub" id="sub" hidden></p>
     </div>
-    <span class="grow"></span>
-    <button id="refresh" class="icon" type="button" title="刷新">&#8635;</button>
+    <button id="refresh" class="icon" type="button" title="刷新" aria-label="刷新">&#8635;</button>
   </header>
-  <!--
-    ★★ 「对话｜轨迹」标签栏 —— 1:1 复刻 DSH 自己那条（复刻清单第 3 项 ✓）。
-
-    ## 参照物与读数来源（★ 二阶取证，写清楚是哪一种 ✗）
-
-    DSH 桌面/手机客户端里这条标签栏是 `@deepseek-ai/dsh-client-ui-conversation` 渲染的 ✓。
-    它**不在**我们这一页上（我们是自己写的会话页 ✓），所以读数是分两层拿到的：
-      ① **真机读数**：隔离无头 Chrome 打在 DSH 自己的页上量 `getBoundingClientRect` /
-         `getComputedStyle` ✓ —— 逐条数字见报告第 1 节 ✓；
-      ② **源码印证**：`app.asar` 里那个包的 `lib/client.js` ✓ —— 它把这条标签栏的
-         DOM 结构与 **CSS 原文**（未压缩的 `Story` 常量 ✓）都写死了 ✓，见报告第 1 节 ✓。
-    ★ 两处对得上才算数 ✗（对不上就写在报告里 ✗）。
-
-    ## 结构（★ 照源码 ✓ —— 不发明）
-
-    源码里是 `div[data-conversation-tabs][role=tablist]` 里放 `button[role=tab]` ✓，
-    选中那颗带 `aria-selected="true"` ✓。这里逐条照抄 ✓（属性名一个不改 ✗）。
-
-    ## ★★ 为什么**不画**子智能体数徽标 ✗
-
-    数据到不了这一页 ✗ —— 桥在 `normalizeSessions` 里就把 `origin === 'subagent'` 的会话
-    **滤掉了** ✓（`dsh-chat-bridge.ts:458` ✓，用户 2026-10-06 定的规矩 ✓），
-    而事件里也没有 `origin`（`normalizePage` 只透出 `seq/time/type/data` 四个键 ✓）。
-    ⇒ 页面手上**根本数不到**子智能体 ✗ ⇒ 按本仓纪律**宁可不画** ✓，不编一个恒为 0 的徽标 ✗。
-    ★ 详见报告第 2 节 / 第 6 节 ✓。
-  -->
   <div class="tabs" id="tabs" role="tablist" data-conversation-tabs>
-    <button type="button" role="tab" id="tab-chat" class="tab is-active" aria-selected="true" aria-controls="view-chat">对话</button>
-    <button type="button" role="tab" id="tab-trace" class="tab" aria-selected="false" aria-controls="view-trace">轨迹</button>
+    <button type="button" role="tab" id="tab-chat" class="tab is-active" aria-selected="true" aria-controls="messages">对话</button>
+    <button type="button" role="tab" id="tab-trace" class="tab" aria-selected="false" aria-controls="trace">轨迹</button>
+    <span id="subagent-count" class="subagent-count" hidden></span>
   </div>
-  <div id="status"></div>
+  <div id="status" role="status"></div>
   <div id="sessions" hidden></div>
   <main>
     <div id="state" hidden></div>
-    <!--
-      ★★ 两条渲染路，**同一批事件** ✗（复刻清单第 3 项的"切换行为"那一半 ✓）。
-
-      · `#messages`  = 对话视图 ✓（原样，一个字没动 ✗）；
-      · `#trace`     = 轨迹视图 ✓ —— 由 `ui.js` 的 `renderTraceEvent()` 画 ✓，
-        它**复用的是同一套** `classify()` / `renderEvent()` ✓（不新写一套渲染器 ✗）。
-      · 两层的显隐由根节点 `data-dshm-view` 一个属性决定 ✓（不靠改 DOM 结构 ✗）。
-    -->
     <div id="messages" data-view="chat"></div>
     <div id="trace" data-view="trace" hidden></div>
   </main>
-  <!--
-    ★★ 输入栏：1:1 复刻 DSH 手机端（参照物与读数见报告第 1 节 ✓）。
-
-    · **大圆角卡片**：圆角 22px、占满宽度、两边各留 14px（与真机读数一致 ✓）；
-    · **左下两颗小圆按钮**：命令行「>_」+ 附件「回形针」✓ —— ★ 本轮**只做长相** ✗，
-      功能不接（接哪条通道的方案见报告第 4 节 ✓）；
-    · **右下大圆发送键**：圆形、中间是**上箭头** ✓（原来那颗方块文字「发送」✗ 已换掉 ✓）；
-    · ★ **发送那条路一行没改** ✗：仍然是 `#composer` 的 `submit` + 它里面的 `button[type=submit]`
-      （`ui.js` 里那句 `form.querySelector('button')` 取到的**还是**这颗 ✓）。
-  -->
+  <!-- 审批和用户问题是 composer 的独立交互区，永不混进消息窗口。 -->
+  <section id="interactions" aria-label="等待你处理" hidden></section>
   <form class="composer" id="composer">
     <div class="composer-card">
+      <div id="attachments" class="attachments" hidden></div>
       <textarea id="input" rows="1" placeholder="发消息或创建任务，/ 调用指令，@ 文件或对话"></textarea>
       <div class="composer-row">
         <div class="composer-tools">
-          <!-- ★ 命令行（长相）：`>_` = 一个「›」折线 + 一条下划线 ✓ -->
           <button type="button" class="tool-btn" data-tool="command" aria-label="命令行" title="命令行">
-            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-              <path d="M3.2 4.6 L6.6 8 L3.2 11.4" fill="none" stroke="currentColor" stroke-width="1.5"
-                    stroke-linecap="round" stroke-linejoin="round"></path>
-              <path d="M8.4 11.6 H12.8" fill="none" stroke="currentColor" stroke-width="1.5"
-                    stroke-linecap="round"></path>
-            </svg>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 4.6 L6.6 8 L3.2 11.4 M8.4 11.6 H12.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
           </button>
-          <!-- ★ 附件（长相）：回形针 ✓ -->
-          <button type="button" class="tool-btn" data-tool="attach" aria-label="添加附件" title="添加附件">
-            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-              <path d="M10.6 4.1 5.6 9.1a2.05 2.05 0 0 0 2.9 2.9l5.2-5.2a3.4 3.4 0 0 0-4.8-4.8L3.6 7.3a4.75 4.75 0 0 0 6.7 6.7l4.1-4.1"
-                    fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
-                    stroke-linejoin="round"></path>
-            </svg>
+          <button type="button" class="tool-btn" data-tool="attach" aria-label="添加附件" title="附件通道还没接通" aria-disabled="true" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.6 4.1 5.6 9.1a2.05 2.05 0 0 0 2.9 2.9l5.2-5.2a3.4 3.4 0 0 0-4.8-4.8L3.6 7.3a4.75 4.75 0 0 0 6.7 6.7l4.1-4.1" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"></path></svg>
           </button>
+          <input id="attachment-input" type="file" multiple hidden>
         </div>
         <span class="composer-grow"></span>
         <button type="submit" class="send-btn" aria-label="发送" title="发送">
-          <svg class="send-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-            <path d="M10 16.6 V4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-            <path d="M4.8 9.2 10 4 L15.2 9.2" fill="none" stroke="currentColor" stroke-width="1.9"
-                  stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-          <!-- ★ 发送中才出现的那行字（由 ui.js 的 paintComposer 写 ✓）—— 平时是空的、不占视觉 ✓ -->
+          <svg class="send-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16.6 V4.2 M4.8 9.2 10 4 L15.2 9.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path></svg>
           <span class="send-label" id="send-label"></span>
         </button>
       </div>
     </div>
-    <!--
-      ★★ 输入框**正下方**那条紧凑状态条 ✓ —— **四格**：上下文% / 轮 / 步 / tok ✓
-      （本单换掉了原来那句「窗口内已读 N 条 · 在线」✗ —— 那两样仍是页面真读数 ✓，
-      但用户要的是与 DSH 自己那条同口径的四个数 ✓）。
-
-      ★ 它**在 `.composer` 里面** ✓（不是它的兄弟 ✗）—— 这样"输入框 → 状态条 → 安全区"
-        这个顺序只由 `.composer` 的 gap 与 `.homebar` 两处决定 ✓，安全区不会被算两遍 ✓。
-
-      ★★ 四格的内容**由 `ui.js` 现搭** ✗（`renderStatsStrip()` ✓）—— 这里**一个数字都不写死** ✗：
-        · 数据来源是宿主那条流路由带下来的**开场快照投影** ✓ ⇒ 页面侧唯一入口
-          `boot.chatProjections()` ✓（`app.js:456` ✓）⇒ `values.sessionStats` / `.tokenUsage` /
-          `.contextPressure` ✓（桥 `normalizeValues` 已经白名单过一遍 ✓，提交 `9ab9c9a` ✓）；
-        · ★★ **取不到的那一格不画** ✗（键不存在 ⇒ 那一格整个不产出 ✓，绝不退化成 0 ✗）；
-        · ★★ 四格**全**取不到 ⇒ 整条**不占高度** ✗（`ui.js` 给根节点加 `hidden` ✓，
-          `theme.css` 里那条 `.stats-strip[hidden] { display:none }` 是**必须的** ✗）；
-        · ★ **纯展示** ✗：四格不是按钮、没有点击 ✓（DSH 那三格点开是三个宿主面板 ✓，
-          而它们只存在于 DSH 自己的 React 页上 ✓ —— 我们这一页没有可转发的锚点 ✗
-          ⇒ 按本仓"不假装能用"那条规矩，**不做**这个交互 ✓）。
-
-      ★ 字面与几何（高 22px / 字号 12px / 环 14×14 2px / 分隔符「·」✓）的**逐条读数**
-        与出处写在 `theme.css` 那一段注释里 ✓（含哪条是真机、哪条是源码 ✓）。
-    -->
     <div class="stats-strip" id="stats-strip" aria-live="polite"></div>
   </form>
   <div class="homebar"></div>
 </div>
 <script>
-  // ★ 只装隧道、不装 DSH 的外壳 UI（顶栏/抽屉）—— 见 boot.js 里 __DSH_MOBILE_NO_SHELL__ 的说明 ✓
-  globalThis.__DSH_MOBILE_NO_SHELL__ = true
-  // 手机场景标记（boot.js 的 isShellSurface 认它；保留 ?pair= 票据）
+  // 隧道、键盘、安全区与 markdown 仍复用 boot；不把依赖 React DOM 的旧外壳装到本页。
+  globalThis.__DSH_MOBILE_NO_SHELL__ = true;
   (function () {
     try {
-      var url = new URL(location.href)
+      var url = new URL(location.href);
       if (url.searchParams.get('mobile') !== '1') {
-        url.searchParams.set('mobile', '1')
-        history.replaceState(null, '', url.toString())
+        url.searchParams.set('mobile', '1');
+        history.replaceState(null, '', url.toString());
       }
-    } catch (error) { void error }
-  })()
+    } catch (error) { void error; }
+  })();
 </script>
-<!-- ★ 这一行是**隧道**（`__DSH_MOBILE_BOOT__.tunnel`）—— 少了它页面能打开但永远连不上 ✗，
-     而且要排在 app.js 之前（经典脚本先跑，module 是 defer 的 ✓） -->
 <script src="/mobile/boot.js" data-dsh-mobile="1"></script>
 <script type="module" src="/mobile/chat/app.js"></script>
 </body>

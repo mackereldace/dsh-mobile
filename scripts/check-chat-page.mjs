@@ -804,25 +804,10 @@ const FAKE_BOOT = `
               stripGapUnit: strip === null ? null : getComputedStyle(strip).gap,
               stripPadLeft: strip === null ? null : getComputedStyle(strip).paddingLeft,
               stripClipped: strip === null ? null : strip.scrollWidth > strip.clientWidth + 1,
-              stripRing: (function () {
-                var ring = strip === null ? null : strip.querySelector('.stats-ring')
-                if (ring === null) return null
-                var track = ring.querySelector('.stats-ring-track')
-                var fill = ring.querySelector('.stats-ring-fill')
-                var trackCss = track === null ? null : getComputedStyle(track)
-                var fillCss = fill === null ? null : getComputedStyle(fill)
-                return {
-                  viewBox: ring.getAttribute('viewBox'),
-                  box: box(ring),
-                  trackStrokeWidth: trackCss === null ? null : trackCss.strokeWidth,
-                  trackStroke: trackCss === null ? null : trackCss.stroke,
-                  trackFill: trackCss === null ? null : trackCss.fill,
-                  fillStrokeWidth: fillCss === null ? null : fillCss.strokeWidth,
-                  fillStroke: fillCss === null ? null : fillCss.stroke,
-                  fillLinecap: fillCss === null ? null : fillCss.strokeLinecap,
-                  dash: fill === null ? null : fill.getAttribute('stroke-dasharray'),
-                  transform: fill === null ? null : fill.getAttribute('transform'),
-                }
+              stripProgress: (function () {
+                var bar = strip === null ? null : strip.querySelector('.stats-progress')
+                var fill = bar === null ? null : bar.querySelector('.stats-progress-fill')
+                return bar === null ? null : { box: box(bar), fill: { w: fill.getBoundingClientRect().width }, value: bar.getAttribute('aria-valuenow'), role: bar.getAttribute('role') }
               })(),
               home: box(home), homeHeight: home === null ? null : getComputedStyle(home).height,
               composer: box(composer),
@@ -1852,15 +1837,11 @@ try {
     `这一条里的 button = ${fullGeo?.stripButtons}`,
   )
   check(
-    '★★ 上下文那一格前面**真的有那个环**：14×14 / 2px 描边 / `dasharray` 与算式**逐字**相同（★ 判据不是"看见一个 `%`"✗）',
-    fullGeo?.stripRing !== null && fullGeo?.stripRing !== undefined &&
-      fullGeo.stripRing.viewBox === '0 0 14 14' &&
-      fullGeo.stripRing.box.w === 14 && fullGeo.stripRing.box.h === 14 &&
-      fullGeo.stripRing.trackStrokeWidth === '2px' && fullGeo.stripRing.fillStrokeWidth === '2px' &&
-      fullGeo.stripRing.fillLinecap === 'round' &&
-      fullGeo.stripRing.dash === expectedDash(expectedPercent(PROJ_FIXTURES.full.values.contextPressure)) &&
-      fullGeo.stripRing.transform === 'rotate(-90 7 7)',
-    `环=${JSON.stringify(fullGeo?.stripRing)}｜期望 dash=${expectedDash(expectedPercent(PROJ_FIXTURES.full.values.contextPressure))}`,
+    '★★ 上下文进度条为 56×6，填充比例与真实百分比一致',
+    fullGeo?.stripProgress?.role === 'progressbar' && fullGeo.stripProgress.value === '45' &&
+      fullGeo.stripProgress.box.w === 56 && fullGeo.stripProgress.box.h === 6 &&
+      Math.abs(fullGeo.stripProgress.fill.w / 56 - .45) <= .002,
+    JSON.stringify(fullGeo?.stripProgress),
   )
   check(
     '★★ 状态条的**高度 / 字号 / 位置**照真值 ±2px（高 22 = 行高 20 + 上下各 1px ✓、字号 12px ✓、在卡片**之下**、输入栏**之内** ✓）',

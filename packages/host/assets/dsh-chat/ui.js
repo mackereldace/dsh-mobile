@@ -1693,32 +1693,20 @@ export function mountChat(options) {
     }
   }
 
-  /** 上下文那一格前面的环 ✓（同一个算式、同一组几何照 DSH 的 `ContextMeter` ✓）。 */
-  const contextRing = (percent) => {
-    const NS = 'http://www.w3.org/2000/svg'
-    const svg = document.createElementNS(NS, 'svg')
-    // ★ SVG 元素的类是**只读的 SVGAnimatedString** ✗ ⇒ 只能 `setAttribute('class', …)` ✓
-    svg.setAttribute('class', 'stats-ring')
-    svg.setAttribute('viewBox', '0 0 14 14')
-    svg.setAttribute('width', '14')
-    svg.setAttribute('height', '14')
-    svg.setAttribute('aria-hidden', 'true')
-    const track = document.createElementNS(NS, 'circle')
-    track.setAttribute('class', 'stats-ring-track')
-    track.setAttribute('cx', '7')
-    track.setAttribute('cy', '7')
-    track.setAttribute('r', String(STATS_RING_RADIUS))
-    const fill = document.createElementNS(NS, 'circle')
-    fill.setAttribute('class', 'stats-ring-fill')
-    fill.setAttribute('cx', '7')
-    fill.setAttribute('cy', '7')
-    fill.setAttribute('r', String(STATS_RING_RADIUS))
-    // ★ 与 DSH 同一条算式 ✓：`${周长 × 百分比/100} ${周长}` ✓（从 -90° 起画 ✓）
-    fill.setAttribute('stroke-dasharray', STATS_RING_CIRCUMFERENCE * percent / 100 + ' ' + STATS_RING_CIRCUMFERENCE)
-    fill.setAttribute('transform', 'rotate(-90 7 7)')
-    svg.appendChild(track)
-    svg.appendChild(fill)
-    return svg
+  /** 沿用我们现有紧凑条的 56×6 进度条；百分比来自真实投影。 */
+  const contextProgress = (percent) => {
+    const bar = document.createElement('span')
+    bar.className = 'stats-progress'
+    bar.setAttribute('role', 'progressbar')
+    bar.setAttribute('aria-label', '上下文占用')
+    bar.setAttribute('aria-valuemin', '0')
+    bar.setAttribute('aria-valuemax', '100')
+    bar.setAttribute('aria-valuenow', String(percent))
+    const fill = document.createElement('span')
+    fill.className = 'stats-progress-fill'
+    fill.style.width = String(percent) + '%'
+    bar.appendChild(fill)
+    return bar
   }
 
   /**
@@ -1773,7 +1761,7 @@ export function mountChat(options) {
       cell.className = 'stats-cell'
       // ★ 纯 ASCII 的钩子 ✓（验收按它找那一格 ✓，DOM 上看不出区别 ✓）
       cell.setAttribute('data-cell', cells[index].key)
-      if (cells[index].key === 'context') cell.appendChild(contextRing(cells[index].percent))
+      if (cells[index].key === 'context') cell.appendChild(contextProgress(cells[index].percent))
       const text = document.createElement('span')
       text.className = 'stats-text'
       text.textContent = cells[index].text
@@ -1893,15 +1881,19 @@ export function mountChat(options) {
     }
   }
 
+  const sessionMenu = root.querySelector('#session-menu')
   const hideSessions = () => {
     if (sessionPanel !== null && sessionPanel !== undefined) sessionPanel.hidden = true
+    if (sessionMenu) sessionMenu.setAttribute('aria-expanded', 'false')
   }
+  if (sessionMenu) sessionMenu.addEventListener('click', () => titleButton && titleButton.click())
 
   if (titleButton !== null && titleButton !== undefined) {
     titleButton.addEventListener('click', () => {
       if (sessionPanel === null || sessionPanel === undefined) return
       const willShow = sessionPanel.hidden !== false
       sessionPanel.hidden = !willShow
+      if (sessionMenu) sessionMenu.setAttribute('aria-expanded', String(willShow))
       if (willShow) paintSessions()
     })
   }
@@ -2186,7 +2178,7 @@ export function mountChat(options) {
    * ★ 发送键 = `form` 里那颗 `button` ✓ —— **取法与改前逐字相同** ✗
    *   （原来那颗是方块文字「发送」✓，现在换成了圆形箭头 ✓，但那**不影响**这条取值 ✓）。
    */
-  const sendButton = form === null || form === undefined ? null : form.querySelector('button')
+  const sendButton = form === null || form === undefined ? null : form.querySelector('button[type=submit]')
 
   const growInput = () => {
     if (input === null || input === undefined || input.style === undefined) return
@@ -2218,6 +2210,16 @@ export function mountChat(options) {
       form.dataset.sending = sending ? '1' : '0'
     }
   }
+
+  const commandButton = root.querySelector('[data-tool=command]')
+  if (commandButton) commandButton.addEventListener('click', () => {
+    if (!input || input.disabled) return
+    if (!input.value.startsWith('/')) input.value = '/' + input.value
+    input.focus()
+    if (typeof input.setSelectionRange === 'function') input.setSelectionRange(1, 1)
+    growInput()
+    paintComposer()
+  })
 
   if (input !== null && input !== undefined) {
     input.addEventListener('input', () => {
