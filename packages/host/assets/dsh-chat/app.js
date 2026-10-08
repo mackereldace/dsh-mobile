@@ -83,6 +83,44 @@ function rpc(method, args) {
 
 const params = new URLSearchParams(location.search)
 let currentId = params.get('session') || ''
+let interactionTimer = null, interactionEpoch = 0, interactionInFlight = 0
+const questionCallIds = new Set()
+
+// 仅首次快照和真实交互事件触发读取；空闲时没有轮询。
+function scheduleInteractions() {
+  if (interactionTimer !== null) clearTimeout(interactionTimer)
+  interactionTimer = setTimeout(() => { interactionTimer = null; void refreshInteractions() }, 30)
+}
+async function refreshInteractions() {
+  const requested = currentId, epoch = ++interactionEpoch
+  if (!requested) return
+  interactionInFlight += 1
+  try {
+    const value = await rpc('mobile/dsh/interactions', { sessionId: requested })
+    if (requested !== currentId || epoch !== interactionEpoch) return
+    if (value && value.channels) page.setChannels(value.channels)
+    page.setInteractions(value)
+    console.log('[dsh-chat] 交互待办：选择=' + ((value && value.values && value.values.userQuestions && value.values.userQuestions.active || []).length))
+  } catch (error) {
+    console.log('[dsh-chat] 交互读取：' + (error instanceof Error ? error.message : String(error)))
+  } finally { interactionInFlight -= 1 }
+}
+function receiveEvents(events) {
+  let interactionChanged = false, childrenChanged = false
+  for (const event of Array.isArray(events) ? events : []) {
+    const data = event.data || {}
+    if ((event.type === 'tool/call' || event.type === 'tool/ptc-dispatch') && data.name === 'ask_user_question') {
+      questionCallIds.add(data.callId || data.subCallId)
+      interactionChanged = true
+    }
+    if (event.type === 'tool/result' && questionCallIds.has(data.callId || (data.message && data.message.toolCallId))) interactionChanged = true
+    if (event.type === 'user/message' && data.source && data.source.kind === 'user-question-reply') interactionChanged = true
+    if (event.type === 'subagent/catalog' || event.type === 'subagent/status') childrenChanged = true
+  }
+  page.handlers.onEvents(events)
+  if (interactionChanged) scheduleInteractions()
+  if (childrenChanged) void loadSessions()
+}
 
 /**
  * ★★ 审批**裁决**那条路 ✓（`mobile/dsh/approval` ✓ —— 手机上点「拒绝」/「允许一次」✓）。
@@ -119,16 +157,14 @@ function answerApproval(requestId, decision) {
  * ★ 探完立刻、也只探一次 ✓（不做轮询 ✓ —— 通道起来与否是宿主重启才有的事 ✓）。
  */
 function probeApprovalChannel(page) {
-  return answerApproval('probe-no-such-request', 'rejected').then(
-    function () {
-      page.setApprovalChannel(true)
-      return true
-    },
-    function () {
-      page.setApprovalChannel(false)
-      return false
-    },
-  )
+  return rpc('mobile/dsh/capabilities', {}).then(value => {
+    if (!value || !value.channels) throw new Error('宿主没有返回通道能力')
+    page.setChannels(value.channels)
+    return value.channels.approval === true
+  }).catch(() => answerApproval('probe-no-such-request', 'rejected').then(
+    () => { page.setApprovalChannel(true); return true },
+    () => { page.setApprovalChannel(false); return false },
+  ))
 }
 
 const page = mountChat({
@@ -136,6 +172,9 @@ const page = mountChat({
   onSwitch: function (id) {
     currentId = id
     received = 0
+    latestProjections = null
+    interactionEpoch += 1
+    questionCallIds.clear()
     void loadSessions()
     // ★ 切会话 ⇒ **旧流先关掉** ✓（`refreshFetch` 里走 `startStream` ⇒ 先 `stopStream` ✓）
     return refreshFetch()
@@ -163,8 +202,8 @@ const page = mountChat({
    *   只是「发完之后立刻取一次」这一下现在按取数方式分派 ✓（`refreshFetch` ✓）：
    *   流 ⇒ 重开这条流（新快照 ✓）；轮询 ⇒ 与改动前逐字相同的 `refreshNow()` ✓。
    */
-  send: function (text) {
-    return rpc('mobile/dsh/send', { sessionId: currentId, text: text }).then(function () {
+  send: function (text, receiptIds) {
+    return rpc('mobile/dsh/send', { sessionId: currentId, text: text, ...(receiptIds && receiptIds.length ? { receiptIds } : {}) }).then(function () {
       return refreshFetch()
     })
   },
@@ -173,6 +212,10 @@ const page = mountChat({
    *   `answerApproval` ✓：它负责置灰、把结果说出来、失败也说出来 ✓）。
    */
   answerApproval: answerApproval,
+  answerQuestion: function (callId, answers) {
+    return rpc('mobile/dsh/question', { sessionId: currentId, callId, answers }).then(value => { scheduleInteractions(); return value })
+  },
+  upload: function (sessionId, name, bytes) { return rpc('mobile/dsh/upload', { sessionId, name, bytes }) },
 })
 
 let received = 0
@@ -191,6 +234,8 @@ const poller = new ChatPoller({
     return rpc('mobile/dsh/read', { sessionId: requested, maxMessages: WINDOW }).then(function (value) {
       if (requested !== currentId) return [] // 过期答案 ⇒ 作废（也不许改游标/连接状态 ✗）
       page.setConnection('online')
+      if (value && value.values) { latestProjections = { values: value.values }; page.setInteractions(value) }
+      if (value && value.channels) page.setChannels(value.channels)
       const events = value !== null && typeof value === 'object' && Array.isArray(value.events) ? value.events : []
       if (typeof value.sessionId === 'string' && value.sessionId.length > 0) currentId = value.sessionId
       received += events.length
@@ -201,7 +246,7 @@ const poller = new ChatPoller({
 })
 
 // 把取数循环的处理器接上（★ 显式 ✓ —— 不靠"偷偷改别人的 options 对象"✗，那个坑踩过两次）
-poller.options.onEvents = page.handlers.onEvents
+poller.options.onEvents = receiveEvents
 poller.options.onError = function (message) {
   page.setConnection('offline')
   page.handlers.onError(message)
@@ -305,7 +350,7 @@ function deduperFor(sessionId) {
       return Promise.resolve([])
     },
     onEvents: function (events) {
-      page.handlers.onEvents(events)
+      receiveEvents(events)
     },
     onError: function (message) {
       page.handlers.onError(message)
@@ -368,6 +413,10 @@ function startStream(sessionId) {
         setConnection('online')
         reopenAttempt = 0
         rememberProjections(next.value)
+        if (next.value && next.value.type === 'snapshot') {
+          if (latestProjections && latestProjections.values) page.setInteractions(latestProjections)
+          scheduleInteractions()
+        }
         received += events.length
         // ★★ 复用现成那条路 ✓：`accept` 负责排序 + `seq` 去重 + 喂给 `ui.js` ✓
         deduperFor(requested).accept(events)
@@ -453,6 +502,7 @@ try {
   void error
 }
 try {
+  boot.chatInteractionStatus = () => ({ pending: interactionTimer !== null, inFlight: interactionInFlight, epoch: interactionEpoch })
   boot.chatProjections = function () {
     return latestProjections
   }

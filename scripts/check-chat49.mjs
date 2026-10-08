@@ -29,10 +29,10 @@ f.push=function(events){for(const event of events) queue.push({type:'event',even
 const ok=value=>Promise.resolve({result:{ok:true,value}});
 window.__DSH_MOBILE_BOOT__={renderMarkdownInto:(el,text)=>{el.textContent=text},tunnel:{
  rpc(method,payload){const a=payload.args||{}; f.calls.push({method,args:a});
- if(method==='mobile/dsh/sessions')return ok({sessions:[{id:'s1',title:'验收会话'},{id:'s2',title:'第二会话'}]});
+ if(method==='mobile/dsh/sessions')return ok({sessions:[{id:'s1',title:'验收会话',subagentStats:{total:2,running:1}},{id:'s2',title:'第二会话'}]});
  if(method==='mobile/dsh/capabilities')return ok({channels:f.channels});
  if(method==='mobile/dsh/interactions')return ok({sessionId:a.sessionId,values:f.values,channels:f.channels});
- if(method==='mobile/dsh/approval'){f.answers.push(a);return ok({ok:true,outcome:a.decision})}
+ if(method==='mobile/dsh/approval'){f.answers.push(a);if(f.failApproval)return Promise.reject(Error('审批中断'));return ok({ok:true,outcome:a.decision})}
  if(method==='mobile/dsh/question'){f.answers.push(a);if(f.rejectQuestion)return ok({ok:false,accepted:false});f.values.userQuestions.active=[];return ok({ok:true,accepted:true})}
  if(method==='mobile/dsh/upload'){f.uploads.push(a);if(f.failUpload)return Promise.reject(Error('上传中断'));return ok({ok:true,receiptId:'receipt49',file:{attachmentId:'attachment49',name:a.name,bytes:a.bytes.length}})}
  if(method==='mobile/dsh/send'){f.sent.push(a);if(f.failSend)return Promise.reject(Error('发送中断'));return ok({ok:true})}
@@ -105,7 +105,81 @@ try{
  check('点击图形定位记录并打开其调用详情',await evaluate(`(()=>{document.querySelector('.trace-bar').dispatchEvent(new MouseEvent('click',{bubbles:true}));const row=document.querySelector('[data-trace-seq="6"]');return row.classList.contains('is-selected')&&row.closest('.trace-call').open})()`))
  check('清空搜索恢复全部轨迹',await evaluate(`(()=>{const i=document.querySelector('[aria-label=搜索轨迹]');i.value='';i.dispatchEvent(new Event('input'));return document.querySelectorAll('.trace-bar').length>=5})()`))
  await evaluate(`document.querySelector('#tab-chat').click()`)
- const EXPECTED_MIN_CHECKS=26
+ const until=async expression=>{for(let n=0;n<100;n++){if(await evaluate(expression)===true)return true;await sleep(20)}return false}
+ check('子智能体徽标取真实当前会话运行数',await evaluate(`(()=>{const b=document.querySelector('#subagent-count');return !b.hidden&&b.textContent==='● 1'&&b.classList.contains('is-running')&&b.title.includes('子智能体 2 个')})()`))
+ await evaluate(`__chat49.values.userQuestions.active=[{callId:'q49',state:'open',questions:[{id:'q1',question:'选择方案',options:[{label:'甲',description:'第一个方案'},{label:'乙'}]}]}];__chat49.push([{seq:20,time:3000,type:'tool/call',data:{name:'ask_user_question',callId:'q49',arguments:JSON.stringify({questions:__chat49.values.userQuestions.active[0].questions})}}])`)
+ const questionReady=await until(`!!document.querySelector('.question-card')`)
+ check('真实工具事件触发一次交互读取',questionReady&&(await evaluate(`__chat49.calls.filter(c=>c.method==='mobile/dsh/interactions').length>=2`)),questionReady)
+ check('选择卡在独立输入区，消息中无问题JSON且接管composer',await evaluate(`document.querySelector('#interactions .question-card')!==null&&document.querySelector('#composer').hidden&&!document.querySelector('#messages').textContent.includes('选择方案')`))
+ check('未选择时提交键禁用，选项按真实通道可点',await evaluate(`document.querySelector('.question-submit').disabled&&[...document.querySelectorAll('.question-option input')].every(n=>!n.disabled)`))
+ await evaluate(`document.querySelector('.question-option input[value="甲"]').click();__chat49.rejectQuestion=true;document.querySelector('.question-card').requestSubmit()`)
+ await until(`document.querySelector('.question-status')?.textContent.includes('没提交成功')`)
+ check('应答被拒绝保留卡片与选择并可重试',await evaluate(`document.querySelector('.question-option input[value="甲"]').checked&&!document.querySelector('.question-submit').disabled&&document.querySelector('.question-status').textContent.includes('未被接收')`))
+ await evaluate(`__chat49.rejectQuestion=false;document.querySelector('.question-card').requestSubmit()`)
+ const questionDone=await until(`document.querySelector('.question-card')===null`)
+ const reply=await evaluate(`__chat49.answers.filter(a=>a.callId==='q49').at(-1)`)
+ check('选择应答携带真实session、callId与选项标签',reply?.sessionId==='s1'&&reply?.callId==='q49'&&JSON.stringify(reply?.answers)===JSON.stringify([{id:'q1',selected:['甲']}]),reply)
+ check('接受后撤下选择卡并恢复草稿入口',questionDone&&(await evaluate(`document.querySelector('#interactions').hidden&&!document.querySelector('#composer').hidden`)))
+ await evaluate(`__chat49.push([{seq:21,time:3100,type:'approval/asked',data:{id:'a49',toolName:'bash',callId:'a-call49',reason:'需要批准'}}])`)
+ await until(`!!document.querySelector('#interactions .approval')`)
+ check('审批同样独立接管输入区而非消息',await evaluate(`!!document.querySelector('#interactions .approval')&&!document.querySelector('#messages .approval')&&document.querySelector('#composer').hidden&&[...document.querySelectorAll('.approval-option')].every(n=>!n.disabled)`))
+ await evaluate(`document.querySelector('.approval-option[data-decision="allowed-once"]').click()`)
+ const approvalDone=await until(`!document.querySelector('#interactions .approval')`)
+ const approvalReply=await evaluate(`__chat49.answers.find(a=>a.requestId==='a49')`)
+ check('审批点击调用正式裁决词汇且成功撤卡',approvalDone&&approvalReply?.requestId==='a49'&&approvalReply?.decision==='allowed-once',approvalReply)
+ check('上传能力接通后附件键实际可用',await evaluate(`!document.querySelector('[data-tool=attach]').disabled`))
+ const filePick=await evaluate(`(async()=>{const dt=new DataTransfer();dt.items.add(new File([new Uint8Array([0,1,127,128,255])],'字节测试.bin',{type:'application/octet-stream'}));const i=document.querySelector('#attachment-input');i.files=dt.files;i.dispatchEvent(new Event('change'));return true})()`)
+ await until(`__chat49.uploads.length===1&&document.querySelector('.attachment-chip')?.textContent.includes('5 字节')`)
+ const upload=await evaluate(`(()=>{const u=__chat49.uploads[0];return u?{sessionId:u.sessionId,name:u.name,isBytes:u.bytes instanceof Uint8Array,bytes:[...u.bytes]}:{}})()`)
+ check('文件选择发送原始Uint8Array而非空对象',filePick&&upload.sessionId==='s1'&&upload.name==='字节测试.bin'&&upload.isBytes&&JSON.stringify(upload.bytes)==='[0,1,127,128,255]',upload)
+ check('上传成功显示真实文件大小与收据待发状态',await evaluate(`document.querySelector('.attachment-chip').textContent.includes('5 字节')&&!document.querySelector('button[type=submit]').disabled&&document.querySelector('#input').value===''`))
+ await evaluate(`__chat49.failSend=true;document.querySelector('#input').value='附件草稿';document.querySelector('#input').dispatchEvent(new Event('input'));document.querySelector('#composer').requestSubmit()`)
+ await until(`document.querySelector('#status').textContent.includes('没发出去')`)
+ check('发送失败保留文字与已上传附件',await evaluate(`document.querySelector('#input').value==='附件草稿'&&document.querySelector('.attachment-chip')!==null&&!document.querySelector('button[type=submit]').disabled`))
+ await evaluate(`__chat49.failSend=false;document.querySelector('#input').value='';document.querySelector('#input').dispatchEvent(new Event('input'));document.querySelector('#composer').requestSubmit()`)
+ await until(`document.querySelector('.attachment-chip')===null`)
+ const sent=await evaluate(`__chat49.sent.at(-1)`)
+ check('仅附件消息发送会话收据且不丢附件',sent?.sessionId==='s1'&&sent?.text===''&&JSON.stringify(sent?.receiptIds)==='["receipt49"]',sent)
+ check('成功发送后清掉对应会话附件',await evaluate(`document.querySelector('#attachments').hidden&&document.querySelector('#input').value===''`))
+ await evaluate(`__chat49.failUpload=true;const dt=new DataTransfer();dt.items.add(new File(['bad'],'失败.txt'));const i=document.querySelector('#attachment-input');i.files=dt.files;i.dispatchEvent(new Event('change'))`)
+ await until(`document.querySelector('.attachment-chip')?.textContent.includes('上传中断')`)
+ check('上传失败明确显示原因并阻止缺收据发送',await evaluate(`document.querySelector('.attachment-chip').textContent.includes('上传中断')&&document.querySelector('button[type=submit]').disabled`))
+ await evaluate(`document.querySelector('[aria-label="移除附件 失败.txt"]').click()`)
+ check('失败附件可移除且不清空其他草稿',await evaluate(`document.querySelector('#attachments').hidden&&document.querySelector('#input').value===''`))
+ await until(`__DSH_MOBILE_BOOT__.chatInteractionStatus().pending===false&&__DSH_MOBILE_BOOT__.chatInteractionStatus().inFlight===0`)
+ const beforeIdle=await evaluate(`__chat49.calls.filter(c=>c.method==='mobile/dsh/interactions').length`)
+ await sleep(300)
+ const afterIdle=await evaluate(`__chat49.calls.filter(c=>c.method==='mobile/dsh/interactions').length`)
+ check('空闲期间不轮询交互投影',beforeIdle===afterIdle,{beforeIdle,afterIdle})
+ await evaluate(`document.querySelector('#session-menu').click();[...document.querySelectorAll('.session-row')].find(n=>n.textContent.includes('第二会话')).click()`)
+ await until(`document.querySelector('#title').textContent==='第二会话'`)
+ check('无子智能体数据会话不编造零徽标',await evaluate(`document.querySelector('#subagent-count').hidden`))
+ await evaluate(`__chat49.channels={approval:false,question:false,upload:false};__chat49.values.userQuestions.active=[{callId:'qmulti49',state:'continued',questions:[{id:'qm',question:'多选题',multiSelect:true,options:[{label:'甲'},{label:'乙'}]}]}];__chat49.push([{seq:30,time:4000,type:'tool/ptc-dispatch',data:{name:'ask_user_question',subCallId:'qmulti49'}}])`)
+ await until(`document.querySelector('[data-call-id="qmulti49"]')!==null`)
+ check('通道缺失时选择控件与附件键明确置灰',await evaluate(`[...document.querySelectorAll('.question-option input')].every(n=>n.disabled)&&document.querySelector('.question-submit').disabled&&document.querySelector('[data-tool=attach]').disabled&&document.querySelector('.question-status').textContent.includes('未接通')`))
+ await evaluate(`__chat49.channels={approval:true,question:true,upload:true};__chat49.push([{seq:31,time:4100,type:'tool/ptc-dispatch',data:{name:'ask_user_question',subCallId:'qmulti49'}}])`)
+ await until(`document.querySelector('.question-option input')?.disabled===false`)
+ check('continued问题使用可应答卡而不伪装消息',await evaluate(`document.querySelector('.question-title').textContent.includes('任务已继续')&&!document.querySelector('#messages').textContent.includes('多选题')`))
+ await evaluate(`document.querySelectorAll('.question-option input').forEach(n=>n.click());const t=document.querySelector('.question-card textarea');t.value='补充说明';t.dispatchEvent(new Event('input'));document.querySelector('.question-card').requestSubmit()`)
+ await until(`document.querySelector('.question-card')===null`)
+ const multi=await evaluate(`__chat49.answers.find(a=>a.callId==='qmulti49')`)
+ check('多选与自定义文字完整交给真实答案契约',multi?.sessionId==='s2'&&JSON.stringify(multi?.answers)==='[{"id":"qm","selected":["甲","乙"],"custom":"补充说明"}]',multi)
+ await evaluate(`__chat49.values.userQuestions.active=[{callId:'qcustom49',state:'open',questions:[{id:'qc',question:'自行回答',options:[{label:'原选项'}]}]}];__chat49.push([{seq:32,time:4200,type:'tool/call',data:{name:'ask_user_question',callId:'qcustom49'}}])`)
+ await until(`document.querySelector('[data-call-id="qcustom49"]')!==null`)
+ const customEdit=await evaluate(`(()=>{document.querySelector('.question-option input').click();const t=document.querySelector('.question-card textarea');t.value='自由回答';t.dispatchEvent(new Event('input'));return true})()`); if(customEdit!==true) console.log('自定义编辑诊断',customEdit)
+ check('单选的自定义回答与既有选项互斥',await evaluate(`!document.querySelector('.question-option input').checked&&!document.querySelector('.question-submit').disabled`),await evaluate(`({cards:[...document.querySelectorAll('.question-card')].map(n=>({id:n.dataset.callId,text:n.textContent,choices:[...n.querySelectorAll('input')].map(i=>({checked:i.checked,disabled:i.disabled})),custom:n.querySelector('textarea')?.value,disabled:n.querySelector('button').disabled})),active:__chat49.values.userQuestions.active,calls:__chat49.calls.map(c=>c.method)})`))
+ await evaluate(`document.querySelector('.question-card').requestSubmit()`)
+ await until(`document.querySelector('.question-card')===null`)
+ const custom=await evaluate(`__chat49.answers.find(a=>a.callId==='qcustom49')`)
+ check('自定义回答发送空selected加原文',JSON.stringify(custom?.answers)==='[{"id":"qc","selected":[],"custom":"自由回答"}]',custom)
+ await evaluate(`__chat49.failApproval=true;__chat49.push([{seq:40,time:5000,type:'approval/asked',data:{id:'a-fail49',toolName:'bash',reason:'失败重试'}}])`)
+ await until(`!!document.querySelector('#interactions .approval')`)
+ await evaluate(`document.querySelector('.approval-option[data-decision="rejected"]').click()`)
+ await until(`document.querySelector('.approval-why')?.textContent.includes('审批中断')`)
+ check('审批网络失败保留卡片、显示原因并恢复重试键',await evaluate(`document.querySelector('.approval-why').textContent.includes('审批中断')&&[...document.querySelectorAll('.approval-option')].every(n=>!n.disabled)`))
+ await evaluate(`__chat49.failApproval=false;document.querySelector('.approval-option[data-decision="rejected"]').click()`)
+ await until(`!document.querySelector('#interactions .approval')`)
+ const EXPECTED_MIN_CHECKS=51
  check('下界等于实跑总数',total+1===EXPECTED_MIN_CHECKS,{total:total+1,expected:EXPECTED_MIN_CHECKS})
 }finally{
  if(ws)ws.close();if(chrome){try{process.kill(-chrome.pid,'SIGKILL')}catch{}try{execFileSync('pkill',['-f',`--user-data-dir=${profile}`],{stdio:'ignore'})}catch{}}

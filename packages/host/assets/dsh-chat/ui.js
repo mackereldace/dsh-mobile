@@ -399,8 +399,14 @@ export function appendEvents(container, events, context) {
     80,
   )
   for (const event of Array.isArray(events) ? events : []) {
+    if (context && typeof context.isQuestionEvent === 'function' && context.isQuestionEvent(event)) continue
     const node = renderEvent(event, context)
-    if (node !== null) container.appendChild(node)
+    if (node !== null) {
+      if (classify(event.type) === 'approval' && context && context.dock) {
+        if (!decidedEventFor(context, event)) context.dock.insertBefore(node, context.dock.firstChild)
+        if (typeof context.dockChanged === 'function') context.dockChanged()
+      } else container.appendChild(node)
+    }
   }
   // ★ 用户手动往上翻的时候**不许把他拽回去** ✗（`follow` 是在追加之前量的 ✓）
   if (follow && typeof scroller.scrollTop === 'number') scroller.scrollTop = scroller.scrollHeight
@@ -941,10 +947,12 @@ function answerApproval(card, view, option, context) {
     status.textContent = '这一页没有接上裁决通道（按钮本不该能按）'
     return Promise.resolve()
   }
+  let accepted = false
   return Promise.resolve()
     .then(() => answer(view.requestId, option.id))
     .then((result) => {
       const ok = result !== null && typeof result === 'object' && result.ok === true
+      accepted = ok
       const outcome = result !== null && typeof result === 'object' && typeof result.outcome === 'string' ? result.outcome : ''
       status.textContent = ok
         ? '已提交：' + (outcome.length > 0 ? outcome : option.id)
@@ -952,6 +960,8 @@ function answerApproval(card, view, option, context) {
     })
     .catch((error) => {
       status.textContent = '没提交成功：' + (error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      if (!accepted && context && context.channelConnected === true) for (const button of buttons) button.disabled = false
     })
 }
 
@@ -1411,6 +1421,7 @@ export function mountChat(options) {
       void error
     }
   }
+  const dock = root.querySelector('#interactions')
   const form = root.querySelector('#composer')
   const input = root.querySelector('#input')
   const status = root.querySelector('#status')
@@ -1505,6 +1516,19 @@ export function mountChat(options) {
    *   ★ 探测结果可能比卡片**晚到** ✓ ⇒ 变了必须把已经画出来的卡**就地重画** ✓（见下 ✓）。
    */
   let approvalChannelConnected = false
+  let questionChannelConnected = false, uploadChannelConnected = false
+  let interactionValues = { active: [], settled: [] }
+  const answeredQuestions = new Set()
+  const questionCards = new Map()
+  const questionEventIds = new Set()
+  const attachmentDrafts = new Map()
+  const activeAttachments = () => attachmentDrafts.get(currentSessionId) || []
+  const dockChanged = () => {
+    if (!dock) return
+    dock.hidden = dock.children.length === 0
+    // 老宿主缺应答能力时保留草稿入口；通道已接通的待办接管输入区。
+    if (form) form.hidden = !dock.hidden && (approvalChannelConnected || questionChannelConnected)
+  }
   /**
    * ★ 那本账之一：`requestId ⇒ 那条 approval/decided` ✓。
    *   ★ 为什么非得有它 ✗：裁决事件可能比那张卡**晚到** ✓（页面是分批轮询的 ✓），
@@ -1523,7 +1547,27 @@ export function mountChat(options) {
       const id = approvalIdOf(event)
       return id.length > 0 ? decidedApprovals.get(id) : undefined
     },
-    answer: options.answerApproval,
+    dock, dockChanged,
+    isQuestionEvent: event => {
+      const data = event.data || {}
+      if ((event.type === 'tool/call' || event.type === 'tool/ptc-dispatch') && data.name === 'ask_user_question') {
+        questionEventIds.add(data.callId || data.subCallId)
+        return true
+      }
+      return event.type === 'tool/result' && questionEventIds.has(data.callId || (data.message && data.message.toolCallId))
+    },
+    answer: async (id, decision) => {
+      const session = currentSessionId
+      const result = await options.answerApproval(id, decision)
+      if (session === currentSessionId && result && result.ok === true) {
+        const drawn = drawnApprovals.get(id)
+        if (drawn) drawn.wrapper.remove()
+        drawnApprovals.delete(id)
+        decidedApprovals.set(id, { type: 'approval/decided', data: { id, decision } })
+        dockChanged()
+      }
+      return result
+    },
   })
 
   /** 这一批里的 `approval/decided` 入账 ✓（返回**这一批新增**的那些 ✓）。 */
@@ -1554,7 +1598,8 @@ export function mountChat(options) {
       const drawn = drawnApprovals.get(id)
       if (drawn === undefined) continue
       drawnApprovals.delete(id)
-      redrawApproval(drawn.wrapper, drawn.event, decided)
+      drawn.wrapper.remove()
+      dockChanged()
     }
   }
 
@@ -1564,8 +1609,9 @@ export function mountChat(options) {
    *   画卡那条路是纯函数 ✓（`appendEvents`/`renderEvent` 不碰页面状态 ✓）。
    */
   const registerDrawnApprovals = (events) => {
-    if (typeof list.querySelectorAll !== 'function') return
-    for (const card of list.querySelectorAll('.approval[data-request]')) {
+    const container = dock || list
+    if (typeof container.querySelectorAll !== 'function') return
+    for (const card of container.querySelectorAll('.approval[data-request]')) {
       const id = String(card.getAttribute('data-request') || '')
       if (id.length === 0 || drawnApprovals.has(id)) continue
       const asked = (Array.isArray(events) ? events : []).filter((event) => approvalIdOf(event) === id)[0]
@@ -1583,9 +1629,123 @@ export function mountChat(options) {
     const next = connected === true
     if (next === approvalChannelConnected) return
     approvalChannelConnected = next
+    dockChanged()
     for (const [id, drawn] of [...drawnApprovals]) {
       redrawApproval(drawn.wrapper, drawn.event, decidedApprovals.get(id))
     }
+  }
+  const renderQuestion = entry => {
+    if (!dock || !entry || typeof entry.callId !== 'string' || !Array.isArray(entry.questions)) return
+    const signature = JSON.stringify(entry)
+    const previous = questionCards.get(entry.callId)
+    if (previous && previous.signature === signature) return
+    if (previous) previous.node.remove()
+    const card = document.createElement('form')
+    card.className = 'question-card'
+    card.setAttribute('data-call-id', entry.callId)
+    const title = document.createElement('div')
+    title.className = 'question-title'
+    title.textContent = entry.state === 'continued' ? '等待你的选择（任务已继续）' : '等待你的选择'
+    card.appendChild(title)
+    const fields = []
+    for (const q of entry.questions) {
+      const field = document.createElement('fieldset')
+      const legend = document.createElement('legend')
+      legend.textContent = q.question || q.header || q.id
+      field.appendChild(legend)
+      if (q.detail) { const detail = document.createElement('p'); detail.textContent = q.detail; field.appendChild(detail) }
+      const inputs = []
+      const custom = document.createElement('textarea')
+      custom.rows = 1
+      custom.placeholder = '补充或自行填写'
+      custom.setAttribute('aria-label', (q.header || q.question || q.id) + ' 自定义回答')
+      custom.disabled = !questionChannelConnected
+      for (const option of Array.isArray(q.options) ? q.options : []) {
+        const label = document.createElement('label')
+        label.className = 'question-option'
+        const choice = document.createElement('input')
+        choice.type = q.multiSelect ? 'checkbox' : 'radio'
+        choice.name = entry.callId + ':' + q.id
+        choice.value = option.label
+        choice.disabled = !questionChannelConnected
+        const text = document.createElement('span')
+        text.textContent = option.label
+        if (option.description) { const detail = document.createElement('small'); detail.textContent = option.description; text.appendChild(detail) }
+        label.append(choice, text)
+        choice.addEventListener('change', () => { if (!q.multiSelect) custom.value = ''; updateSubmit() })
+        inputs.push(choice)
+        field.appendChild(label)
+      }
+      custom.addEventListener('input', () => { if (!q.multiSelect && custom.value.trim()) inputs.forEach(input => { input.checked = false }); updateSubmit() })
+      field.appendChild(custom)
+      fields.push({ q, inputs, custom })
+      card.appendChild(field)
+    }
+    const submit = document.createElement('button')
+    submit.type = 'submit'
+    submit.className = 'question-submit'
+    submit.textContent = '提交选择'
+    const why = document.createElement('div')
+    why.className = 'question-status'
+    why.setAttribute('role', 'status')
+    why.textContent = questionChannelConnected ? '' : '选择应答通道未接通（请重开 DeepSeek Harness）'
+    card.append(submit, why)
+    let busy = false
+    const updateSubmit = () => { submit.disabled = busy || !questionChannelConnected || !fields.length || fields.some(f => !f.inputs.some(i => i.checked) && !f.custom.value.trim()) }
+    updateSubmit()
+    card.addEventListener('submit', async event => {
+      event.preventDefault()
+      if (submit.disabled || typeof options.answerQuestion !== 'function') return
+      const answers = fields.map(f => ({ id: f.q.id, selected: f.inputs.filter(i => i.checked).map(i => i.value), ...(f.custom.value.trim() ? {custom:f.custom.value.trim()} : {}) }))
+      const session = currentSessionId
+      busy = true
+      updateSubmit()
+      fields.forEach(f => [...f.inputs,f.custom].forEach(i => { i.disabled = true }))
+      why.textContent = '正在提交…'
+      try {
+        const result = await options.answerQuestion(entry.callId, answers)
+        if (session !== currentSessionId) return
+        if (!result || result.accepted !== true || result.ok !== true) throw new Error('请求已处理或已超时，本次选择未被接收')
+        answeredQuestions.add(entry.callId)
+        questionCards.delete(entry.callId)
+        card.remove()
+        dockChanged()
+        setNotice('选择已提交')
+      } catch (error) {
+        why.textContent = '没提交成功：' + (error instanceof Error ? error.message : String(error))
+        busy = false
+        fields.forEach(f => [...f.inputs,f.custom].forEach(i => { i.disabled = !questionChannelConnected }))
+        updateSubmit()
+      }
+    })
+    questionCards.set(entry.callId, { node: card, signature })
+    dock.appendChild(card)
+  }
+  const setInteractions = value => {
+    const questions = value && value.values ? value.values.userQuestions : value && value.userQuestions
+    if (!questions || !Array.isArray(questions.active)) return
+    interactionValues = questions
+    const activeIds = new Set(questions.active.map(entry => entry.callId))
+    for (const [id, card] of questionCards) {
+      if (!activeIds.has(id)) { card.node.remove(); questionCards.delete(id) }
+    }
+    for (const entry of questions.active) if (!answeredQuestions.has(entry.callId)) renderQuestion(entry)
+    dockChanged()
+  }
+  const setChannels = channels => {
+    if (!channels || typeof channels !== 'object') return
+    setApprovalChannel(channels.approval === true)
+    const changed = questionChannelConnected !== (channels.question === true)
+    questionChannelConnected = channels.question === true && typeof options.answerQuestion === 'function'
+    uploadChannelConnected = channels.upload === true && typeof options.upload === 'function'
+    if (changed) {
+      for (const card of questionCards.values()) card.node.remove()
+      questionCards.clear()
+      setInteractions({ userQuestions: interactionValues })
+    }
+    dockChanged()
+    paintComposer()
+    console.log('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
   }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
@@ -2018,8 +2178,27 @@ export function mountChat(options) {
         input.value = getDraft(drafts, currentId)
       }
       currentSessionId = currentId
+      if (dock) dock.replaceChildren()
+      questionCards.clear()
+      answeredQuestions.clear()
+      questionEventIds.clear()
+      interactionValues = { active: [], settled: [] }
+      dockChanged()
+    }
+    const badge = root.querySelector('#subagent-count')
+    const current = sessions.find(item => item.id === currentSessionId)
+    const stats = current && current.subagentStats
+    const total = stats && Number.isInteger(stats.total) && stats.total >= 0 ? stats.total : null
+    if (badge) {
+      badge.hidden = total === null || total === 0
+      const running = stats && Number.isInteger(stats.running) && stats.running >= 0 ? stats.running : null
+      badge.textContent = total === null ? '' : '● ' + (running !== null && running > 0 ? running : total)
+      badge.classList.toggle('is-running', running !== null && running > 0)
+      badge.title = total === null ? '' : '子智能体 ' + total + ' 个' + (running === null ? '（运行状态未知）' : '，运行中 ' + running + ' 个')
+      if (total !== null) console.log('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
     }
     paintSessions()
+    paintComposer()
   }
 
   /** 写一条临时消息 ✓（并立刻重画 ✓）。 */
@@ -2058,6 +2237,8 @@ export function mountChat(options) {
        */
       decidedApprovals.clear()
       drawnApprovals.clear()
+      if (dock) dock.querySelectorAll('.ev-approval').forEach(node => node.remove())
+      dockChanged()
       /**
        * ★★ 裁剪那件事的状态**跟着换会话一起归零** ✗（长会话那一单 ✓）——
        *   见 `resetEventWindow`：只摘那句"更早的 N 条已收起"✓（清屏上面已经做过了 ✓）。
@@ -2202,10 +2383,74 @@ export function mountChat(options) {
     }
   }
 
+  const attachmentsBox = root.querySelector('#attachments')
+  const attachmentInput = root.querySelector('#attachment-input')
+  const attachButton = root.querySelector('[data-tool=attach]')
+  const paintAttachments = () => {
+    if (!attachmentsBox) return
+    attachmentsBox.replaceChildren()
+    const files = activeAttachments()
+    attachmentsBox.hidden = !files.length
+    for (const file of files) {
+      const chip = document.createElement('div')
+      chip.className = 'attachment-chip' + (file.error ? ' is-error' : '')
+      const text = document.createElement('span')
+      text.textContent = file.name + (file.uploading ? ' · 上传中…' : file.error ? ' · ' + file.error : ' · ' + file.size + ' 字节')
+      chip.appendChild(text)
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.textContent = '×'
+      remove.setAttribute('aria-label', '移除附件 ' + file.name)
+      remove.disabled = sending
+      remove.addEventListener('click', () => {
+        attachmentDrafts.set(currentSessionId, activeAttachments().filter(entry => entry !== file))
+        paintComposer()
+      })
+      chip.appendChild(remove)
+      attachmentsBox.appendChild(chip)
+    }
+  }
+  const addAttachments = async files => {
+    if (!uploadChannelConnected || connection !== 'online' || !currentSessionId) return
+    const session = currentSessionId
+    for (const source of Array.from(files || [])) {
+      const file = { name: source.name, size: source.size, uploading: true, receiptId: '', error: '' }
+      const pending = attachmentDrafts.get(session) || []
+      pending.push(file)
+      attachmentDrafts.set(session, pending)
+      paintComposer()
+      try {
+        // 单帧协议32MiB，base64展开后仍须留足JSON和加密帧空间。
+        if (source.size > 20 * 1024 * 1024) throw new Error('附件超过20MiB单次上传上限')
+        const bytes = new Uint8Array(await source.arrayBuffer())
+        const value = await options.upload(session, source.name, bytes)
+        if (!value || value.ok !== true || typeof value.receiptId !== 'string' || !value.receiptId) throw new Error('宿主没有返回附件收据')
+        file.receiptId = value.receiptId
+        console.log('[dsh-chat] 附件上传：' + source.name + ' ' + bytes.length + ' 字节，收据已取得')
+      } catch (error) {
+        file.error = error instanceof Error ? error.message : String(error)
+        console.log('[dsh-chat] 附件上传失败：' + file.error)
+      }
+      file.uploading = false
+      if (session === currentSessionId) paintComposer()
+    }
+  }
+  if (attachButton) attachButton.addEventListener('click', () => { if (!attachButton.disabled && attachmentInput) attachmentInput.click() })
+  if (attachmentInput) attachmentInput.addEventListener('change', () => { const files = Array.from(attachmentInput.files || []); attachmentInput.value = ''; void addAttachments(files) })
+
   paintComposer = () => {
+    const files = activeAttachments()
+    const hasReceipts = files.some(file => file.receiptId.length > 0)
+    const uploadPending = files.some(file => file.uploading || file.error)
+    paintAttachments()
+    if (attachButton) {
+      attachButton.disabled = sending || !uploadChannelConnected || connection !== 'online' || !currentSessionId
+      attachButton.setAttribute('aria-disabled', String(attachButton.disabled))
+      attachButton.title = uploadChannelConnected ? '添加附件（单个≤20MiB）' : '附件通道未接通（请重开 DeepSeek Harness）'
+    }
     if (input !== null && input !== undefined) input.disabled = sending
     if (sendButton !== null && sendButton !== undefined) {
-      sendButton.disabled = sending || !canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection })
+      sendButton.disabled = sending || uploadPending || !(hasReceipts ? connection === 'online' : canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection }))
       /**
        * ★★ 这里原来写的是 `sendButton.textContent = sending ? '发送中…' : '发送'` ✗。
        *   新键子的**形状**是圆形箭头 ✓ ⇒ 那行字不能再当"按钮内容"写了 ✓（会把箭头抹掉 ✗）：
@@ -2242,7 +2487,10 @@ export function mountChat(options) {
     form.addEventListener('submit', async (submitEvent) => {
       if (submitEvent.preventDefault) submitEvent.preventDefault()
       const current = input === null || input === undefined ? '' : String(input.value || '')
-      if (!canSend({ text: current, sending, connection })) {
+      const session = currentSessionId
+      const files = activeAttachments()
+      const receiptIds = files.filter(file => file.receiptId).map(file => file.receiptId)
+      if (sending || files.some(file => file.uploading || file.error) || !(receiptIds.length ? connection === 'online' : canSend({ text: current, sending, connection }))) {
         // ★ 按了没反应是最糟的 ✓ —— 断线时说清楚 ✓
         if (connection === 'offline') setNotice('断线中，等连上再发（字还在）')
         return
@@ -2254,14 +2502,16 @@ export function mountChat(options) {
       paintComposer()
       setNotice('发送中…')
       try {
-        await options.send(begun.pending)
+        await options.send(begun.pending, receiptIds)
+        attachmentDrafts.set(session, [])
         sending = false
         sendSettled(true, begun.pending)
         setNotice('已发出')
       } catch (error) {
         // ★★ 失败 ⇒ **原文放回输入框** ✗（"发出去的字突然没了"是我最想避免的一种）
         const settled = sendSettled(false, begun.pending)
-        if (input !== null && input !== undefined) input.value = settled.draft
+        if (session === currentSessionId && input !== null && input !== undefined) input.value = settled.draft
+        else drafts = putDraft(drafts, session, settled.draft)
         sending = false
         growInput()
         setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
@@ -2321,6 +2571,9 @@ export function mountChat(options) {
      *   探到接通 ⇒ 卡片上那两颗按钮才可点 ✓；探不到 ⇒ 一直置灰 ✓（不假装能用 ✗）。
      */
     setApprovalChannel,
+    setChannels,
+    setInteractions,
+    addAttachments,
     setConnection: (next) => {
       connection = next === 'offline' ? 'offline' : next === 'online' ? 'online' : 'unknown'
       paint()

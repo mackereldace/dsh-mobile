@@ -483,3 +483,27 @@
 .trace-record { font-size:13px; line-height:1.6; margin:8px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 .trace-list .is-selected { outline:2px solid var(--tab-ink-active); outline-offset:3px; }
 .trace-empty[hidden] { display:none; }
+
+/* 输入区接管：待办独立于消息窗口，处理后回到草稿。 */
+#interactions { flex:none; max-height:45vh; overflow:auto; padding:10px 14px; border-top:1px solid var(--line); background:var(--surface); }
+#interactions[hidden], #composer[hidden], .attachments[hidden] { display:none; }
+#interactions .approval { margin:0 0 8px; }
+#interactions .ev { margin:0; }
+.question-card { padding:10px 2px; border:0; margin:0; }
+.question-title { font-weight:600; margin-bottom:10px; }
+.question-card fieldset { border:0; padding:0; margin:0 0 12px; min-width:0; }
+.question-card legend { font-size:14px; margin-bottom:6px; }
+.question-card p, .question-status { font-size:12px; color:var(--ink2); margin:5px 0; }
+.question-option { display:flex; align-items:flex-start; gap:8px; border:1px solid var(--line); border-radius:7px; padding:9px 10px; margin:5px 0; font-size:13px; }
+.question-option:has(input:checked) { border-color:var(--tab-ink-active); background:var(--tint); }
+.question-option input { accent-color:var(--tab-ink-active); margin:3px 0 0; }
+.question-option small { display:block; font-size:11px; color:var(--ink2); }
+.question-card textarea { width:100%; resize:vertical; padding:8px; border:1px solid var(--line); border-radius:7px; background:var(--surface); color:var(--ink); font:inherit; font-size:13px; }
+.question-submit { border:0; border-radius:6px; padding:8px 14px; color:white; background:var(--tab-ink-active); font:inherit; font-size:13px; }
+.question-submit:disabled { opacity:.45; }
+.attachments { display:flex; flex-direction:column; gap:5px; padding:0 0 8px; }
+.attachment-chip { display:flex; gap:8px; font-size:12px; color:var(--ink2); padding:5px 8px; background:var(--tint); border-radius:5px; }
+.attachment-chip span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.attachment-chip button { border:0; background:none; color:var(--ink2); font:inherit; }
+.attachment-chip.is-error { color:var(--danger); }
+.subagent-count.is-running { color:var(--accent); }
