@@ -5478,7 +5478,8 @@ try {
    *   而 `JSON.stringify(null)` 返回的**字符串是** `'null'` ✓
    *   ⇒ `JSON.parse('null')` 的结果是 **`null`**（不是对象 ✓）
    *   ⇒ 下面那句 `ff.w` 直接抛 `TypeError: Cannot read properties of null (reading 'w')` ✗，
-   *   被主体 try 的 catch 接住 ⇒ **后面 224 条断言一条都没跑** ✗✗（0.2.0 上实测：159 条即崩 ✗）。
+   *   被主体 try 的 catch 接住 ⇒ **后面 225 条断言一条都没跑** ✗✗（0.2.0 上实测：159 条即崩 ✗；
+   *   修好后同一跑 384 条 ✓ ＝ 159 + 225 ✓）。
    *
    *   修法（★ 只加兜底、**不动判据** ✓）：把"不是对象"一律折成 `{}` ✓ ——
    *   于是它照旧走下面那条 `check(..., 诊断文本)` ✓：**该红就红一条** ✓，不崩整轮 ✓。
@@ -5498,7 +5499,7 @@ try {
       ? (ff.w === undefined
         ? `★ 探针取到了但**没等到读数**（上游是 ${JSON.stringify(ff)}）⇒ 弹窗外层进 DOM 后 rAF 没跑完 ✗`
         : `首帧 ${ff.w}×${ff.h} @${ff.x},${ff.y} vs 视口 ${ff.vw}×${ff.vh}｜首帧已带标记=${ff.tagged}`)
-      : `★ 探针**没取到**（__dshmPanelFirstFrame 一直是 null，原始返回 ${JSON.stringify(firstFrame)}）⇒ 观察窗口内没看到 [role="dialog"][aria-modal="true"] + nav + [role="presentation"] 这个组合 ✗`,
+      : `★ 探针**没取到**（__dshmPanelFirstFrame 一直是 null，原始返回 ${JSON.stringify(firstFrame)}）⇒ 观察窗口内**没进过**探针那个分支：它要求 [role="presentation"] 浮层里那个 :scope > div **自己**有 nav 子元素（0.2.0 实测 nav 嵌在更深一层 ⇒ 这一条不成立 ✗ —— 即"探针认不出 0.2.0 的设置弹窗"✓，**不是**"0.2.0 上首帧真的不是整屏"✗）`,
   )
   check(
     np.rect !== undefined && Math.abs(np.rect.w - np.viewport.w) <= 2 && np.rect.h >= np.viewport.h - 2,
