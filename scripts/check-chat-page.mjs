@@ -46,6 +46,43 @@ const ASSETS = join(HERE, '..', 'packages', 'host', 'assets', 'dsh-chat')
  */
 const FIXTURE_DIR = join(HERE, '..', 'packages', 'host', 'test', 'dsh-chat', 'fixtures')
 const FIXTURE_EVENT = JSON.parse(readFileSync(join(FIXTURE_DIR, 'real-assistant-message-event.json'), 'utf8'))
+/**
+ * ★★ 真 markdown 夹具（本单新增 ✓）：`fixtures/README.md` —— 仓里那份**真文档** ✓，一字未改 ✓。
+ *
+ * ★ 为什么用**文件**而不是在脚本里编一段 ✗：上一单的教训正是「夹具与真实不符 ⇒
+ *   断言全绿、线上照错」✓。这份文档里有标题（`#` / `##` ✓）、粗体（`**…**` ✓）、
+ *   有序列表（`1.` `2.` ✓）、围栏代码块（```bash ✓）、表格（`|` ✓）——
+ *   全是**真 markdown**，而期望值（下面几条读数 ✓）**从文档机械推出来** ✗，不是手抄的 ✓。
+ */
+const MD_DOC = readFileSync(join(FIXTURE_DIR, 'README.md'), 'utf8')
+/**
+ * ★ 不可信输入与公式的**探针**（这一块**不是真事件** ✗ —— 真事件里既没有公式、
+ *   也没有恶意输入 ✓ ⇒ 这两档只能自己带 ✓，并且在这里**写明**它是探针 ✓）。
+ *
+ * ★ 内容是**真的**：粗体 / 斜体 / 行内代码 / 任务勾选 / 行内公式那几行**逐字**取自
+ *   工作区的 `公式样例.md` ✓（用户自己写的那一页 ✓）。
+ * ★ 恶意输入是**经典探针**（`<img onerror=…>` 与 `javascript:` 链接 ✓）——
+ *   它验的是渲染器的**真实行为** ✓（见报告第 5 节 ✓），不是观感 ✓。
+ */
+const PROBE_MD = [
+  '## 不可信输入与公式探针',
+  '',
+  '行内公式 $E = mc^2$ 与行间公式：',
+  '',
+  '$$',
+  'a^2 + b^2 = c^2',
+  '$$',
+  '',
+  '- **粗体**、*斜体*、`行内代码`',
+  '- [x] 任务勾选也能显示',
+  '',
+  '<img src=x onerror="alert(1)">',
+  '',
+  '<script>alert(3)</script>',
+  '',
+  '[点我](javascript:alert(2))',
+  '',
+].join('\n')
 const KEEP = process.argv.includes('--keep')
 
 /** 夹具读数（**由真事件机械推出** ✓ —— 不是手抄的期望值 ✗）。 */
@@ -66,13 +103,56 @@ const REAL_REASONING = REAL_PARTS_ALL
 /** 把一串字折成"HTML 里安全的片段" ✓（页面把文字转义过 ⇒ 直接 includes 会假失败 ✗）。 */
 const escapeHtml = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 /**
+ * ★ 不可信输入那几条用的判据：原文到底**以文字**出现在 DOM 里吗 ✓。
+ *
+ * ★ 为什么要两种编法 ✗：`--dump-dom` 把**文本节点**里的 `<` `>` `&` 转义 ✓，
+ *   但 **`"` 不转义**（引号只在属性里才需要转义 ✓）⇒ 只按 `escapeHtml` 去撞
+ *   会**假红** ✓（我第一次就是这样 ✓）。两种都认 ✓ —— 判据仍然是"它是**文字**" ✓，
+ *   而"它有没有变成元素"由另一条（`!/<img/` ✓）单独钉 ✓。
+ */
+const escapeTextNode = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const textVisible = (haystack, raw) => haystack.includes(escapeTextNode(raw)) || haystack.includes(escapeHtml(raw))
+/**
  * ★ 思维链里**开头**那一小段 ✓ —— 用来证明"它进了折叠的思考块、但**没进**正文气泡" ✓。
  * 取前 24 字（真思维链 ≥100 字 ✓）⇒ 它是 `data-text-head`（前 64 字）的**前缀** ✓。
  */
 const REAL_REASONING_HEAD = REAL_REASONING.slice(0, 24)
+/**
+ * ★★ 从**真事件正文**里机械取出来的两样东西（本单新增 ✓）—— 它们是
+ * 「markdown 记号」与「它该变成的那个元素的内容」之间的**唯一**判据 ✓。
+ *
+ * ★ 为什么非要这样 ✗：不能拿「文本里出现了 `**加了两遍**` 的原文」当「渲染成了粗体」✓
+ *   （那正是本仓今天栽过的那类假判据 ✓）。判据必须是：正文里那个 `**X**` 的 X，
+ *   在 DOM 里变成了**一个 `<strong>` 元素**，且里面**就是** X ✓。
+ */
+const REAL_BOLD = (REAL_PROSE.match(/\*\*([^*]+)\*\*/) ?? [])[1] ?? ''
+const REAL_INLINE_CODE = (REAL_PROSE.match(/`([^`]+)`/) ?? [])[1] ?? ''
+/** 正文里**第一个 markdown 记号之前**那一段 ✓（气泡的文字必须从它开始 ✓）。 */
+const REAL_PROSE_LEAD = REAL_PROSE.slice(0, REAL_PROSE.indexOf('**') < 0 ? 40 : REAL_PROSE.indexOf('**'))
+/** ★ 真 markdown 文档里的读数（同样**从文档机械推出来** ✓）。 */
+const MD_FENCE_FIRST_LINE = (MD_DOC.match(/```[A-Za-z0-9]*\n([^\n]+)/) ?? [])[1] ?? ''
+const MD_OL_COUNT = (MD_DOC.match(/^\d+[.)]\s+/gm) ?? []).length
+const MD_H_COUNT = (MD_DOC.match(/^#{1,6}\s+/gm) ?? []).length
+/** ★ 探针那段里的读数（`$…$` 有两处 ⇒ 该画出两个数学节点 ✓）。 */
+const PROBE_MATH_COUNT = 2
+
+/**
+ * 从 dump 里切出**某一条助手事件**的那一块 ✓ —— 按 `data-text-chars`（= 正文长度 ✓）找 ✓。
+ *
+ * ★ 为什么不用「第几条」✗：事件先后由 `seq` 决定 ✓，用序号会在夹具一增减时**静默错位** ✓
+ *   （切错了还照样去 includes ⇒ 假绿 ✓）。
+ */
+const agentBlockByChars = (html, chars) => {
+  for (const part of html.split('<div class="ev ev-agent')) {
+    if (!part.includes('data-type="assistant/message"')) continue
+    const seen = Number((part.match(/data-text-chars="(\d+)"/) ?? [])[1] ?? '-1')
+    if (seen === chars) return '<div class="ev ev-agent' + part.split('</div></div>')[0] + '</div></div>'
+  }
+  return ''
+}
 
 /** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 42
+const EXPECTED_MIN_CHECKS = 58
 
 let checks = 0
 let failed = 0
@@ -122,18 +202,55 @@ const FAKE_BOOT = `
     if (settled) deliver()
     else pending.push(deliver)
   }
-  // ★ 真事件**同步**拉（经典脚本先跑、module 是 defer ✓）⇒ 第一次读之前一定已经就位 ✓
+  // ★ 真事件与真 markdown 文档都**同步**拉（经典脚本先跑、module 是 defer ✓）
+  //   ⇒ 第一次读之前一定已经就位 ✓
   try {
     var xhr = new XMLHttpRequest()
     xhr.open('GET', '/fixture/real-assistant-message-event.json', false)
     xhr.send(null)
     realAssistant = JSON.parse(xhr.responseText)
     events = events.concat([realAssistant])
-    flush()
     document.documentElement.setAttribute('data-e2e-fixture', String(Array.isArray(realAssistant.data.message.content) ? realAssistant.data.message.content.length : -1))
   } catch (error) {
     document.documentElement.setAttribute('data-e2e-fixture-error', String((error && error.message) || error))
   }
+  /*
+   * ★★ 本单的**真 markdown 夹具** ✓：把仓里那份真文档（fixtures/README.md ✓）原样拉下来，
+   *   包成**真形状**的 assistant/message 事件 ✓（data.message.content 里 type=text 那种块 ✓）。
+   *   ★ 两条探针事件单独发（公式 + 不可信输入 ✓ —— 真事件里没有这两样 ✓）。
+   *   ★ seq 必须**大于**真事件那条（8345 ✓）✗：断言里取"第一条 assistant/message"的地方
+   *     还在（见下面 agentBlock ✓）⇒ 让真事件永远是第一条 ✓。
+   */
+  var mdDoc = ''
+  var probeDoc = ''
+  try {
+    var mdXhr = new XMLHttpRequest()
+    mdXhr.open('GET', '/fixture/real-markdown-doc.md', false)
+    mdXhr.send(null)
+    mdDoc = mdXhr.responseText
+  } catch (mdError) {
+    document.documentElement.setAttribute('data-e2e-md-error', String((mdError && mdError.message) || mdError))
+  }
+  try {
+    var probeXhr = new XMLHttpRequest()
+    probeXhr.open('GET', '/fixture/untrusted-probe.md', false)
+    probeXhr.send(null)
+    probeDoc = probeXhr.responseText
+  } catch (probeError) {
+    document.documentElement.setAttribute('data-e2e-md-error', String((probeError && probeError.message) || probeError))
+  }
+  if (mdDoc.length > 0) {
+    events = events.concat([
+      { seq: 9001, time: 9001, type: 'assistant/message', data: { turn: 1, step: 2, message: { content: [{ type: 'text', text: mdDoc }] } } }
+    ])
+  }
+  if (probeDoc.length > 0) {
+    events = events.concat([
+      { seq: 9002, time: 9002, type: 'assistant/message', data: { turn: 1, step: 3, message: { content: [{ type: 'text', text: probeDoc }] } } }
+    ])
+  }
+  document.documentElement.setAttribute('data-e2e-md', String(mdDoc.length))
+  flush()
   var sent = []
   var calls = []
   function ok(value) { return Promise.resolve({ type: 'server-response', rpcId: 'r1', result: { ok: true, value: value } }) }
@@ -145,8 +262,14 @@ const FAKE_BOOT = `
    */
   var phase = new URLSearchParams(location.search).get('phase') || 'sent'
   var reads = 0
-  globalThis.__DSH_MOBILE_BOOT__ = {
-    tunnel: {
+  /*
+   * ★★ 这里**不能**整个盖掉 __DSH_MOBILE_BOOT__ ✗（本单改 ✓）：
+   *   宿主发的 boot.js 已经把 **markdown 渲染器**挂在它上面了 ✓
+   *   （renderMarkdownInto ✓ —— 会话页要用的就是它 ✓）⇒
+   *   整对象重新赋值会把渲染器**悄悄抹掉** ✓ ⇒ 页面永远走兜底路径、而断言还全绿 ✗。
+   */
+  var __api = globalThis.__DSH_MOBILE_BOOT__ = globalThis.__DSH_MOBILE_BOOT__ || {}
+  __api.tunnel = {
       rpc: function (method, payload) {
         calls.push(method)
         if (method === 'mobile/dsh/sessions') return ok({ ok: true, sessions: sessions })
@@ -176,11 +299,16 @@ const FAKE_BOOT = `
         }
         return Promise.reject(new Error('假隧道不认这个端点：' + method))
       }
-    },
-    // 夹具自检用：真页面跑完应当已经问过这两个端点 ✓
-    __fakeCalls: function () { return calls.slice() },
-    __fakeSent: function () { return sent.slice() }
-  }
+    }
+  // 夹具自检用：真页面跑完应当已经问过这两个端点 ✓
+  __api.__fakeCalls = function () { return calls.slice() }
+  __api.__fakeSent = function () { return sent.slice() }
+  /*
+   * ★★ 夹具自检（本单最要紧的一条 ✓）：页面里**真的拿得到**那个渲染器吗 ✗ ——
+   *   它来自宿主发的真 boot.js ✓（不是我在这儿塞的 ✓）。
+   *   拿不到 ⇒ 下面的 markdown 断言全是在验**兜底路径** ✓（假绿 ✓）。
+   */
+  document.documentElement.setAttribute('data-e2e-boot', typeof __api.renderMarkdownInto)
   // ★ 把页面里的 JS 错误**画在 DOM 上** ✓ —— 夹具失败时能自证原因 ✓（这条学自开发壳 ✓）
   var errs = []
   globalThis.addEventListener('error', function (e) { errs.push('error: ' + e.message) })
@@ -325,11 +453,44 @@ async function serve(mode) {
       res.end(body)
     }
     if (path === '/mobile/boot.js') {
-      send(mode === 'no-tunnel' ? NO_TUNNEL_BOOT : FAKE_BOOT, MIME['.js'])
+      /**
+       * ★★ 这里发的是**真的 `boot.js`**（宿主线上发的就是这一份 ✓：`packages/host/lib/boot.js` ✓）
+       *   后面接上夹具那半（假隧道 ✓）。
+       *
+       * ★ 为什么非真不可 ✗（本单改 ✓）：会话页的 markdown 渲染器**就在这个文件里** ✓ ——
+       *   用一份假 boot 就永远测不到「页面真的从宿主那里拿到了渲染器」✓，
+       *   而那正是本单的判据 ✓（假 boot 会把渲染器抹掉 ⇒ 页面永远走兜底 ⇒ 假绿 ✗）。
+       * ★ 真 boot.js 在会话页上是**安全**的 ✓：`page.html` 设了 `__DSH_MOBILE_NO_SHELL__` ✓
+       *   ⇒ 外壳不装 ✓（只读探针实测：没有 DOM 注入、没有报错、`tunnel` 仍由夹具给 ✓）。
+       */
+      const real = readFileSync(join(HERE, '..', 'packages', 'host', 'lib', 'boot.js'), 'utf8')
+      /**
+       * ★ `no-renderer` 模式：把渲染器**摘掉**（模拟老宿主 ✓）——
+       *   验的是兜底那条路：拿不到渲染器时正文**照旧看得见** ✓，不许空白 ✗。
+       */
+      const prelude = mode === 'no-renderer'
+        ? '\n;(function () { var api = globalThis.__DSH_MOBILE_BOOT__; if (api) api.renderMarkdownInto = undefined })();\n'
+        : ''
+      const fixture = mode === 'no-tunnel' ? NO_TUNNEL_BOOT : FAKE_BOOT
+      send(real + prelude + '\n;/* ---- 夹具（假隧道）---- */\n' + fixture, MIME['.js'])
       return
     }
     if (path === '/fixture/real-assistant-message-event.json') {
       send(readFileSync(join(FIXTURE_DIR, 'real-assistant-message-event.json')), 'application/json; charset=utf-8')
+      return
+    }
+    /**
+     * ★★ 真 markdown 文档（仓里那份夹具 README ✓）—— 原样发，不改一个字 ✓。
+     *   它**不属于会话页要拿的量** ✓（会话页拿不到夹具目录 ✓），
+     *   与真事件同一条路：模拟宿主把磁盘上的东西交给页面 ✓。
+     */
+    if (path === '/fixture/real-markdown-doc.md') {
+      send(readFileSync(join(FIXTURE_DIR, 'README.md')), 'text/markdown; charset=utf-8')
+      return
+    }
+    /** ★ 探针那段（公式 + 不可信输入 ✓ —— 不是真事件 ✓，见 PROBE_MD 上面的说明 ✓）。 */
+    if (path === '/fixture/untrusted-probe.md') {
+      send(PROBE_MD, 'text/markdown; charset=utf-8')
       return
     }
     if (path === '/mobile/chat' || path === '/mobile/chat/') {
@@ -417,15 +578,38 @@ try {
     fixtureParts === String(REAL_PARTS_ALL.length) && fixtureError === '',
     `块数=${fixtureParts}｜夹具错误=${fixtureError || '(无)'}`,
   )
+  /**
+   * ★★ 本单的两条**夹具自检** ✓——少了它们，下面的 markdown 断言有可能是在**空转** ✓：
+   *   · 页面到底有没有**真渲染器**（假 boot 会把它抹掉 ⇒ 页面永远走兜底 ⇒ 假绿 ✗）；
+   *   · 那份**真 markdown 文档**到底有没有交到页面 ✓。
+   */
+  const bootProbe = (html.match(/data-e2e-boot="([^"]*)"/) ?? [])[1] ?? '(没有这个读数)'
+  const mdDocChars = Number((html.match(/data-e2e-md="(\d+)"/) ?? [])[1] ?? '-1')
+  const mdError = (html.match(/data-e2e-md-error="([^"]*)"/) ?? [])[1] ?? ''
+  check(
+    '★★ 夹具自检：页面里**真的拿得到**渲染器（宿主发的 boot.js 导出的那个 ✓ —— 换成假 boot 这条必红 ✓）',
+    bootProbe === 'function' && mdError === '',
+    `typeof renderMarkdownInto=${bootProbe}｜夹具错误=${mdError || '(无)'}`,
+  )
+  check(
+    '★★ 夹具自检：**真 markdown 文档**已交给页面（字数逐字对上那份文件 ✓）',
+    mdDocChars === MD_DOC.length,
+    `页面上 ${mdDocChars} 字 vs 文件 ${MD_DOC.length} 字`,
+  )
 
   check('页头显示的是当前会话的标题 ✓', html.includes('换图标那两个标签'))
   /**
    * ★ 用户消息现在按**真形状**给（`data.message.content[]` ✓ —— 不再是自造的 `data:{text}` ✗）
    *   ⇒ 这条同时钉住"用户消息也走同一套正文提取" ✓。
+   * ★★ 本单把口径**改强**了 ✗：气泡里不但要有那段字，还要**过渲染器** ✓
+   *   （渲染器给每段包一个 `<p>` ✓）—— 所以这里钉的是 `<p>` + 原话 ✓，
+   *   而不是原来那句"气泡里直接就是裸文本" ✓（那正是被本单换掉的行为 ✓）。
    */
+  const userBubble = (html.match(/class="ev ev-user"[^>]*>\s*<div class="bubble">([\s\S]*?)<\/div>/) ?? [])[1] ?? ''
   check(
-    '用户消息被画出来了（真形状 `data.message.content[]` ⇒ 用户气泡 ✓）',
-    /class="ev ev-user"[^>]*>\s*<div class="bubble">把首页那两颗图标的圆角再收一点</.test(html),
+    '用户消息被画出来了，而且正文**过的是渲染器**（真形状 `data.message.content[]` ⇒ 气泡里的 `<p>` ✓）',
+    userBubble.includes('<p>') && userBubble.includes('把首页那两颗图标的圆角再收一点'),
+    `用户气泡=${JSON.stringify(userBubble.slice(0, 48))}`,
   )
   /**
    * ★★ 本单的**主断言** ✓：真事件的正文必须**一字不差**地出现在气泡里 ✓，
@@ -447,8 +631,24 @@ try {
   const agentBubble = (agentBlock.match(/<div class="bubble">([\s\S]*?)<\/div>/) ?? [])[1] ?? ''
   check(
     '★★ 真事件画出来的是**正文**（不是整坨 JSON）：气泡**以正文开头**，且页面上没有 `{"turn":`',
-    agentBubble.length > 0 && agentBubble.startsWith(escapeHtml(REAL_PROSE.slice(0, 40))) && !html.includes(escapeHtml('{"turn":')),
-    `气泡开头=${JSON.stringify(agentBubble.slice(0, 40))}`,
+    agentBubble.startsWith('<p>' + escapeHtml(REAL_PROSE_LEAD)) && !html.includes(escapeHtml('{"turn":')),
+    `气泡开头=${JSON.stringify(agentBubble.slice(0, 48))}`,
+  )
+  /**
+   * ★★ 本单的**主断言** ✓：正文里的 markdown 记号**真的变成了元素** ✗。
+   *
+   * `**X**` ⇒ `<strong>X</strong>` ✓、行内代码 ⇒ `<code>X</code>` ✓，
+   * 而 X **是从真事件正文里机械取出来的** ✓（不是手抄的期望值 ✗）。
+   * ★ 判据为什么非这样不可 ✗：「文本里出现了 `**加了两遍**` 的原文」在**旧行为**
+   *   （`textContent`）下同样成立 ✓ —— 那是假判据 ✓。这里要的是**元素** ✓。
+   * ★ 变异回 `textContent`（或把原文整个塞进 `innerHTML`）⇒ 这条必红 ✓。
+   */
+  check(
+    '★★ 真事件里的 markdown **真的渲染成了元素**（`**X**` ⇒ `<strong>X</strong>` ✓、行内代码 ⇒ `<code>X</code>` ✓）',
+    REAL_BOLD.length > 0 && REAL_INLINE_CODE.length > 0 &&
+      agentBubble.includes('<strong>' + escapeHtml(REAL_BOLD) + '</strong>') &&
+      agentBubble.includes('<code>' + escapeHtml(REAL_INLINE_CODE) + '</code>'),
+    `期望 <strong>${REAL_BOLD}</strong> 与 <code>${REAL_INLINE_CODE}</code>｜气泡=${JSON.stringify(agentBubble.slice(0, 90))}`,
   )
   check(
     '★★ 正文**就是**期望的那段（字符数逐字对上 `type:\'text\'` 块 ✓）',
@@ -483,8 +683,90 @@ try {
     html.includes('escalate sandbox to danger-full-access') && !/class="approval-option"/.test(html),
   )
   check('★ 认不出的事件类型也画了出来（没有静默丢弃 ✓）', html.includes('someUnknownEvent'))
+  /**
+   * ★★ 本单新加：认不出的形状**照旧摊原文** ✗（不只画个类型名 ✓）。
+   *   `someUnknownEvent` 的 data 是 `{whatever:1}` ✓ ⇒ `textOf` 认不出字段 ⇒
+   *   `JSON.stringify` 兜底 ✓ ⇒ 那坨 JSON 必须**看得见** ✓。
+   * ★ 变异：把兜底那条 append 删掉 ⇒ 这条必红 ✓（类型名那条也可能一起红 ✓）。
+   */
+  check(
+    '★ 认不出的形状**照旧摊原文**（`{"whatever":1}` 那坨 JSON 在页面上看得见 ✓ —— 静默丢掉必红 ✓）',
+    html.includes('someUnknownEvent') && html.includes('{"whatever":1}'),
+    `原文字样在不在=${html.includes('{"whatever":1}')}`,
+  )
   check('★ 发出去的这条以用户气泡出现在页面上（走的是真实提交路径 ✓）', html.includes('这条是端到端检查发出去的'))
   check('发送之后输入框是空的（清空立刻 ✓）', !/id="input"[^>]*>这条是端到端检查发出去的</.test(html))
+
+  /**
+   * ─────────── ★★ markdown 渲染（本单的主场 ✓）───────────
+   *
+   * ★★ 判据一律是**元素** ✗，不是文本 ✓：真文档里写了 `# 标题` ✓ ⇒ DOM 里必须真有 `<h1>` ✓。
+   *   「文本里出现了 `# 标题` 的原文」在**旧行为**（`textContent`）下同样成立 ✓
+   *   ⇒ 那种判据是**假的** ✓（本项目今天栽过的那一类 ✓）。
+   * ★ 每一条的期望值都是**从那份真文档机械推出来的** ✓（不是手抄的 ✓）。
+   */
+  const mdBlock = agentBlockByChars(html, MD_DOC.length)
+  check(
+    '★★ 夹具自检：真 markdown 文档那条助手事件**画出来了**（按 `data-text-chars` 定位 ✓）',
+    mdBlock.length > 0,
+    `文档 ${MD_DOC.length} 字｜切到 ${mdBlock.length} 字`,
+  )
+  check(
+    '★★ 真 markdown 的**标题**渲染成了元素（文档里有「# 」/「## 」⇒ DOM 里真有 `<h1>` / `<h2>` ✓）',
+    /<h1[ >]/.test(mdBlock) && /<h2[ >]/.test(mdBlock),
+    `文档里有 ${MD_H_COUNT} 行标题｜DOM 里 <h1> ${(mdBlock.match(/<h1[ >]/g) ?? []).length} 个`,
+  )
+  check(
+    '★★ 真 markdown 的**粗体 / 行内代码**渲染成了元素（`<strong>` / `<code>` 计数 ✓ —— 不是看文本 ✓）',
+    (mdBlock.match(/<strong[ >]/g) ?? []).length > 0 && (mdBlock.match(/<code[ >]/g) ?? []).length > 0,
+    `<strong> ${(mdBlock.match(/<strong[ >]/g) ?? []).length} 个｜<code> ${(mdBlock.match(/<code[ >]/g) ?? []).length} 个`,
+  )
+  check(
+    '★★ 真 markdown 的**围栏代码块**渲染成了 `<pre class="dshm-md-code"><code>`（里面就是那份文档的第一行命令 ✓）',
+    mdBlock.includes('<pre class="dshm-md-code">') && mdBlock.includes(escapeHtml(MD_FENCE_FIRST_LINE)),
+    `期望第一行=${JSON.stringify(MD_FENCE_FIRST_LINE.slice(0, 48))}`,
+  )
+  check(
+    '★★ 真 markdown 的**列表**渲染成了元素（文档里 N 条有序项 ⇒ DOM 里真有 `<ol>` + `<li>` ✓）',
+    /<ol[ >]/.test(mdBlock) && (mdBlock.match(/<li[ >]/g) ?? []).length >= MD_OL_COUNT,
+    `文档里 ${MD_OL_COUNT} 条有序项｜DOM 里 ${(mdBlock.match(/<li[ >]/g) ?? []).length} 个 <li>`,
+  )
+  check(
+    '★ 真 markdown 的**表格**渲染成了 `<table>`（真文档里确实有表 ✓）',
+    /<table[ >]/.test(mdBlock) && /<th[ >]/.test(mdBlock),
+  )
+
+  /**
+   * ─────────── ★ 公式与**不可信输入**（探针那条 ✓ —— 见 PROBE_MD 的说明 ✓）───────────
+   *
+   * ★ 公式那一档的读数**以实测为准** ✗：只读探针量到的是
+   *   `<span class="dshm-md-math" data-dshm-math="ready">` 里套 **Temml 画出的 `<math>`** ✓
+   *   （`packages/host/lib/boot.js` 里内联了 Temml ✓，所以这一档在验收页上是真能画出来的 ✓）。
+   */
+  const probeBlock = agentBlockByChars(html, PROBE_MD.length)
+  check(
+    '★★ 夹具自检：探针那条（公式 + 不可信输入）画出来了 ✓',
+    probeBlock.length > 0,
+    `探针 ${PROBE_MD.length} 字｜切到 ${probeBlock.length} 字`,
+  )
+  check(
+    '★★ 公式渲染出了**数学节点**（`$…$` ⇒ `.dshm-md-math` ✓，而且 Temml 真画出了 `<math>` ✓）',
+    (probeBlock.match(/dshm-md-math/g) ?? []).length >= PROBE_MATH_COUNT &&
+      probeBlock.includes('data-dshm-math="ready"') && probeBlock.includes('<math'),
+    `数学节点 ${(probeBlock.match(/dshm-md-math/g) ?? []).length} 个（期望 ≥${PROBE_MATH_COUNT}）｜状态=${(probeBlock.match(/data-dshm-math="([a-z]+)"/) ?? [])[1] ?? '(无)'}`,
+  )
+  check(
+    '★★ 不可信输入**没有变成元素**（`<img …>` 只以**转义文字**出现 ✓ —— 一个 `<img>` 元素都不许有 ✓）',
+    !/<img[ >/]/.test(html) && !probeBlock.includes('<script') &&
+      textVisible(probeBlock, '<img src=x onerror="alert(1)">') &&
+      textVisible(probeBlock, '<script>alert(3)</script>'),
+    `页面里 <img> 元素 ${(html.match(/<img[ >/]/g) ?? []).length} 个｜原文以文字可见=${textVisible(probeBlock, '<img src=x onerror="alert(1)">')}`,
+  )
+  check(
+    '★★ `javascript:` 链接**没有**变成可点的 href（降级成纯文本 ✓ —— 渲染器自己的规矩 ✓）',
+    !/href="javascript:/i.test(html) && probeBlock.includes('链接协议不被允许'),
+    `页面里 href="javascript:…" 出现 ${(html.match(/href="javascript:/gi) ?? []).length} 次`,
+  )
 
   /**
    * ─────────────── 输入栏：1:1 复刻 DSH 手机端（本单新增 ✓）───────────────
@@ -647,6 +929,30 @@ try {
     console.log(`    现场：状态行=${JSON.stringify(statusLine)}｜状态块=${stateCls}｜夹具错误=${fixtureErr}`)
   }
   check('★ 而状态行确实在报错（不能"装作没事"✓）', readFail.includes('读取出错'))
+
+  /**
+   * ── 反向：**拿不到渲染器**（老宿主 / 假 boot ✓）⇒ 正文照旧看得见，不许空白 ──
+   *
+   * ★ 这一趟专治"保底路径"：本单把正文改走渲染器 ✓ ⇒ 一旦渲染器**缺席**，
+   *   兜底必须**摊原文** ✓（"认不出的也要看得见" ✓）。
+   * ★ 变异：把兜底那条 `container.textContent = text` 删掉 ⇒ 下面第一条必红 ✓。
+   */
+  console.log('\n── 反向：拿不到渲染器（老宿主）⇒ 正文**照旧摊原文**，不许空白 ──')
+  const noRendererSetup = await serve('no-renderer')
+  const noRenderer = await dumpDom(`http://127.0.0.1:${noRendererSetup.port}/mobile/chat?phase=sent`, 'data-e2e="sent"', 40_000)
+  const noRendererBoot = (noRenderer.match(/data-e2e-boot="([^"]*)"/) ?? [])[1] ?? '(没有这个读数)'
+  const proseLeadPresent = noRenderer.includes(escapeHtml(REAL_PROSE.slice(0, 40)))
+  check(
+    '夹具自检：这一趟**确实没有**渲染器（否则下面那条是在空转 ✓）',
+    noRendererBoot === 'undefined',
+    `typeof renderMarkdownInto=${noRendererBoot}`,
+  )
+  check(
+    '★ 拿不到渲染器时正文**照旧摊原文**（显示成空白必红 ✓，而且这趟**不该**有 `<strong>` ✓）',
+    proseLeadPresent && !noRenderer.includes('<strong>'),
+    `正文开头在不在=${proseLeadPresent}｜页面里 <strong> ${(noRenderer.match(/<strong[ >]/g) ?? []).length} 个`,
+  )
+  noRendererSetup.server.close()
 
   console.log('\n── 反向：假隧道缺席 ⇒ 页面必须落到"读不出来"，而不是白屏 ──')
   const noTunnelSetup = await serve('no-tunnel')
