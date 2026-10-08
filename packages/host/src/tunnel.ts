@@ -36,7 +36,7 @@ import {
   type EstablishedSession,
   type HostDeviceCredentials,
 } from '@dsh-mobile/protocol'
-import { encodeBinary, HostHandshake } from '@dsh-mobile/protocol'
+import { decodeBinary, encodeBinary, HostHandshake } from '@dsh-mobile/protocol'
 import type { RawKeyPair } from '@dsh-mobile/protocol'
 
 /** 握手帧的固定 nonce 前缀（与协议文档一致）。 */
@@ -383,7 +383,8 @@ export class TunnelSession {
           await this.sendError(ErrorCode.HandshakeMalformed, 'RpcRequest is not valid JSON')
           return
         }
-        await this.handleRpc(request)
+        // 在交给网关前还原上行字节；只解码业务负载，信封标识保持原样。
+        await this.handleRpc({ ...request, payload: decodeBinary(request.payload) })
         return
       }
       case FrameType.StreamOpen: {
