@@ -31,6 +31,22 @@ npm test                               # 单测（★ 条数会变 ✗ —— 20
 node scripts/check-mobile-layout.mjs   # 真机验收（起临时实例 + 无头 Chrome）
                                        # ★ 耗时别照抄 ✗ —— 2026-10-08 实测跑到 7:24 仍未结束 ✓
                                        #   （硬超时也未触发：脚本里是 ?? 1_500_000，见下）
+                                       #
+                                       # ★★ 2026-10-08 血泪：★ 这行【不要裸跑】✗ ——
+                                       #   裸跑会用默认 PATH 的 dsh（本机是 0.1.5-rc.1），
+                                       #   而 0.1.5 的客户端【根本不列这些会话】⇒ 会话行夹具打不开
+                                       #   ⇒ 155/157/158/189 + 状态栏那族【共 127 条】会一起红 ✗，
+                                       #   而它们【一条都不是产品回归】✓。
+                                       #   ★ 正确跑法（脚本注释 :693 早就写着，是我没照做 ✗）：
+                                       #     DSH_BIN=/Volumes/Data/dsh020/node_modules/@deepseek-ai/dsh/lib/bin.js \
+                                       #       ML_DSH_PORT=3963 ML_PROXY_PORT=3961 ML_TLS_PORT=3962 \
+                                       #       node scripts/check-mobile-layout.mjs
+                                       #   （那份 0.2.0-rc.2 是用户 2026-10-08 批准后装在【独立 prefix】的 ✓，
+                                       #    ★ 没覆盖全局那份 0.1.5-rc.1 ✗；★ 端口要错开，因为
+                                       #    check-device-channel 与它【共用】/tmp/e2e-dsh-home ⇒ 别并行 ✓）
+                                       #   ★ 受控对照：换 DSH_BIN 后 155-* 9→0、157-A-* 11→0、158-A-* 5→0、
+                                       #     189-* 9→0、「没有顶栏标记」16→0、「评估出错」15→0；
+                                       #     诊断行从「会话行=0」变成「会话行=5 + 状态栏出现」✓
 node scripts/check-apk.mjs             # APK 专项（14 条：包信息/权限/dex 符号/CA 指纹/链校验）
 node scripts/check-production.mjs      # 生产自检
 node scripts/check-device-channel.mjs  # 端侧通道端到端
