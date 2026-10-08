@@ -23510,6 +23510,7 @@
       //   所以外壳不装、这两个渲染函数仍在作用域里 —— 直接导出，免得会话页另写一套
       //   （本仓规矩：不新造渲染器）。
       renderMarkdownInto: renderMarkdownInto,
+      debugLine: debugBoxLine,
       splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,
@@ -24729,7 +24730,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1008061540'
+    var BOOT_STAMP = 'BUILD-1008063210'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

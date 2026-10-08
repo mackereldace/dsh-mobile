@@ -33,7 +33,7 @@
  *
  * ## 传输：宿主注入的加密隧道（与 codex 页同一条 ✓）
  */
-import { mountChat } from './ui.js'
+import { mountChat, chatLog } from './ui.js'
 import { ChatPoller, followRequest, frameEvents, reopenDelayMs } from './poller.js'
 
 /** 一趟取多少条（窗口 ✓）—— **只有轮询那条路**用它 ✓。 */
@@ -100,9 +100,9 @@ async function refreshInteractions() {
     if (requested !== currentId || epoch !== interactionEpoch) return
     if (value && value.channels) page.setChannels(value.channels)
     page.setInteractions(value)
-    console.log('[dsh-chat] 交互待办：选择=' + ((value && value.values && value.values.userQuestions && value.values.userQuestions.active || []).length))
+    chatLog('[dsh-chat] 交互待办：选择=' + ((value && value.values && value.values.userQuestions && value.values.userQuestions.active || []).length))
   } catch (error) {
-    console.log('[dsh-chat] 交互读取：' + (error instanceof Error ? error.message : String(error)))
+    chatLog('[dsh-chat] 交互读取：' + (error instanceof Error ? error.message : String(error)))
   } finally { interactionInFlight -= 1 }
 }
 function receiveEvents(events) {
@@ -470,7 +470,7 @@ function rememberProjections(frame) {
     const three = ['sessionStats', 'tokenUsage', 'contextPressure'].filter(function (key) {
       return keys.indexOf(key) >= 0
     })
-    console.log(
+    chatLog(
       '[dsh-chat] 开场快照的投影：asOfSeq=' + String(latestProjections.asOfSeq) +
         ' · 状态条那三个键命中 ' + String(three.length) + '/3' + (three.length > 0 ? '（' + three.join('、') + '）' : ''),
     )
@@ -509,7 +509,7 @@ try {
 } catch (error) {
   void error
 }
-console.log(
+chatLog(
   '[dsh-chat] 取数方式：' +
     (fetchMode === 'stream'
       ? '流 mobile/dsh/follow（空闲 0 字节 ✓）'
@@ -581,7 +581,7 @@ try {
  */
 try {
   void probeApprovalChannel(page).then(function (connected) {
-    console.log('[dsh-chat] 审批裁决通道：' + (connected ? '已接通（按钮可点）' : '未接通（按钮置灰）'))
+    chatLog('[dsh-chat] 审批裁决通道：' + (connected ? '已接通（按钮可点）' : '未接通（按钮置灰）'))
   })
 } catch (error) {
   page.handlers.onError(error instanceof Error ? error.message : String(error))
