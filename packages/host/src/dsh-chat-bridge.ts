@@ -72,6 +72,7 @@
 import { ErrorCode } from '@dsh-mobile/protocol'
 
 import type { ApprovalBroker } from './dsh-approval.ts'
+import { normalizeAnswers, normalizeQuestionView, readDshChatChannels, sharedQuestionBroker, type QuestionBroker } from './dsh-question.ts'
 import { readHostRpcResult } from './gateway-rpc.ts'
 
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
@@ -91,6 +92,10 @@ export const DSH_CHAT_PATHS = {
    * 落到 `dsh-approval.ts` 那个中间人上 ✓（真正生效的地方是 `cordis.ts` 的 waterfall 应答者 ✓）。
    */
   approval: 'mobile/dsh/approval',
+  question: 'mobile/dsh/question',
+  upload: 'mobile/dsh/upload',
+  capabilities: 'mobile/dsh/capabilities',
+  interactions: 'mobile/dsh/interactions',
 } as const
 
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
@@ -119,6 +124,7 @@ export interface DshChatDeps {
    *   假装成功 ⇒ 手机上显示"已处理"✓ 而电脑上那张卡还挂着 ✓ —— 最难查的一类 ✗。
    */
   readonly approvalBroker?: ApprovalBroker
+  readonly questionBroker?: QuestionBroker
 }
 
 /**
@@ -138,7 +144,53 @@ export async function handleDshChatEndpoint(
   if (endpoint === DSH_CHAT_PATHS.send) return sendPrompt(deps, args, signal)
   if (endpoint === DSH_CHAT_PATHS.create) return createSession(deps, args, signal)
   if (endpoint === DSH_CHAT_PATHS.approval) return settleApproval(deps, args)
+  if (endpoint === DSH_CHAT_PATHS.question) return answerQuestion(deps, args, signal)
+  if (endpoint === DSH_CHAT_PATHS.upload) return uploadFile(deps, args, signal)
+  if (endpoint === DSH_CHAT_PATHS.capabilities) return { ok: true, channels: readDshChatChannels() }
+  if (endpoint === DSH_CHAT_PATHS.interactions) return readInteractions(deps, args, signal)
   return undefined
+}
+
+/** 前台回 waterfall；continued 回 DSH 自己的答案端点。false 绝不写成成功。 */
+async function answerQuestion(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const sessionId = requireString(args, 'sessionId')
+  const callId = requireString(args, 'callId')
+  const answers = normalizeAnswers(args['answers'])
+  if ((deps.questionBroker ?? sharedQuestionBroker()).settle(sessionId, callId, answers)) return { ok: true, accepted: true, channel: 'foreground' }
+  const accepted = unwrap(await deps.call('userQuestions/answer', { args: { agentId: sessionId, callId, answer: { answers } } }, signal))
+  if (typeof accepted !== 'boolean') throw new Error('选择应答通道返回了不可识别的结果')
+  return { ok: accepted, accepted, channel: 'continued' }
+}
+
+/** 官方 fileUploads/upload 与 raw uploadFileBinary 共用 Agent 作用域收据，不另造上传身份。 */
+async function uploadFile(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const sessionId = requireString(args, 'sessionId')
+  const bytes = args['bytes']
+  if (!(bytes instanceof Uint8Array)) throw new Error('附件上传缺少原始 bytes 字节')
+  const request = { data: Buffer.from(bytes).toString('base64'), ...(typeof args['name'] === 'string' ? { name: args['name'] } : {}) }
+  const value = asRecord(unwrap(await deps.call('fileUploads/upload', { args: { agentId: sessionId, request } }, signal)))
+  const file = asRecord(value?.['file'])
+  if (value === null || file === null || typeof value['receiptId'] !== 'string' || value['receiptId'].length === 0 ||
+      typeof file['attachmentId'] !== 'string' || typeof file['name'] !== 'string' || typeof file['bytes'] !== 'number' || !Number.isFinite(file['bytes']) || file['bytes'] < 0) {
+    throw new Error('附件上传通道没有返回有效的会话收据')
+  }
+  return { ok: true, receiptId: value['receiptId'], file: { attachmentId: file['attachmentId'], name: file['name'], bytes: file['bytes'] } }
+}
+
+/** 按交互事件触发一次读取，无需定时轮询；legacy 前台卡也从同一入口读得到。 */
+async function readInteractions(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const sessionId = requireString(args, 'sessionId')
+  const projection = asRecord(unwrap(await deps.call('session/projections', { args: { request: { sessionId } } }, signal)))
+  const values = withPendingQuestions(deps, sessionId, normalizeValues(projection?.['values']))
+  return { ok: true, sessionId, values: { userQuestions: values['userQuestions'] ?? { active: [], settled: [] } }, channels: readDshChatChannels() }
+}
+
+function withPendingQuestions(deps: DshChatDeps, sessionId: string, values: Record<string, unknown>): Record<string, unknown> {
+  const pending = (deps.questionBroker ?? sharedQuestionBroker()).pending(sessionId)
+  if (pending.length === 0) return values
+  const view = normalizeQuestionView(values['userQuestions']) ?? { active: [], settled: [] }
+  const foreground = pending.map(({ callId, questions, state }) => ({ callId, questions, state }))
+  return { ...values, userQuestions: { active: [...view.active.filter(item => !foreground.some(row => row.callId === item.callId)), ...foreground], settled: view.settled } }
 }
 
 /**
@@ -223,7 +275,8 @@ async function listSessions(deps: DshChatDeps, signal?: AbortSignal): Promise<un
  *     实测这一次是 `3 KB / 3 ms` ✓（冷会话首次 `39 ms` ✓），而页面每 `900 ms` 才轮询一次 ✓。
  */
 async function readPage(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-  const { headSeq, values } = await resolveHeadSeq(deps, args, signal)
+  const { headSeq, values: projections } = await resolveHeadSeq(deps, args, signal)
+  const values = withPendingQuestions(deps, requestSessionId(args), projections)
   /**
    * ★ `head < 0` ⇒ 这个会话**一条事件都没有** ✓ ⇒ 正确答案就是"空的一页" ✓。
    *   ★ 这里**不再**拿 -1 去调 `session/page` ✗：那条路只会得到"不报错但永远空白" ✗
@@ -251,7 +304,10 @@ async function readPage(deps: DshChatDeps, args: Record<string, unknown>, signal
 /** 发一条消息 ✓（`requestId` 由**这里**生成 ✓ —— 手机不用操心 ✓）。 */
 async function sendPrompt(deps: DshChatDeps, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const sessionId = requireString(args, 'sessionId')
-  const text = requireString(args, 'text')
+  const text = typeof args['text'] === 'string' ? args['text'] : ''
+  const receiptIds = args['receiptIds'] === undefined ? [] : args['receiptIds']
+  if (!Array.isArray(receiptIds) || !receiptIds.every(value => typeof value === 'string' && value.trim().length > 0) || new Set(receiptIds).size !== receiptIds.length) throw new Error('附件收据格式不符：receiptIds 须为不重复的非空字符串数组')
+  if (text.trim().length === 0 && receiptIds.length === 0) throw Object.assign(new Error('参数缺失：text'), { code: ErrorCode.Internal })
   const mode = args['mode'] === 'steer' ? 'steer' : 'queue'
   const requestId = typeof args['requestId'] === 'string' && args['requestId'].length > 0
     ? (args['requestId'] as string)
@@ -260,7 +316,7 @@ async function sendPrompt(deps: DshChatDeps, args: Record<string, unknown>, sign
     requestId,
     sessionId,
     mode,
-    content: [{ type: 'text', text }],
+    content: [...(text.trim().length > 0 ? [{ type: 'text', text }] : []), ...receiptIds.map(receiptId => ({ type: 'file', receiptId }))],
   }
   const value = unwrap(await deps.call('session/prompt', { args: { request } }, signal))
   /**
@@ -448,6 +504,12 @@ export function normalizeSessions(value: unknown): unknown[] {
       ? (container['sessions'] as unknown[])
       : []
   const out: unknown[] = []
+  // 在过滤子会话之前保留真实 running。只与父投影的 catalog id 匹配，不从 lineage 猜数量。
+  const activity = new Map<string, boolean>()
+  for (const item of raw) {
+    const row = asRecord(item)
+    if (row !== null && typeof row['sessionId'] === 'string' && typeof row['running'] === 'boolean') activity.set(row['sessionId'], row['running'])
+  }
   for (const item of raw) {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
@@ -458,6 +520,12 @@ export function normalizeSessions(value: unknown): unknown[] {
     if (isSubagentSession(record)) continue
     const values = projectionValues(record)
     const projectionTitle = stringField(values, 'title')
+    const catalog = Array.isArray(values['subagentCatalog']) ? values['subagentCatalog'] : undefined
+    const childIds = catalog?.map(item => asRecord(item)?.['id']).filter((id): id is string => typeof id === 'string' && id.length > 0)
+    const subagentStats = childIds === undefined ? undefined : {
+      total: childIds.length,
+      running: childIds.every(id => activity.has(id)) ? childIds.filter(id => activity.get(id) === true).length : null,
+    }
     out.push({
       id,
       // ★ 标题的真身在投影里 ✓；顶层那个只作老式回退 ✓
@@ -468,6 +536,7 @@ export function normalizeSessions(value: unknown): unknown[] {
       current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
       updatedAt: typeof record['updatedAt'] === 'number' ? (record['updatedAt'] as number) : null,
       blank: record['blank'] === true,
+      ...(subagentStats === undefined ? {} : { subagentStats }),
       /**
        * ★ 两个**真形状里就有**的可选字段，原样透传 ✓（**都不是新造的名字** ✓）：
        * · `origin` ✓ —— 子智能体的标记（`'subagent'` ✓）；进来的表里已经滤掉这一类 ✓，
@@ -596,6 +665,10 @@ export function normalizeValues(value: unknown): Record<string, unknown> {
   copyIfPresent(source, out, 'permissions')
   copyIfPresent(source, out, 'subagentCatalog')
   copyIfPresent(source, out, 'lastPromptAt')
+  copyView(source, out, 'userQuestions', value => {
+    const view = normalizeQuestionView(value)
+    return view === null ? null : { active: view.active, settled: view.settled }
+  })
   copyView(source, out, 'sessionStats', sessionStatsView)
   copyView(source, out, 'tokenUsage', tokenUsageView)
   copyView(source, out, 'contextPressure', contextPressureView)

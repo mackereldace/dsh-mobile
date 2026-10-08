@@ -32,6 +32,7 @@ import {
   sharedApprovalBroker,
   type AskedApprovals,
 } from './dsh-approval.ts'
+import { mountQuestionChannel, setDshChatChannels } from './dsh-question.ts'
 import { DeviceStore } from './devices.ts'
 import { machineDisplayName, notifyTextFor, questionTextFor, shouldNotifyEvent } from './notify-text.ts'
 import { localMachineName } from './lan-trust.ts'
@@ -802,6 +803,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         }),
   })
 
+  try {
+    const mounted = mountQuestionChannel(ctx as unknown as Parameters<typeof mountQuestionChannel>[0], error => {
+      console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error)
+    })
+    console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`)
+  } catch (error) {
+    console.warn('[dsh-mobile] 手机选择应答未挂载：', error)
+  }
+
   /**
    * 把端侧通道暴露给 agent：注册 `phone_notify` 工具。
    *
@@ -1134,10 +1144,12 @@ export function apply(ctx: Context, config: Config = {}): void {
      *   在 ⇒ 水路挂上了 ✓，问题在"等/答"那一段 ✓；不在 ⇒ 根本没挂上 ✓，看上面那行警告 ✓。
      */
     if (answererMounted) {
+      setDshChatChannels({ approval: true })
       console.log(
         `[dsh-mobile] 手机裁决已挂载（approval/request, prepend；${Math.round(DEFAULT_APPROVAL_TTL_MS / 1000)} 秒无人应答 ⇒ 交回桌面卡）`,
       )
     } else {
+      setDshChatChannels({ approval: false })
       console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效')
     }
   }

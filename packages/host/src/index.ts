@@ -2533,6 +2533,7 @@ export function createMobileHost(options: {
        *   `sharedApprovalBroker()` 是模块级单例 ✓ ⇒ 两处 `import` 到同一个文件 ⇒ 同一个实例 ✓。
        */
       const { sharedApprovalBroker } = await import('./dsh-approval.ts')
+      const { sharedQuestionBroker } = await import('./dsh-question.ts')
       return handleDshChatEndpoint(
         {
           call: (target, payload, bridgeSignal) =>
@@ -2547,6 +2548,7 @@ export function createMobileHost(options: {
            */
           recordPrompt: (ref, via) => recordPrompt(ref, via, device),
           approvalBroker: sharedApprovalBroker(),
+          questionBroker: sharedQuestionBroker(),
         },
         endpoint,
         payload,
