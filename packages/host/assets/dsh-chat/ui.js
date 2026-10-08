@@ -913,40 +913,140 @@ export function sendFailureHint(message) {
 }
 
 /**
- * 输入框**正下方那一行状态条**该写什么 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ * 那四格的**键**与顺序 ✓（纯 ASCII ✓ —— 验收按 `data-cell="<key>"` 定位那一格 ✗）。
  *
- * ## ★★ 为什么这里**不写**「45% · 488 轮 2525 步 · 1062M tok」✗
- *
- * 用户给的参照物上就是这三个数 ✓，而**今天这条路拿不到它们** ✗ —— 查证过程：
- *   · `session/page` 的结果 schema（`dsh-api-session-controller/lib/typert.host.js:558-580` ✓）
- *     只有 `records` + `hasMore` ✗（`projections` 在**单条会话**级别，
- *     不是这个按页端点给的东西）⇒ 桥 `normalizePage` 里那份 `values` 白名单
- *     （`packages/host/src/dsh-chat-bridge.ts:398-418` ✓）在真机上读到的是**不存在的字段** ✓；
- *   · 那三个数的真身是 DSH 的三个**会话投影** ✓：`sessionStats`（轮/步 ✓）+
- *     `tokenUsage`（token 总数 ✓）+ `contextPressure`（`pressureTokens / contextWindow` = 那个百分比 ✓）
- *     —— 定义分别见 `dsh-session-stats/lib/types/projection.js` 与
- *     `dsh-token-meter/lib/types/usage-projection.js` ✓；
- *   · 而**唯一**能读到投影的现成入口是 `session/projections` ✓ —— 桥已经在
- *     `resolveHeadSeq` 里调过它（`dsh-chat-bridge.ts:246-252` ✓），但**没有把值转给页面** ✗。
- *
- * ⇒ 规矩是**留空比编好** ✓（用户原话）。所以这一行只写页面**真的量到**的两样：
- *   「窗口内已读 N 条」+ 连接状态 ✓ —— 而且**说清它是窗口内的** ✗，
- *   免得被误读成"整个会话的 N 条"✓（那是另一个数 ✓）。
- *
- * ★ 接真数的方案（要改桥，不在本单范围 ✓）见报告第 4 节 ✓。
+ * ★ 顺序 = 真图顺序 ✓：上下文% → 轮 → 步 → tok ✓
+ *   （DSH 自己那一行是「换成 1 个比例格 + 2 颗药丸」的排法 ✓，
+ *   见 `StatsPills` + `ContextMeter` ✓ —— 逐条读数见报告第 1 节 ✓）。
  */
-export function statsStripText(input) {
-  const events = input !== null && typeof input === 'object' && typeof input.eventCount === 'number' && input.eventCount > 0
-    ? Math.floor(input.eventCount)
-    : 0
-  const connection = input !== null && typeof input === 'object' ? input.connection : 'unknown'
-  const parts = []
-  // ★ 一段都没有时**不留空串**（空串会让这一条塌成 0 高 ✓ ⇒ 几何就量不到了 ✗）
-  parts.push(events > 0 ? '窗口内已读 ' + events + ' 条' : '还没读到内容')
-  if (connection === 'offline') parts.push('断线')
-  else if (connection === 'online') parts.push('在线')
-  else parts.push('连接中…')
-  return parts.join(' · ')
+export const STATS_CELL_KEYS = Object.freeze(['context', 'turns', 'steps', 'tokens'])
+
+/** ★ 上下文那格的环：14px viewBox、半径 5.5、描边 2px ✓（逐字抄自 `ContextMeter` ✓）。 */
+export const STATS_RING_RADIUS = 5.5
+/** 环的周长 ✓（`stroke-dasharray` 的第二个数就用它 ✓ —— 与 DSH 同一条算式 ✓）。 */
+export const STATS_RING_CIRCUMFERENCE = 2 * Math.PI * STATS_RING_RADIUS
+/** token 求和要的**四个桶** ✓（名字取自 `dsh-token-meter` 的投影 ✓，一个不许漏 ✗）。 */
+const TOKEN_BUCKETS = Object.freeze(['uncachedInputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens'])
+
+/** 只认**真对象** ✓（数组 / `null` / 标量一律不认 ✗ —— 与桥那一层同一条纪律 ✓）。 */
+function recordOf(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+/**
+ * 取一个**非负安全整数** ✓（取不到 ⇒ `null` ✓ —— **绝不补 0** ✗）。
+ *
+ * ★ 这一行就是"键不存在 = 数据取不到"那条铁律的落点 ✓：
+ *   `0` 是**合法值**（⇒ 返回 `0` ✓），而"没有这个键 / 不是整数 / 是负数"
+ *   一律 `null` ✓ ⇒ 调用方据此**不画那一格** ✗。
+ */
+function countOf(source, key) {
+  const record = recordOf(source)
+  const value = record === null ? undefined : record[key]
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * token 总数怎么念 ✓（纯函数 ✓）—— ★ 判据**逐字抄自** DSH 自己的客户端 ✗，不是我们定的 ✓：
+ *
+ * · `@deepseek-ai/dsh-client-ui-chat/lib/client.js` 的 `formatTokens()` ✓；
+ * · `@deepseek-ai/dsh-client-ui-conversation/lib/client.js` 里那个**同名同体**的函数 ✓
+ *   （两份独立文件逐字相同 ⇒ 这条口径不是某一处的笔误 ✓）。
+ *
+ * ```
+ * scaled = c >= 100 ? round(c) : round(c*10)/10        // ★ ≥100 取整、否则一位小数 ✓
+ * value < 1e3  ⇒ 原数 ✓
+ * value < 1e6  ⇒ scaled(value/1e3) + 「K」✓
+ * 否则          ⇒ scaled(value/1e6) + 「M」✓
+ * ```
+ * 单位后缀取自语言包 ✓（`"number.thousand": "{value}K"` / `"number.million": "{value}M"` ✓）。
+ * ★ 认不出（负数 / `NaN` / 不是数）⇒ 空串 ✓（调用方据此不画那一格 ✗）。
+ */
+export function formatTokenCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return ''
+  const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
+  if (value < 1e3) return String(value)
+  if (value < 1e6) return scaled(value / 1e3) + 'K'
+  return scaled(value / 1e6) + 'M'
+}
+
+/**
+ * 输入框**正下方那一行状态条**该画哪几格 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## 四格的官方口径（★ 逐条抄自 DSH 自己的客户端 ✗，不是我们定的 ✓）
+ *
+ * | 格子 | 读 | 口径 |
+ * |---|---|---|
+ * | 上下文% | `values.contextPressure` | `used = projectedTokens ?? pressureTokens` ✓；`min(100, round(used / contextWindow × 100))` + `%` ✓ |
+ * | 轮 | `values.sessionStats.turns` | 整数 + 「轮」✓ |
+ * | 步 | `values.sessionStats.steps` | 整数 + 「步」✓ |
+ * | tok | `values.tokenUsage` **四个桶求和** | 见 {@link formatTokenCount} ✓ |
+ *
+ * 出处（都在 `app.asar` 里读出来 ✓）：
+ * · 百分比 ⇒ `dsh-client-ui-conversation/lib/client.js` 的 `contextOccupancy()` ✓
+ *   （`projectedTokens ?? pressureTokens` ✓；缺 used 或 `contextWindow` ⇒ 返回 `null` ⇒
+ *   **那一格不画** ✗ —— 同一条纪律我们照抄 ✓）；
+ * · 轮 / 步 / 求和 ⇒ `dsh-client-ui-chat/lib/client.js` 的 `StatsPills()` ✓
+ *   （`billedInputTokens(usage) + usage.outputTokens` ✓，其中
+ *   `billedInputTokens = uncachedInputTokens + cacheReadTokens + cacheWriteTokens` ✓）；
+ * · 文案 ⇒ 同包中文语言包 `"stats.counts": "{turns} 轮 {steps} 步"` ✓。
+ *
+ * ## ★★ 铁律：**键不存在 = 数据取不到 = 那一格不画** ✗
+ *
+ * 不许退化成 `0` ✗、不许填编造的值 ✗；而 DSH **自己报的真实 0**（例如 `turns: 0`）
+ * **照常显示 `0 轮`** ✓ —— "没有这个数"与"这个数是 0"是两件事 ✓。
+ * 取不到 ⇒ 这一格**整个不产出** ✓ ⇒ 调用方（`renderStatsStrip` ✓）据此决定整条要不要占高度 ✓。
+ *
+ * ★ 比 DSH 多一道守卫 ✗：`tokenUsage` 的四个桶**必须都在**才算得出那一格 ✓ ——
+ *   少一个桶的"和"是一个**偏小的假数** ✓（桥那边的字段真形状是四个都在 ✓；
+ *   真要缺了，宁可这一格不画 ✗，也不报一个错的 tok 数 ✗）。
+ *
+ * @param {unknown} values `boot.chatProjections().values` ✓（**可能有、可能没有**的键 ✓）
+ * @returns {Array<{key: string, text: string, percent?: number}>} 只含**取得到**的那几格 ✓（顺序固定 ✓）
+ */
+export function statsCells(values) {
+  const source = recordOf(values)
+  const cells = []
+
+  // ① 上下文% ✓（`used` 或 `contextWindow` 任一取不到 ⇒ 这一格不画 ✗）
+  const pressure = source === null ? null : recordOf(source.contextPressure)
+  if (pressure !== null) {
+    const projected = countOf(pressure, 'projectedTokens')
+    const reported = countOf(pressure, 'pressureTokens')
+    const used = projected !== null ? projected : reported
+    const window = countOf(pressure, 'contextWindow')
+    if (used !== null && window !== null && window > 0) {
+      const percent = Math.min(100, Math.round((used / window) * 100))
+      cells.push({ key: 'context', text: percent + '%', percent })
+    }
+  }
+
+  // ② 轮 / ③ 步 ✓（各自独立取 ✓ —— 一个取不到不影响另一个 ✓）
+  const stats = source === null ? null : recordOf(source.sessionStats)
+  const turns = countOf(stats, 'turns')
+  if (turns !== null) cells.push({ key: 'turns', text: turns + ' 轮' })
+  const steps = countOf(stats, 'steps')
+  if (steps !== null) cells.push({ key: 'steps', text: steps + ' 步' })
+
+  // ④ tok ✓（四个桶求和 ✓ —— 少一个桶就不算这一格 ✗）
+  const usage = source === null ? null : recordOf(source.tokenUsage)
+  if (usage !== null) {
+    const buckets = TOKEN_BUCKETS.map((key) => countOf(usage, key))
+    if (buckets.every((count) => count !== null)) {
+      const total = buckets.reduce((sum, count) => sum + count, 0)
+      const text = formatTokenCount(total)
+      if (text.length > 0) cells.push({ key: 'tokens', text: text + ' tok' })
+    }
+  }
+
+  return cells
+}
+
+/** 四格拼成一行字 ✓（**只给日志/排障念** ✗ —— DOM 那条路是 {@link mountChat} 里现搭的 ✓）。 */
+export function statsStripText(values) {
+  return statsCells(values)
+    .map((cell) => cell.text)
+    .join(' · ')
 }
 
 /**
@@ -1035,8 +1135,47 @@ export function mountChat(options) {
   const status = root.querySelector('#status')
   const stateBox = root.querySelector('#state')
   const refresh = root.querySelector('#refresh')
-  /** ★ 输入框正下方那一行状态条（位置与样式先留出来 ✓ —— 内容见 `statsStripText` ✓）。 */
+  /**
+   * ★★ 输入框**正下方**那一行紧凑状态条 ✓ —— 四格：上下文% / 轮 / 步 / tok ✓。
+   *
+   * ## 数据从哪来（★ 页面侧**只有**这一个入口 ✗）
+   *
+   * `boot.chatProjections()` ✓（`app.js:456` ✓）⇒ `{asOfSeq, values}` ✓ ——
+   * 宿主那条流路由把**开场快照自带的投影**接进去 ✓（`rememberProjections` ✓）。
+   * ★ 每次 `paint()` **现取** ✓、不缓存 ✗：投影是"每个会话第一帧一次"✓，
+   *   缓存它就会在切会话之后还念上一个会话的数 ✓（在手机上完全看不出来 ✗）。
+   * ★ 取不到（老宿主 / 没有投影 / 桥还没接上 ✓）⇒ `null` ✓ ⇒ 四格全部不画 ✓。
+   *
+   * ## ★★ 四格全取不到 ⇒ 这条**不占高度** ✗
+   *
+   * 这是**故意**的 ✓，也正是这条口径与改前那条注释的关系 ✗：改前这一行只会写
+   * 「窗口内已读 N 条 · 在线」✓ ⇒ **恒有字** ✓ ⇒ 它的前提是"绝不会塌成 0 高"✓。
+   * 现在这一行**会**塌（没有投影时 ✓），所以：
+   *   · `hidden` 走 `display:none` ✓（`.stats-strip[hidden]` 那条规则是**必须的** ✗ ——
+   *     与 `#messages[hidden]` / `#sessions[hidden]` 同一个坑：作者样式的 `display:flex`
+   *     会盖掉 UA 的 `[hidden]` ✓ ⇒ 不写就是"藏着还占 22px"✓）；
+   *   · ★ 于是**几何断言必须跑在"有投影"的那一档上** ✗ —— 在有投影的夹具里量高度 ✓；
+   *     没有投影的那一档量的是"塌陷"（`display:none` + 高 0 ✓），不是"这条有多高" ✓
+   *     （本仓原话：空串会让这一条塌成 0 高 ⇒ 几何就量不到了 ✗ —— 现在这一条**是**要量的那条 ✓）。
+   *
+   * ## 纯展示（★ 本仓规矩：不假装能用 ✗）
+   *
+   * 四格**不是按钮** ✓（`<span>` ✓，没有 `click`、没有 `cursor:pointer` ✓）——
+   * DSH 自己那三格点开是三个宿主面板 ✓，而它们**只存在于 DSH 自己的 React 页**上 ✓
+   * （我们这一页没有可转发的锚点 ✗）⇒ 按照"要提供交互就该像审批卡那样有真实通道"✓，
+   * 没有通道就**不做**交互 ✗。
+   */
   const statsStrip = root.querySelector('#stats-strip')
+  /**
+   * ★ 上一次画进 DOM 的那四格（`null` = 还没画过 ✓）。
+   *
+   * ★ 为什么要它 ✗：`paint()` 会被**每一批事件**触发 ✓，而四格的值一小时也不变一次 ✓
+   *   ⇒ 不挡住就是"每条消息都重建一次 DOM"✓（白烧电 ✓，还会把环的过渡打断 ✗）。
+   * ★ 初值必须是 `null` 而**不是** `''` ✗：空串与"四格全没有"的键**撞车** ✓
+   *   ⇒ 第一次 `paint()`（那时候正好没有投影）会被当成"没变"而**跳过** ✓
+   *   ⇒ `hidden` 永远不设 ⇒ 那 22px 空带一直在 ✓（塌陷那条断言也就假绿了 ✓）。
+   */
+  let statsDrawnKey = null
   /**
    * ★★ 「对话｜轨迹」标签栏（复刻清单第 3 项 ✓）—— 三样东西：两个 tab、两个视图层、一个读数 ✓。
    *
@@ -1174,6 +1313,114 @@ export function mountChat(options) {
    *  也正是上一轮记下的坏味道（别靠改别人的东西接线 ✓）。 */
   let paintComposer = () => {}
 
+  /**
+   * 现取一次宿主给的**会话投影** ✓（`boot.chatProjections()` ✓ —— 页面侧唯一入口 ✓）。
+   *
+   * ★ 认不出一律 `null` ✓：老宿主没有这个函数 ✓、它抛 ✓、它给的形状不对 ✓ ——
+   *   三种都当成"取不到"✓ ⇒ 四格全不画 ✓（**绝不许**因此画一个 0 ✗ 或 `-` ✗）。
+   */
+  const readProjectionValues = () => {
+    const boot = globalThis.__DSH_MOBILE_BOOT__
+    const read = boot === null || boot === undefined ? undefined : boot.chatProjections
+    if (typeof read !== 'function') return null
+    try {
+      const snapshot = read()
+      const values = snapshot !== null && typeof snapshot === 'object' ? snapshot.values : null
+      return values !== null && typeof values === 'object' ? values : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  /** 上下文那一格前面的环 ✓（同一个算式、同一组几何照 DSH 的 `ContextMeter` ✓）。 */
+  const contextRing = (percent) => {
+    const NS = 'http://www.w3.org/2000/svg'
+    const svg = document.createElementNS(NS, 'svg')
+    // ★ SVG 元素的类是**只读的 SVGAnimatedString** ✗ ⇒ 只能 `setAttribute('class', …)` ✓
+    svg.setAttribute('class', 'stats-ring')
+    svg.setAttribute('viewBox', '0 0 14 14')
+    svg.setAttribute('width', '14')
+    svg.setAttribute('height', '14')
+    svg.setAttribute('aria-hidden', 'true')
+    const track = document.createElementNS(NS, 'circle')
+    track.setAttribute('class', 'stats-ring-track')
+    track.setAttribute('cx', '7')
+    track.setAttribute('cy', '7')
+    track.setAttribute('r', String(STATS_RING_RADIUS))
+    const fill = document.createElementNS(NS, 'circle')
+    fill.setAttribute('class', 'stats-ring-fill')
+    fill.setAttribute('cx', '7')
+    fill.setAttribute('cy', '7')
+    fill.setAttribute('r', String(STATS_RING_RADIUS))
+    // ★ 与 DSH 同一条算式 ✓：`${周长 × 百分比/100} ${周长}` ✓（从 -90° 起画 ✓）
+    fill.setAttribute('stroke-dasharray', STATS_RING_CIRCUMFERENCE * percent / 100 + ' ' + STATS_RING_CIRCUMFERENCE)
+    fill.setAttribute('transform', 'rotate(-90 7 7)')
+    svg.appendChild(track)
+    svg.appendChild(fill)
+    return svg
+  }
+
+  /**
+   * 把那四格画进 DOM ✓（**取不到的那一格整个不产出** ✗ —— 连分隔符也不留 ✓）。
+   *
+   * ★ 次序与 DOM：`span.stats-cell[data-cell=…]` 一串 ✓，两格之间一个
+   *   `span.stats-sep`（「·」✓）—— 分隔符**跟着数据走** ✗（画在"前两格之间"而不是
+   *   "四个位置各留一个"✓，否则缺一格时就会留下一个孤零零的「·」✓）。
+   * ★ `innerHTML` 一个字都不用 ✗（这里全是自己造的字 ✓，但同一条纪律照守 ✓）。
+   */
+  const renderStatsStrip = () => {
+    if (statsStrip === null || statsStrip === undefined) return
+    const values = readProjectionValues()
+    const cells = statsCells(values)
+    const key = cells.map((cell) => cell.key + '=' + cell.text).join('|')
+    // ★ 内容没变 ⇒ 一个字节都不动 ✓（`paint()` 每批事件都会跑 ✓）
+    if (key === statsDrawnKey) return
+    statsDrawnKey = key
+    /**
+     * ★ 真机排障用的一行 ✓（本仓规矩：真机才现形的问题要**在调试框里留一行可念的**✗）——
+     *   用户报"这一条怎么没了 / 怎么少一格"时，这一行就是答案 ✓。
+     * ★ 只在**变了**的时候念 ✓（四格一小时也难得变一次 ✓ —— 不会刷屏 ✓）。
+     * ★ 与 `app.js` 那句"开场快照的投影：… 三个键命中 N/3"配成一对 ✓
+     *   （那句说**宿主给了什么** ✓，这句说**页面画了什么** ✓）。
+     */
+    try {
+      console.log(
+        '[dsh-chat] 状态条：' +
+          (cells.length === 0 ? '（投影取不到 ⇒ 这一条不占高度）' : statsStripText(values)),
+      )
+    } catch (error) {
+      // ★ 念不出来也不许影响画 ✗（老壳的 console 可能被摘掉 ✓）
+      void error
+    }
+    if (typeof statsStrip.replaceChildren === 'function') statsStrip.replaceChildren()
+    else statsStrip.textContent = ''
+    // ★★ 四格全取不到 ⇒ **整条不占高度** ✗（`hidden` 的 `display:none` 写在 theme.css 里 ✓）
+    if (cells.length === 0) {
+      statsStrip.hidden = true
+      return
+    }
+    statsStrip.hidden = false
+    for (let index = 0; index < cells.length; index += 1) {
+      if (index > 0) {
+        const sep = document.createElement('span')
+        sep.className = 'stats-sep'
+        sep.setAttribute('aria-hidden', 'true')
+        sep.textContent = '·'
+        statsStrip.appendChild(sep)
+      }
+      const cell = document.createElement('span')
+      cell.className = 'stats-cell'
+      // ★ 纯 ASCII 的钩子 ✓（验收按它找那一格 ✓，DOM 上看不出区别 ✓）
+      cell.setAttribute('data-cell', cells[index].key)
+      if (cells[index].key === 'context') cell.appendChild(contextRing(cells[index].percent))
+      const text = document.createElement('span')
+      text.className = 'stats-text'
+      text.textContent = cells[index].text
+      cell.appendChild(text)
+      statsStrip.appendChild(cell)
+    }
+  }
+
   const paint = () => {
     const view = computePageState({ loading, eventCount, error, connection })
     const line = resolveStatusLine({
@@ -1183,10 +1430,9 @@ export function mountChat(options) {
       normal: pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText,
     })
     if (status !== null && status !== undefined) status.textContent = line
-    // ★ 输入框正下方那一行：**只写真读数** ✓（口径与"为什么不是那三个数"见 `statsStripText` ✓）
-    if (statsStrip !== null && statsStrip !== undefined) {
-      statsStrip.textContent = statsStripText({ eventCount, connection })
-    }
+    // ★ 输入框正下方那一行：**四格只画取得到的那几格** ✓（口径见 `statsCells` ✓、
+    //   塌陷与"为什么不占高度"见 `statsStrip` 那一段 ✓）
+    renderStatsStrip()
     if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true

@@ -137,6 +137,100 @@ const MD_H_COUNT = (MD_DOC.match(/^#{1,6}\s+/gm) ?? []).length
 const PROBE_MATH_COUNT = 2
 
 /**
+ * ★★ 四格（状态条）那几档的**已知投影夹具** ✓ —— 一条真会话的 `values` 真形状 ✓
+ * （字段名逐个抄自 `app.asar` ✓，见 `dsh-chat-bridge.ts` 的 `normalizeValues` ✓）。
+ *
+ * ## 为什么要有它（以及为什么必须有**四**档 ✗）
+ *
+ * 桥把三个会话投影带进了 `values` ✓，而那是"**可能有、可能没有**"的键 ✗ ——
+ * ⇒ 只验"有数据时画对了"是**半个判据** ✓：真正会出错的是另一半 ✓
+ * （键缺了却画一个 `0%` / `0 轮` ✓ —— 那正是本条铁律要防的"编数字"✗）。
+ * 所以四档各钉一件事 ✓：
+ *   · `full`         ⇒ 四格**逐字**且**顺序**正确 ✓（含上下文那个环 ✓）；
+ *   · `nopressure`   ⇒ **缺整个 `contextPressure`** ⇒ `%` 那一格**一个都没有** ✗
+ *                      （★ `0%` 也算失败 ✗ —— 那正是"退化成 0"）；
+ *   · `missingturns` ⇒ `sessionStats` 在、但**缺 `turns`** ⇒ 没有「轮」那一格 ✗
+ *                      （★ 不许退化成 `0 轮` ✗ —— 这一档专门打"只判投影在不在"的实现 ✓）；
+ *   · `zeroturns`    ⇒ `turns: 0` 是 **DSH 自己报的真实 0** ⇒ **照显示 `0 轮`** ✓
+ *                      （★ "没有这个数"与"这个数是 0"是两件事 ✗ —— 这一档防的是**矫枉过正**：
+ *                        把真实的 0 也当成"取不到"藏起来 ✓）。
+ *
+ * ★ 数字是**挑**出来的 ✓（`488 轮` / `2525 步` / `1062M tok` / `45%` ✓ —— 用户给的那张参照表 ✓）：
+ *   下面 `expectedCells` 那几格是**从这些数机械算出来**的 ✗，不是手抄的期望值 ✓；
+ *   而"机械算出来的就是这四个字面"这一条**单独有一条夹具自检** ✓
+ *   ⇒ 谁改了这里的数、却又没改目标字面，那条自检当场红 ✓。
+ */
+const PROJ_FIXTURES = {
+  full: {
+    asOfSeq: 8412,
+    values: {
+      sessionStats: { turns: 488, steps: 2525 },
+      // ★ 四桶求和要正好落在 1.062e9 ⇒ `1062M tok` ✓（`cacheWriteTokens` 是 0 也算一个桶 ✓）
+      tokenUsage: { uncachedInputTokens: 2000000, cacheReadTokens: 1058000000, cacheWriteTokens: 0, outputTokens: 2000000 },
+      // ★ used 取 `projectedTokens`（450000 / 1000000 = 45% ✓）
+      contextPressure: { contextWindow: 1000000, pressureTokens: 259578, projectedTokens: 450000 },
+    },
+  },
+  nopressure: {
+    asOfSeq: 8412,
+    values: {
+      sessionStats: { turns: 488, steps: 2525 },
+      tokenUsage: { uncachedInputTokens: 2000000, cacheReadTokens: 1058000000, cacheWriteTokens: 0, outputTokens: 2000000 },
+      // ★ 这个键**整个不在** ✓（不是 null ✗、不是 0 ✗ —— 桥那层的口径就是"认不出连键都不输出"✓）
+    },
+  },
+  missingturns: {
+    asOfSeq: 8412,
+    values: {
+      sessionStats: { steps: 2525 },
+      tokenUsage: { uncachedInputTokens: 2000000, cacheReadTokens: 1058000000, cacheWriteTokens: 0, outputTokens: 2000000 },
+      contextPressure: { contextWindow: 1000000, projectedTokens: 450000 },
+    },
+  },
+  zeroturns: {
+    asOfSeq: 8412,
+    values: {
+      sessionStats: { turns: 0, steps: 2525 },
+      tokenUsage: { uncachedInputTokens: 2000000, cacheReadTokens: 1058000000, cacheWriteTokens: 0, outputTokens: 2000000 },
+      contextPressure: { contextWindow: 1000000, projectedTokens: 450000 },
+    },
+  },
+}
+
+/** ★ 四格的**期望值**：从夹具机械推出来 ✓（口径与 `ui.js` 的 `statsCells` 同源 ✓，不是手抄 ✗）。 */
+const TOKEN_BUCKET_KEYS = ['uncachedInputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens']
+const expectedTokenSum = (usage) => TOKEN_BUCKET_KEYS.reduce((sum, key) => sum + usage[key], 0)
+const expectedTokText = (usage) => {
+  const value = expectedTokenSum(usage)
+  const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
+  if (value < 1e3) return String(value) + ' tok'
+  if (value < 1e6) return scaled(value / 1e3) + 'K tok'
+  return scaled(value / 1e6) + 'M tok'
+}
+const expectedPercent = (pressure) => {
+  const used = pressure.projectedTokens ?? pressure.pressureTokens
+  return Math.min(100, Math.round((used / pressure.contextWindow) * 100))
+}
+/** 一格 ⇒ `[data-cell, 文本]` ✓（取不到的那一格**根本不在表里** ✗）。 */
+const expectedCells = (name) => {
+  const values = PROJ_FIXTURES[name].values
+  const out = []
+  const pressure = values.contextPressure
+  if (pressure !== undefined && (pressure.projectedTokens ?? pressure.pressureTokens) !== undefined && pressure.contextWindow !== undefined) {
+    out.push(['context', expectedPercent(pressure) + '%'])
+  }
+  const stats = values.sessionStats
+  if (stats !== undefined && stats.turns !== undefined) out.push(['turns', stats.turns + ' 轮'])
+  if (stats !== undefined && stats.steps !== undefined) out.push(['steps', stats.steps + ' 步'])
+  const usage = values.tokenUsage
+  if (usage !== undefined && TOKEN_BUCKET_KEYS.every((key) => usage[key] !== undefined)) out.push(['tokens', expectedTokText(usage)])
+  return out
+}
+/** ★ 上下文那个环的 `stroke-dasharray` ✓（与 `ui.js` 同一条算式 ✓ —— 两侧都是 IEEE754 双精度 ⇒ 字面相等 ✓）。 */
+const RING_CIRCUMFERENCE = 2 * Math.PI * 5.5
+const expectedDash = (percent) => RING_CIRCUMFERENCE * percent / 100 + ' ' + RING_CIRCUMFERENCE
+
+/**
  * 从 dump 里切出**某一条助手事件**的那一块 ✓ —— 按 `data-text-chars`（= 正文长度 ✓）找 ✓。
  *
  * ★ 为什么不用「第几条」✗：事件先后由 `seq` 决定 ✓，用序号会在夹具一增减时**静默错位** ✓
@@ -151,8 +245,16 @@ const agentBlockByChars = (html, chars) => {
   return ''
 }
 
-/** ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。 */
-const EXPECTED_MIN_CHECKS = 67
+/**
+ * ★ 断言条数下界（**只许上调** ✓ —— 有人删断言不算"全都验过了" ✓）。
+ *
+ * ★★ 提到 **96** 的账（本单 ✓）：改前是 **67** ✗ —— 而那一轮**实跑 73 项** ✓
+ *   ⇒ 也就是**有 6 条余量** ✗（少跑 6 条也不会红 ✓，那正是这道下界想防的静默 ✓）。
+ *   本单实跑 **96** 项（95 通过 / 1 失败 —— 那条红是审批那单造成的**过期断言** ✓，
+ *   与本单无关 ✓，也不由本单来修 ✗）⇒ 下界**贴着实跑数**写到 **96** ✓。
+ *   ★ 本文件同时有另一单在改（★ 它把那 6 条余量里的一条用掉了：67 → 68 ✓）——
+ *   ★ 这一行是**共享的** ✗：谁最后写谁说了算 ✓（若那一单后写，就会退回 68 ✓）。 */
+const EXPECTED_MIN_CHECKS = 96
 
 let checks = 0
 let failed = 0
@@ -171,6 +273,26 @@ const check = (name, ok, detail) => {
 /** 假隧道：按脚本回答 `mobile/dsh/*`，与真宿主同形状（`{result:{ok,value}}` ✓）。 */
 const FAKE_BOOT = `
 ;(function () {
+  /*
+   * ★★ 这一趟的**取数方式**与**投影档**由 URL 决定 ✓（本单新增 ✓）。
+   *
+   * ★ 为什么用 URL 参数而不是"另起一个夹具" ✗：\`app.js\` 判"走流还是走轮询"的判据是
+   *   **能力**（\`typeof tunnel.openStream === 'function'\` ✓，在**模块加载那一刻**读一次 ✓）
+   *   ⇒ 只有"这一趟有没有挂 openStream"能改它 ✓ —— 而**不挂**的那几趟
+   *   （\`phase=create\` / \`send-fail\` / \`read-fail\` / 无隧道 ✓）必须**逐字保持原样** ✗
+   *   （它们验的是轮询那条老路 ✓，一个字都不许动 ✓）。
+   *
+   * ★ 四格的数据**只能**从流那条路来 ✓（★ 这不是夹具挑食 ✗）：
+   *   \`app.js\` 把快照里的投影记进 \`latestProjections\` ✓（\`rememberProjections\` ✓，
+   *   只认 \`{type:'snapshot', projections}\` ✓）⇒ \`boot.chatProjections()\` 才念得出来 ✓；
+   *   而**真机上恒为流** ✓（\`boot.js\` 一直有 \`openStream\` ✓ —— 见 \`app.js:56\` 那段 ✓）。
+   */
+  var Q = new URLSearchParams(location.search)
+  var PROJ_KEY = Q.get('proj') || ''
+  var STREAM_MODE = Q.get('fetch') === 'stream'
+  /** ★ 探针在页面加载后多久取读数 ✓（默认 320 与原状逐字相同 ✓；流那一档给宽一点 ✓）。 */
+  var PROBE_MS = Number(Q.get('probe') || '320')
+  var PROJECTIONS = ${JSON.stringify(PROJ_FIXTURES)}
   var sessions = [
     { id: 's-1', title: '换图标那两个标签', updatedAt: 30, current: true },
     { id: 's-2', title: '原生首页的卡片间距', updatedAt: 90, running: true },
@@ -304,6 +426,51 @@ const FAKE_BOOT = `
   __api.__fakeCalls = function () { return calls.slice() }
   __api.__fakeSent = function () { return sent.slice() }
   /*
+   * ★★ 流那条路（★ 本单新增 ✗，**只在 \`?fetch=stream\` 那一趟挂上** ✓）——
+   *   四格的数据（会话投影 ✓）**只有**开场快照带得下来 ✓，而快照只在流里 ✓。
+   *
+   * ## 这一条流要满足的两件事（★ 都与真宿主同形 ✗）
+   *
+   * 1. **第一帧必须是 \`{type:'snapshot'}\`** ✓，里面 \`records[].event\` 逐条是事件 ✓、
+   *    \`projections\` 就是那三个键 ✓ —— 与 \`app.js\` 的 \`frameEvents\` / \`rememberProjections\`
+   *    认的两样**逐字对齐** ✓（形状错了 ⇒ 事件不来 / 投影不来 ⇒ 断言全红 ✓，不会静默 ✓）；
+   * 2. **之后一直挂着** ✓（不结束 ✗）：流正常收尾会被 \`app.js\` 当成一次断开 ✓
+   *    （\`StreamEnd\` ⇒ 报错 + 排重开 ✓）⇒ 那一趟会反复重开、读数是活的 ✓
+   *    —— ★ 本单不验重开那条路 ✗（它有自己的单 ✓），所以这里按住不动 ✓。
+   *    ★ \`return()\` 要**真的**把挂着的 \`next()\` 叫醒 ✗（切会话 / 发消息都会取消这一条 ✓）——
+   *    不叫醒它，页面里那个 \`await\` 就永远挂着 ✓（\`app.js\` 里那段"取消闩"注释说的就是这个坑 ✓）。
+   */
+  if (STREAM_MODE) {
+    __api.tunnel.openStream = function (method, payload) {
+      calls.push(method + '(stream)')
+      void payload
+      var frame = {
+        type: 'snapshot',
+        records: events.map(function (one) { return { event: one } }),
+        projections: PROJECTIONS[PROJ_KEY] || null,
+      }
+      var handed = false
+      var hold = null
+      var iter = {
+        next: function () {
+          if (!handed) { handed = true; return Promise.resolve({ done: false, value: frame }) }
+          return new Promise(function (resolve) { hold = resolve })
+        },
+        'return': function () {
+          if (hold !== null) { var fire = hold; hold = null; fire({ done: true, cancelled: true }) }
+          return Promise.resolve({ done: true })
+        },
+      }
+      iter[Symbol.asyncIterator] = function () { return iter }
+      var iterable = {}
+      iterable[Symbol.asyncIterator] = function () { return iter }
+      return iterable
+    }
+  }
+  /** ★ 这一趟**真的**是流 / 真的带了哪一档投影 ✓（夹具自检用 ✓）。 */
+  document.documentElement.setAttribute('data-e2e-fetch', STREAM_MODE ? 'stream' : 'poll')
+  document.documentElement.setAttribute('data-e2e-proj', PROJ_KEY || '(none)')
+  /*
    * ★★ 夹具自检（本单最要紧的一条 ✓）：页面里**真的拿得到**那个渲染器吗 ✗ ——
    *   它来自宿主发的真 boot.js ✓（不是我在这儿塞的 ✓）。
    *   拿不到 ⇒ 下面的 markdown 断言全是在验**兜底路径** ✓（假绿 ✓）。
@@ -393,6 +560,47 @@ const FAKE_BOOT = `
               sendIcon: box(document.querySelector('.send-btn .send-icon')),
               strip: box(strip), stripFont: strip === null ? null : getComputedStyle(strip).fontSize,
               stripText: strip === null ? null : strip.textContent,
+              /*
+               * ★★ 状态条那**四格**的逐项读数 ✓（本单新增 ✓ —— 这一段就是四格断言的全部证据 ✓）。
+               *
+               * ★ 判据一律是**元素与文本** ✗，不是"页面里出现了 \`%\` 这个字符"✓：
+               *   · \`stripCells\` 逐格记 \`[data-cell, 文本]\` ✓（顺序即 DOM 顺序 ✓）；
+               *   · \`stripSeps\` 数分隔符 ✓（应当是**格数 − 1** ✓ —— 缺一格时不许留孤零零的「·」✓）；
+               *   · \`stripButtons\` 数这一条里的 \`<button>\` ✓（★ 必须是 **0** ✗ —— 四格是纯展示 ✓）；
+               *   · 环的 \`stroke-width\` 与 \`stroke-dasharray\` 都取自**计算值/属性**✓
+               *     （dasharray 与脚本里那条同算式机械推出来的字面**逐字比** ✓）。
+               */
+              stripCells: strip === null ? null : [].slice.call(strip.querySelectorAll('.stats-cell')).map(function (c) {
+                return [c.getAttribute('data-cell'), c.textContent]
+              }),
+              stripSeps: strip === null ? null : strip.querySelectorAll('.stats-sep').length,
+              stripButtons: strip === null ? null : strip.querySelectorAll('button').length,
+              stripHidden: strip === null ? null : strip.hasAttribute('hidden'),
+              stripDisplay: strip === null ? null : getComputedStyle(strip).display,
+              stripLineHeight: strip === null ? null : getComputedStyle(strip).lineHeight,
+              stripGapUnit: strip === null ? null : getComputedStyle(strip).gap,
+              stripPadLeft: strip === null ? null : getComputedStyle(strip).paddingLeft,
+              stripClipped: strip === null ? null : strip.scrollWidth > strip.clientWidth + 1,
+              stripRing: (function () {
+                var ring = strip === null ? null : strip.querySelector('.stats-ring')
+                if (ring === null) return null
+                var track = ring.querySelector('.stats-ring-track')
+                var fill = ring.querySelector('.stats-ring-fill')
+                var trackCss = track === null ? null : getComputedStyle(track)
+                var fillCss = fill === null ? null : getComputedStyle(fill)
+                return {
+                  viewBox: ring.getAttribute('viewBox'),
+                  box: box(ring),
+                  trackStrokeWidth: trackCss === null ? null : trackCss.strokeWidth,
+                  trackStroke: trackCss === null ? null : trackCss.stroke,
+                  trackFill: trackCss === null ? null : trackCss.fill,
+                  fillStrokeWidth: fillCss === null ? null : fillCss.strokeWidth,
+                  fillStroke: fillCss === null ? null : fillCss.stroke,
+                  fillLinecap: fillCss === null ? null : fillCss.strokeLinecap,
+                  dash: fill === null ? null : fill.getAttribute('stroke-dasharray'),
+                  transform: fill === null ? null : fill.getAttribute('transform'),
+                }
+              })(),
               home: box(home), homeHeight: home === null ? null : getComputedStyle(home).height,
               composer: box(composer),
               placeholder: input === null ? null : input.getAttribute('placeholder'),
@@ -485,7 +693,7 @@ const FAKE_BOOT = `
           } catch (error) {
             document.documentElement.setAttribute('data-e2e-geometry-error', String((error && error.message) || error))
           }
-        }, 320)
+        }, PROBE_MS)
         return
       }
       // 会话列表可能还没到 ⇒ 等一拍再点开标题 ⇒ 再点「＋ 新会话」✓
@@ -986,7 +1194,23 @@ try {
   const geometryRaw = decodeURIComponent((html.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
   let g = null
   try { g = geometryRaw.length > 0 ? JSON.parse(geometryRaw) : null } catch (error) { g = null }
-  check('夹具自检：输入栏几何读数拿到了（本来没有的话下面全是空转 ✓）', g !== null && geometryError === '', `夹具错误=${geometryError || '(无)'}`)
+  /** ★ 夹具把页面里的 JS 错误画在 `#fixture-errors` 上 ✓ —— 出问题时**先念它** ✗（不然只剩猜 ✓）。 */
+  const fixtureErrors = (html.match(/id="fixture-errors"[^>]*>([^<]*)</) ?? [])[1] ?? ''
+  console.log('    \u2500\u2500 \u8bca\u65ad\uff1a\u771f\u4e8b\u4ef6\u5230\u4e86\u5417 data-text-chars \u51fa\u73b0 ' + ((html.match(/data-text-chars=/g) ?? []).length) + ' \u6b21\uff5c\u6c14\u6ce1 ' + ((html.match(/class="bubble"/g) ?? []).length) + ' \u4e2a\uff5cdata-e2e-fixture=' + ((html.match(/data-e2e-fixture="(-?\d+)"/) ?? [])[1] ?? '-'))
+  /**
+   * ★★ 这一行原来是 `JSON.stringify({ strip: gv.strip, … }) + ' ｜ tabs.y=' + (tb?.barRect?.y) + …` ✗
+   *   —— 而 `gv` 在**下面**才声明（第 1206 行 ✓）、`tb` 更要等到标签栏那一节（第 1344 行 ✓）
+   *   ⇒ `let/const` 的**死区**当场 `ReferenceError` ✓ ⇒ ★ **整套件跑到这里就崩** ✗
+   *   （另一单 11:00:00 写进去的 ✓，我 11:00:1x 跑验收时正好踩上 ✓）。
+   * ★ 处置：这一行改成只念**已经拿到的** `g` ✓；`tabs` 那两样**挪到 `tb` 解析之后**去念 ✓
+   *   （见标签栏那一节开头的同名诊断 ✓）—— ★ 一个读数都没少 ✗，只是换了个地方念 ✓。
+   */
+  console.log('    \u2500\u2500 \u8bca\u65ad\uff1ageometry=' + JSON.stringify({ strip: g?.strip, stripText: g?.stripText, card: g?.card, composer: g?.composer, vh: g?.vh }))
+  check(
+    '夹具自检：输入栏几何读数拿到了（本来没有的话下面全是空转 ✓）',
+    g !== null && geometryError === '',
+    `夹具错误=${geometryError || '(无)'}｜页面 JS 错误=${fixtureErrors || '(无)'}`,
+  )
   const gv = g ?? {}
   const card = gv.card ?? null
   const tools = Array.isArray(gv.tools) ? gv.tools : []
@@ -1041,25 +1265,35 @@ try {
     gv.sendIcon !== null && gv.sendIcon.w > 8 && gv.sendIcon.h > 8 && (gv.sendLabel === '' || gv.sendLabel === null),
     `图标=${gv.sendIcon?.w}×${gv.sendIcon?.h}｜那行字=${JSON.stringify(gv.sendLabel)}`,
   )
-  /** ⑦ 状态条：在**输入框正下方**（卡片底之下 ✓、输入栏底之上 ✓）、字号 11px。 */
-  check(
-    '★ 状态条在输入框正下方（卡片底之下、输入栏底之上）、字号 11px',
-    gv.stripFont === '11px' && stripBox !== null && card !== null && composerBox !== null &&
-      stripBox.y >= card.bottom - 1 && stripBox.bottom <= composerBox.bottom + 1,
-    `字号=${gv.stripFont}｜strip.y=${stripBox?.y} card.bottom=${card?.bottom} composer.bottom=${composerBox?.bottom}`,
-  )
   /**
-   * ⑧ ★★ **不编数字** ✗。
-   *    ★★ 这一条的**口径将来只许换、不许删** ✗：今天会话页拿不到
-   *       `sessionStats` / `tokenUsage` / `contextPressure` 三个投影 ✓
-   *       （`session/page` 的结果 schema 只有 records + hasMore ✓）；
-   *       等桥把那三个投影接出来（另一单 ✓），这里要**换成**
-   *       "百分比 = 宿主给的 used/window"✓ —— 不是把它松掉 ✓。
+   * ⑦ ★★ 这一趟**没有投影数据**（轮询那条路 ✓，`mobile/dsh/read` 的 `values` 谁也没读 ✓）
+   *   ⇒ 按本单那条铁律：**四格全取不到 ⇒ 整条不占高度** ✗ —— 所以这一档量的是**塌陷** ✓。
+   *
+   * ★ 为什么把原来那条"位置 + 字号 11px"搬走了 ✗：这条口径换过之后，这一趟里状态条
+   *   `display:none`（`getBoundingClientRect()` 恒 `0×0` ✓）⇒ 在这里量高度/位置是**在量空气** ✓
+   *   （那正是 `ui.js` 里那段注释说的"空串会让这一条塌成 0 高 ⇒ 几何就量不到了"✓）。
+   *   ⇒ 几何那条**搬到有投影的那一档**去量 ✓（见下面「四格 · 已知投影」那一节 ✓）——
+   *     口径只换地方、**没放松** ✗（那里量的是真高度 22px ±2 ✓，比原来更硬 ✓）。
    */
   check(
-    '★★ 状态条写的是真读数：非空、且**没有编出来的**上下文百分比（今天没有数据源）',
-    typeof gv.stripText === 'string' && gv.stripText.length > 0 && !gv.stripText.includes('%'),
-    `读到 ${JSON.stringify(gv.stripText)}`,
+    '★★ 投影取不到 ⇒ 状态条**整条塌陷**（display:none、高 0 —— 那 22px 的空带不许在 ✓）',
+    gv.stripDisplay === 'none' && stripBox !== null && stripBox.h === 0 && gv.stripHidden === true,
+    `display=${gv.stripDisplay}｜hidden=${gv.stripHidden}｜盒=${JSON.stringify(stripBox)}`,
+  )
+  /**
+   * ⑧ ★★ 塌陷时**四格一个都不许画** ✗ —— 也不许留"0 轮"这种**编出来的**数 ✓。
+   *
+   * ★★ 这一条的**口径是换过的** ✓（原来要求"文本非空、且没有 `%`"✓）：数据面已经通了 ✓
+   *   （桥把三个投影带进了 `values` ✓，另一单 ✓）⇒ 旧口径的两半**都反了** ✓：
+   *   现在正确的行为是**空**（取不到就不画 ✓），而不是"非空 + 不许有百分比"✗。
+   *   ⇒ 换成"**一格都没有** + 条上没有任何四格的字面"✓（更严 ✓，不是放松 ✗）。
+   * ★ 反向打红：把 `statsCells` 里任何一处"取不到就补 0"打开 ⇒ 这条必红 ✓（已做变异 ✓）。
+   */
+  check(
+    '★★ 塌陷时**四格一个都不画**（0 格 / 0 个分隔符 / 没有任何「N 轮」「N 步」「tok」「%」✓）',
+    gv.stripCells !== null && gv.stripCells.length === 0 && gv.stripSeps === 0 &&
+      typeof gv.stripText === 'string' && !/[0-9]+\s*(轮|步|tok)|%/.test(gv.stripText),
+    `格数=${gv.stripCells?.length}｜分隔符=${gv.stripSeps}｜文本=${JSON.stringify(gv.stripText)}`,
   )
   /**
    * ⑨ 安全区**只算一次**（这是本项目花钱最多的一条 ✓）：
@@ -1117,6 +1351,8 @@ try {
   const tabsRaw = decodeURIComponent((html.match(/data-e2e-tabs="([^"]*)"/) ?? [])[1] ?? '')
   let tb = null
   try { tb = tabsRaw.length > 0 ? JSON.parse(tabsRaw) : null } catch (error) { tb = null }
+  /** ★ 这一行就是原来那条 `tabs.y=… tabs.before=…` 诊断 ✓（挪到 `tb` 真的解析出来之后 ✓）。 */
+  console.log('    \u2500\u2500 \u8bca\u65ad\uff1atabs.y=' + (tb?.barRect?.y) + ' tabs.before=' + JSON.stringify(tb?.before))
   check(
     '夹具自检：标签栏读数拿到了（本来没有的话下面全是空转 ✓）',
     tb !== null && tabsError === '',
@@ -1215,14 +1451,30 @@ try {
   const tab0 = tabBtns[0] ?? null
   const tab1 = tabBtns[1] ?? null
   check(
-    '★★ 标签栏几何照真值 ±2px（高 27 / 字号 13 / 字重 500 / 行高 16 / 下内边距 9 / 间距 36 / 左缩进 8 / 指示条 2px+圆角2px）',
-    barRect !== null && Math.abs(barRect.h - 27) <= 2 &&
+    '★★ 标签栏几何照真值 ±2px（高 25 / 字号 13 / 字重 500 / 行高 16 / 下内边距 9 / 间距 36 / 左缩进 28 / 指示条 2px+圆角2px）',
+    barRect !== null && Math.abs(barRect.h - 25) <= 2 &&
       Math.abs(Number.parseFloat(tv.barGap ?? '0') - 36) <= 2 &&
-      Math.abs(Number.parseFloat(tv.barPaddingLeft ?? '0') - 8) <= 2 &&
+      Math.abs(Number.parseFloat(tv.barPaddingLeft ?? '0') - 28) <= 2 &&
+      Math.abs((tab0?.rect?.x ?? -99) - 28) <= 2 &&
       tab0?.fontSize === '13px' && tab0?.fontWeight === '500' && tab0?.lineHeight === '16px' &&
       tab0?.paddingBottom === '9px' && tab1?.afterHeight === '2px' &&
       tab1?.afterRadius === '2px' && tab1?.afterBottom === '-1px',
-    `高=${barRect?.h}（真值 27）｜gap=${tv.barGap}｜padding-left=${tv.barPaddingLeft}｜字号=${tab0?.fontSize}/${tab0?.fontWeight}/${tab0?.lineHeight}｜下内边距=${tab0?.paddingBottom}｜指示条=${tab1?.afterHeight} r=${tab1?.afterRadius} bottom=${tab1?.afterBottom}`,
+    `高=${barRect?.h}（真机也是 25）｜gap=${tv.barGap}｜padding-left=${tv.barPaddingLeft}｜首颗 x=${tab0?.rect?.x}（真值 28 = 侧栏轨道 20 + 源码 8）｜字号=${tab0?.fontSize}/${tab0?.fontWeight}/${tab0?.lineHeight}｜下内边距=${tab0?.paddingBottom}｜指示条=${tab1?.afterHeight} r=${tab1?.afterRadius} bottom=${tab1?.afterBottom}`,
+  )
+  /**
+   * ⑨ ★★ 两颗标签的**实测位置**与真机截图逐像素对上 ✓
+   *   （`docs/ui/08-conversation.png` ✓ —— 824×1830 @dpr2 ✓，量法见 `theme.css` 里那张表 ✓）。
+   *
+   * 真机读数：选中那颗 **28..53.5** ✓、未选中那颗文字从 **90.5** 起 ✓
+   * ⇒ 首颗左沿 **28±2** ✓、两颗**文字左沿差 62±3** ✓。
+   * ★ 这两条与上面那条**不是重复** ✗：上面判的是 CSS 声明值 ✓，这条判的是**排出来的盒子** ✓
+   *   —— 字体/字距一变，声明值照样对、位置就偏了 ✓（而这正是"1:1"里唯一可判定的那一半 ✓）。
+   */
+  check(
+    '★★ 两颗标签的实测位置照真机截图 ±2px（首颗左沿 28 ✓、第二颗比它右 62 ✓）',
+    tab0 !== null && tab1 !== null &&
+      Math.abs(tab0.rect.x - 28) <= 3 && Math.abs((tab1.rect.x - tab0.rect.x) - 62) <= 3,
+    `首颗 x=${tab0?.rect?.x}（真值 28）｜第二颗 x=${tab1?.rect?.x}（真值 90.5 ⇒ 差 62）｜实测差=${tab1 === null || tab0 === null ? '-' : tab1.rect.x - tab0.rect.x}`,
   )
   /** ⑦ ★ 位置：在**页头下面**（不是上面 ✗）、且在消息区之上 ✓。 */
   check(
@@ -1249,6 +1501,140 @@ try {
       composerBefore.bottom === composerAfter.bottom &&
       composerAfter.bottom <= (tv.inputVisibleAfter?.vh ?? 0),
     `切之前 ${JSON.stringify(composerBefore)}｜切之后 ${JSON.stringify(composerAfter)}｜视口高=${tv.inputVisibleAfter?.vh}`,
+  )
+
+  /**
+   * ─────────── ★★ 四格状态条 · **已知投影**那四档（本单的主场 ✓）───────────
+   *
+   * ## 判据为什么必须长这样 ✗（三条"假判据"都是这里最容易犯的 ✓）
+   *
+   * 1. ★ **"页面里有 `%` 这个字符"不算"百分比是对的"** ✗ —— 判据是那一格的
+   *    `[data-cell, 文本]` **逐字**等于**从夹具机械推出来**的期望 ✓；
+   * 2. ★ **"有四个格子"不算"缺格不画"** ✗ —— 所以专门有 `nopressure` / `missingturns`
+   *    两档 ✓（键不在 ⇒ **那一格连元素都不该有** ✓，而不是画一个 `0%` / `0 轮` ✗）；
+   * 3. ★ **"取不到就不画"也不许反过来伤到真实数据** ✗ —— 所以有 `zeroturns`
+   *    （`turns: 0` ⇒ 必须**照显示** `0 轮` ✓）。
+   *
+   * ## 这一节的四趟怎么跑（★ 都必须走**流** ✗）
+   *
+   * 四格的数据只有开场快照带得下来 ✓ ⇒ 夹具挂了 `openStream` ✓（见 `FAKE_BOOT` 里那段 ✓）——
+   * ★ 于是这四趟**顺带**在验"真机那条取数路"（流 ✓）上这四格是对的 ✓，
+   *   而**不是**在一个只有夹具才有的旁路上 ✓。
+   */
+  console.log('\n── ★★ 四格状态条：已知投影夹具（逐字 / 缺格不画 / 真实 0）──')
+  check(
+    '★★ 夹具自检：四个已知投影**机械推出**的四格 = 设计目标（`45%` / `488 轮` / `2525 步` / `1062M tok` ✓ —— 目标字面与夹具数是同一条链 ✓）',
+    JSON.stringify(expectedCells('full')) ===
+      JSON.stringify([['context', '45%'], ['turns', '488 轮'], ['steps', '2525 步'], ['tokens', '1062M tok']]),
+    `机械推出=${JSON.stringify(expectedCells('full'))}`,
+  )
+  check(
+    '★★ 夹具自检：`nopressure` 档的 `values` 里**真的没有** `contextPressure` 这个键（否则下面那条是空转 ✓）',
+    !('contextPressure' in PROJ_FIXTURES.nopressure.values) && PROJ_FIXTURES.full.values.contextPressure !== undefined,
+  )
+  check(
+    '★★ 夹具自检：`missingturns` 档的 `sessionStats` 在、但**真的没有** `turns`（★ 不是 null、不是 0 ✓）',
+    PROJ_FIXTURES.missingturns.values.sessionStats !== undefined &&
+      !('turns' in PROJ_FIXTURES.missingturns.values.sessionStats) &&
+      PROJ_FIXTURES.missingturns.values.sessionStats.steps !== undefined,
+  )
+  check(
+    '★★ 夹具自检：`zeroturns` 档给的是**真实的 0**（`turns === 0` ✓ —— 不是缺键 ✓）',
+    PROJ_FIXTURES.zeroturns.values.sessionStats.turns === 0,
+  )
+
+  /** 跑一档已知投影 ✓（走流 ✓、读数在 `data-e2e-geometry` 上 ✓）。 */
+  const projRuns = {}
+  for (const name of ['full', 'nopressure', 'missingturns', 'zeroturns']) {
+    const dom = await dumpDom(`${base}/mobile/chat?phase=sent&fetch=stream&proj=${name}&probe=1200`, 'data-e2e-tabs=', 40_000)
+    const raw = decodeURIComponent((dom.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
+    let geo = null
+    try { geo = raw.length > 0 ? JSON.parse(raw) : null } catch (error) { geo = null }
+    projRuns[name] = { dom, geo }
+  }
+  const runGeo = (name) => projRuns[name]?.geo ?? null
+  const runCells = (name) => {
+    const cells = runGeo(name)?.stripCells
+    return Array.isArray(cells) ? cells : null
+  }
+  const runStripText = (name) => {
+    const text = runGeo(name)?.stripText
+    return typeof text === 'string' ? text : ''
+  }
+
+  // ── 档 ①：`full`（四格逐字 ✓ + 那个环 ✓ + 高/位置/字号 ✓）──────────────
+  const fullGeo = runGeo('full')
+  check(
+    '★★ 夹具自检：`proj=full` 这一档**真的**走的是流、且四格读数拿到了（否则下面全是空转 ✓）',
+    fullGeo !== null && projRuns.full.dom.includes('data-e2e-fetch="stream"') &&
+      Array.isArray(fullGeo.stripCells) && fullGeo.stripCells.length === 4,
+    `fetch=${(projRuns.full.dom.match(/data-e2e-fetch="([^"]*)"/) ?? [])[1] ?? '(没有)'}｜格数=${fullGeo?.stripCells?.length}｜文本=${JSON.stringify(fullGeo?.stripText)}`,
+  )
+  check(
+    '★★ 四格**逐字**且**顺序**正确（`45%` / `488 轮` / `2525 步` / `1062M tok` ✓ —— 期望值**从夹具机械推出来** ✗，不是手抄 ✓）',
+    JSON.stringify(runCells('full')) === JSON.stringify(expectedCells('full')),
+    `读到=${JSON.stringify(runCells('full'))}｜期望=${JSON.stringify(expectedCells('full'))}`,
+  )
+  check(
+    '★ 分隔符「·」的数量 = 格数 − 1（3 个 ✓ —— 跟着数据走 ✓，不是四个位置各留一个 ✓）',
+    fullGeo?.stripSeps === expectedCells('full').length - 1,
+    `分隔符=${fullGeo?.stripSeps}｜格数=${fullGeo?.stripCells?.length}`,
+  )
+  check(
+    '★★ 四格**是纯展示**：这一条里**一个 `<button>` 都没有**（★ 本仓规矩：没有真实通道就别假装能点 ✗）',
+    fullGeo?.stripButtons === 0,
+    `这一条里的 button = ${fullGeo?.stripButtons}`,
+  )
+  check(
+    '★★ 上下文那一格前面**真的有那个环**：14×14 / 2px 描边 / `dasharray` 与算式**逐字**相同（★ 判据不是"看见一个 `%`"✗）',
+    fullGeo?.stripRing !== null && fullGeo?.stripRing !== undefined &&
+      fullGeo.stripRing.viewBox === '0 0 14 14' &&
+      fullGeo.stripRing.box.w === 14 && fullGeo.stripRing.box.h === 14 &&
+      fullGeo.stripRing.trackStrokeWidth === '2px' && fullGeo.stripRing.fillStrokeWidth === '2px' &&
+      fullGeo.stripRing.fillLinecap === 'round' &&
+      fullGeo.stripRing.dash === expectedDash(expectedPercent(PROJ_FIXTURES.full.values.contextPressure)) &&
+      fullGeo.stripRing.transform === 'rotate(-90 7 7)',
+    `环=${JSON.stringify(fullGeo?.stripRing)}｜期望 dash=${expectedDash(expectedPercent(PROJ_FIXTURES.full.values.contextPressure))}`,
+  )
+  check(
+    '★★ 状态条的**高度 / 字号 / 位置**照真值 ±2px（高 22 = 行高 20 + 上下各 1px ✓、字号 12px ✓、在卡片**之下**、输入栏**之内** ✓）',
+    fullGeo !== null && fullGeo.stripHidden === false && fullGeo.strip !== null &&
+      Math.abs(fullGeo.strip.h - 22) <= 2 && fullGeo.stripFont === '12px' && fullGeo.stripLineHeight === '20px' &&
+      fullGeo.card !== null && fullGeo.composer !== null &&
+      fullGeo.strip.y >= fullGeo.card.bottom - 1 && fullGeo.strip.bottom <= fullGeo.composer.bottom + 1,
+    `高=${fullGeo?.strip?.h}（真值 22）｜字号=${fullGeo?.stripFont}/${fullGeo?.stripLineHeight}｜y=${fullGeo?.strip?.y} card.bottom=${fullGeo?.card?.bottom} composer.bottom=${fullGeo?.composer?.bottom}`,
+  )
+
+  // ── 档 ②：`nopressure`（缺 projection ⇒ 那一格不画 ✗，**不是** `0%` ✗）────────
+  check(
+    '★★ 缺整个 `contextPressure` ⇒ **没有 `%` 那一格**（★ 连元素都不在 ✗ —— 画 `0%` 就是"编数字" ✓）',
+    JSON.stringify(runCells('nopressure')) === JSON.stringify([['turns', '488 轮'], ['steps', '2525 步'], ['tokens', '1062M tok']]) &&
+      !runStripText('nopressure').includes('%') &&
+      (runCells('nopressure') ?? []).every(([cell]) => cell !== 'context'),
+    `读到=${JSON.stringify(runCells('nopressure'))}｜文本=${JSON.stringify(runStripText('nopressure'))}`,
+  )
+  check(
+    '★ 而**其余三格照画**（缺一格不许把整条都收掉 ✗）—— 格数 3、分隔符 2、条**没有**塌陷 ✓',
+    runGeo('nopressure')?.stripCells?.length === 3 && runGeo('nopressure')?.stripSeps === 2 &&
+      runGeo('nopressure')?.stripHidden === false,
+    `格数=${runGeo('nopressure')?.stripCells?.length}｜分隔符=${runGeo('nopressure')?.stripSeps}｜hidden=${runGeo('nopressure')?.stripHidden}`,
+  )
+
+  // ── 档 ③：`missingturns`（**字段**级缺 ⇒ 那一格不画 ✗ —— 专打"退化成 0 轮"✗）──
+  check(
+    '★★ `sessionStats` 里缺 `turns` ⇒ **没有「轮」那一格** ✗ —— 尤其**不许**退化成 `0 轮` ✗（★ 这一档打的是"只判投影在不在"的实现 ✓）',
+    JSON.stringify(runCells('missingturns')) === JSON.stringify([['context', '45%'], ['steps', '2525 步'], ['tokens', '1062M tok']]) &&
+      !runStripText('missingturns').includes('轮'),
+    `读到=${JSON.stringify(runCells('missingturns'))}｜文本=${JSON.stringify(runStripText('missingturns'))}`,
+  )
+
+  // ── 档 ④：`zeroturns`（DSH 报的**真实 0** ⇒ **照显示** ✓）──────────────────
+  check(
+    '★★ DSH 报的**真实 0 照显示**：`turns: 0` ⇒ 那一格就是 `0 轮` ✓（★ 不许因为"0 看着像没数据"就藏起来 ✗ —— 那是另一条铁律的反面 ✓）',
+    JSON.stringify(runCells('zeroturns')) === JSON.stringify(expectedCells('zeroturns')) &&
+      (runCells('zeroturns') ?? []).some(([cell, text]) => cell === 'turns' && text === '0 轮') &&
+      runGeo('zeroturns')?.stripHidden === false,
+    `读到=${JSON.stringify(runCells('zeroturns'))}｜期望=${JSON.stringify(expectedCells('zeroturns'))}`,
   )
 
   console.log('\n── 正向（第二趟 · 新建会话之后）：切到空会话，旧内容必须让位 ──')
@@ -1350,6 +1736,14 @@ try {
     const raw = decodeURIComponent((shot.match(/data-e2e-tabs="([^"]*)"/) ?? [])[1] ?? '')
     let g2 = null
     try { g2 = raw.length > 0 ? JSON.parse(raw) : null } catch (error) { g2 = null }
+    /**
+     * ★ 状态条那几样读的是**另一个属性** ✗（`data-e2e-geometry` ✓ —— 它们在 `g` 上 ✓，
+     *   不在 `tabs` 上 ✓）。★ 第一次我把这两处读串了 ⇒ 两条"塌陷"断言读到 `undefined` 当场红 ✓
+     *   （这正是"读数拿不到就红、不许当绿"那条 ✓）。
+     */
+    const rawGeo2 = decodeURIComponent((shot.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
+    let geo2 = null
+    try { geo2 = rawGeo2.length > 0 ? JSON.parse(rawGeo2) : null } catch (error) { geo2 = null }
     const bar = g2?.barRect ?? null
     const comp = g2?.composerBefore ?? null
     const vh2 = g2?.vh ?? -1
@@ -1369,6 +1763,61 @@ try {
       `★★ [${size}] 输入栏**整条都在视口内**（composer.bottom <= vh ✓）、且标签栏没把它顶下去（底边仍有 ≥ 40px 让位 ✓）`,
       comp !== null && comp.h > 0 && comp.bottom <= vh2 && comp.bottom >= vh2 - 40,
       `输入栏 ${JSON.stringify(comp)}｜视口高 ${vh2}｜距底 ${comp === null ? '-' : vh2 - comp.bottom}px`,
+    )
+    /**
+     * ★★ [本单新增] 这一档**没有投影** ⇒ 那条状态条不许占高度 ✗（在真机视口上再钉一次 ✓）——
+     *   22px 的空带在 412 宽上就是"输入框底下多一条空白"✓，比在默认窗口上更该钉 ✓。
+     */
+    check(
+      `★★ [${size}] 投影取不到 ⇒ 状态条**塌陷**（display:none、高 0 ✓ —— 不占那 22px ✓）`,
+      geo2?.stripHidden === true && geo2?.stripDisplay === 'none' && (geo2?.strip?.h ?? -1) === 0,
+      `hidden=${geo2?.stripHidden}｜display=${geo2?.stripDisplay}｜高=${geo2?.strip?.h}｜格数=${geo2?.stripCells?.length}`,
+    )
+  }
+
+  /**
+   * ─────────── ★★ 几何两档 · **四格展开档**（本单新增 ✓）───────────
+   *
+   * ## 为什么单开这两档 ✗
+   *
+   * 上面那两档里状态条是**塌陷**的 ✓（那是另一条判据 ✓）—— 而"这一条有多高、有没有被截断"
+   * ★ 必须在它**真的画着四格**的时候量 ✗（否则就是在量空气 ✓ —— 本仓栽过这种"几何量到 0"✓）。
+   * ⇒ 同两档（412×915 / 320×568 ✓）再跑一次，这次给**已知投影** ✓（走流 ✓）。
+   *
+   * ## 判据（★ 全部是几何与元素，没有一条是观感 ✗）
+   *
+   * 1. **四格逐字**（320 那一档与 412 那一档**都**要 ✓ —— 窄屏不许悄悄少一格 ✗）；
+   * 2. **高 22 ±2px** ✓（真值 22 = 行高 20 + 上下各 1px ✓，见 `theme.css` 那一段的出处 ✓）、
+   *    且在卡片之下、输入栏之内 ✓；
+   * 3. ★★ **没被截断** ✗（`scrollWidth ≤ clientWidth + 1` ✓ —— "多一项就被省略号吃掉"
+   *    是本仓那条紧凑条**实测栽过**的事 ✓：320 宽上四格 + 三个分隔符必须还排得下 ✓）；
+   * 4. **输入栏整条仍在视口内** ✓（这一条是"状态条不许把输入栏挤出去"的可判定写法 ✓）。
+   */
+  for (const size of ['412x915', '320x568']) {
+    const [w, h] = size.split('x').map(Number)
+    console.log(`\n── 几何档 ${size} · 四格展开（已知投影 ✓）──`)
+    const shot = await dumpDom(`${base}/mobile/chat?phase=sent&fetch=stream&proj=full&probe=1200`, 'data-e2e-tabs=', 40_000, size)
+    const rawGeo = decodeURIComponent((shot.match(/data-e2e-geometry="([^"]*)"/) ?? [])[1] ?? '')
+    let gp = null
+    try { gp = rawGeo.length > 0 ? JSON.parse(rawGeo) : null } catch (error) { gp = null }
+    const cells = Array.isArray(gp?.stripCells) ? gp.stripCells : null
+    check(
+      `★★ [${size}] 夹具自检：这一档**真的**拿到了读数、真视口（${w}×${h} ✓）与四格（走的是流 ✓）`,
+      gp !== null && gp.vw === w && gp.vh === h && cells !== null && cells.length === 4 &&
+        shot.includes('data-e2e-fetch="stream"'),
+      `读到视口 ${gp?.vw}×${gp?.vh}（期望 ${w}×${h}）｜格数=${cells?.length}｜fetch=${(shot.match(/data-e2e-fetch="([^"]*)"/) ?? [])[1] ?? '(没有)'}`,
+    )
+    check(
+      `★★ [${size}] 四格逐字（机械推出 ✓ —— 窄屏上也不许少一格 / 不许换字 ✓）`,
+      JSON.stringify(cells) === JSON.stringify(expectedCells('full')),
+      `读到=${JSON.stringify(cells)}｜期望=${JSON.stringify(expectedCells('full'))}`,
+    )
+    check(
+      `★★ [${size}] 状态条高 22±2px、未被省略号截断、且不把输入栏挤出视口（★ 这三样合起来才是"排得下"✓）`,
+      gp !== null && gp.strip !== null && Math.abs(gp.strip.h - 22) <= 2 && gp.stripClipped === false &&
+        gp.composer !== null && gp.composer.h > 0 && gp.composer.bottom <= gp.vh + 1 &&
+        gp.strip.y >= gp.card.bottom - 1 && gp.strip.bottom <= gp.composer.bottom + 1,
+      `高=${gp?.strip?.h}（真值 22）｜截断=${gp?.stripClipped}（scrollW vs clientW）｜输入栏 bottom=${gp?.composer?.bottom} / 视口高 ${gp?.vh}｜条 y=${gp?.strip?.y} card.bottom=${gp?.card?.bottom}`,
     )
   }
 } finally {

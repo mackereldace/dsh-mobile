@@ -30,11 +30,23 @@
     <span class="grow"></span>
     <button id="refresh" title="刷新">⟳</button>
   </header>
+  <!--
+    ★★ 「对话｜轨迹」标签栏 —— 与产品页（`page.html`）**逐字同构** ✓。
+      `theme.css` 顶部那条规矩：**稿子与装机必须同源** ✗（"稿子好看、装机变样"就是这么来的 ✓）。
+      ★ 结构与属性一个不改 ✓（`role` / `aria-selected` / `data-conversation-tabs` ✓）；
+      ★ 两个视图层同理 ✓（`#messages` 对话 ✓、`#trace` 轨迹 ✓）。
+      没有子智能体数徽标：数据到不了这一页（见 `page.html` 里那段说明 ✓）。
+  -->
+  <div class="tabs" id="tabs" role="tablist" data-conversation-tabs>
+    <button type="button" role="tab" id="tab-chat" class="tab is-active" aria-selected="true" aria-controls="view-chat">对话</button>
+    <button type="button" role="tab" id="tab-trace" class="tab" aria-selected="false" aria-controls="view-trace">轨迹</button>
+  </div>
   <div id="status">已连上，正在读…</div>
   <div id="sessions" hidden></div>
   <main>
     <div id="state" hidden></div>
-    <div id="messages"></div>
+    <div id="messages" data-view="chat"></div>
+    <div id="trace" data-view="trace" hidden></div>
   </main>
   <!--
     ★ 输入栏与产品页（`page.html`）**同一份结构** ✓ —— `theme.css` 顶部那条规矩：

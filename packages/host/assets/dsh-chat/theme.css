@@ -110,8 +110,38 @@
    */
   .tabs {
     flex: none; display: flex; position: relative; z-index: 1;
-    gap: 36px; margin: 0; padding: 0 0 0 8px;
+    /* ★ padding-left 的取值见下面那段（真机 28 = 侧栏轨道 20 + 源码 8 ✓） */
+    gap: 36px; margin: 0; padding: 0 0 0 28px;
   }
+  /**
+   * ★★ 左边那 20px：把**真机上的侧栏轨道**补回来 ✗（截图逐像素量出来的 ✓）。
+   *
+   * ## 真机读数（`docs/ui/08-conversation.png` ✓ —— 824×1830 @dpr2 = 412×915 ✓）
+   *
+   * | 量到的 | 设备像素 | 换算 CSS |
+   * |---|---|---|
+   * | 选中那颗的文字左沿 | 57 | **28.5** |
+   * | 连着指示条的色块 | 56..107 | **28 .. 53.5**（宽 25.5 ✓） |
+   * | 未选中那颗的文字 | 181..230 | **90.5 .. 115** |
+   * | 两颗的文字**中心距** | 119..206 ⇒ 143 | **71.5** |
+   * | 指示条 | 56..107，高 **4 行**（148–151 ✓） | 高 **2px** ✓ |
+   * | 顶栏底 / 指示条 | 150 / 148 | 页头底 = 75 ✓、指示条 74–75 ✓ |
+   *
+   * ⇒ 「两颗标签的字面中心距 **71.5**」= 真机上**两个盒子都是 26 宽、间距 36** ✓
+   *   （26 + 36 = 62 ✗ 对不上 ✓ ⇒ 这里**不是** 26 宽的等宽盒，见下 ✓）。
+   *
+   * ## ★ 与源码 CSS 的两个差值（★ 都写在这儿，不许当没看见 ✗）
+   *
+   * 1. **左边 28 而不是 8** ✗：源码里 `.…_tabs` 确实是 `padding-left: 8px` ✓，
+   *    但它住在**会话面板**里 ✓，而真机上面板左边还有 **20px 的侧栏轨道** ✓
+   *    （顶栏那颗汉堡就画在 17–26.5 ✓）⇒ 28 = 20 + 8 ✓ —— **两个数都印上了** ✓。
+   *    我们这一页**没有侧栏** ✗ ⇒ 不补这 20px 的话，标签会比正文还靠左 18px ✓
+   *    （正文气泡的左内沿在 **26.5** ✓）—— 那才是"抄了个数字、丢了意图" ✗。
+   * 2. **指示条 28..53.5（宽 25.5）而不是 13** ✗：源码只说 `left:0; right:0` ✓，
+   *    宽度 = 那颗的盒子宽 ✓；真机上量到 **25.5** ✓ ⇒ 那颗盒子不是"字宽 13" ✗
+   *    （两个字 13px 各 13px + 一点点字距 ✓ 正好 25.5 ✓）。
+   *    ⇒ 我们这颗**不写死宽度** ✗，让它由文字撑开 ✓（与真机同一条规矩 ✓）。
+   */
   .tab {
     position: relative; margin: 0; padding: 0 0 9px; border: 0; background: transparent;
     color: var(--tab-ink); font: inherit; font-size: 13px; font-weight: 500; line-height: 16px;
@@ -283,12 +313,62 @@
   /* 发送中 ⇒ 图标收起来、只留一句字（**形状不变** ✓，见报告第 3 节的断言口径 ✓） */
   .composer[data-sending="1"] .send-icon { display: none; }
   .composer[data-sending="1"] .send-label { display: block; }
-  /* ★ 输入框**正下方**那一行状态条：位置与字号照参照物 ✓，内容只写真读数 ✓ */
+  /**
+   * ───────────── 输入框**正下方**那条紧凑状态条（四格：上下文% / 轮 / 步 / tok）─────────────
+   *
+   * ## 几何从哪来（★ 两路，写清哪条是哪条 ✗）
+   *
+   * ① **DSH 自己那条**（`[data-composer-stats]` ✓）—— 读的是 `app.asar` 里
+   *    `0.2.0-rc.2` 两个包里**未压缩的 CSS 原文** ✓（本机那份运行时页面取不到，
+   *    见报告第 1 节那条现场 ✓）：
+   *    · `.bOPqQW_root { gap: 12px; font-size: calc(var(--dsh-content-font-size-secondary,13px) - 1px); line-height: calc(20px + …secondary,0px) }` ✓；
+   *    · `.bOPqQW_pill { gap: 6px; padding: 1px 8px; border-radius: 999px; color: var(--dsw-alias-label-tertiary) }` ✓；
+   *    · `.JObwrW_trigger`（上下文那一格 ✓）`{ gap: 6px; padding: 1px 8px; font-size: var(…secondary,13px); line-height: calc(20px + …) }` ✓；
+   *    · 环 `{ viewBox 0 0 14 14; r 5.5; stroke-width 2px }` ✓（track = `--dsw-alias-border-l3` ✓、
+   *      fill = `--dsw-alias-label-tertiary` ✓，`stroke-linecap: round` ✓）；
+   *    · 分隔符 `.bOPqQW_sep { margin: 0 6px }` ✓。
+   *    ⇒ 由 `--dsh-content-font-size-secondary` 在主题里的真值（**13px** ✓，
+   *      `dsh-client-ui-theme/lib/client.js` ✓）推出：**字号 12px / 行高 20px / 一格高 22px**
+   *      ✓ —— 22px 就是"≤22px，原为 26px"那个真值 ✓。
+   *
+   * ② **我们自己在手机上的那条**（`#dshm-stats` ✓，`boot.js` 里那套，真机实测过 ✓）：
+   *    `min-height: 21px` / `font-size: 12px` / `line-height: 15px` / `gap: 6px` ✓ ——
+   *    与本页这一条**同量级** ✓（12px 那条口径两处一致 ✓）。
+   *
+   * ## 逐项落到本页 ✓（★ 与上面两条读数对得上 ✗）
+   *
+   * · **高 22px** = 行高 20 + 上下各 1px ✓（与 DSH 那一格**逐像素相同** ✓）；
+   * · **字号 12px** ✓（DSH：`--dsh-content-font-size-secondary` 13px − 1px ✓）；
+   * · **四格间距**：格与格之间走**分隔符**（`gap: 6px` ✓ —— 与 DSH 那颗药丸内部的 6px 同值 ✓）；
+   * · **分隔符「·」**：★ DSH 那条写的是 `color: var(--dsw-alias-separator-primary)` ✓
+   *   而**那个 token 在 DSH 主题里根本不存在** ✗（`boot.js` 里那条注释早记过这一笔 ✓：
+   *   桥接时 9 个 token 有 8 个有值、唯独它空 ✓）⇒ 它实际**继承**了文字的 tertiary 色 ✓
+   *   ⇒ 我们这里干脆**继承**（一个字都不写 ✓ —— 这才是与真图相同的计算值 ✓）；
+   * · **环 2px**：`stroke-width: 2px` ✓（真值 ✓）、`fill: none` ✓、`stroke-linecap: round` ✓；
+   * · **纯展示**：★ 没有 `:active` / `:hover` / `cursor` ✗ —— 四格不是按钮 ✓（不假装能用 ✓）。
+   */
   .stats-strip {
-    flex: none; padding: 0 20px; font-size: 11px; line-height: 16px;
+    flex: none; display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 1px 20px; font-size: 12px; line-height: 20px;
     color: var(--ink3); font-variant-numeric: tabular-nums;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /**
+   * ★★ 塌陷：四格全取不到 ⇒ **不占高度** ✗。
+   *
+   * ★ 这一条**非有不可** ✗（与 `#messages[hidden]` / `#sessions[hidden]` / `#state[hidden]`
+   *   是同一个坑 ✓）：`.stats-strip` 自己是 `display:flex` ✓ —— 那是**作者样式** ✓，
+   *   它会盖掉 UA 给 `[hidden]` 的 `display:none` ✓ ⇒ 不写这一条就是"元素藏了、仍占 22px"✓
+   *   （量出来是一个 22px 的空带 ✓，在手机上看就是输入框底下多一条空白 ✗）。
+   */
+  .stats-strip[hidden] { display: none; }
+  /** 一格 ✓（环 + 字 ✓ —— 与 DSH 那颗药丸同一个内间距 6px ✓）。 */
+  .stats-strip .stats-cell { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .stats-strip .stats-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /** 上下文那一格的环 ✓（14×14、2px 描边 ✓ —— 与 DSH 的 `ContextMeter` 同一组几何 ✓）。 */
+  .stats-strip .stats-ring { flex: none; display: block; width: 14px; height: 14px; }
+  .stats-strip .stats-ring-track { fill: none; stroke: var(--line); stroke-width: 2px; }
+  .stats-strip .stats-ring-fill { fill: none; stroke: var(--ink3); stroke-width: 2px; stroke-linecap: round; }
   /* ★ 安全区：**不再写死 22px** ✗ —— 用 boot.js:68 那条口径 ✓（键盘开着时它已经让过位了 ✓） */
   .homebar {
     flex: none; height: max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px));
