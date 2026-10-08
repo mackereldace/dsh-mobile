@@ -18,7 +18,8 @@
  * 两条都不需要真实隧道，因此快且稳定。
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -5351,3 +5352,693 @@ test('★★ 行为：与本单无关的值**逐字节**原样穿过（不含地
   assert.equal(other.read(DSH_SELECTION_KEY), 'keep-me', '★ 非目标键那一次写不许顺手把会话选择也动了 ✗')
 })
 
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ round 216：顶栏那颗「回到主会话」的**几何**（真浏览器量出来的 ✓，不是读 CSS 文本 ✗）
+ *
+ * ## 为什么必须上真浏览器 ✗
+ * 用户实测："在主智能体的时候这个控件只隐藏，仍然导致**标题向右偏移**" ✗ ——
+ * 那是**布局引擎**的行为 ✓（`visibility: hidden` 保留的盒子**照样在 flex 流里占位** ✗），
+ * 本文件的假 DOM 夹具**没有布局** ✗ ⇒ 在它上面断言几何 = **假判据** ✗
+ * （今天 11+ 例教训里的头号一条 ✓）。所以这一段：
+ *   ① 从 `boot.js` 里把 `installShell` 真正写进 `<style>` 的那份 CSS **求值取出来** ✓
+ *      （不是抄一份 CSS ✗ —— 抄的那份会漂 ✓）；
+ *   ② 用**无头 Chrome**（`--no-sandbox --ignore-certificate-errors` ✓）按 412×915 移动视口
+ *      真的排版一次 ✓，然后量 `getBoundingClientRect()` ✓。
+ *
+ * ## 三条判据（每一条都**能被变异打红** ✓，对照写在断言旁 ✓）
+ *   · 主会话（键隐藏）时，标题盒与其**文字**的位置，必须与"**这颗键完全不存在**"时**逐像素一致** ✓；
+ *   · 子单（键可见）时，那颗键必须**可见**且**可点**（`elementFromPoint` 命中的是它自己 ✓）；
+ *   · 两种状态下，那颗键都不许盖住标题的**文字**（相交面积 = 0 ✓）。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+const GEOMETRY_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+
+/**
+ * 把 `installShell` 里那段 `style.textContent = [...]` **真的求值** ✓ ——
+ * 取出来的就是生产写进 `<style>` 的那个字符串 ✓。
+ *
+ * ★ 为什么不能只抽字符串字面量拼起来 ✗：那一段里有
+ *   `'… --dshm-top-h: ' + TOPBAR_HEIGHT + 'px …'` 这种**拼接** ✓ ——
+ *   只抽字面量会把它变成 `--dshm-top-h: ` （**没有值** ✗），
+ *   于是 `left: calc(var(--dshm-top-h) + 2px)` 这类表达式全部退化 ✗ ⇒ 量到的是**假几何** ✗
+ *   （本轮实测踩过：那样量出来 `--dshm-top-h` 为空、那颗键的左边界变成 0 ✗）。
+ */
+function shellStyleCss(): string {
+  const anchor = "var style = document.createElement('style')"
+  const chunks: string[] = []
+  let cursor = 0
+  for (;;) {
+    const at = bootSource.indexOf(anchor, cursor)
+    if (at < 0) break
+    const afterVar = bootSource.indexOf('\n', at)
+    cursor = afterVar < 0 ? bootSource.length : afterVar
+    const match = /style\.textContent\s*=\s*\[/.exec(bootSource.slice(cursor))
+    if (match === null) continue
+    const start = cursor + match.index + match[0].length - 1
+    let i = start
+    let depth = 0
+    while (i < bootSource.length) {
+      const ch = bootSource[i]
+      if (ch === '/' && bootSource[i + 1] === '*') {
+        const end = bootSource.indexOf('*/', i + 2)
+        i = end < 0 ? bootSource.length : end + 2
+        continue
+      }
+      if (ch === '/' && bootSource[i + 1] === '/') {
+        const end = bootSource.indexOf('\n', i)
+        i = end < 0 ? bootSource.length : end + 1
+        continue
+      }
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const quote = ch
+        let k = i + 1
+        while (k < bootSource.length) {
+          if (bootSource[k] === '\\') { k += 2; continue }
+          if (bootSource[k] === quote) break
+          k += 1
+        }
+        i = k + 1
+        continue
+      }
+      if (ch === '[') depth += 1
+      if (ch === ']') {
+        depth -= 1
+        if (depth === 0) break
+      }
+      i += 1
+    }
+    chunks.push(bootSource.slice(start, i + 1))
+  }
+  assert.ok(chunks.length >= 1, '★ 必须能从 boot.js 里找到 `style.textContent = [` 那一段 ✓')
+
+  const heightMatch = /var TOPBAR_HEIGHT = (\d+)/.exec(bootSource)
+  assert.ok(heightMatch !== null, '★ 夹具自检：必须能读到 TOPBAR_HEIGHT ✓')
+
+  /**
+   * ★ 求值之前先把"这一段的自由标识符只有 `TOPBAR_HEIGHT`"钉死 ✗ ——
+   *   将来谁在这一段里引用一个模块级变量（而不是字面量 ✓），这条会**先红** ✓，
+   *   而不是让我们悄悄量到一份**缺了那个值**的 CSS ✗（本轮首版就是这么骗过自己的 ✗）。
+   *
+   * ★ 必须**一趟扫完**（注释 / 字符串 / 裸标识符一起判 ✗）：先用正则替换再去扫会出事 ✓ ——
+   *   CSS 里满是 `/* … *​/` 与 `'…'` 交错，顺序一错就会把**字符串里**的 `/` 当注释开头 ✗
+   *   ⇒ 切出一堆碎片标识符 ✗（本轮实测：`vs` / `ms` / `px` / `dshm` 全被当成自由变量 ✗）。
+   */
+  const freeIds = new Set<string>()
+  {
+    const text = chunks.join('\n')
+    let i = 0
+    while (i < text.length) {
+      const ch = text[i] ?? ''
+      if (ch === '/' && text[i + 1] === '*') {
+        const end = text.indexOf('*/', i + 2)
+        i = end < 0 ? text.length : end + 2
+        continue
+      }
+      if (ch === '/' && text[i + 1] === '/') {
+        const end = text.indexOf('\n', i)
+        i = end < 0 ? text.length : end + 1
+        continue
+      }
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const quote = ch
+        let k = i + 1
+        while (k < text.length) {
+          if (text[k] === '\\') { k += 2; continue }
+          if (text[k] === quote) break
+          k += 1
+        }
+        i = k + 1
+        continue
+      }
+      if (/[A-Za-z_$]/.test(ch)) {
+        let k = i
+        while (k < text.length && /[A-Za-z0-9_$]/.test(text[k] ?? '')) k += 1
+        freeIds.add(text.slice(i, k))
+        i = k
+        continue
+      }
+      i += 1
+    }
+  }
+  const unknown = [...freeIds].filter((id) => id !== 'TOPBAR_HEIGHT')
+  assert.deepEqual(
+    unknown,
+    [],
+    '★ 这一段里除了 TOPBAR_HEIGHT 不许再有别的自由标识符 ✓（多了 ⇒ 这里求值出来的 CSS 是**缺值**的 ✗ = 假几何 ✗）',
+  )
+
+  const body = chunks.map((chunk) => '  var __part = ' + chunk + '\n  __parts.push(__part.join("\\n"))').join('\n')
+  // eslint-disable-next-line no-new-func —— 就是要在测试里跑 production 的那段数组字面量（它只有拼接 ✓）
+  const factory = new Function('__parts', 'TOPBAR_HEIGHT', body) as (parts: string[], height: number) => void
+  const parts: string[] = []
+  factory(parts, Number(heightMatch?.[1]))
+  return parts.join('\n')
+}
+
+/** 顶栏的一屏（三种状态 + 长标题 → 量"会不会滑到那颗键底下"✓）。 */
+type GeometryMode = 'absent' | 'hidden' | 'shown' | 'shown-long'
+
+const GEOMETRY_ICON =
+  '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 12h16"/></svg>'
+
+/**
+ * 一屏 = **照抄** `boot.js` 的顶栏结构 ✓（`installShell` 那几行：三个流内键 + 标题 ✓、
+ * 那颗键按 `data-dshm-shown` 给定 ✓），DOM 里同时建三/四屏、只留一屏可见 ✓ ——
+ * 这样量每一屏时它都是"页面上唯一在排版的东西" ✓（不会互相影响 ✓）。
+ *
+ * ★★ 顶栏的 `id` 必须是**真的那个** `dsh-mobile-top` ✗ —— 不能写成
+ *   `dshm-mobile-top-<mode>` ✗（那是本夹具的半成品写法 ✗，这个单实测踩到了 ✓）：
+ *   `boot.js` 的样式表是用 **`#dsh-mobile-top` 这个 id 选择器**写的 ✓
+ *   （`position/height/padding-top/box-sizing/display:flex/gap` 一整条 ✓，
+ *   再加 `#dsh-mobile-top > button` 那条给三颗键 `44×44` ✓）——
+ *   换了 id ⇒ **产品 CSS 一条都不命中** ✗ ⇒ 量到的是**浏览器默认样式**下的假顶栏 ✗：
+ *   实测那颗键变成 `35×28`（UA 默认 padding ✓ 不是产品的 44×44 ✗）、
+ *   顶栏高度被内容撑成 `68/79/101` ✗（不是 `height: 44px` ✓）⇒
+ *   主会话/子单的标题差 **5px** ✗（真实产品里是 **0** ✓）。
+ *   四屏用同一个 id 是**故意**的 ✓：同一时刻只有一屏 `display: block` ✓（其余 `display: none` ✓），
+ *   所以 `getElementById` / `querySelector` 那种"全文档唯一"的读法不会歧义 ✗，
+ *   而每屏都拿到**和真机同一套产品 CSS** ✓ —— 这才是这条几何断言要的"真浏览器真几何" ✓。
+ *
+ * ★★ 而且**一条产品规则都不许被夹具覆盖** ✗（尤其是那颗键的 `position: absolute` ✓ ——
+ *   本轮的修复**就是它** ✓）：上一版夹具写过 `.dshm-geo-host > header { position: static !important; }`
+ *   ✗，它把 `#dsh-mobile-back-main { position: absolute }` 一起按死了 ✓ ⇒
+ *   那颗键**又回到流里占位** ✗ ⇒ 主会话标题实测被挤右 **46px**（`92` vs `46` ✗ = 用户报的那个偏移 ✗）。
+ *   四屏叠在视口顶上这件事**不需要**靠改 `position` 解决 ✓：同一时刻只有一屏 `display: block` ✓。
+ */
+function geometryPage(styleCss: string): string {
+  const modes: GeometryMode[] = ['absent', 'hidden', 'shown', 'shown-long']
+  const hosts = modes
+    .map(
+      (mode) =>
+        '<div class="dshm-geo-host" data-mode="' + mode + '">' +
+        '<header id="dsh-mobile-top" data-dshm-push-follower="1">' +
+        '<button id="dsh-mobile-nav" type="button" aria-label="nav">\u2630</button>' +
+        (mode === 'absent'
+          ? ''
+          : '<button id="dsh-mobile-back-main" type="button" aria-label="back" ' +
+            'data-dshm-shown="' + (mode === 'hidden' ? '0' : '1') + '">' + GEOMETRY_ICON + '</button>') +
+        '<div id="dsh-mobile-title" role="heading" aria-level="1">' +
+        (mode === 'shown-long' ? 'A very long conversation title that fills the whole title box' : 'Title') +
+        '</div>' +
+        '<button id="dsh-mobile-files" type="button" aria-label="files">' + GEOMETRY_ICON + '</button>' +
+        '</header></div>',
+    )
+    .join('')
+  return (
+    /**
+     * ★★ `width=device-width` 这一条**非有不可** ✓ —— CDP 的
+     *   `Emulation.setDeviceMetricsOverride({ mobile: true })` 走的是**真·移动布局** ✓：
+     *   没有这条 meta 时布局视口退回移动默认的 **980px** ✗（本轮实测：`innerWidth` 是 `981` ✗，
+     *   `outerWidth` 才是 `412` ✗）⇒ "412px 宽的手机"又成了**假视口** ✗、量到的几何全是假的 ✗。
+     *   真手机上的 DSH 页面本来就带这条 meta ✓ ⇒ 夹具照抄它才是"与真机同形" ✓。
+     */
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    /**
+     * ★★ 夹具自己的那两条**必须排在产品 CSS 前面** ✗ —— 顺序反了就会**盖住产品规则** ✗
+     *   （同优先级、后写的赢 ✓）。这个单实测踩到过一次 ✓：把
+     *   `.dshm-geo-host > header { position: static !important; }`（或任何 `header` 通用规则 ✗）
+     *   写在 `styleCss` **后面** ⇒ 顺手把 `#dsh-mobile-back-main { position: absolute }`
+     *   一起按掉 ✗（`!important` 连特异性都省了 ✗）⇒ 那颗键**回到流里占位** ✗ ⇒
+     *   主会话标题实测被挤右 **46px**（`92` vs `46` ✗）—— 和"产品坏了"长得一模一样 ✗，
+     *   但产品是好的 ✓（`boot.js` 那条 `position: absolute` 一个字都没动 ✓）。
+     *   所以这里**只留"隐藏没在量的那几屏"这一条** ✓（纯 `display` ✓，碰不到几何 ✓），
+     *   而且放在产品 CSS 之前 ✓。
+     */
+    '<style>\nhtml, body { margin: 0; padding: 0; background: #15171a; }\n' +
+    '.dshm-geo-host { display: none; }\n.dshm-geo-host[data-live="1"] { display: block; }\n</style>' +
+    '<style>\n' +
+    styleCss +
+    '\n</style></head><body>' +
+    hosts +
+    '</body></html>'
+  )
+}
+
+/** 量一屏：标题盒 / 标题**文字**盒 / 那颗键的盒 + 可见性 + 可点性（`elementFromPoint` 命中谁 ✓）。
+ *
+ * ★★ 四屏里的 `id` 全是**产品那个真的 id** ✓（`dsh-mobile-nav` / `dsh-mobile-back-main` /
+ *   `dsh-mobile-title` / `dsh-mobile-files` ✓），**一个 `-<mode>` 后缀都不许加** ✗ ——
+ *   加后缀是本夹具半成品时的写法 ✗，后果是看不见的 ✓：
+ *   `boot.js` 那条 `#dsh-mobile-back-main { position: absolute; … }` 是 **id 选择器** ✓，
+ *   对 `dsh-mobile-back-main-hidden` 这种加过后缀的 id **一条都不命中** ✗（CSS 不做前缀匹配 ✗；
+ *   本轮实测：CDP 的 `CSS.getMatchedStylesForNode` 里连这条规则都不出现 ✗）⇒
+ *   那颗键**留在 flex 流里占位** ✗ ⇒ 主会话标题实测 `92`（而"这颗键完全不存在"是 `46` ✗）
+ *   = 看着像"产品坏了" ✗，其实产品是好的 ✓。
+ *   四屏同 id 无妨 ✓：所有查询都用 `host.querySelector(...)` 限定在**当前那一屏**里 ✓。
+ */
+const GEOMETRY_PROBE = `(() => {
+  const host = document.querySelector('.dshm-geo-host[data-live="1"]')
+  const mode = host.getAttribute('data-mode')
+  const bar = host.querySelector('header')
+  const title = host.querySelector('#dsh-mobile-title')
+  const nav = host.querySelector('#dsh-mobile-nav')
+  const back = host.querySelector('#dsh-mobile-back-main')
+  const box = (el) => {
+    if (el === null) return null
+    const r = el.getBoundingClientRect()
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }
+  }
+  const textBox = (el) => {
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    const r = range.getBoundingClientRect()
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }
+  }
+  const style = (el, prop) => (el === null ? null : getComputedStyle(el).getPropertyValue(prop).trim())
+  const label = (el) => (el === null ? null : (el.id || el.tagName.toLowerCase()))
+  const backBox = box(back)
+  const clickPoints = []
+  if (backBox !== null) {
+    for (const [fx, fy] of [[0.5, 0.5], [0.05, 0.5], [0.95, 0.5], [0.5, 0.05], [0.5, 0.95]]) {
+      const x = backBox.left + backBox.width * fx
+      const y = backBox.top + backBox.height * fy
+      clickPoints.push({ x: x, y: y, hit: label(document.elementFromPoint(x, y)) })
+    }
+  }
+  const titleBox = box(title)
+  const navBox = box(nav)
+  const fontSize = style(title, 'font-size')
+  return {
+    mode: mode,
+    viewport: { width: innerWidth, height: innerHeight },
+    topH: style(document.documentElement, '--dshm-top-h'),
+    backSlot: style(document.documentElement, '--dshm-back-slot'),
+    backExists: back !== null,
+    backShownAttr: back === null ? null : back.getAttribute('data-dshm-shown'),
+    backVisibility: style(back, 'visibility'),
+    backPointerEvents: style(back, 'pointer-events'),
+    backPosition: style(back, 'position'),
+    backBox: backBox,
+    titleBox: titleBox,
+    titleTextBox: textBox(title),
+    titleContentLeft: titleBox === null ? null : titleBox.left + parseFloat(style(title, 'padding-left')),
+    titleContentRight: titleBox === null ? null : titleBox.right - parseFloat(style(title, 'padding-right')),
+    navRight: navBox === null ? null : navBox.right,
+    /** 产品自己声明的顶栏 gap ✓（那颗键"紧挨着 ☰"的判据拿它当事实来源 ✓，不许在测试里写死 ✗）。 */
+    barGap: style(document.documentElement, '--dshm-bar-gap'),
+    fontSize: fontSize,
+    clickPoints: clickPoints,
+  }
+})()`
+
+/** 无头 Chrome 里的一个会话（一份临时 profile ✓，收尾只按**自己的 profile** 精确回收 ✓）。 */
+interface ChromeSession {
+  evaluate: (expression: string) => Promise<unknown>
+  close: () => void
+}
+
+async function withChrome<T>(
+  viewport: { width: number; height: number },
+  file: string,
+  run: (session: ChromeSession) => Promise<T>,
+): Promise<T> {
+  const profile = mkdtempSync(join(tmpdir(), 'dshm-geometry-'))
+  const port = 9600 + Math.floor(Math.random() * 300)
+  const chrome = spawn(
+    GEOMETRY_CHROME,
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--ignore-certificate-errors',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-extensions',
+      '--disable-component-update',
+      '--disable-background-networking',
+      '--remote-debugging-port=' + String(port),
+      '--user-data-dir=' + profile,
+      'about:blank',
+    ],
+    { stdio: 'ignore', detached: true },
+  )
+  let socket: WebSocket | null = null
+  /**
+   * ★ 真·同步小睡 ✓（`close()` 需要按毫秒重试 ✓，而它**不**是 async ✓ —— 收尾链越短越好 ✗）。
+   *   `Atomics.wait` 走的是**阻塞** ✓，不会往事件循环里塞计时器 ✓（塞了就是新的句柄泄漏 ✗）。
+   */
+  const sleepSync = (ms: number): void => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  }
+  const chromeGone = (): boolean => chrome.exitCode !== null || chrome.signalCode !== null
+  /**
+   * ★★ 杀**整棵进程组** ✓（不只是组长 ✗）——
+   *   `detached: true` 起的 Chrome 自己是组长 ✓ ⇒ `process.kill(-pid)` 才带得走
+   *   gpu / renderer / network 那些辅助进程 ✓（只杀组长 = 留一堆孤儿 ✓，
+   *   实测就是它们让整份文件跑完不退出 ✗）。
+   * ★ 负号要**先**试 ✓，再补一发普通 `chrome.kill()`（组里可能只剩组长 ✓ / 有些平台不支持负 pid ✓）。
+   * ★ 只吃"进程/组已经不在了"那一类错 ✗：本函数**不许**抛错把用例红掉 ✓。
+   */
+  const killChromeGroup = (): void => {
+    const pid = chrome.pid
+    if (pid !== undefined) {
+      try { process.kill(-pid, 'SIGKILL') } catch { /* 这一组已经没了 */ }
+    }
+    try { chrome.kill('SIGKILL') } catch { /* 已经退了 */ }
+  }
+  /**
+   * ★★ 收尾三件事，一件都不能省 ✓（而且都必须**真的做到** ✗，不是"调一下就走" ✗）：
+   *
+   * ① ★ **显式 `ws.close()`** ✓ —— 把 CDP 那条 WebSocket 主动放掉 ✓。
+   *    ★ 实测（本单，Node v24.10.0，本机）：**只跑这 2 条时**，
+   *      删掉这一行进程**同样**在 ~11s 自己结束 ✓（因为下面 ② 的 SIGKILL 让对端一死，
+   *      这条 socket 也就没了 ✓）—— 所以它**不是**本文件那 2 条的"退出承重点" ✗。
+   *      ★ 但它仍然必须在 ✓：它是**主动**释放 ✓（不依赖"对端恰好被杀"这个运气 ✓），
+   *      也是"进程能自己结束"的**唯一**书面保证 ✓（完整跑这份文件时，进程确实**不**自己结束 ✗，
+   *      而那与这条 socket **无关** ✓ —— 见交付说明里的句柄现场 ✓）。
+   *
+   * ② ★ **SIGKILL 掉自己那棵 Chrome 进程树** ✓ —— 这是收尾的第一件事 ✓。
+   *    ★ 必须**连它那一组一起杀** ✗：Chrome 是 `spawn(..., { detached: true })` 起的 ✓
+   *      ⇒ 它自己就是**进程组组长** ✓ ⇒ 只 `chrome.kill()` 掉组长 ✗，
+   *      那一组里的辅助进程（gpu / renderer / network ✓）会**变成孤儿继续活着** ✗。
+   *      实测（本单）：漏掉的正是这个 ✓ —— 完整跑这份文件后进程**不**自己结束 ✗，
+   *      而现场是「两个 `writeOnly` Socket」✗ = 两条通往**没死透的 headless Chrome** 的管道 ✓
+   *      （`ps` 里能看到 `--user-data-dir=.../dshm-geometry-*` 的浏览器还活着 ✓）。
+   *      ⇒ 先 `process.kill(-pid)`（负号 = **整组** ✓），再补一发普通 kill 兜底 ✓。
+   *
+   * ③ ★ **删掉自己那份临时 profile** ✓ —— 删不掉就**重试** ✓，重试不成**也不抛错** ✗：
+   *    临时目录残留是 OS 的事 ✓，它**不是**被测行为 ✗（拿它把用例判红 = 假判据 ✗）。
+   *    ★ 重试是实测逼出来的 ✗：Chrome 临死前还在往 profile 里写东西 ✓，
+   *      立刻 `rmSync` 会 `ENOTEMPTY, Directory not empty` ✗ —— 那**不是断言** ✓，
+   *      它会直接让整条用例红 ✗（本单实测：完整跑这份文件时 `视口 360px` 那条就这么红过一次 ✗）。
+   *    ★ 为什么**不**等 `chrome.once('exit')` ✗：实测在 `node --test`（本机 `--test-isolation=process` ✓）
+   *      里那个事件**根本不出现** ✓（探针里 11ms 就到 ✓，同一套参数 ✗）⇒ 等它 = 白等一个超时 ✗
+   *      （首版就是这么把每条用例拖到 10.5s 的 ✗）。改成**查退出码** ✓ + **同步重试** ✓ 之后，
+   *      收尾耗时回到毫秒级 ✓，而 `ENOTEMPTY` 也躲开了 ✓（见交付说明的实测数据 ✓）。
+   */
+  const close = (): void => {
+    if (socket !== null) {
+      try { socket.close() } catch { /* 已经关了 */ }
+      socket = null
+    }
+    killChromeGroup()
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        rmSync(profile, { recursive: true, force: true })
+        return
+      } catch {
+        /* Chrome 可能还在收尾写 profile ⇒ 小睡后重试 ✓（最多 8 次 ≈ 0.35s ✓） */
+      }
+      if (chromeGone() && attempt >= 1) return
+      sleepSync(50)
+    }
+  }
+  try {
+    let target: { webSocketDebuggerUrl?: string } | undefined
+    for (let i = 0; i < 100 && target === undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      try {
+        const list = (await (await fetch('http://127.0.0.1:' + String(port) + '/json/list')).json()) as Array<{
+          type: string
+          webSocketDebuggerUrl?: string
+        }>
+        target = list.find((entry) => entry.type === 'page')
+      } catch {
+        /* 还没起来 */
+      }
+    }
+    assert.ok(target?.webSocketDebuggerUrl !== undefined, '★ 夹具自检：无头 Chrome 必须起得来并报出一个 page target ✓')
+    const ws = new WebSocket(String(target?.webSocketDebuggerUrl))
+    socket = ws
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve()
+      ws.onerror = () => reject(new Error('CDP WebSocket 打不开'))
+      setTimeout(() => reject(new Error('CDP WebSocket 打开超时')), 10_000)
+    })
+    let messageId = 0
+    const pending = new Map<number, (message: { id?: number; result?: unknown; error?: { message?: string } }) => void>()
+    ws.onmessage = (event: MessageEvent) => {
+      const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { message?: string } }
+      if (message.id !== undefined && pending.has(message.id)) {
+        const settle = pending.get(message.id)
+        pending.delete(message.id)
+        settle?.(message)
+      }
+    }
+    const send = (method: string, params: Record<string, unknown>): Promise<{ result?: unknown; error?: { message?: string } }> =>
+      new Promise((resolve, reject) => {
+        const id = ++messageId
+        pending.set(id, resolve)
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error('CDP 调用超时：' + method))
+        }, 20_000)
+        const wrapped = (message: { id?: number; result?: unknown; error?: { message?: string } }): void => {
+          clearTimeout(timer)
+          resolve(message)
+        }
+        pending.set(id, wrapped)
+        ws.send(JSON.stringify({ id: id, method: method, params: params }))
+      })
+    await send('Runtime.enable', {})
+    /**
+     * ★ 视口**只能靠 CDP 覆盖** ✓ —— 无头 Chrome 的 `--window-size` 在这台机器上被忽略 ✗
+     *   （本轮实测：不覆盖时 `innerWidth` 是 `500` ✗ ⇒ "412px 宽的手机"是**假的** ✗）。
+     */
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 2,
+      mobile: true,
+    })
+    await send('Emulation.setUserAgentOverride', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    })
+    const evaluate = async (expression: string): Promise<unknown> => {
+      const answer = await send('Runtime.evaluate', { expression: expression, returnByValue: true, awaitPromise: true })
+      assert.equal(answer.error, undefined, '★ CDP 调用不许报错 ✓：' + JSON.stringify(answer.error ?? {}))
+      const result = answer.result as { result?: { value?: unknown }; exceptionDetails?: { text?: string } } | undefined
+      assert.equal(result?.exceptionDetails, undefined, '★ 页面里求值不许抛错 ✓：' + JSON.stringify(result?.exceptionDetails ?? {}))
+      return result?.result?.value
+    }
+    await send('Page.enable', {})
+    /**
+     * ★★ 把**真的那个文件**载进来 ✓ —— 夹具的 HTML 已经写到磁盘上了 ✓，
+     *   但只 `Page.navigate` 到 `about:blank` ✗ ⇒ 页面上**什么都没有** ✗ ⇒
+     *   探针里 `document.querySelector('.dshm-geo-host[data-live="1"]')` 是 `null` ✗
+     *   ⇒ `null.getAttribute('data-mode')` 抛 `TypeError` ✗ = 那 2 条红 ✓（实测如此 ✓）。
+     *   `file://` 一条路就够 ✓（同一台机器上的临时目录 ✓，不涉及网络 ✗）。
+     */
+    {
+      const answer = await send('Page.navigate', { url: 'file://' + file })
+      assert.equal(answer.error, undefined, '★ CDP 导航不许报错 ✓：' + JSON.stringify(answer.error ?? {}))
+    }
+    /**
+     * ★★ 导航是**异步**的 ✓：`Page.navigate` 回来时文档可能还没建好 ✗ ⇒
+     *   这里必须**等夹具真的就位**再量 ✓（轮询 ✓）—— 判据是"四屏 + 那颗键那个节点都在" ✓
+     *   （`display: none` 的屏也在 DOM 里 ✓，所以这个读法对没在量的那几屏同样有效 ✓）。
+     *   ★ 不许立刻去量 ✗：立刻量的后果就是上一个单那种**假判据** ✗
+     *   （探针抛 `TypeError` ⇒ 看着像"产品坏了" ✗，其实只是页面没载进来 ✗）。
+     */
+    let pageReady = false
+    for (let i = 0; i < 100 && !pageReady; i++) {
+      try {
+        pageReady =
+          (await evaluate(
+            'document.querySelectorAll(".dshm-geo-host").length === 4 && document.querySelector("#dsh-mobile-back-main") !== null',
+          )) === true
+      } catch {
+        /* 文档还在换代，求值会被拒 —— 下一轮再试 ✓ */
+      }
+      if (!pageReady) await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    assert.equal(
+      pageReady,
+      true,
+      '★ 夹具自检：几何页面必须真的载进浏览器 ✓（等了 20s 仍找不到四屏 / 那颗键 ✗ ⇒ 量不到任何几何 ✗）',
+    )
+    /**
+     * ★★ 视口覆盖必须**在新文档上重来一遍** ✓ —— 上面那次是在 `about:blank` 上设的 ✗，
+     *   换文档时被丢掉了 ✗ ⇒ 实测 `innerWidth` 退回无头默认的 981/980 ✗
+     *   （= 又是**假视口** ✗，量出来的手机几何全是假的 ✗）。重设一次才是真的 412/360 ✓。
+     */
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 2,
+      mobile: true,
+    })
+    await send('Emulation.setUserAgentOverride', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    })
+    return await run({ evaluate: evaluate, close: close })
+  } finally {
+    /** ★ 收尾：kill 自己那棵 Chrome ✓ + 放掉 CDP socket ✓ + 删自己的临时 profile ✓（见 `close()` 的注释 ✓）。 */
+    close()
+  }
+}
+
+function overlaps(
+  a: { left: number; right: number; top: number; bottom: number },
+  b: { left: number; right: number; top: number; bottom: number },
+): { width: number; height: number; area: number } {
+  const width = Math.min(a.right, b.right) - Math.max(a.left, b.left)
+  const height = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)
+  return { width: width, height: height, area: Math.max(0, width) * Math.max(0, height) }
+}
+
+const GEOMETRY_DRIVER = '★★ 几何：主会话（键隐藏）的标题必须与"这颗键完全不存在"逐像素一致；子单可见可点；两者不遮'
+const GEOMETRY_OPTIONS = { skip: existsSync(GEOMETRY_CHROME) ? false : '这台机器上没有 Google Chrome' }
+
+for (const viewportWidth of [412, 360]) {
+  test(GEOMETRY_DRIVER + '（视口 ' + String(viewportWidth) + 'px）', GEOMETRY_OPTIONS, async () => {
+    const css = shellStyleCss()
+    const dir = mkdtempSync(join(tmpdir(), 'dshm-geometry-page-'))
+    const file = join(dir, 'topbar.html')
+    writeFileSync(file, geometryPage(css))
+    try {
+      await withChrome({ width: viewportWidth, height: 915 }, file, async (session) => {
+        const measure = async (mode: GeometryMode): Promise<Record<string, unknown>> => {
+          const switched = await session.evaluate(
+            "(function(){var hosts=document.querySelectorAll('.dshm-geo-host');" +
+              'for(var i=0;i<hosts.length;i++){hosts[i].setAttribute("data-live",hosts[i].getAttribute("data-mode")===' +
+              JSON.stringify(mode) +
+              '?"1":"0")}' +
+              'return document.querySelector(".dshm-geo-host[data-live=\\"1\\"]").getAttribute("data-mode")})()',
+          )
+          assert.equal(switched, mode, '★ 夹具自检：该屏必须真的被切到可见 ✓')
+          const value = (await session.evaluate(GEOMETRY_PROBE)) as Record<string, unknown>
+          assert.equal(value['mode'], mode, '★ 夹具自检：量到的必须是目标那一屏 ✓')
+          assert.equal(
+            (value['viewport'] as { width: number }).width,
+            viewportWidth,
+            '★ 夹具自检：视口宽度必须真的是 ' + String(viewportWidth) + 'px ✓（否则量的是假视口 ✗）',
+          )
+          return value
+        }
+        const absent = await measure('absent')
+        const hidden = await measure('hidden')
+        const shown = await measure('shown')
+        const long = await measure('shown-long')
+
+        /** 逐像素比较（只比这四个数 ✓ —— 它们就是"标题在哪"的全部 ✓）。 */
+        const positionOf = (sample: Record<string, unknown>, key: string): number[] => {
+          const box = sample[key] as { left: number; right: number; top: number; bottom: number }
+          return [box.left, box.right, box.top, box.bottom]
+        }
+        const same = (a: number[], b: number[]): boolean => a.every((value, index) => value === b[index])
+
+        // ── ① ★ 核心判据：主会话（键隐藏 ✓）≡ 键**完全不存在** ✓ ──
+        assert.ok(
+          same(positionOf(hidden, 'titleBox'), positionOf(absent, 'titleBox')),
+          '★★ 主会话（键隐藏 ✓）的标题盒必须与"这颗键**完全不存在**"时逐像素一致 ✗ —— ' +
+            '实测 ' +
+            JSON.stringify(positionOf(hidden, 'titleBox')) +
+            ' vs ' +
+            JSON.stringify(positionOf(absent, 'titleBox')) +
+            '（把它改回 `visibility: hidden` 而**保留盒子在流里** ⇒ 本条红 ✓：标题被挤右 46px ✗ ' +
+            '= 用户报的"标题向右偏移"✗）',
+        )
+        assert.ok(
+          same(positionOf(hidden, 'titleTextBox'), positionOf(absent, 'titleTextBox')),
+          '★★ 而且**文字**也必须逐像素一致 ✗（标题盒一样、文字却被挤偏，同样是用户看得见的那种偏 ✗）—— 实测 ' +
+            JSON.stringify(positionOf(hidden, 'titleTextBox')) +
+            ' vs ' +
+            JSON.stringify(positionOf(absent, 'titleTextBox')),
+        )
+        assert.ok(
+          same(positionOf(shown, 'titleBox'), positionOf(absent, 'titleBox')),
+          '★★ 子单（键可见 ✓）时标题**也不许动** ✗ —— 实测 ' +
+            JSON.stringify(positionOf(shown, 'titleBox')) +
+            ' vs ' +
+            JSON.stringify(positionOf(absent, 'titleBox')) +
+            '（在那颗键上给 `display: none` ⇒ 本条红 ✓：进/出子单标题会跳 46px ✗）',
+        )
+        assert.ok(
+          same(positionOf(long, 'titleBox'), positionOf(absent, 'titleBox')),
+          '★★ 长标题那一屏同样不许动 ✗（这一条顺带保证"留白"不是靠改标题宽度换来的 ✓）',
+        )
+
+        // ── ② 主会话（键隐藏 ✓）⇒ 真的不在流里、真的看不见、真的点不到 ──
+        assert.equal(hidden['backExists'], true, '★ 那颗键仍然要在 DOM 里 ✓（`syncBackToMainButton()` 只改 `data-dshm-shown` ✓）')
+        assert.equal(hidden['backShownAttr'], '0', '★ 主会话里 `data-dshm-shown` 必须是 0 ✓')
+        assert.equal(hidden['backVisibility'], 'hidden', '★ 主会话里必须看不见 ✓')
+        assert.equal(hidden['backPointerEvents'], 'none', '★ 而且必须点不到 ✓（`pointer-events: none` ✓）')
+        assert.equal(
+          hidden['backPosition'],
+          'absolute',
+          '★★ 主会话里那颗键必须是 **absolute** ✓（= **不在流里** = 不占位 ✓）。' +
+            '把它改回 `static`（隐藏但仍在流里占位）⇒ 上面那条"主会话标题不偏"**红** ✓',
+        )
+        const hiddenPoints = hidden['clickPoints'] as Array<{ hit: string | null }>
+        assert.ok(
+          hiddenPoints.every((point) => point.hit !== null && point.hit !== 'dsh-mobile-back-main'),
+          '★ 主会话里那颗键的盒子上**任何一个点**都不许命中它自己 ✓（命中了 ⇒ 还能被误触 ✗）—— 实测 ' +
+            JSON.stringify(hiddenPoints),
+        )
+
+        // ── ③ 子单（键可见 ✓）⇒ 可见 + 可点（真的能接住那一下 ✓）──
+        assert.equal(shown['backExists'], true, '★ 子单里那颗键当然要在 ✓')
+        assert.equal(shown['backShownAttr'], '1', '★ 子单里 `data-dshm-shown` 必须是 1 ✓')
+        assert.equal(shown['backVisibility'], 'visible', '★★ 子单里必须**可见** ✓（改回"主会话也可见"那条变异打的是反向 ✓）')
+        assert.notEqual(shown['backPointerEvents'], 'none', '★★ 子单里必须能接住点击 ✓（`pointer-events` 不许是 none ✗）')
+        const shownPoints = shown['clickPoints'] as Array<{ x: number; y: number; hit: string | null }>
+        const reachable = shownPoints.filter((point) => point.hit === 'dsh-mobile-back-main')
+        assert.ok(
+          reachable.length >= 4,
+          '★★ 子单里那颗键必须**可点** ✓：盒子上的取样点里至少 4/5 要命中它自己 ✓（`elementFromPoint` 命中的是它 = ' +
+            '它接得住这一下 ✓）—— 实测 ' +
+            JSON.stringify(shownPoints),
+        )
+        const shownBack = shown['backBox'] as { left: number; right: number }
+        const shownNavRight = shown['navRight'] as number
+        const shownGap = shown['barGap'] as string
+        const shownGapPx = Number.parseFloat(shownGap)
+        /**
+         * ★★ 判据不是"贴着" ✗、而是"**只隔着顶栏自己的 `gap`**" ✓ ——
+         *   产品把左边界定义成 `--dshm-back-left` = `--dshm-bar-btn` + `--dshm-bar-gap`
+         *   （`boot.js` 里那条没动的注释：`2px`(gap) + `44px`(☰ 那颗的宽) ✓），
+         *   而 ☰ 的右边界 = `--dshm-bar-btn` ✓ ⇒ 两者**本来就该差一个 gap** ✓。
+         *   ★ 这里**不是**把断言放松 ✗：从 `document` 上读产品**真实声明**的 gap ✓
+         *   （不是写死 `2` ✓ —— 钉死数字就等于把"这个数只有一个事实来源"那条卖掉了 ✗），
+         *   再要求实测差**恰好等于它**（`< 0.5px` ✓）。夹具没套上产品 CSS 时实测是 `46 vs 44`
+         *   而 gap 读到 `0` ⇒ **本条照样红** ✓（不是"变成恒真" ✗）。
+         */
+        assert.ok(
+          Number.isFinite(shownGapPx) && shownGapPx > 0,
+          '★ 夹具自检：必须能从 document 上读到顶栏自己声明的 `--dshm-bar-gap` ✓（读到 0/NaN ⇒ ' +
+            '那颗键的横向落点就没有事实来源可对了 ✗）—— 实测 ' + JSON.stringify(shownGap),
+        )
+        assert.ok(
+          Math.abs(shownBack.left - shownNavRight - shownGapPx) < 0.5,
+          '★ 那颗键的左边界必须仍然**只隔着顶栏自己的 gap**（= `boot.js` 的 `--dshm-back-left` ✓，' +
+            '上一版它在流里时落到的那个横坐标 ✓、肌肉记忆不被打乱 ✓）—— 实测 ' +
+            String(shownBack.left) +
+            ' vs ☰ 右边 ' +
+            String(shownNavRight) +
+            ' + gap ' +
+            String(shownGapPx),
+        )
+
+        // ── ④ 两种状态下都不许盖住标题的**文字** ──
+        for (const sample of [hidden, shown, long]) {
+          const backBox = sample['backBox'] as { left: number; right: number; top: number; bottom: number }
+          const textBox = sample['titleTextBox'] as { left: number; right: number; top: number; bottom: number }
+          assert.equal(
+            overlaps(backBox, textBox).area,
+            0,
+            '★★ ' +
+              String(sample['mode']) +
+              '：那颗键与标题**文字**的相交面积必须是 0 ✗ —— 实测 ' +
+              JSON.stringify(overlaps(backBox, textBox)),
+          )
+          const contentLeft = sample['titleContentLeft'] as number
+          assert.ok(
+            backBox.right <= contentLeft + 0.001,
+            '★★ ' +
+              String(sample['mode']) +
+              '：标题的**内容盒**也必须在键的右边 ✓（那颗键的右边界 ' +
+              String(backBox.right) +
+              ' 必须 <= 标题内容左边界 ' +
+              String(contentLeft) +
+              ' ✓ —— 否则长标题的文字会滑到它底下 ✗）',
+          )
+        }
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
