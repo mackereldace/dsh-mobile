@@ -34,7 +34,7 @@ try{
  const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)return {__error:r.exceptionDetails.text};return r.result?.value}
  await send('Emulation.setDeviceMetricsOverride',{width:412,height:915,deviceScaleFactor:1,mobile:true})
  await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/mobile/chat?debug=1`})
- for(let n=0;n<100;n++){if(await evaluate(`typeof __DSH_MOBILE_BOOT__?.debugLine==='function'`))break;await sleep(50)}
+ for(let n=0;n<100;n++){if(await evaluate(`typeof globalThis.__DSH_MOBILE_BOOT__?.debugLine==='function'`)===true)break;await sleep(50)}
  check('完整生产boot确实导出手机调试写入器',await evaluate(`typeof __DSH_MOBILE_BOOT__.debugLine==='function'`))
  await evaluate(`__DSH_MOBILE_BOOT__.debugLine('[dsh-chat] 真实写入自检')`)
  await sleep(100)
