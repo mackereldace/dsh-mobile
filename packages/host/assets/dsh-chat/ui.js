@@ -77,7 +77,9 @@ export function toViewModel(event) {
   const view = {
     kind,
     type,
-    title: titleFor(kind, type),
+    title: kind === 'tool' && data !== null && typeof data === 'object'
+      ? firstString(data, ['name', 'toolName']) || titleFor(kind, type)
+      : titleFor(kind, type),
     text,
     thinking: thinkingOf(data),
     body: text,
@@ -237,6 +239,8 @@ function safeJson(value) {
 /** 事件的"种类"⇒ 画法。认不出的一律走 `other`（**仍然画** ✓）。 */
 export function classify(type) {
   const text = typeof type === 'string' ? type.toLowerCase() : ''
+  // 已核实的内部记账事件：保留原文供排障，但默认收起，避免 JSON 淹没对话。
+  if (text.startsWith('session-log-deepseek/') || text.startsWith('agent/inbox/')) return 'meta'
   if (text.includes('usermessage') || text.includes('user/') || text.includes('prompt')) return 'user'
   if (text.includes('agentmessage') || text.includes('assistant') || text.includes('message')) return 'agent'
   /**
@@ -333,6 +337,12 @@ export function textOf(event) {
   const data = event === null || typeof event !== 'object' ? null : event.data
   if (typeof data === 'string') return data
   if (data !== null && typeof data === 'object') {
+    if (classify(event.type) === 'tool' && data.arguments !== undefined) return toolArguments(data.arguments)
+    const message = recordOf(data.message)
+    if (classify(event.type) === 'tool' && message !== null) {
+      const text = assistantText(data)
+      if (text.length > 0) return text
+    }
     for (const key of ['text', 'message', 'content', 'output', 'command', 'summary', 'title']) {
       const value = data[key]
       if (typeof value === 'string' && value.length > 0) return value
@@ -347,6 +357,23 @@ export function textOf(event) {
     }
   }
   return ''
+}
+
+/** 工具参数只展示业务字段；JSON 字符串先解开，命令保持真实换行。 */
+export function toolArguments(value) {
+  let args = value
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args) } catch { return args }
+  }
+  const record = recordOf(args)
+  if (record === null) return typeof args === 'string' ? args : safeJson(args)
+  const command = firstString(record, ['command', 'cmd', 'script'])
+  if (command.length > 0) {
+    const rest = Object.entries(record).filter(([key]) => !['command', 'cmd', 'script'].includes(key))
+    return command + (rest.length > 0 ? '\n\n' + rest.map(([key, entry]) => key + ': ' +
+      (typeof entry === 'string' ? entry : JSON.stringify(entry, null, 2))).join('\n') : '')
+  }
+  return JSON.stringify(record, null, 2)
 }
 
 /**
@@ -808,6 +835,19 @@ export function renderEvent(event, context) {
   const seq = event !== null && typeof event === 'object' ? event.seq : null
   if (typeof seq === 'number') wrapper.setAttribute('data-seq', String(seq))
 
+  if (view.kind === 'meta') {
+    const details = document.createElement('details')
+    details.className = 'event-meta'
+    const summary = document.createElement('summary')
+    summary.textContent = view.type.startsWith('session-log-deepseek/') ? '会话记录已同步' : '输入队列已更新'
+    const raw = document.createElement('pre')
+    raw.textContent = JSON.stringify(event.data, null, 2)
+    details.appendChild(summary)
+    details.appendChild(raw)
+    wrapper.appendChild(details)
+    return wrapper
+  }
+
   if (view.kind === 'user' || view.kind === 'agent') {
     // ★ 思维链**默认折叠** ✓（口径同官方客户端的"思考"行 ✓）—— 点开才看全文 ✓
     if (view.thinking.length > 0) {
@@ -1020,7 +1060,7 @@ function toolCard(view) {
   if (view.collapsed) {
     const hidden = document.createElement('span')
     hidden.className = 'tool-hidden'
-    hidden.textContent = '还有 ' + view.hiddenLines + ' 行'
+    hidden.textContent = view.hiddenLines > 0 ? '还有 ' + view.hiddenLines + ' 行' : '还有 ' + (view.text.length - view.body.length) + ' 字'
     head.appendChild(hidden)
   }
   const spacer = document.createElement('span')
@@ -1042,7 +1082,8 @@ function toolCard(view) {
       body.textContent = expanded ? view.body : view.text
       toggle.textContent = expanded ? '展开' : '收起'
       const hiddenNote = head.querySelector('.tool-hidden')
-      if (hiddenNote !== null) hiddenNote.textContent = expanded ? '还有 ' + view.hiddenLines + ' 行' : '全部'
+      if (hiddenNote !== null) hiddenNote.textContent = expanded
+        ? (view.hiddenLines > 0 ? '还有 ' + view.hiddenLines + ' 行' : '还有 ' + (view.text.length - view.body.length) + ' 字') : '全部'
     })
     head.appendChild(toggle)
   }

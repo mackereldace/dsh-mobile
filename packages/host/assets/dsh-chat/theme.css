@@ -257,6 +257,10 @@
   }
   .dim { color: var(--ink3); }
   .small { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .event-meta { color: var(--ink3); font-size: 11px; }
+  .event-meta > summary { cursor: pointer; }
+  .event-meta:not([open]) > pre { display: none; }
+  .event-meta > pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
   /**
    * ───────────────────────── 输入栏（1:1 复刻 DSH 手机端）─────────────────────────
    *

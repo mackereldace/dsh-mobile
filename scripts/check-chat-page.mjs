@@ -1350,8 +1350,10 @@ try {
    *   （这与"不许假装能用"是同一条纪律 ✓：看不懂的审批绝不摆按钮 ✓）
    */
   check(
-    '★ 真形状的审批（没有 options）⇒ 一颗按钮都不给，且原文摊出来 ✓',
-    html.includes('escalate sandbox to danger-full-access') && !/class="approval-option"/.test(html),
+    '★ 真形状审批使用官方两选项；通道未接通时两颗按钮均不可提交 ✓',
+    html.includes('escalate sandbox to danger-full-access') &&
+      (html.match(/class="approval-option"[^>]*disabled/g) ?? []).length === 2 &&
+      !html.includes('data-decision="allowed-always"'),
   )
   check('★ 认不出的事件类型也画了出来（没有静默丢弃 ✓）', html.includes('someUnknownEvent'))
   /**
@@ -2170,7 +2172,7 @@ try {
   const BIG_LAST_INDEX = BIG_N
   const BIG_LAST_SEQ = 100000 + BIG_LAST_INDEX
   /** ★ `BIG_N` 是偶数 ⇒ 最后那一条是 `tool/call` ✓（正文长这样 ✓，与消息那条不同 ✗）。 */
-  const BIG_LAST_TEXT = '工具第 ' + String(BIG_LAST_INDEX) + ' 条'
+  const BIG_LAST_TEXT = 'bash第 ' + String(BIG_LAST_INDEX) + ' 条'
   check(
     '★★ 夹具自检：长会话这一趟**真的**跑起来了（页面报了上界、CDP 九步全求值成功 ✓ —— 否则下面全是空转 ✗）',
     typeof bigLimit === 'number' && bigLimit === BIG_LIMIT_EXPECTED && bigStepErrors.length === 0 &&
