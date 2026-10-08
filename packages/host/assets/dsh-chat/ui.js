@@ -20,6 +20,15 @@
  * `renderEvent()` 只负责把 view model 画出来 ✓ —— 判断散在 DOM 代码里就永远测不了 ✗。
  */
 
+/** 与boot手机调试框共用一个写入器；没有诊断口的旧客户端仍留控制台日志。 */
+export function chatLog(text) {
+  try { console.log(text) } catch (error) { void error }
+  const boot = globalThis.__DSH_MOBILE_BOOT__
+  if (boot && typeof boot.debugLine === 'function') {
+    try { boot.debugLine(text) } catch (error) { void error }
+  }
+}
+
 /** 折叠阈值：工具块超过它就默认收起 ✓（手机屏小，一条 300 行的命令会吃掉整屏 ✗）。 */
 export const MAX_VISIBLE_LINES = 10
 export const MAX_VISIBLE_CHARS = 600
@@ -1745,7 +1754,7 @@ export function mountChat(options) {
     }
     dockChanged()
     paintComposer()
-    console.log('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
+    chatLog('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
   }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
@@ -1813,7 +1822,7 @@ export function mountChat(options) {
      *   （那句说**宿主给了什么** ✓，这句说**页面画了什么** ✓）。
      */
     try {
-      console.log(
+      chatLog(
         '[dsh-chat] 状态条：' +
           (cells.length === 0 ? '（投影取不到 ⇒ 这一条不占高度）' : statsStripText(values)),
       )
@@ -2195,7 +2204,7 @@ export function mountChat(options) {
       badge.textContent = total === null ? '' : '● ' + (running !== null && running > 0 ? running : total)
       badge.classList.toggle('is-running', running !== null && running > 0)
       badge.title = total === null ? '' : '子智能体 ' + total + ' 个' + (running === null ? '（运行状态未知）' : '，运行中 ' + running + ' 个')
-      if (total !== null) console.log('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
+      if (total !== null) chatLog('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
     }
     paintSessions()
     paintComposer()
@@ -2426,10 +2435,10 @@ export function mountChat(options) {
         const value = await options.upload(session, source.name, bytes)
         if (!value || value.ok !== true || typeof value.receiptId !== 'string' || !value.receiptId) throw new Error('宿主没有返回附件收据')
         file.receiptId = value.receiptId
-        console.log('[dsh-chat] 附件上传：' + source.name + ' ' + bytes.length + ' 字节，收据已取得')
+        chatLog('[dsh-chat] 附件上传：' + source.name + ' ' + bytes.length + ' 字节，收据已取得')
       } catch (error) {
         file.error = error instanceof Error ? error.message : String(error)
-        console.log('[dsh-chat] 附件上传失败：' + file.error)
+        chatLog('[dsh-chat] 附件上传失败：' + file.error)
       }
       file.uploading = false
       if (session === currentSessionId) paintComposer()

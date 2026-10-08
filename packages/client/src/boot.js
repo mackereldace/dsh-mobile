@@ -23510,6 +23510,7 @@
       //   所以外壳不装、这两个渲染函数仍在作用域里 —— 直接导出，免得会话页另写一套
       //   （本仓规矩：不新造渲染器）。
       renderMarkdownInto: renderMarkdownInto,
+      debugLine: debugBoxLine,
       splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,

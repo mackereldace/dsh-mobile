@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const assets = join(root, 'packages/host/assets/dsh-chat')
 const fixture = `
 window.__DSHM_CHAT_PAGE__ = {};
-window.__chat49 = {calls:[], answers:[], uploads:[], sent:[], cancelled:0};
+window.__chat49 = {calls:[], answers:[], uploads:[], sent:[], logs:[], cancelled:0};
 const f = window.__chat49;
 f.events = [
  {seq:1,time:1000,type:'turn/start',data:{turn:1}},
@@ -27,7 +27,7 @@ f.channels={approval:true,question:true,upload:true};
 let hold=null, queue=[];
 f.push=function(events){for(const event of events) queue.push({type:'event',event});if(hold&&queue.length){const h=hold;hold=null;h({done:false,value:queue.shift()})}};
 const ok=value=>Promise.resolve({result:{ok:true,value}});
-window.__DSH_MOBILE_BOOT__={renderMarkdownInto:(el,text)=>{el.textContent=text},tunnel:{
+window.__DSH_MOBILE_BOOT__={debugLine:text=>f.logs.push(text),renderMarkdownInto:(el,text)=>{el.textContent=text},tunnel:{
  rpc(method,payload){const a=payload.args||{}; f.calls.push({method,args:a});
  if(method==='mobile/dsh/sessions')return ok({sessions:[{id:'s1',title:'验收会话',subagentStats:{total:2,running:1}},{id:'s2',title:'第二会话'}]});
  if(method==='mobile/dsh/capabilities')return ok({channels:f.channels});
@@ -179,7 +179,8 @@ try{
  check('审批网络失败保留卡片、显示原因并恢复重试键',await evaluate(`document.querySelector('.approval-why').textContent.includes('审批中断')&&[...document.querySelectorAll('.approval-option')].every(n=>!n.disabled)`))
  await evaluate(`__chat49.failApproval=false;document.querySelector('.approval-option[data-decision="rejected"]').click()`)
  await until(`!document.querySelector('#interactions .approval')`)
- const EXPECTED_MIN_CHECKS=51
+ check('页面通道、状态、附件日志进入手机共享调试写入器',await evaluate(`['交互通道','状态条','开场快照的投影','附件上传：','附件上传失败：'].every(key=>__chat49.logs.some(line=>line.startsWith('[dsh-chat]')&&line.includes(key)))`))
+ const EXPECTED_MIN_CHECKS=52
  check('下界等于实跑总数',total+1===EXPECTED_MIN_CHECKS,{total:total+1,expected:EXPECTED_MIN_CHECKS})
 }finally{
  if(ws)ws.close();if(chrome){try{process.kill(-chrome.pid,'SIGKILL')}catch{}try{execFileSync('pkill',['-f',`--user-data-dir=${profile}`],{stdio:'ignore'})}catch{}}
