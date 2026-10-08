@@ -29,7 +29,7 @@ f.push=function(events){for(const event of events) queue.push({type:'event',even
 const ok=value=>Promise.resolve({result:{ok:true,value}});
 window.__DSH_MOBILE_BOOT__={debugLine:text=>f.logs.push(text),renderMarkdownInto:(el,text)=>{el.textContent=text},tunnel:{
  rpc(method,payload){const a=payload.args||{}; f.calls.push({method,args:a});
- if(method==='mobile/dsh/sessions')return ok({sessions:[{id:'s1',title:'验收会话',subagentStats:{total:2,running:1}},{id:'s2',title:'第二会话'}]});
+ if(method==='mobile/dsh/sessions')return ok({sessions:[{id:'s1',title:'验收会话',subagentStats:f.subagentStats||{total:2,running:1}},{id:'s2',title:'第二会话'}]});
  if(method==='mobile/dsh/capabilities')return ok({channels:f.channels});
  if(method==='mobile/dsh/interactions')return ok({sessionId:a.sessionId,values:f.values,channels:f.channels});
  if(method==='mobile/dsh/approval'){f.answers.push(a);if(f.failApproval)return Promise.reject(Error('审批中断'));return ok({ok:true,outcome:a.decision})}
@@ -106,7 +106,10 @@ try{
  check('清空搜索恢复全部轨迹',await evaluate(`(()=>{const i=document.querySelector('[aria-label=搜索轨迹]');i.value='';i.dispatchEvent(new Event('input'));return document.querySelectorAll('.trace-bar').length>=5})()`))
  await evaluate(`document.querySelector('#tab-chat').click()`)
  const until=async expression=>{for(let n=0;n<100;n++){if(await evaluate(expression)===true)return true;await sleep(20)}return false}
- check('子智能体徽标取真实当前会话运行数',await evaluate(`(()=>{const b=document.querySelector('#subagent-count');return !b.hidden&&b.textContent==='● 1'&&b.classList.contains('is-running')&&b.title.includes('子智能体 2 个')})()`))
+ check('子智能体徽标显示真实总数，颜色和说明取运行数',await evaluate(`(()=>{const b=document.querySelector('#subagent-count');return !b.hidden&&b.textContent==='● 2 个子智能体'&&b.classList.contains('is-running')&&b.title==='子智能体 2 个，运行中 1 个'})()`))
+ await evaluate(`__chat49.subagentStats={total:2,running:null};document.querySelector('#refresh').click()`)
+ await until(`!document.querySelector('#subagent-count').classList.contains('is-running')`)
+ check('运行状态未知仍显示真实总数并明确说明未知',await evaluate(`(()=>{const b=document.querySelector('#subagent-count');return !b.hidden&&b.textContent==='● 2 个子智能体'&&!b.classList.contains('is-running')&&b.title==='子智能体 2 个（运行状态未知）'})()`))
  await evaluate(`__chat49.values.userQuestions.active=[{callId:'q49',state:'open',questions:[{id:'q1',question:'选择方案',options:[{label:'甲',description:'第一个方案'},{label:'乙'}]}]}];__chat49.push([{seq:20,time:3000,type:'tool/call',data:{name:'ask_user_question',callId:'q49',arguments:JSON.stringify({questions:__chat49.values.userQuestions.active[0].questions})}}])`)
  const questionReady=await until(`!!document.querySelector('.question-card')`)
  check('真实工具事件触发一次交互读取',questionReady&&(await evaluate(`__chat49.calls.filter(c=>c.method==='mobile/dsh/interactions').length>=2`)),questionReady)
@@ -180,7 +183,7 @@ try{
  await evaluate(`__chat49.failApproval=false;document.querySelector('.approval-option[data-decision="rejected"]').click()`)
  await until(`!document.querySelector('#interactions .approval')`)
  check('页面通道、状态、附件日志进入手机共享调试写入器',await evaluate(`['交互通道','状态条','开场快照的投影','附件上传：','附件上传失败：'].every(key=>__chat49.logs.some(line=>line.startsWith('[dsh-chat]')&&line.includes(key)))`))
- const EXPECTED_MIN_CHECKS=52
+ const EXPECTED_MIN_CHECKS=53
  check('下界等于实跑总数',total+1===EXPECTED_MIN_CHECKS,{total:total+1,expected:EXPECTED_MIN_CHECKS})
 }finally{
  if(ws)ws.close();if(chrome){try{process.kill(-chrome.pid,'SIGKILL')}catch{}try{execFileSync('pkill',['-f',`--user-data-dir=${profile}`],{stdio:'ignore'})}catch{}}
