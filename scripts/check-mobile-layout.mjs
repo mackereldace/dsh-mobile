@@ -1664,17 +1664,67 @@ try {
   //   ③ 点开真的能打开**宿主原生**的详情（而不是我们另画一个）。
   check(sessionFixture.ids.length > 0, '能准备一份真实会话（状态栏只在有轮次的会话上渲染）', sessionFixture.ids.length > 0 ? `工作区「${sessionFixture.title}」` : '没有可复制的会话日志')
   if (sessionFixture.ids.length > 0) {
-    await evaluate(`document.getElementById('dsh-mobile-nav').click()`)
+    /**
+     * ★★ 这一段原来**无脑点一次工作区行**✗ —— 那一行是**开/关切换**的 ✓，
+     *   已经展开时点它就把**它自己收起来** ✗ ⇒ 侧栏一条会话行都不剩 ⇒
+     *   下面那个循环只能退到 `[role="treeitem"]` ⇒ 点到的全是**工作区行** ✗
+     *   ⇒ 会话永远打不开 ✓（round 158 的「第一跑」记下的就是这个形态 ✓）。
+     *   ★ 修法**不新发明** ✗：把同文件 round 158 那一节**已经修好同样毛病**的写法移植过来 ✓
+     *   （打开抽屉先看 `body[data-dsh-mobile-drawer]` ✓、展开工作区先看那一行自己的
+     *    `aria-expanded` ✓、再 3×14 轮重试地等 `[class*="_sessionRow"]` 出现 ✓、
+     *    关抽屉走 `#dsh-mobile-scrim` ✓ —— 见下面 158 那一节的 openSessionList / closeDrawerNow ✓）。
+     */
+    // 抽屉那颗键是**开/关切换**的 ⇒ 先看状态再点 ✗（见 boot.js 里 nav 的 setDrawer ✓）
+    await evaluate(`(function(){
+      if(document.body.dataset.dshMobileDrawer!=='open'){ var n=document.getElementById('dsh-mobile-nav'); if(n) n.click() }
+      return true })()`)
     await sleep(1000)
-    const expandedRow = await evaluate(`(function(){
-      var title=${JSON.stringify(sessionFixture.title)}
-      var rows=[].slice.call(document.querySelectorAll('[class*="_projectRow"]'))
-      var target=null
-      for(var i=0;i<rows.length;i++){ if((rows[i].innerText||'').indexOf(title)>=0){ target=rows[i]; break } }
-      if(!target) target=rows[0]
-      if(!target) return '(没有工作区行)'
-      target.click(); return (target.innerText||'').replace(/\\s+/g,' ').slice(0,24) })()`)
-    await sleep(1400)
+    for (let i = 0; i < 24; i++) {
+      const n = Number(await evaluate(`document.querySelectorAll('[class*="_projectRow"]').length`))
+      if (n > 0) break
+      await sleep(500)
+    }
+    /**
+     * 展开目标工作区：**先判断再点** ✗ —— 判据是 DSH 自己渲染上去的 `aria-expanded` ✓
+     * （不是我们猜的类名 ✓）；`aria` 读不到时**只在一条会话行都没有的情况下**才点 ✓
+     * ⇒ 哪一档都**不会把已经展开的那一行收起来** ✓。
+     */
+    const workspaceProbe = async () => {
+      try {
+        return JSON.parse(
+          await evaluate(`(function(){
+          var title=${JSON.stringify(sessionFixture.title ?? '')}
+          var rows=[].slice.call(document.querySelectorAll('[class*="_projectRow"]'))
+          var target=null
+          for(var i=0;i<rows.length;i++){ if(title!==''&&(rows[i].innerText||'').indexOf(title)>=0){ target=rows[i]; break } }
+          if(target===null) target=rows[0]
+          var rowsNow=document.querySelectorAll('[class*="_sessionRow"]').length
+          if(!target) return JSON.stringify({text:'(没有工作区行)',aria:null,rows:rowsNow,clicked:false})
+          var aria=String(target.getAttribute('aria-expanded'))
+          var shouldClick=aria==='false'||(aria!=='true'&&rowsNow===0)
+          if(shouldClick) target.click()
+          return JSON.stringify({text:(target.innerText||'').replace(/\\s+/g,' ').slice(0,24),aria:aria,rows:rowsNow,clicked:shouldClick}) })()`),
+        )
+      } catch (error) {
+        return { text: '(探针失败)', aria: null, rows: 0, clicked: false, error: String(error && error.message ? error.message : error) }
+      }
+    }
+    let workspaceState = await workspaceProbe()
+    let sessionRowCount = Number(await evaluate(`document.querySelectorAll('[class*="_sessionRow"]').length`))
+    for (let attempt = 0; attempt < 3 && sessionRowCount === 0; attempt++) {
+      for (let i = 0; i < 14; i++) {
+        sessionRowCount = Number(await evaluate(`document.querySelectorAll('[class*="_sessionRow"]').length`))
+        if (sessionRowCount > 0) break
+        await sleep(500)
+      }
+      if (sessionRowCount > 0) break
+      workspaceState = await workspaceProbe()
+      await sleep(1600)
+    }
+    sessionRowCount = Number(await evaluate(`document.querySelectorAll('[class*="_sessionRow"]').length`))
+    const expandedRow = workspaceState.text
+    const drawerNow = String(await evaluate(`String(document.body.dataset.dshMobileDrawer||'')`))
+    console.log(`  · 工作区「${String(expandedRow)}」aria-expanded=${String(workspaceState.aria)}｜点过=${String(workspaceState.clicked)}｜会话行=${sessionRowCount}｜抽屉=${drawerNow}`)
     /**
      * 挨个试侧栏里的会话行，直到状态栏出现。
      *
@@ -1726,7 +1776,21 @@ try {
           composer:(document.querySelector('[class*="composerStack"]')||{}).innerText||''}) })()`)
       console.log(`  · 没找到有轮次的会话，页面尾部文本: ${String(what).slice(0, 260)}`)
     }
-    await evaluate(`(function(){var b=document.getElementById('dsh-mobile-drawer-backdrop');if(b)b.click()})()`)
+    /**
+     * ★ 关抽屉走 `#dsh-mobile-scrim` ✓（与 round 158 的 `closeDrawerNow` 同一口径 ✓）——
+     *   本项目**没有** `dsh-mobile-drawer-backdrop` 这个 id ✗（脚本自己在 158 那段写着 ✓），
+     *   老写法 `getElementById('dsh-mobile-drawer-backdrop')` 是**空点** ✓ ⇒ 抽屉会一直开着 ✓。
+     */
+    for (let i = 0; i < 4; i++) {
+      const drawerLeftOpen = await evaluate(`(function(){
+        if(document.body.dataset.dshMobileDrawer!=='open') return false
+        var s=document.getElementById('dsh-mobile-scrim')
+        if(s) s.click()
+        if(document.body.dataset.dshMobileDrawer==='open'){ var n=document.getElementById('dsh-mobile-nav'); if(n) n.click() }
+        return document.body.dataset.dshMobileDrawer==='open' })()`)
+      if (drawerLeftOpen !== true) break
+      await sleep(600)
+    }
     await sleep(1000)
     check(
       expandedRow !== '(没有工作区行)' && openedSession !== null,
