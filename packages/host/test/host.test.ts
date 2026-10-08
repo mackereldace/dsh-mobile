@@ -1191,6 +1191,51 @@ test('端到端：流式 RPC 经隧道按序送达并结束', async () => {
       { seq: 1, text: '第一页' },
       { seq: 2, text: '第二页' },
     ])
+    /**
+     * ★ 反向控制（本轮加 ✓）：**只认 `mobile/dsh/follow` 那一条** ✗ ——
+     *   别的流端点照旧原样转发 ✓。变异成"所有流都改名/多加一跳"时这条必红 ✓。
+     */
+    assert.deepEqual(env.calls, [{ namespace: 'session', method: 'history', args: { sessionId: 's-1', limit: 50 } }])
+  } finally {
+    env.cleanup()
+  }
+})
+
+/**
+ * ★★ 会话页那条流走的是**本地流路由**（本轮新增 ✓）：`mobile/dsh/follow` ⇒ `session/follow`。
+ *
+ * ## 为什么非有不可 ✗
+ *
+ * 桥的纪律是「手机只认 `mobile/dsh/*`」✓ ⇒ 页面喊的是 `mobile/dsh/follow` ✓，
+ * 转发那一跳在宿主的 `openStream` 里 ✓。这一跳要是没接上，
+ * 手机上的形状是**光秃秃一句报错**（页面上"读取出错"✓），而宿主审计里只有
+ * `failed: …` 两个字的线索 ✓ —— 不是那种"看一眼就知道"的故障 ✓。
+ *
+ * ★ 参数那一半同样要钉死 ✗：请求形状**由页面给**（`{ args: { request } }` ✓，
+ *   照官方客户端 ✓）⇒ 宿主**一个字段都不许补、不许改** ✓
+ *   （`SessionFollowRequest` 里没有 `cursor` ✓ —— 多补一个字段就是那类"照着想的形状写"✗）。
+ *
+ * ★ 变异判据：把 `index.ts` 里那句 `request.endpoint === 'mobile/dsh/follow' ? 'session/follow' : …`
+ *   改回原样（不转发）⇒ **恰好**本用例变红 ✓（网关会收到 `mobile/dsh/follow` ⇒ 断言当场不成立 ✓）。
+ */
+test('★★ 本地流路由：mobile/dsh/follow 被转发到会话的 session/follow，且参数一个字段都不改', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    const request = {
+      address: { kind: 'session', sessionId: 's-1' },
+      maxMessages: 500,
+      turnWindow: { minMessages: 50, minTurns: 2 },
+    }
+    const items = await mobile.collectStream('mobile/dsh/follow', { request })
+    /** ① 帧**原样**回到手机 ✓（这条路由只改名，不改任何产出 ✓）。 */
+    assert.deepEqual(items, [
+      { seq: 1, text: '第一页' },
+      { seq: 2, text: '第二页' },
+    ])
+    /** ② 网关收到的是 **DSH 的**端点名 ✓（不转发的话这里会是 `mobile/dsh/follow` ✗）。 */
+    assert.deepEqual(env.calls, [{ namespace: 'session', method: 'follow', args: { request } }])
   } finally {
     env.cleanup()
   }
