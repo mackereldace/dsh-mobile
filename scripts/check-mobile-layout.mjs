@@ -4024,6 +4024,107 @@ try {
   //   —— 本项目吃过"以为点到了、其实点在浮层上"的亏，触摸同理 ✓。
   // ★ 坐标要避开调试框（`?debug=1` 时它占上方约 40vh）：取 y=600，在消息区中部 ✓。
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+  /**
+   * ★★ round 191：0.2.0 上那 20 条「真触摸」家族假红的**唯一**根因 ✓。
+   *
+   * 0.2.0 客户端在**没有配 API Key 的临时 profile** 上会挂一个**阻塞性引导弹窗** ✓：
+   *   · 它是挂在 `body` 上的门户层（`[class*="_root_"]`：`position:fixed; inset:0; z-index:1000` ✓）
+   *     ⇒ **盖在内容区上面** ✓（实测 `elementFromPoint(132,600)` 拿到的是它的正文 `div.jLrgrW_body` ✗）；
+   *   · 它还会把 `#root` 整个设成 `inert` ✓（插件自己的注释原话：「keep the application root inert」✓）
+   *     ⇒ **`#root` 里的一切都退出命中测试** ✗ —— 凡是挂进 `centerCol` 的夹具（157-C 那两件 ✓）
+   *     因此**一个 `touchmove` 都收不到** ✓。
+   *
+   * ★ 为什么它能把人骗好几轮 ✗：我们挂在 `document` 上的**捕获**监听照旧收到全部事件 ✓
+   *   （原始读数 `starts:15 moves:74 ends:15` 一条不少 ✓）⇒「事件发出去了」是个**假判据** ✗；
+   *   真正错的是 `areaOf(event.target)` —— 命中的是弹窗里的节点 ⇒ 判成 `other` ⇒ 一笔判定都不产生 ✗。
+   *   ⇒ 判据只许落在**命中测试**上 ✓（「那两个落点到底归谁」✓）。
+   *
+   * ★ 它是**环境前置**、不是产品回归 ✓：0.1.5 没有这个弹窗 ✓；脚本开头（第 1202 行附近 ✓）
+   *   本来就有同一套「按弹窗自己的按钮关掉它」的做法 ✓，但它只覆盖了**第一次加载** ✗ ——
+   *   第 3985 行的 `Page.navigate` 会把页面整个重载 ⇒ 弹窗又回来了 ⇒ 后面所有真触摸全被它吃掉 ✗。
+   *   ⇒ 这里补一次**同款**关闭 ✓（★ 与 `:1202` 那段是**同一套做法** ✓ —— 都是「按弹窗自己的按钮关掉它」✓；
+   *     这里只多两件事 ✓：① 把点击范围收在**那个门户里面** ✗（不像 `:1202` 那样在全页找按钮 ✓，
+   *     免得误点产品自己的控件 ✗）；② 加 `#root.inert` 这个闸门 ✓），
+   *   并且★新增一条断言★证明「内容区那两点真的回到了我们手里」✓（关不掉就如实红 ✗，绝不静默放过 ✗）。
+   *
+   * ★ 「该不该关」的判据只用 `#root.inert` ✗（不靠 `_root_*` 这种构建哈希类名 ✓）：
+   *   0.1.5 上 `#root` 不会是 inert ⇒ 这个循环一次都不点 ✓（不可能误伤产品自己的控件 ✓）。
+   *   标签集合按 0.2.0 的实际串给出 ✓：`onboardingLater`「稍后配置」✓、`onboardingSkip`「跳过」✓、
+   *   `onboardingTitle`「添加一个 API Key 开始使用」✓（其余两档照旧 ✓）。
+   */
+  const mlPurge = []
+  for (let i = 0; i < 4; i++) {
+    const stepped = String(
+      await evaluate(`(function(){
+        try{
+          var appRoot=document.getElementById('root');
+          var inert=appRoot!==null&&appRoot.inert===true;
+          if(!inert) return JSON.stringify({blocking:false,inert:false});
+          var roots=[].slice.call(document.querySelectorAll('[class*="_root_"]'));
+          var portal=null;
+          for(var i=0;i<roots.length;i++){
+            var el=roots[i];
+            var cs=getComputedStyle(el);
+            if(cs.position!=='fixed'||cs.display==='none'||cs.visibility==='hidden') continue;
+            var r=el.getBoundingClientRect();
+            if(r.width<window.innerWidth-2||r.height<window.innerHeight-2) continue;
+            portal=el;break;
+          }
+          if(portal===null) return JSON.stringify({blocking:true,inert:true,portal:false});
+          var bs=[].slice.call(portal.querySelectorAll('button'));
+          var labels=[];
+          var hit=null;
+          for(var k=0;k<bs.length;k++){
+            var t=String(bs[k].innerText||'').replace(/\\s+/g,' ').trim();
+            if(t!==''&&labels.length<6) labels.push(t.slice(0,12));
+            if(hit===null&&/稍后配置|跳过|继续|开始使用/.test(t)) hit=bs[k];
+          }
+          if(hit===null) return JSON.stringify({blocking:true,inert:true,portal:true,labels:labels});
+          hit.click();
+          return JSON.stringify({blocking:true,inert:true,portal:true,clicked:String(hit.innerText||'').replace(/\\s+/g,' ').trim().slice(0,12)});
+        }catch(e){return JSON.stringify({error:String(e&&e.message?e.message:e)})}
+      })()`),
+    )
+    let parsed = null
+    try {
+      parsed = JSON.parse(stepped)
+    } catch {
+      parsed = { raw: stepped.slice(0, 80) }
+    }
+    mlPurge.push(parsed)
+    if (parsed.blocking !== true || typeof parsed.clicked !== 'string') break
+    await sleep(700)
+  }
+  await sleep(500)
+  const mlStarts = [
+    [330, 600],
+    [120, 600],
+  ]
+  const mlOwned = JSON.parse(
+    String(
+      await evaluate(`JSON.stringify((function(){
+        var appRoot=document.getElementById('root');
+        var points=${JSON.stringify(mlStarts)}.map(function(p){
+          try{
+            var boot=window.__DSH_MOBILE_BOOT__;
+            if(!boot||typeof boot.swipeAreaAt!=='function') return {pt:p,area:'(没有 swipeAreaAt)',node:''};
+            var at=boot.swipeAreaAt(p[0],p[1]);
+            return {pt:p,area:at.area,node:at.node};
+          }catch(e){return {pt:p,area:'(探针抛错)',node:String(e&&e.message?e.message:e)}}
+        });
+        return {inertRoot:appRoot!==null&&appRoot.inert===true,points:points};
+      })())`),
+    ),
+  )
+  check(
+    mlOwned.points !== undefined &&
+      mlOwned.points.length === 2 &&
+      mlOwned.inertRoot === false &&
+      mlOwned.points.every((entry) => entry.area === 'content'),
+    '★ 前置（0.2.0 的引导弹窗已让开 ✓）：内容区那两个落点（330,600 / 120,600）命中的是**我们认得的 content** ✓ —— 不是 0.2.0 引导弹窗门户的 other ✗（判据是**命中测试** ✓，不是「事件发出去了」✗：那个门户 `position:fixed;inset:0;z-index:1000` 会盖住内容区 ✓，还会把 `#root` 设成 `inert` ⇒ `#root` 里的一切（含挂进 centerCol 的夹具）都退出命中测试 ✗）',
+    `关闭弹窗=${JSON.stringify(mlPurge)}｜落点判定=${JSON.stringify(mlOwned)}`,
+  )
+
   const gesture = async (fromX, fromY, dx, dy) => {
     // ★ 步数要够密：3 步时最后一个 move 常被浏览器**合并掉** ✗，于是"滑 70px"实际只到 47px ✓
     //   （本轮因此假红过：手势没到阈值 → 那一下变成了"点会话行" → 抽屉被 DSH 自己关掉 ✗）。
