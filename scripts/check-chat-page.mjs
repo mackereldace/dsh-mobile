@@ -2208,44 +2208,18 @@ try {
    * ★ 为什么"锚点仍然活着"是前提 ✗：D 只摘掉**最老的一条** ✓，而锚点在列表**中段** ✓
    *   ⇒ 它必然还在 ✓（如果不在，说明"只裁了一条"这件事没成立 ✓ —— 那时应当报红而不是静默 ✓）。
    */
-  /**
-   * ★★ 滚动补偿（★ 这一条**如实写**，它现在**只是"补偿跑到了"** ✗，不是"纹丝不动"✗）
-   *
-   * ## 要证的是什么 ✗
-   *
-   * 用户滚到中间（`scrollTop = 8639` ✓）之后，窗口又滑了一格 ✓ —— 这一格 =
-   * 最老那一条被摘掉（`evictedHeight ≈ 118px` ✓）。
-   * · **补偿跑到了**：`scrollTop` 真的跟着**加了** ✓（实测 `8639 → 8791` ✓ = `+152` ✓）；
-   * · ★★ **但没到"纹丝不动"** ✗：锚点还剩 **≈ 236px** 的位移 ✓。
-   *
-   * ## 为什么还剩这么多（★ 已定位到"哪一层"，未定位到"哪一个数" ✗）
-   *
-   * 残差 ≈ **两格**（2 × 118 ✓）。也就是说：把"内容缩了多少"这一项量成
-   * `evictedHeight + 提示行的推力 − 追加净增` ✓ 是**不够的** ✗ ——
-   * 真实位移里还有**两格**没被算进去 ✓（`#messages` 是 `display:flex; gap:10px` ✓，
-   * "摘掉 n 个兄弟"会让 `gap` 少掉 n 份 ✓，而"提示行重建"只补得回 1 份 ✓ ——
-   * 方向对得上，但**量级对不上** ✗ ⇒ 还有一个我没识别的几何在里头 ✓）。
-   * ★ 结论：**这一条判据不声称"像素级不跳"** ✗。按实测写：
-   *   `0 < Δtop < 三格` 且 `scrollTop` 确实增加了 ✓ —— 它能打红 ✓
-   *   （把补偿整段去掉 ⇒ `scrollTop` **完全不动** ⇒ 第一条就红 ✓，见报告第 4 节 ✓）。
-   * ★ 与 DSH 的差距写在报告第 1 与第 6 节：它用的是**语义锚点**
-   *   （`retain(row, position)` + `preserve()` ✓，`dsh-client-ui-chat/lib/client.js:4740-4830` ✓）——
-   *   记住"某一行 + 它在屏口里的位置"✓，再按**那一行自己**的新位置回写 `scrollTop` ✓。
-   *   本页的节点是每条事件现造的、没有稳定行身份 ✗ ⇒ 要做就得**留下行身份**
-   *   （例如给每条一个 `data-seq` 并在裁之前记住"屏口最上面那条的 `seq`"✓，
-   *   裁完再按 `seq` 找回它 ✓）—— **本轮没做** ✗，如实留在报告第 6 节 ✓。
-   */
+  // 同一事件在裁剪前后的屏口坐标，目标残差不超过2px。
   const bigResidual = bigScroll !== null && bigAnchor !== null &&
     typeof bigScroll.probeTop === 'number' && typeof bigAnchor.probeTop === 'number' &&
     bigAnchor.probeStillThere === true
     ? Math.abs(bigAnchor.probeTop - bigScroll.probeTop)
     : null
   check(
-    `★★ 滚动补偿**真的跑到了**（窗口滑一格之后 \`scrollTop\` 跟着加了 ✓ —— 把补偿整段去掉必红 ✓；残差 ${bigResidual === null ? '-' : Math.round(bigResidual)}px，目标 2px **未达到** ✗）`,
+    `★★ 裁剪后同一事件仍在原屏口位置（残差 ${bigResidual === null ? '-' : bigResidual}px，目标≤2px）`,
     bigScroll !== null && bigScroll.ok === true && bigAnchor !== null && bigAnchor.probeStillThere === true &&
       typeof bigScroll.scrollTop === 'number' && typeof bigAnchor.scrollTop === 'number' &&
-      bigAnchor.scrollTop - bigScroll.scrollTop >= 100 &&
-      bigResidual !== null && bigResidual <= 3 * 118,
+      bigAnchor.scrollTop < bigScroll.scrollTop &&
+      bigResidual !== null && bigResidual <= 2,
     `锚点 seq=${bigScroll?.probeSeq}｜推之前 top=${bigScroll?.probeTop}（scrollTop=${bigScroll?.scrollTop}）｜推之后 top=${bigAnchor?.probeTop}（scrollTop=${bigAnchor?.scrollTop}）｜ΔscrollTop=${(bigAnchor?.scrollTop ?? 0) - (bigScroll?.scrollTop ?? 0)}｜残差=${bigResidual}px`,
   )
   check(

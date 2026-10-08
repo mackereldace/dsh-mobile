@@ -91,7 +91,21 @@ try{
  check('窄视口状态条不截断且输入栏在屏内',!compact.clipped&&compact.bottom<=compact.height,compact)
  await send('Emulation.setDeviceMetricsOverride',{width:412,height:915,deviceScaleFactor:1,mobile:true})
  await evaluate(`document.documentElement.style.setProperty('--dshm-safe-top','0px')`)
- const EXPECTED_MIN_CHECKS=17
+ await evaluate(`document.querySelector('#tab-trace').click()`)
+ check('轨迹控制栏有时长、轮次、调用和真实搜索框',await evaluate(`(()=>{return [...document.querySelectorAll('[data-trace-control]')].map(n=>n.textContent).join('/')==='时长/轮次/调用'&&document.querySelector('[aria-label=搜索轨迹]')?.type==='search'})()`))
+ const graph=await evaluate(`(()=>{const s=document.querySelector('.trace-graph svg');return {mode:s?.getAttribute('data-mode'),labels:[...s.querySelectorAll('text')].map(n=>n.textContent),lanes:[...s.querySelectorAll('.trace-bar')].map(n=>n.getAttribute('class')),width:s.querySelector('[data-seq="6"]')?.getAttribute('width')}})()`)
+ check('图形轨迹确有输入、模型、工具三泳道与数据条',graph.labels?.join('/')==='输入/模型/工具'&&[0,1,2].every(l=>graph.lanes?.some(c=>c.includes('trace-lane-'+l))),graph)
+ const timed=await evaluate(`(()=>{document.querySelector('[data-trace-control=duration]').click();const s=document.querySelector('.trace-graph svg');return {mode:s.getAttribute('data-mode'),width:s.querySelector('[data-seq="6"]')?.getAttribute('width'),caption:document.querySelector('.trace-caption').textContent}})()`)
+ check('时长键切换轴且工具宽度按配对时间改变',timed.mode==='duration'&&timed.width!==graph.width&&timed.caption.includes('1.00'),timed)
+ check('轮次键确实收起所有轮次详情',await evaluate(`(()=>{document.querySelector('[data-trace-control=turns]').click();const rows=[...document.querySelectorAll('.trace-turn')];return rows.length>0&&rows.every(n=>!n.open)})()`))
+ check('再点轮次可展开详情',await evaluate(`(()=>{document.querySelector('[data-trace-control=turns]').click();return [...document.querySelectorAll('.trace-turn')].every(n=>n.open)})()`))
+ check('调用键确实收起模型和工具调用组',await evaluate(`(()=>{document.querySelector('[data-trace-control=calls]').click();const rows=[...document.querySelectorAll('.trace-call')];return rows.length>0&&rows.every(n=>!n.open)})()`))
+ const found=await evaluate(`(()=>{const i=document.querySelector('[aria-label=搜索轨迹]');i.value='bash';i.dispatchEvent(new Event('input'));return {bars:document.querySelectorAll('.trace-bar').length,rows:document.querySelectorAll('[data-trace-seq]').length,text:document.querySelector('.trace-list').textContent}})()`)
+ check('搜索实际过滤图形和详情记录',found.bars===1&&found.rows===1&&found.text.includes('bash')&&!found.text.includes('助手正文'),found)
+ check('点击图形定位记录并打开其调用详情',await evaluate(`(()=>{document.querySelector('.trace-bar').dispatchEvent(new MouseEvent('click',{bubbles:true}));const row=document.querySelector('[data-trace-seq="6"]');return row.classList.contains('is-selected')&&row.closest('.trace-call').open})()`))
+ check('清空搜索恢复全部轨迹',await evaluate(`(()=>{const i=document.querySelector('[aria-label=搜索轨迹]');i.value='';i.dispatchEvent(new Event('input'));return document.querySelectorAll('.trace-bar').length>=5})()`))
+ await evaluate(`document.querySelector('#tab-chat').click()`)
+ const EXPECTED_MIN_CHECKS=26
  check('下界等于实跑总数',total+1===EXPECTED_MIN_CHECKS,{total:total+1,expected:EXPECTED_MIN_CHECKS})
 }finally{
  if(ws)ws.close();if(chrome){try{process.kill(-chrome.pid,'SIGKILL')}catch{}try{execFileSync('pkill',['-f',`--user-data-dir=${profile}`],{stdio:'ignore'})}catch{}}

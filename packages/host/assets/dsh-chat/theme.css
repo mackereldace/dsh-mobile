@@ -461,3 +461,25 @@
 .bubble .dshm-md-table th, .bubble .dshm-md-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
 .bubble blockquote { margin: 8px 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--ink2); }
 .bubble .dshm-md-math { max-width: 100%; overflow-x: auto; }
+
+/* 图形轨迹：三泳道总览，折叠控制作用于真实详情。 */
+.trace-toolbar { display:flex; align-items:center; gap:6px; margin-bottom:12px; }
+.trace-toolbar button { border:1px solid var(--line); border-radius:5px; padding:5px 8px; background:var(--surface); color:var(--ink2); font:inherit; font-size:12px; white-space:nowrap; }
+.trace-toolbar button[aria-pressed=true] { color:var(--tab-ink-active); background:var(--tint); }
+.trace-toolbar input { flex:1; min-width:0; width:100%; border:1px solid var(--line); border-radius:5px; padding:6px 8px; background:var(--surface); color:var(--ink); font:inherit; font-size:12px; }
+.trace-graph { border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--surface); margin-bottom:14px; }
+.trace-graph svg { width:100%; display:block; }
+.trace-lane-label { fill:var(--ink2); font-size:11px; }
+.trace-grid { stroke:var(--line-soft); }
+.trace-bar { cursor:pointer; fill:var(--tab-ink-active); }
+.trace-lane-0 { fill:#a2a8b2; } .trace-lane-2 { fill:var(--accent); }
+.trace-bar:hover, .trace-bar:focus { stroke:var(--ink); stroke-width:1; }
+.trace-caption { color:var(--ink3); font-size:11px; }
+.trace-list { display:flex; flex-direction:column; gap:12px; }
+.trace-turn > summary { font-weight:600; font-size:14px; padding:8px 0; color:var(--ink); cursor:pointer; }
+.trace-call { border-left:2px solid var(--line); padding-left:10px; margin:5px 0 12px; }
+.trace-call > summary { color:var(--ink2); font-size:12px; padding:5px 0; cursor:pointer; }
+.trace-call .ev { margin:6px 0; }
+.trace-record { font-size:13px; line-height:1.6; margin:8px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.trace-list .is-selected { outline:2px solid var(--tab-ink-active); outline-offset:3px; }
+.trace-empty[hidden] { display:none; }

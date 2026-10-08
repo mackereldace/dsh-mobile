@@ -509,170 +509,40 @@ export function isTrimmableEvent(node) {
  *   `screenDelta` = 补偿**之后**锚点相对屏口还差多少 px ✓（≈0 ⇒ 用户那一条没动 ✓）
  */
 export function trimEventWindow(container, metrics, withNote) {
-  const note = withNote !== false
   const none = { trimmed: 0, hidden: 0, drawn: 0, scrollTop: null, screenDelta: null }
-  if (container === null || container === undefined || typeof container.children === 'undefined') return none
-  /**
-   * ★★ 那句"更早的 N 条已收起"里的 **N 是累计数** ✗ —— 它记在这一层的
-   *   `data-trim-hidden-total` 上 ✓（切会话时由 `resetEventWindow` 归零 ✓）。
-   */
+  if (!container || !container.children) return none
   const hiddenBefore = Math.max(0, Number(container.getAttribute('data-trim-hidden-total') || '0'))
-  const drawnBefore = container.children.length
-  if (drawnBefore <= MAX_DRAWN_EVENTS) {
-    return { trimmed: 0, hidden: hiddenBefore, drawn: drawnBefore, scrollTop: null, screenDelta: null }
-  }
-  /** `offsetTop` = 节点在**这一层内容坐标**里的位置 ✓（不随滚动变 ✓ —— 补偿要的就是这个基准 ✓）。 */
-  const offsetTopOf = (node) => {
-    if (node !== null && node !== undefined && typeof node.offsetTop === 'number') return node.offsetTop
-    const style = node !== null && node !== undefined && typeof globalThis.getComputedStyle === 'function'
-      ? globalThis.getComputedStyle(node)
-      : null
-    const parsed = style === null || style === undefined ? Number.NaN : Number.parseFloat(style.marginTop)
-    return Number.isFinite(parsed) ? parsed : 0
-  }
+  const rows = Array.from(container.children).filter(node => !node.classList.contains('ev-trim-note'))
+  const excess = Math.max(0, rows.length - MAX_DRAWN_EVENTS)
   const doomed = []
-  const removable = drawnBefore - MAX_DRAWN_EVENTS
-  for (let index = 0; index < removable; index++) {
-    const node = container.children[index]
-    // ★ 撞上"待裁决的审批卡" ⇒ **立刻收手** ✗（它和它后面的一律留着 ✓，见上面第 5 条 ✓）
+  for (const node of rows.slice(0, excess)) {
     if (!isTrimmableEvent(node)) break
     doomed.push(node)
   }
-  if (doomed.length === 0) {
-    return { trimmed: 0, hidden: 0, drawn: drawnBefore, scrollTop: null, screenDelta: null }
+  if (!doomed.length) return { ...none, hidden: hiddenBefore, drawn: container.children.length }
+  // 保留同一节点及其屏口坐标；不估算行高、gap或提示行高度。
+  const scroller = metrics && metrics.scroller
+  let anchor = metrics && metrics.anchor
+  let anchorTop = metrics && metrics.anchorTop
+  if (anchor && doomed.includes(anchor)) {
+    anchor = rows[doomed.length]
+    anchorTop = anchor && scroller ? anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
   }
-  /**
-   * ★★ 补偿的**锚点**（★ 这一步的心思全在这儿 ✗）
-   *
-   * ## 为什么要补偿 ✗
-   *
-   * 摘掉的内容全在用户**上面** ✓ ⇒ 不做任何事的话，屏上内容整体**上移** ✓ ——
-   * 用户正读着的那一段会"跳一下"✓（而且越往上翻、跳得越狠 ✓）。
-   *
-   * ## ★★ 为什么**不是** `scrollTop += 高度差` ✗（我第一版就是这么写的 ✓）
-   *
-   * 那个式子只在"容器只增不减"时成立 ✓。**长会话里恰恰相反** ✗：
-   * 内容一直在长、头部一直在回收 ⇒ 窗口像一条**传送带** ✓ ——
-   * 净高度几乎不变 ✓，而"被摘掉那一段的高"却是**一整段** ✓
-   * ⇒ 加它会把 `scrollTop` 一路推到列表底部 ✓（用户正翻历史，却被甩到最新 ✓ ——
-   * 比"跳一下"更糟 ✓，而且**看起来像功能正常**✗）。
-   * ★ 这一条是本轮**实测**出来的 ✓：照那个式子写的时候，读数从 253 涨到几万 ✓，
-   *   而 `scrollHeight` 根本没变 ✓ —— 那一刻就知道式子错了 ✓。
-   *
-   * ## 正确的写法：**钉住一条还在屏上的节点** ✗
-   *
-   * ① 追加**之前**，调用方记下"屏口最上面那一条"（`metrics.anchor` ✓）以及它在屏口里的位置
-   *   （`metrics.anchorTop` ✓，单位 px ✓）；
-   * ② 裁完之后，把 `scrollTop` 挪成"**它在屏口里的位置与原来一样**"✓
-   *   ⇒ `newScrollTop = anchor.offsetTop − anchorTop` ✓。
-   * ★ 这条式子对"只追加不裁"也成立吗 ✗ —— 成立 ✓（此时 `anchor.offsetTop` 没变 ✓
-   *   ⇒ `newScrollTop = 原来的 scrollTop` ✓，等于什么都不做 ✓）⇒ 只在**真裁了**的时候调用它 ✓。
-   * ★ 那条锚点**被裁掉了**怎么办 ✗ ⇒ 拿"剩下的第一条"（旧写法里的 `firstKept` ✓）
-   *   当替身 ✓：它正好是"原来屏口之下最近的那一条"✓ ⇒ 同一条式子**稍微**多走一点
-   *   （≈ 一个 `gap` ✓），方向是**对的** ✓（比"不补偿"和"推到底部"都好得多 ✓）。
-   * ★ DSH 自己也是这么做的 ✓：`retain(row, position)` + `preserve()`
-   *   （`dsh-client-ui-chat/lib/client.js:4740-4830` ✓）—— **语义锚点 + 补偿** ✓，
-   *   不是"按高度差平移"✗（见报告第 1 节的逐行读数 ✓）。
-   */
-  /**
-   * ★★ 被摘掉的**不只是事件节点** ✗：那句提示行（`.ev-trim-note` ✓）自己也住在头部 ✓、
-   *   也要跟着被回收/重建 ✓ ⇒ "收起了几条"必须**只数事件节点** ✓
-   *   （把它算进去，屏上就会写"更早的 2 条已收起"✓ —— 我第一版就是这样 ✓，
-   *   而它看上去完全像个正常读数 ✗）。
-   */
-  const evicted = doomed.filter((node) => !(node.classList !== undefined && node.classList !== null &&
-    typeof node.classList.contains === 'function' && node.classList.contains('ev-trim-note'))).length
   for (const node of doomed) node.remove()
-  /**
-   * ★★ 那个数字是**累计**的 ✗（不是"这一次摘了几个"✓）—— 它说的是
-   *   "这个会话里更早的多少条已经不在屏上了"✓。只报这一次的量，窗口一滑动
-   *   读数就变回 2 ✗（用户看那句提示会以为只收起了两条 ✓ —— 我第一版就是这样 ✓）。
-   */
-  const hidden = hiddenBefore + evicted
+  const hidden = hiddenBefore + doomed.length
   container.setAttribute('data-trim-hidden-total', String(hidden))
-  /**
-   * ★★ 那句提示行**自己也有高度** ✗（它住在列表头部 ✓、而且这一轮它是**重建**的 ✓
-   *   —— 旧的被摘掉、新的插在最前面 ✓ ⇒ 它下面的所有内容都会被再挪一下 ✓）。
-   *   ⇒ 把"它净高变了多少"也算进补偿量里 ✓（不补这一下，用户那一条会残存一个
-   *   **提示行的高度**的位移 ✓ —— 实测 84px ✓，比我预期的"一个 gap"大得多 ✓）。
-   * ★ 只在它真的被重建过的时候量 ✗（`evicted > 0` ✓）：否则这一轮根本没碰它 ✓。
-   */
-  const noteSentinel = container.firstElementChild
-  const sentinelTopBefore = offsetTopOf(noteSentinel)
-  ensureTrimNote(container, hidden, note)
-  /**
-   * ★ "提示行把下面的内容往下推了多少" ✓ —— 用**同一只哨兵节点**（现在排第一的那条 ✓，
-   *   它一定还在 ✓）在插入前后的 `offsetTop` 差来量 ✓（同节点、同参照物 ✓，
-   *   所以这个差**只有**提示行那一份贡献 ✓）。
-   */
-  const notePush = offsetTopOf(noteSentinel) - sentinelTopBefore
-  /**
-   * ★★ 滚动补偿（★ 这一步的心思全在这儿 ✗）
-   *
-   * ## 为什么要补偿 ✗
-   *
-   * 摘掉的内容全在用户**上面** ✓ ⇒ 不做任何事的话，屏上内容整体**上移** ✓ ——
-   * 用户正读着的那一段会"跳一下"✓（而且越往上翻、跳得越狠 ✓）。
-   *
-   * ## 补偿量怎么量出来的（★ 本轮在这儿栽了三次，三种错法都记下来 ✗）
-   *
-   * **对的做法**：量**滚动容器自己的** `scrollHeight` ✓ ——
-   *   `shrink = 追加之前的高 + （这一轮摘掉的那些节点的高 + 它们占的 `gap` ✓）− 现在的高` ✓。
-   *   它不依赖任何节点的 `offsetTop` ✓ ⇒ 也就不依赖"谁当了 `offsetParent`"✓、
-   *   更不依赖"我挑的那只节点还在不在"✓（那三样正是前三次翻车的原因 ✓）。
-   *   而"摘掉的那些有多高"用一个**离屏探针**量 ✓：把被摘的节点先挪到一个
-   *   `display:none` 的临时容器里 ✓ ⇒ 内容立刻少掉那一段 ✓（这一下就量得准 ✓），
-   *   量完再真删掉 ✓。
-   *
-   * **三只错法（都写在明处 ✓，免得下一个读的人再走一遍 ✗）**：
-   *   ① `scrollTop += 高度差` 里那个"高度差"取成了**两只不同节点**的 `offsetTop` 之差 ✓
-   *      ⇒ 把"两条之间原本隔多远"也算了进去 ✓（实测 8,000+ px ✓ ⇒ 一路推到列表底部 ✓）；
-   *   ② 改成"列表最后那个孩子的 `offsetTop` 前后差"✓ —— 可**它是谁在变** ✗
-   *      （追加之后"最后一个孩子"换成了新来的那一条 ✓）⇒ 量出来是负数 ✓
-   *      ⇒ 被自己的守卫挡掉 ✓ ⇒ 等于**没补偿**（读数 `top: 91.9 → 7.5` ✓）；
-   *   ③ 改成"那只一定会活下来的节点的 `offsetTop` 前后差"✓ —— 它被**那句提示行**
-   *      的重建（摘掉旧的、插上新的 ✓）带着挪了 ✓ ⇒ 量到的不是"内容缩了多少"✓
-   *      而是"提示行净高变了多少"（负数 ✓，实测 −118 ✓）。
-   *
-   * ## 一条纪律（学自 DSH 自己那条路 ✓）
-   *
-   * DSH 用**语义锚点**（记住某一行 + 它在屏口里的位置 ✓，见
-   * `dsh-client-ui-chat/lib/client.js:4740-4830` 的 `retain` / `preserve` ✓）。
-   * 我们这一页没有"行身份"这种稳定锚点 ✗（节点是每条事件现造的 ✓）
-   * ⇒ 退一步用**容器自己的几何** ✓：判据是"用户看的那一条动没动"✓，
-   *   而"容器矮了多少"与它**等价** ✓（只要补偿量算对 ✓）。
-   * ★ 而且这一层**不许**再引入第二个滚动真相来源 ✗：
-   *   `theme.css` 里那条 `overflow-anchor: none` ✓ 就是为了让"滚动位置"只有一个owner ✓
-   *   （浏览器的 scroll anchoring 会自己改 `scrollTop` ✓ —— 实测读数会一路往 0 漂 ✓）。
-   */
-  let applied = null
+  ensureTrimNote(container, hidden, withNote !== false)
   let screenDelta = null
-  const scroller = metrics !== null && metrics !== undefined ? metrics.scroller : null
-  if (scroller !== null && scroller !== undefined && typeof scroller.scrollTop === 'number') {
-    const base = typeof metrics.scrollTop === 'number' ? metrics.scrollTop : scroller.scrollTop
-    const passed = metrics !== null && metrics !== undefined && typeof metrics.scrollHeight === 'number'
-      ? metrics.scrollHeight
-      : null
-    const floor = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-    const clamp = (value) => Math.min(floor, Math.max(0, Math.round(value)))
-    let shrink = 0
-    if (passed !== null && typeof metrics.evictedHeight === 'number') {
-      /**
-       * ★★ 这一行就是"内容缩了多少" ✗ —— 两个量都来自**滚动容器自己** ✓：
-       *   · `evictedHeight` = 这一轮摘掉的那些节点（+ 它们的 `gap` ✓）有多高 ✓
-       *     —— **在真正摘掉之前**塞进一个离屏容器量出来的 ✓（`handleEvents` 里量的 ✓）；
-       *   · `scroller.scrollHeight − passed` = 现在比"追加之前"净高多少 ✓
-       *     （既是"新事件撑起来的" ✓、也是"摘掉那些塌下去的"✓，两项合在一起 ✓）。
-       *   ⇒ 两者之差就是**净缩量** ✓。
-       * ★ 它**只能是正数**（正常情况 ✓）；算出来是负的说明量歪了 ✓ ⇒ 宁可
-       *   **不补偿**（`shrink = 0` ✓）也不许把用户往反方向推 ✓ ——"宁可不动，不许推错方向" ✓。
-       */
-      shrink = Math.max(0, metrics.evictedHeight + notePush - (scroller.scrollHeight - passed))
+  if (scroller && typeof scroller.scrollTop === 'number') {
+    if (metrics.follow === true) scroller.scrollTop = scroller.scrollHeight
+    else if (anchor && anchor.parentElement === container && typeof anchorTop === 'number') {
+      const delta = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchorTop
+      scroller.scrollTop += delta
+      screenDelta = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchorTop
     }
-    applied = clamp(base + shrink)
-    scroller.scrollTop = applied
   }
-  return { trimmed: doomed.length, hidden, drawn: container.children.length, scrollTop: applied, screenDelta }
+  return { trimmed: doomed.length, hidden, drawn: container.children.length,
+    scrollTop: scroller ? scroller.scrollTop : null, screenDelta }
 }
 
 export function resetEventWindow(container) {
@@ -726,6 +596,55 @@ export function isTraceEvent(event) {
 export function renderTraceEvent(event, context) {
   if (!isTraceEvent(event)) return null
   return renderEvent(event, context)
+}
+
+/** 实际事件配对的泳道数据；时长模式移除未被任何span覆盖的空闲区间。 */
+export function traceTimeline(events, duration = false) {
+  const source = Array.isArray(events) ? events : []
+  const results = new Map(), starts = new Map()
+  for (const event of source) {
+    const data = event.data || {}
+    const id = data.callId || (data.message && data.message.toolCallId)
+    if (event.type === 'tool/result' && id) results.set(id, Number(event.time))
+    if (event.type === 'request/header' || event.type === 'step/start') {
+      starts.set(String(data.turn) + ':' + String(data.step), Number(event.time))
+    }
+  }
+  let turn = 0, step = 0
+  const spans = []
+  for (const event of source) {
+    const data = event.data || {}, view = toViewModel(event)
+    if (typeof data.turn === 'number') turn = data.turn
+    if (typeof data.step === 'number') step = data.step
+    if (!['user', 'agent', 'reasoning', 'tool', 'step', 'error'].includes(view.kind)) continue
+    const lane = view.kind === 'tool' ? 2 : ['agent', 'reasoning'].includes(view.kind) ? 1 : 0
+    let start = Number(data.startedAt ?? event.time)
+    if (!Number.isFinite(start) && typeof data.startedAt === 'string') start = Date.parse(data.startedAt)
+    let end = start
+    if (typeof data.timeSeconds === 'number' && Number.isFinite(data.timeSeconds)) end = start + Math.max(0, data.timeSeconds * 1000)
+    else if (event.type === 'tool/call' && results.has(data.callId)) end = results.get(data.callId)
+    else if (lane === 1) {
+      const began = starts.get(String(turn) + ':' + String(step))
+      if (Number.isFinite(began) && began <= start) { end = start; start = began }
+    }
+    if (duration && (!Number.isFinite(start) || !Number.isFinite(end))) continue
+    spans.push({ event, view, turn, step, lane, start, end: Math.max(start, end), milliseconds: Math.max(0, end - start) || 0 })
+  }
+  if (!duration) return { spans: spans.map((span, index) => ({ ...span, start: index, end: index + 1 })), extent: spans.length }
+  const sorted = [...spans].sort((a, b) => a.start - b.start)
+  if (!sorted.length) return { spans: [], extent: 0 }
+  const base = sorted[0].start
+  let coveredUntil = base, removedIdle = 0, extent = 0
+  for (const span of sorted) {
+    if (span.start > coveredUntil) removedIdle += span.start - coveredUntil
+    const end = Math.max(span.start + 1, span.end)
+    const projectedStart = span.start - base - removedIdle
+    span.start = projectedStart
+    span.end = end - base - removedIdle
+    coveredUntil = Math.max(coveredUntil, end)
+    extent = Math.max(extent, span.end)
+  }
+  return { spans, extent }
 }
 
 /**
@@ -793,6 +712,7 @@ function renderBodyInto(container, text) {
     }
   }
   container.textContent = text
+  container.setAttribute('data-render-fallback', '渲染器未就绪')
 }
 
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
@@ -1898,42 +1818,160 @@ export function mountChat(options) {
     })
   }
 
-  // ── ★★ 标签栏：对话｜轨迹（复刻清单第 3 项 ✓）──────────────────────────
-  /**
-   * 轨迹视图**空的时候**那句话 ✓。
-   *
-   * ★ 为什么非有不可 ✗：切过去看到**一片空白**，与"页面坏了"在手机上是同一件事 ✓
-   *   （本仓口径：认不出的也要看得见 ✓、空也要说话 ✓ —— 与 `computePageState` 的
-   *   「还没有内容」同一条规矩 ✓）。
-   */
+  // 轨迹的工具栏、三泳道总览与同源详情。只保留最近200个事件。
+  const traceToolbar = document.createElement('div')
+  traceToolbar.className = 'trace-toolbar'
+  const traceGraph = document.createElement('div')
+  traceGraph.className = 'trace-graph'
+  const traceList = document.createElement('div')
+  traceList.className = 'trace-list'
   const traceEmpty = document.createElement('div')
   traceEmpty.className = 'trace-empty'
   traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
-
-  /** 轨迹视图的占位话：只在**真的一条都没有**时摆着 ✓（有内容就摘掉 ✓）。 */
-  const refreshTraceEmpty = () => {
-    if (traceView === null || traceView === undefined || typeof traceView.appendChild !== 'function') return
-    const has = traceSteps > 0
-    const attached = traceEmpty.parentElement !== null && traceEmpty.parentElement !== undefined
-    if (!has && !attached) traceView.appendChild(traceEmpty)
-    if (has && attached) traceEmpty.remove()
+  let traceEvents = []
+  let actualDuration = false, turnsOpen = true, callsOpen = true
+  const traceSearch = document.createElement('input')
+  traceSearch.type = 'search'
+  traceSearch.placeholder = '搜索轨迹'
+  traceSearch.setAttribute('aria-label', '搜索轨迹')
+  const traceControls = {}
+  for (const [key, label] of [['duration', '时长'], ['turns', '轮次'], ['calls', '调用']]) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = label
+    button.setAttribute('data-trace-control', key)
+    button.setAttribute('aria-pressed', String(key !== 'duration'))
+    traceControls[key] = button
+    traceToolbar.appendChild(button)
   }
-
-  /**
-   * 这一批事件里的 `step` / `tool` 追加进轨迹视图 ✓（**复用** `renderTraceEvent` ✓）。
-   *
-   * ★ 与对话视图**同一个 `context`** ✓ —— 审批那两本账（`decidedFor` ✓）也要在这条路上生效 ✓，
-   *   否则轨迹里那张卡与对话里的那张会说两套话 ✓。
-   */
-  const appendTrace = (events) => {
-    if (traceView === null || traceView === undefined || typeof traceView.appendChild !== 'function') return
-    for (const event of Array.isArray(events) ? events : []) {
-      const node = renderTraceEvent(event, approvalContext())
-      if (node === null) continue
-      traceView.appendChild(node)
-      traceSteps += 1
+  traceToolbar.appendChild(traceSearch)
+  const installTrace = () => {
+    if (traceView) traceView.replaceChildren(traceToolbar, traceGraph, traceList, traceEmpty)
+  }
+  const refreshTraceEmpty = () => { traceEmpty.hidden = traceSteps > 0 }
+  const drawTrace = () => {
+    if (!traceView) return
+    const query = traceSearch.value.trim().toLowerCase()
+    const cells = traceTimeline(traceEvents, actualDuration)
+    const visible = cells.spans.filter(span => !query || (span.view.title + ' ' + span.view.text).toLowerCase().includes(query))
+    traceSteps = cells.spans.filter(span => isTraceEvent(span.event)).length
+    traceList.replaceChildren()
+    const turns = new Map(), groups = new Map()
+    for (const span of visible) {
+      const turn = span.turn
+      let section = turns.get(turn)
+      if (!section) {
+        section = document.createElement('details')
+        section.className = 'trace-turn'
+        section.open = turnsOpen
+        const summary = document.createElement('summary')
+        summary.textContent = turn ? '第 ' + turn + ' 轮' : '会话开始'
+        section.appendChild(summary)
+        turns.set(turn, section)
+        traceList.appendChild(section)
+      }
+      let parent = section
+      if (span.lane > 0) {
+        const key = turn + ':' + span.step
+        let group = groups.get(key)
+        if (!group) {
+          group = document.createElement('details')
+          group.className = 'trace-call'
+          group.open = callsOpen
+          const summary = document.createElement('summary')
+          summary.textContent = '调用 ' + (span.step || '记录')
+          group.appendChild(summary)
+          groups.set(key, group)
+          section.appendChild(group)
+        }
+        parent = group
+      }
+      let node = renderTraceEvent(span.event, approvalContext())
+      if (!node) {
+        node = document.createElement('div')
+        node.className = 'trace-record'
+        node.textContent = span.view.title + (span.view.text ? '：' + span.view.text : '')
+      }
+      node.setAttribute('data-trace-seq', String(span.event.seq))
+      parent.appendChild(node)
     }
-    refreshTraceEmpty()
+    traceGraph.replaceChildren()
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 360 112')
+    svg.setAttribute('role', 'img')
+    svg.setAttribute('aria-label', '输入、模型、工具三条泳道的会话轨迹')
+    svg.setAttribute('data-mode', actualDuration ? 'duration' : 'sequence')
+    const createSvg = (tag, attrs, text) => {
+      const node = document.createElementNS(svg.namespaceURI, tag)
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value))
+      if (text) node.textContent = text
+      svg.appendChild(node)
+      return node
+    }
+    for (let lane = 0; lane < 3; lane++) {
+      createSvg('text', { x: 0, y: 20 + lane * 30, class: 'trace-lane-label' }, ['输入', '模型', '工具'][lane])
+      createSvg('line', { x1: 38, x2: 358, y1: 24 + lane * 30, y2: 24 + lane * 30, class: 'trace-grid' })
+    }
+    const extent = Math.max(1, cells.extent)
+    for (const span of visible) {
+      const bar = createSvg('rect', { x: 40 + span.start / extent * 316, y: 9 + span.lane * 30,
+        width: Math.max(2, (span.end - span.start) / extent * 316), height: 14, rx: 2,
+        class: 'trace-bar trace-lane-' + span.lane, 'data-seq': span.event.seq, role: 'button', tabindex: 0 })
+      const title = document.createElementNS(svg.namespaceURI, 'title')
+      title.textContent = span.view.title + ' · ' + (span.milliseconds / 1000).toFixed(2) + ' 秒'
+      bar.appendChild(title)
+      bar.setAttribute('aria-label', title.textContent)
+      const reveal = () => {
+        const row = Array.from(traceList.querySelectorAll('[data-trace-seq]')).find(n => n.getAttribute('data-trace-seq') === String(span.event.seq))
+        if (!row) return
+        let parent = row.parentElement
+        while (parent && parent !== traceList) { if (parent.tagName === 'DETAILS') parent.open = true; parent = parent.parentElement }
+        row.scrollIntoView({ block: 'center' })
+        traceList.querySelectorAll('.is-selected').forEach(n => n.classList.remove('is-selected'))
+        row.classList.add('is-selected')
+      }
+      bar.addEventListener('click', reveal)
+      bar.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); reveal() } })
+    }
+    traceGraph.appendChild(svg)
+    const caption = document.createElement('div')
+    caption.className = 'trace-caption'
+    caption.textContent = actualDuration ? '有效时长 ' + (cells.extent / 1000).toFixed(2) + ' 秒（空闲已压缩）' : visible.length + ' 条记录 · 按事件顺序'
+    traceGraph.appendChild(caption)
+    traceEmpty.hidden = visible.length > 0
+    if (!visible.length && query) traceEmpty.textContent = '没有匹配的轨迹记录'
+    else traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
+  }
+  traceControls.duration.addEventListener('click', () => {
+    actualDuration = !actualDuration
+    traceControls.duration.setAttribute('aria-pressed', String(actualDuration))
+    drawTrace()
+  })
+  for (const key of ['turns', 'calls']) traceControls[key].addEventListener('click', () => {
+    if (key === 'turns') turnsOpen = !turnsOpen
+    else callsOpen = !callsOpen
+    const open = key === 'turns' ? turnsOpen : callsOpen
+    traceControls[key].setAttribute('aria-pressed', String(open))
+    traceList.querySelectorAll(key === 'turns' ? '.trace-turn' : '.trace-call').forEach(node => { node.open = open })
+  })
+  traceSearch.addEventListener('input', drawTrace)
+  installTrace()
+  const appendTrace = events => {
+    traceEvents.push(...(Array.isArray(events) ? events : []))
+    traceEvents = traceEvents.slice(-MAX_DRAWN_EVENTS)
+    traceSteps = traceEvents.filter(isTraceEvent).length
+    if (traceView && !traceView.hidden) drawTrace()
+    else {
+      for (const event of Array.isArray(events) ? events : []) {
+        const node = renderTraceEvent(event, approvalContext())
+        if (node) traceList.appendChild(node)
+      }
+      const firstSeq = traceEvents[0] && traceEvents[0].seq
+      for (const node of traceList.querySelectorAll('.ev[data-seq]')) {
+        if (typeof firstSeq === 'number' && Number(node.getAttribute('data-seq')) < firstSeq) node.remove()
+      }
+      trimEventWindow(traceList, null, false)
+    }
   }
 
   /**
@@ -1957,7 +1995,7 @@ export function mountChat(options) {
       tabTrace.setAttribute('aria-selected', trace ? 'true' : 'false')
     }
     // ★ 从没有过步骤 ⇒ 切过去的时候才第一次摆那句占位话 ✓
-    if (trace) refreshTraceEmpty()
+    if (trace) drawTrace()
   }
 
   if (tabs !== null && tabs !== undefined) {
@@ -2003,7 +2041,11 @@ export function mountChat(options) {
        *   （在手机上表现为"切了会话，轨迹里还是上一个会话"✗，而且完全看不出来 ✓）。
        */
       if (traceView !== null && traceView !== undefined && typeof traceView.replaceChildren === 'function') {
-        traceView.replaceChildren()
+        traceEvents = []
+        traceSearch.value = ''
+        traceList.replaceChildren()
+        traceGraph.replaceChildren()
+        installTrace()
       } else if (traceView !== null && traceView !== undefined) {
         traceView.textContent = ''
       }
@@ -2090,40 +2132,8 @@ export function mountChat(options) {
        *   （只增不减 ✓），所以"有内容 ⇒ ready"那条规矩**一个字都没动** ✓ ——
        *   裁剪**不可能**变成"出错清屏"✓。
        */
-      /**
-       * ★★ 量"这一轮会被摘掉的那些有多高" ✗（补偿要用的那个数 ✓）——
-       *   在这之前**先把它们挪进一个 `display:none` 的离屏容器** ✓：
-       *   内容立刻少掉那一段 ✓ ⇒ 之后量 `scrollHeight` 的差就只剩"新事件撑起来的" ✓。
-       *   ★ 为什么不在 `trimEventWindow` 里自己量 ✗：那一步只该做"摘 + 补偿"✓，
-       *     而"摘哪几个"（窗口上界 / 待裁决的审批卡不摘 ✓）的规则在那儿 ✓ ——
-       *     这里只按**同一个判据**（`isTrimmableEvent` ✓）预演一遍 ✓，不另立规则 ✗。
-       */
-      const parked = document.createElement('div')
-      parked.style.display = 'none'
-      document.body.appendChild(parked)
-      const doomedCandidates = []
-      for (let index = 0; index < Math.max(0, list.children.length - MAX_DRAWN_EVENTS); index++) {
-        const node = list.children[index]
-        if (!isTrimmableEvent(node)) break
-        doomedCandidates.push(node)
-      }
-      const heightBeforePark = scrollerNow.scrollHeight
-      for (const node of doomedCandidates) parked.appendChild(node)
-      const evictedHeight = Math.max(0, heightBeforePark - scrollerNow.scrollHeight)
-      windowMetrics.evictedHeight = evictedHeight
-      /**
-       * ★★ 量完**必须原样放回去** ✗（顺序也要对 ✓）：`trimEventWindow` 那一步是
-       *   "按 DOM 顺序摘头部"✓ —— 不还回去，它就无头可摘 ✓
-       *   （症状：那句线索从此不再出现 ✓、`data-trim-hidden-total` 也不涨 ✓ ——
-       *   我第一版就是这样 ✓，而读数看上去只是"这次没裁"✗，最难查的一类 ✓）。
-       */
-      for (let back = doomedCandidates.length - 1; back >= 0; back--) {
-        list.insertBefore(doomedCandidates[back], list.firstChild)
-      }
-      parked.remove()
       const trim = trimEventWindow(list, windowMetrics)
-      const traceTrim = trimEventWindow(traceView, null, false)
-      traceSteps = Math.max(0, traceSteps - traceTrim.trimmed)
+      const traceTrim = { trimmed: 0 }
       refreshTraceEmpty()
       /**
        * ★ 把这一步的**读数**交出去 ✓（给验收与真机调试框 ✓ —— 见 `measure` ✓）。
