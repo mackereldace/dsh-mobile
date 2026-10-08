@@ -91,6 +91,30 @@ const DEMO_DELETE_FILES = ['待删-甲.txt','待删-乙.txt']
 const DEMO_KEEP_FILE = '保留-丙.txt'
 const DEMO_DELETE_DIR = '待删目录'
 const DEMO_MOVE_TARGET = '子目录'
+/**
+ * ★★ 把演示工作区写进**本次自己的**临时家目录 ✓（抽成函数：跑的过程中可能还要再补一次 ✗）。
+ *
+ * 为什么要能"补第二次"（2026-10-08 实测 ✓）：本脚本的 `HOME` 是**写死的共享路径**
+ * `/tmp/e2e-dsh-home` ✓，而布局套件可以用 `--dsh-home /tmp/e2e-dsh-home` **指到同一个家目录** ✗
+ * ⇒ 两边互相清（本脚本收尾那一下 `removeQuietly(HOME)` 就在删对方的 ✓）——
+ * 现场读数：⑦ 那一节打开面板时，工作区名单里赫然是**布局套件的**「大目录验收工作区
+ * …/ml-home-irMKht/bigdir-demo」✓，本脚本自己的「多选验收工作区」**不在名单里** ✗
+ * ⇒ 点不到那一行 ⇒ 整节 15 条级联红 ✗（与"1200ms 等太短"同一类现场、根因不同 ✓）。
+ * 名单里**一个字都没变**地缺了演示工作区时，就再补一次（最多 3 次 ✓）。
+ */
+const writeDemoFixture=()=>{
+  const source=join(process.env.HOME ?? '','.dsh','storages','workspace.json')
+  const table=JSON.parse(readFileSync(source,'utf8'))
+  // id 必须是**十六进制** UUID：Zod 的 uuid 校验只认 [0-9a-f]
+  const id='a11ce000-0000-4000-8000-00000017ab1e'
+  table.global=table.global ?? {}
+  table.global.workspaceIds=[id,...(table.global.workspaceIds ?? []).filter((x)=>x!==id)]
+  table.tables=table.tables ?? {}
+  table.tables.workspaces={ [id]:{ path:DEMO, title:DEMO_TITLE, sessionIds:[],
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() }, ...(table.tables.workspaces ?? {}) }
+  mkdirSync(join(HOME,'storages'),{recursive:true})
+  writeFileSync(join(HOME,'storages','workspace.json'),JSON.stringify(table,null,2))
+}
 const workspaceReady=(()=>{
   try {
     rmSync(DEMO,{recursive:true,force:true})
@@ -98,17 +122,7 @@ const workspaceReady=(()=>{
     mkdirSync(join(DEMO,DEMO_DELETE_DIR),{recursive:true})
     for (const name of [...DEMO_DELETE_FILES, DEMO_KEEP_FILE]) writeFileSync(join(DEMO,name),'多选验收用的演示文件\n')
     writeFileSync(join(DEMO,DEMO_DELETE_DIR,'里面的.txt'),'目录也要能被整棵删掉\n')
-    const source=join(process.env.HOME ?? '','.dsh','storages','workspace.json')
-    const table=JSON.parse(readFileSync(source,'utf8'))
-    // id 必须是**十六进制** UUID：Zod 的 uuid 校验只认 [0-9a-f]
-    const id='a11ce000-0000-4000-8000-00000017ab1e'
-    table.global=table.global ?? {}
-    table.global.workspaceIds=[id,...(table.global.workspaceIds ?? []).filter((x)=>x!==id)]
-    table.tables=table.tables ?? {}
-    table.tables.workspaces={ [id]:{ path:DEMO, title:DEMO_TITLE, sessionIds:[],
-      createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() }, ...(table.tables.workspaces ?? {}) }
-    mkdirSync(join(HOME,'storages'),{recursive:true})
-    writeFileSync(join(HOME,'storages','workspace.json'),JSON.stringify(table,null,2))
+    writeDemoFixture()
     return true
   } catch(error){
     console.log('  · 演示工作区准备失败 —— ⑦ 那一节会**显式 SKIP**（不计通过 ✓），原因：'+String(error&&error.message?error.message:error))
@@ -509,16 +523,131 @@ try {
     skip('⑦ 文件面板：多选批量操作（整节未执行）', '演示工作区不可用 —— 原因见上方那条日志')
   } else {
     await ev(`document.getElementById('dsh-mobile-files').click()`)
-    await sleep(1200)
-    // 工作区列表里按**标题**找演示工作区（列表里可能还并排着生产的工作区）
-    const opened = await ev(`(function(){
-      var rows=[].slice.call(document.querySelectorAll('.dshm-ws'))
-      for(var i=0;i<rows.length;i++){
-        if((rows[i].innerText||'').indexOf(${JSON.stringify(DEMO_TITLE)})>=0){ rows[i].click(); return (rows[i].innerText||'').replace(/\\s+/g,' ').slice(0,26) }
+    /**
+     * ★★ 修（本单）：这一条原先**固定等 1200ms**、然后**只点一次** ✗ ⇒
+     *   `opened === false` ⇒ 「进入演示工作区」红 ⇒ 后面**整节 15 条级联红** ✗。
+     *   两个真正的原因（2026-10-08 两次实测分开钉住 ✓）：
+     *
+     *   ① **行来得比 1200ms 晚**：面板那一屏是异步渲染的 ✓（`openFilesSheet()` 先
+     *      `sheetMessage('读取工作区…')`，再等 `workspace/follow` 的 baseline 帧、
+     *      还要 `callLocalEndpoint('mobile/openInApp/apps')` 回来，才 `renderWorkspaceList()` ✓）
+     *      ⇒ 只读取证：点完**立刻** `wsRows=0` ✓、第 1200ms 时 `wsRows=5` ✓
+     *      （即"差一点就过"）✓。所以这是一条**越界即红**的假红 ✗。
+     *
+     *   ② **名单被人换掉**：本脚本的 `HOME` 是写死的 `/tmp/e2e-dsh-home` ✓，
+     *      而并行的别的套件可以用 `--dsh-home /tmp/e2e-dsh-home` 指到**同一个**家目录 ✗
+     *      ⇒ 它收尾/重建时把这个家目录清掉重写 ✓ ⇒ 本脚本的工作区表被顶掉 ✗
+     *      （现场真读数：那一刻名单里是布局套件的「大目录验收工作区 …/ml-home-irMKht/bigdir-demo」✓，
+     *       本脚本的「多选验收工作区」**一个字都没有** ✗ —— 于是 `opened === false` ✓）。
+     *
+     * ★ 写法照抄 `check-mobile-layout.mjs` round 158 的 `bEnterWorkspace`（`:6039` ✓）：
+     *   · 耐心轮询**行出现**再点 ✓（那里用 `waitForExpr` ✓，这里是同一形状的只读轮询 ✓）；
+     *   · 进不去就先点工具栏那颗「工作区」回到列表再试 ✓；
+     *   · **多轮重试** ✓（那一处的 `openSessionList` 是 3 × 14 ✓，这里是 3 轮 ✓）。
+     *   · 只走真 id ✓ —— **没有** `dsh-mobile-drawer-backdrop` 这个 id ✗
+     *     （老脚本里的 `getElementById('dsh-mobile-drawer-backdrop')` 全是空点 ✓，本单没有用它 ✓）。
+     *
+     * ★ 探针**只读** ✓（只 `querySelector` / 读 dataset ✓）：不点、不写、不替被测对象做任何一步 ✓。
+     *   条件**单调** ✓（工作区行出现就不会自己消失 ✓）⇒ 早退那一下与"等满再点"打在同一状态上 ✓。
+     * ★ 点击与"点到哪一行"在**同一段页面脚本**里量 ✓ —— 中间不隔 CDP 往返 ✗
+     *   （本仓已经吃过一次这个亏：布局套件里"点击"与"看有没有加载行"必须同段 ✓）。
+     * ★★ 判据**只加没松** ✗：原来看"有没有点到那一行" ✓，现在还要求**真的进去了**
+     *   （`[data-dshm-fs-entry]` 有行 ✓ + 面板标题还是「电脑文件目录」✓）——
+     *   这正是"点到了但没进去"那一类假绿 ✗ 的守卫 ✓。
+     */
+    const wsPanelState = () => ev(`(function(){
+      var sheet=document.getElementById('dsh-mobile-sheet')
+      var crumb=document.querySelector('.dshm-crumb-path')
+      return JSON.stringify({
+        rows:document.querySelectorAll('.dshm-ws').length,
+        entries:document.querySelectorAll('[data-dshm-fs-entry]').length,
+        title:sheet===null?'':String((sheet.querySelector('.dshm-sheet-title')||{}).textContent||'').trim(),
+        crumb:crumb===null?'':String(crumb.textContent||'').trim(),
+        panel:String((document.body&&document.body.dataset.dshmFiles)||''),
+        text:sheet===null?'':String(sheet.innerText||'').replace(/\\s+/g,' ').slice(0,90),
+      }) })()`)
+    /** 等「工作区行」出现 ✓ —— 上限 20 秒 ✓（原来是一刀切的 1200ms ✗）。 */
+    const waitWorkspaceRow = async () => {
+      for (let i = 0; i < 40; i++) {
+        if (JSON.parse(String(await wsPanelState())).rows > 0) return true
+        await sleep(500)
       }
-      return false })()`)
-    ok(opened !== false, '进入演示工作区（按标题在列表里找到它）', String(opened))
-    await sleep(1900)
+      return false
+    }
+    /** 点那一行 ✓ —— 返回值**就是**点中那行的文本 ✓（false = 没找到 ✓，与老口径一致 ✓）。 */
+    const clickDemoWorkspace = () =>
+      ev(`(function(){
+        var rows=[].slice.call(document.querySelectorAll('.dshm-ws'))
+        for(var i=0;i<rows.length;i++){
+          if((rows[i].innerText||'').indexOf(${JSON.stringify(DEMO_TITLE)})>=0){
+            var label=(rows[i].innerText||'').replace(/\\s+/g,' ').slice(0,26)
+            rows[i].click(); return label
+          }
+        }
+        return false })()`)
+    /** 不在列表那一屏（例如停在上次的工作区文件列表里 ✗）⇒ 先点工具栏「工作区」回去 ✓（没有就不点 ✓）。 */
+    const backToWorkspaceList = () =>
+      ev(`(function(){
+        var bs=[].slice.call(document.querySelectorAll('.dshm-files-toolbar button'))
+        for(var i=0;i<bs.length;i++){
+          if(String(bs[i].textContent||'').replace(/\\s+/g,'').indexOf('工作区')>=0){ bs[i].click(); return true }
+        }
+        return false })()`)
+    let opened = false
+    let wsInto = {}
+    let wsRefilled = 0
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const found = await waitWorkspaceRow()
+      if (found !== true) await backToWorkspaceList()
+      opened = await clickDemoWorkspace()
+      await sleep(1600)
+      wsInto = JSON.parse(String(await wsPanelState()))
+      if (opened !== false && wsInto.entries > 0) break
+      /**
+       * ★ 走到这儿 = 点了但没进去 ✓（或者压根没找到那一行 ✓）——
+       *   要是名单里**逐字没有**演示工作区 ✓，那就是②（共享家目录被顶掉 ✗）：
+       *   再写一次夹具 ✓（连同文件一起重建 ✓ —— 上一轮可能已经删掉过几个 ✓）再试 ✓。
+       */
+      if (wsInto.rows > 0 && String(wsInto.text).indexOf(DEMO_TITLE) < 0) {
+        try {
+          rmSync(DEMO, { recursive: true, force: true })
+          mkdirSync(join(DEMO, DEMO_MOVE_TARGET), { recursive: true })
+          mkdirSync(join(DEMO, DEMO_DELETE_DIR), { recursive: true })
+          for (const name of [...DEMO_DELETE_FILES, DEMO_KEEP_FILE]) writeFileSync(join(DEMO, name), '多选验收用的演示文件\n')
+          writeFileSync(join(DEMO, DEMO_DELETE_DIR, '里面的.txt'), '目录也要能被整棵删掉\n')
+          writeDemoFixture()
+          wsRefilled += 1
+          console.log('  · 名单里没有演示工作区（第 ' + attempt + ' 轮）⇒ 已按自己的家目录重写一次夹具，再试')
+        } catch (error) {
+          console.log('  · 重写夹具失败：' + String(error && error.message ? error.message : error))
+        }
+        await backToWorkspaceList()
+      }
+    }
+    if (opened === false && wsInto.rows > 0) {
+      /**
+       * ★ 名单在、但**演示工作区不在**（重写也没救回来）⇒ 这一节**没跑** ✓ ⇒ 显式 SKIP ✓
+       *   （不是产品坏了 ✗）。为什么不能"找别的行点点看"✗：后面的断言会**真删文件** ✗ ——
+       *   点到生产工作区就是删用户的文件 ✓（现场那一刻名单里的第一个是别人的验收目录 ✓）。
+       *   SKIP 会计入 `skips` ✓、条数掉到下界以下 ⇒ 整个脚本照旧**红** ✓（不许伪装成绿 ✗）。
+       */
+      skip('⑦ 文件面板：多选批量操作（名单里没有演示工作区 ⇒ 整节未执行）',
+        '家目录被别的套件顶掉了（本脚本 HOME=' + HOME + ' 写死 ✗）—— 别把别人的工作区当成演示目录来删 ✓')
+    } else {
+      /** 证据里那 3 对数字全是**真读数** ✓（行数 / 进了之后的条目数 / 面板标题）—— 别再拿"它绿了"当证据 ✗。 */
+      const wsEvidence = JSON.stringify({ rows: wsInto.rows, entries: wsInto.entries, title: wsInto.title, refilled: wsRefilled })
+      ok(
+        opened !== false && wsInto.entries > 0 && String(wsInto.title).indexOf('电脑文件目录') === 0,
+        '进入演示工作区（按标题在列表里找到它 ⇒ 并且**真的进去了**：文件条目已渲染 ✓）',
+        (opened === false ? '(列表里没找到那一行)' : String(opened)) + '｜' + wsEvidence,
+      )
+    }
+    /**
+     * ★ 上一版这里是一句 `await sleep(1900)` ✓（"点完工作区，等文件列表落地"✓）——
+     *   现在那件事已经由**上面那个循环真等到位** ✓（`[data-dshm-fs-entry]` 真的渲染出来 ✓），
+     *   这一个短等只留给"工具栏与底栏同步"收尾 ✓（少等它不影响下一条断言 ✓）。
+     */
+    await sleep(600)
 
     const selectBtn = await ev(`(function(){
       var bs=[].slice.call(document.querySelectorAll('.dshm-files-toolbar button'))
