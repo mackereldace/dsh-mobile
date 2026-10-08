@@ -407,6 +407,47 @@ function approvalIdOf(event) {
   return firstString(data, ['id', 'requestId', 'request_id', 'approvalId'])
 }
 
+/**
+ * 把一条消息的**正文**画进容器 ✓ —— 用**现成**的渲染器 ✗。
+ *
+ * ## 复用的是哪一个
+ *
+ * `boot.js` 自己那一套（`renderMarkdownInto` ✓ —— Temml + 行内公式 + 标题 / 列表 /
+ * 代码块 / 表格 / 引用 ✓）。会话页**本来就加载 `boot.js`**（`page.html` ✓）⇒
+ * 它就是 `globalThis.__DSH_MOBILE_BOOT__.renderMarkdownInto` ✓（`boot.js:23469` ✓）。
+ *
+ * ★ 为什么必须复用 ✗：本仓规矩 —— **不新造渲染器** ✓。再写一份就是同一件事有
+ *   两个真相来源 ✓（而且外壳那份的坑已经被它自己的回归测试钉住了 ✓）。
+ *
+ * ## 拿不到的时候怎么办（两条既有纪律都不能破 ✓）
+ *
+ * · ★ **认不出的也要看得见** ✓：拿不到渲染器（老宿主 / 单测里没给 `boot.js` /
+ *   隧道缺席 ✓）⇒ **退回摊原文** ✓。宁可显示成没有格式的纯文本，
+ *   也**绝不许显示成空白** ✗ —— 空白在手机上完全查不出来 ✓。
+ * · ★ **不拼 `innerHTML`** ✗：正文是**不可信输入** ✓（助手说的话里可以带
+ *   `<img onerror=…>` ✓）⇒ 兜底这条路只走 `textContent` ✓
+ *   （渲染器自己那条路里的 `innerHTML` 是 Temml 的产物 ✓ —— 见报告第 5 节 ✓）。
+ *
+ * ★ 渲染**只在画这一条的时候做一次** ✓（`appendEvents` 只 appendChild ✓，
+ *   轮询不会重画已有节点 ✓）⇒ 这里**不缓存、也不重渲染** ✓。
+ */
+function renderBodyInto(container, text) {
+  const boot = globalThis.__DSH_MOBILE_BOOT__
+  const render = boot === null || boot === undefined ? undefined : boot.renderMarkdownInto
+  if (typeof render === 'function') {
+    try {
+      render(container, text)
+      return
+    } catch (error) {
+      // ★ 渲染器自己炸了也**不许**留个空白 ✗ —— 摊原文，并且把原因说出来 ✓
+      container.textContent = text
+      container.setAttribute('data-render-fallback', String(error && error.message ? error.message : error))
+      return
+    }
+  }
+  container.textContent = text
+}
+
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
 export function renderEvent(event, context) {
   const view = toViewModel(event)
@@ -447,7 +488,15 @@ export function renderEvent(event, context) {
     }
     const bubble = document.createElement('div')
     bubble.className = 'bubble'
-    bubble.textContent = view.text.length > 0 ? view.text : '（这条没有文字内容）'
+    /**
+     * ★★ 正文走**现成**的 markdown 渲染器 ✗（`renderMarkdownInto` ✓）——
+     *   以前这一行是 `bubble.textContent = view.text` ✓，所以助手写 `**加了两遍**`
+     *   在手机上就**原样带星号** ✓（用户点名的那件事 ✓）。
+     * ★ 空正文仍然只写那句占位话 ✓（渲染器对空串什么都不画 ⇒ 会变成空气泡 ✗）。
+     * ★ 思维链**不走这里** ✗（它在那条默认折叠的「思考」行里 ✓ —— 口径不变 ✓）。
+     */
+    if (view.text.length > 0) renderBodyInto(bubble, view.text)
+    else bubble.textContent = '（这条没有文字内容）'
     wrapper.appendChild(bubble)
     return wrapper
   }

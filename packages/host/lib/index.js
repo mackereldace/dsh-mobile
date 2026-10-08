@@ -687,6 +687,32 @@ export function createMobileHost(options) {
                 if (device === undefined) {
                     throw Object.assign(new Error('session has no bound device'), { code: ErrorCode.DeviceUnknown });
                 }
+                /**
+                 * ★★ 插件自有的**本地流路由**（本轮新增 ✓）：`mobile/dsh/follow` ⇒ DSH 的 `session/follow`。
+                 *
+                 * ## 为什么必须有这一跳 ✗
+                 *
+                 * 桥的纪律是「**手机只认 `mobile/dsh/*`**」✓（`dsh-chat-bridge.ts` 头部 ✓）——
+                 * 页面直接去喊 `session/follow` 就把那条纪律破了 ✓（页面上任何一处写法都能绕过插件这一层）。
+                 * ⇒ 转发那一跳留在宿主 ✓，页面只知道 `mobile/dsh/follow` ✓。
+                 *
+                 * ## 与 `invoke` 那半的对应关系 ✓
+                 *
+                 * `invokeLocalEndpoint`（`:1122` ✓）管一元的 `mobile/*` ✓，这里管**流**的 ✓ ——
+                 * 同一条理由：它们不是 DSH 命名空间里的端点 ✓，设备身份已由隧道握手保证 ✓。
+                 * 门禁仍然照跑 ✓（`capabilityCheck(device, request.endpoint)` ✓ ——
+                 * 判的是**手机嘴里那个名字** ✗，不是转发后的 `session/follow` ✓）。
+                 *
+                 * ## 只做**改名**，不做翻译 ✗
+                 *
+                 * 参数形状**由页面给** ✓（照官方客户端 ✓：`{ args: { request: { address, maxMessages, turnWindow } } }` ✓，
+                 * `SessionFollowRequest` 里没有 `cursor` ✓）——这里**一个字段都不补、一个都不改** ✓：
+                 * 每多一层"翻译"，就多一处"照着想的形状写"的机会 ✓（本项目为此栽过 ✓）。
+                 *
+                 * ★ 审计里记的是**手机嘴里那个名字** ✓（下面 `target: request.endpoint` ✓）——
+                 *   真机排查时要对得上页面的日志 ✓（`__DSH_MOBILE_BOOT__.streamLog()` ✓）。
+                 */
+                const upstream = request.endpoint === 'mobile/dsh/follow' ? 'session/follow' : request.endpoint;
                 const gate = capabilityCheck(device, request.endpoint);
                 if (!gate.ok) {
                     // 流式调用此前**没有审计**：一旦被门禁拒绝，手机上表现为"发送无反应"，
@@ -698,7 +724,7 @@ export function createMobileHost(options) {
                     async *[Symbol.asyncIterator]() {
                         const started = Date.now();
                         try {
-                            const iterable = await openGatewayStream(request.endpoint, request.payload, signal);
+                            const iterable = await openGatewayStream(upstream, request.payload, signal);
                             yield* iterable;
                             // 流正常结束才记成功：否则"流被拒/中断"会伪装成成功，掩盖真实故障
                             store.record({ deviceId: device.deviceId, kind: 'stream', target: request.endpoint, detail: `${Date.now() - started}ms`, ok: true });

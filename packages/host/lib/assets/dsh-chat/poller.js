@@ -196,5 +196,106 @@ export class ChatPoller {
   }
 }
 
+// ─────────────────────────── 流（`session/follow`）这一侧 ───────────────────────────
+//
+// 会话页的取数**从轮询改成流**（本轮 ✓）：宿主新增一条本地流路由
+// `mobile/dsh/follow` ⇒ 转发到 DSH 的 `session/follow` ✓。下面三个纯函数是
+// 那条流的**全部纯逻辑** ✓（请求形状 / 帧到事件 / 重开等待 ✓）——
+// 放在这里是为了能单测：这三样里错一样，症状都只是「界面不动」✗（最难查的一类 ✓）。
+
+/**
+ * ★★ `session/follow` 的**窗口参数** —— 照官方客户端 ✓（`session.js:20` 同值 ✓）。
+ * ★ 数字**不自己发明** ✗：它是「开场快照取多宽」的判据 ✓（之后由服务端按 seq 推 ✓）。
+ */
+export const FOLLOW_MAX_MESSAGES = 500
+export const FOLLOW_TURN_WINDOW_MIN_MESSAGES = 50
+export const FOLLOW_TURN_WINDOW_MIN_TURNS = 2
+
+/**
+ * ★★ `session/follow` 的**请求形状** ✓（纯函数 ⇒ 能单测 ⇒ 改一个字段就有断言会红 ✓）。
+ *
+ * ## 为什么是这一个形状（每一条都有出处 ✓）
+ *
+ * · **参数名叫 `request`** ✓、外面还套一层 `args` ✓ —— 网关的线上约定
+ *   （会话页另一条桥也是 `{ args: { request } }` ✓，见 `dsh-chat-bridge.ts` ✓）；
+ * · `address = { kind: 'session', sessionId }` ✓ —— `SessionFollowRequest` 的
+ *   `address` 是**判别联合** ✓，**没有**裸 `sessionId` 字段 ✗
+ *   （`typert.host.js:204-220` ✓ —— 派单里我猜的那个形状是错的 ✓）；
+ * · ★★ **没有 `cursor`** ✗ —— 那个类型里**根本没有**这个字段 ✓：
+ *   开场给哪一窗由 `maxMessages` / `turnWindow` 决定 ✓，之后由服务端按**严格 seq** 推 ✓
+ *   （跳号会抛 `session event stream skipped seq N` ✓ ⇒ 缺口修补不归我们写 ✓）；
+ * · `assistantStream` **不带** ✗：它是官方客户端的「逐字流」选项 ✓，而它的解码端
+ *   **要求**开场快照带 `assistantStream.revision` ✓（`transport.js:74-80` ✓
+ *   —— 缺了就抛 `session assistant stream omitted its opted-in opening baseline` ✓）
+ *   ⇒ 不要它就不要点它 ✓（点了不认，等于给自己造一个必抛的分支 ✗）。
+ *
+ * @param {string} sessionId 会话 id ✓（空串 ⇒ 调用方**不许**开流 ✗）
+ * @returns {{ address: { kind: 'session', sessionId: string }, maxMessages: number, turnWindow: { minMessages: number, minTurns: number } }}
+ */
+export function followRequest(sessionId) {
+  return {
+    address: { kind: 'session', sessionId: typeof sessionId === 'string' ? sessionId : '' },
+    maxMessages: FOLLOW_MAX_MESSAGES,
+    // ★ 每次都新建一个对象 ✗（不是共享常量 ✓）：共享的那份一旦被谁改一下，
+    //   后续每一条流的窗口都跟着变 ✓ —— 那是「第二个事实来源」的另一种写法 ✓
+    turnWindow: {
+      minMessages: FOLLOW_TURN_WINDOW_MIN_MESSAGES,
+      minTurns: FOLLOW_TURN_WINDOW_MIN_TURNS,
+    },
+  }
+}
+
+/**
+ * ★ 一帧 `session/follow` ⇒ 该喂给去重那条路的**事件数组** ✓（纯函数 ⇒ 能单测 ✓）。
+ *
+ * 三种帧各有各的处置 ✗：
+ * · `{type:'snapshot'}` ⇒ **整窗** ✓：`records[].event` **逐条**取出来 ✓
+ *   （★ 不是把整帧当一条事件画 ✗ —— 那画出来的是一坨 JSON ✓）；
+ * · `{type:'event'}` ⇒ **增量** ✓：就是里面那一条 ✓；
+ * · 别的（`assistant-stream` 与将来的新帧 ✓）⇒ **空数组** ✓ ——
+ *   认不出就不画 ✓，而且**绝不抛** ✗（一帧认不出不该把整条流打断 ✓）。
+ *
+ * ★ 一条事件必须是个**对象**才算数 ✓（`null` / 字符串一律不当事件 ✓ ——
+ *   喂进去只会在渲染那一步炸 ✓，而「炸」在手机上就是「页面不动」✗）。
+ *
+ * @param {unknown} frame
+ * @returns {Array<{seq: (number|null), time: (number|null), type: string, data: unknown}>}
+ */
+export function frameEvents(frame) {
+  if (frame === null || typeof frame !== 'object') return []
+  const type = frame.type
+  if (type === 'event') {
+    const event = frame.event
+    return event !== null && typeof event === 'object' ? [event] : []
+  }
+  if (type === 'snapshot') {
+    const records = Array.isArray(frame.records) ? frame.records : []
+    const out = []
+    for (const record of records) {
+      if (record === null || typeof record !== 'object') continue
+      const event = record.event
+      if (event !== null && typeof event === 'object') out.push(event)
+    }
+    return out
+  }
+  return []
+}
+
+/**
+ * ★ 流断掉之后，**第 N 次重开**要等多久 ✓（毫秒 ✓，纯函数 ⇒ 能单测 ✓）。
+ *
+ * ★ 这条阶梯只影响「**多久之后重开**」✗，**不影响正确性** ✓：
+ *   重开拿的是**新快照** ✓ + seq 去重 ✓ ⇒ 期间漏掉的事件一条不少 ✓
+ *   （所以这里可以放心退避 ✓ —— 与轮询那条「退避会漏事件」完全不同 ✓）。
+ * ★ 封顶 8 秒 ✗：再慢下去，「电脑那头刚有新事件」就要等用户察觉了 ✓。
+ *
+ * @param {number} attempt 已经重开失败过几次 ✓（0 = 第一次重开 ✓）
+ */
+export function reopenDelayMs(attempt) {
+  const ladder = [500, 1000, 2000, 4000, 8000]
+  const step = typeof attempt === 'number' && attempt > 0 ? Math.floor(attempt) : 0
+  return ladder[step >= ladder.length ? ladder.length - 1 : step]
+}
+
 // 浏览器里当全局用（`<script type="module">` 也能 import ✓，两条路都留着 ✓）
 if (typeof globalThis !== 'undefined') globalThis.ChatPoller = ChatPoller
