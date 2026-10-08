@@ -2201,7 +2201,7 @@ export function mountChat(options) {
     if (badge) {
       badge.hidden = total === null || total === 0
       const running = stats && Number.isInteger(stats.running) && stats.running >= 0 ? stats.running : null
-      badge.textContent = total === null ? '' : '● ' + (running !== null && running > 0 ? running : total)
+      badge.textContent = total === null ? '' : '● ' + total + ' 个子智能体'
       badge.classList.toggle('is-running', running !== null && running > 0)
       badge.title = total === null ? '' : '子智能体 ' + total + ' 个' + (running === null ? '（运行状态未知）' : '，运行中 ' + running + ' 个')
       if (total !== null) chatLog('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
