@@ -5471,13 +5471,34 @@ try {
    *   它量的是**首帧**几何，所以"去抖 120ms"那种旧实现**必然**报红 ✓（见探针那段注释 ✓）。
    */
   const firstFrame = await evaluate(`JSON.stringify(globalThis.__dshmPanelFirstFrame)`)
-  const ff = typeof firstFrame === 'string' ? JSON.parse(firstFrame) : {}
+  /**
+   * ★★ round 143：空值兜底 ✓（这一处原来会**把整轮套件崩掉** ✗）。
+   *
+   *   根因：探针**没取到**时 `globalThis.__dshmPanelFirstFrame` 仍是 `null` ✓，
+   *   而 `JSON.stringify(null)` 返回的**字符串是** `'null'` ✓
+   *   ⇒ `JSON.parse('null')` 的结果是 **`null`**（不是对象 ✓）
+   *   ⇒ 下面那句 `ff.w` 直接抛 `TypeError: Cannot read properties of null (reading 'w')` ✗，
+   *   被主体 try 的 catch 接住 ⇒ **后面 224 条断言一条都没跑** ✗✗（0.2.0 上实测：159 条即崩 ✗）。
+   *
+   *   修法（★ 只加兜底、**不动判据** ✓）：把"不是对象"一律折成 `{}` ✓ ——
+   *   于是它照旧走下面那条 `check(..., 诊断文本)` ✓：**该红就红一条** ✓，不崩整轮 ✓。
+   *   ★ 断言本身一个字符没改 ✗（没有因为"0.2.0 上取不到"而放宽或删除 ✓）。
+   */
+  let ffParsed = null
+  if (typeof firstFrame === 'string') {
+    try { ffParsed = JSON.parse(firstFrame) } catch { ffParsed = null }
+  }
+  const ff = ffParsed !== null && typeof ffParsed === 'object' ? ffParsed : {}
+  /** 探针是否**取到了**读数（用于把"没取到"和"取到了但几何不对"分开报 ✓） */
+  const ffProbed = ff.w !== undefined || ff.pending === true || ff.tagged !== undefined
   check(
     ff.w !== undefined && Math.abs(ff.w - ff.vw) <= 2 && Math.abs(ff.h - ff.vh) <= 2 && ff.tagged === true,
     '★ 设置弹窗**首帧就是整屏**（不再先画 120ms 的电脑端形态 ✗）',
-    ff.w === undefined
-      ? `探针没取到（返回 ${JSON.stringify(ff)}）`
-      : `首帧 ${ff.w}×${ff.h} @${ff.x},${ff.y} vs 视口 ${ff.vw}×${ff.vh}｜首帧已带标记=${ff.tagged}`,
+    ffProbed
+      ? (ff.w === undefined
+        ? `★ 探针取到了但**没等到读数**（上游是 ${JSON.stringify(ff)}）⇒ 弹窗外层进 DOM 后 rAF 没跑完 ✗`
+        : `首帧 ${ff.w}×${ff.h} @${ff.x},${ff.y} vs 视口 ${ff.vw}×${ff.vh}｜首帧已带标记=${ff.tagged}`)
+      : `★ 探针**没取到**（__dshmPanelFirstFrame 一直是 null，原始返回 ${JSON.stringify(firstFrame)}）⇒ 观察窗口内没看到 [role="dialog"][aria-modal="true"] + nav + [role="presentation"] 这个组合 ✗`,
   )
   check(
     np.rect !== undefined && Math.abs(np.rect.w - np.viewport.w) <= 2 && np.rect.h >= np.viewport.h - 2,
