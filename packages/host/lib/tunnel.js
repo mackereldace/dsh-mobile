@@ -15,7 +15,7 @@
  */
 import { DEFAULT_CAPABILITIES, ErrorCode, FrameFlags, FrameType, wireError, } from './protocol/index.js';
 import { openFrame, parseFrame, ReplayWindow, sealFrame, sealPlaintextFrame, } from './protocol/index.js';
-import { encodeBinary, HostHandshake } from './protocol/index.js';
+import { decodeBinary, encodeBinary, HostHandshake } from './protocol/index.js';
 /** 握手帧的固定 nonce 前缀（与协议文档一致）。 */
 const HANDSHAKE_NONCE_BASE = Buffer.from([0x00, 0x00, 0x00, 0x01]);
 /**
@@ -299,7 +299,8 @@ export class TunnelSession {
                     await this.sendError(ErrorCode.HandshakeMalformed, 'RpcRequest is not valid JSON');
                     return;
                 }
-                await this.handleRpc(request);
+                // 在交给网关前还原上行字节；只解码业务负载，信封标识保持原样。
+                await this.handleRpc({ ...request, payload: decodeBinary(request.payload) });
                 return;
             }
             case FrameType.StreamOpen: {

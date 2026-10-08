@@ -1943,6 +1943,7 @@ export function createMobileHost(options) {
              *   `sharedApprovalBroker()` 是模块级单例 ✓ ⇒ 两处 `import` 到同一个文件 ⇒ 同一个实例 ✓。
              */
             const { sharedApprovalBroker } = await import("./dsh-approval.js");
+            const { sharedQuestionBroker } = await import("./dsh-question.js");
             return handleDshChatEndpoint({
                 call: (target, payload, bridgeSignal) => invokeGatewayEndpoint(options.gateway, target, payload, bridgeSignal ?? signal),
                 /**
@@ -1955,6 +1956,7 @@ export function createMobileHost(options) {
                  */
                 recordPrompt: (ref, via) => recordPrompt(ref, via, device),
                 approvalBroker: sharedApprovalBroker(),
+                questionBroker: sharedQuestionBroker(),
             }, endpoint, payload, signal);
         }
         if (endpoint === 'mobile/openInApp/apps') {

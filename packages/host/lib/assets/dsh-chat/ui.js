@@ -77,7 +77,9 @@ export function toViewModel(event) {
   const view = {
     kind,
     type,
-    title: titleFor(kind, type),
+    title: kind === 'tool' && data !== null && typeof data === 'object'
+      ? firstString(data, ['name', 'toolName']) || titleFor(kind, type)
+      : titleFor(kind, type),
     text,
     thinking: thinkingOf(data),
     body: text,
@@ -237,6 +239,8 @@ function safeJson(value) {
 /** 事件的"种类"⇒ 画法。认不出的一律走 `other`（**仍然画** ✓）。 */
 export function classify(type) {
   const text = typeof type === 'string' ? type.toLowerCase() : ''
+  // 已核实的内部记账事件：保留原文供排障，但默认收起，避免 JSON 淹没对话。
+  if (text.startsWith('session-log-deepseek/') || text.startsWith('agent/inbox/')) return 'meta'
   if (text.includes('usermessage') || text.includes('user/') || text.includes('prompt')) return 'user'
   if (text.includes('agentmessage') || text.includes('assistant') || text.includes('message')) return 'agent'
   /**
@@ -333,6 +337,12 @@ export function textOf(event) {
   const data = event === null || typeof event !== 'object' ? null : event.data
   if (typeof data === 'string') return data
   if (data !== null && typeof data === 'object') {
+    if (classify(event.type) === 'tool' && data.arguments !== undefined) return toolArguments(data.arguments)
+    const message = recordOf(data.message)
+    if (classify(event.type) === 'tool' && message !== null) {
+      const text = assistantText(data)
+      if (text.length > 0) return text
+    }
     for (const key of ['text', 'message', 'content', 'output', 'command', 'summary', 'title']) {
       const value = data[key]
       if (typeof value === 'string' && value.length > 0) return value
@@ -349,6 +359,23 @@ export function textOf(event) {
   return ''
 }
 
+/** 工具参数只展示业务字段；JSON 字符串先解开，命令保持真实换行。 */
+export function toolArguments(value) {
+  let args = value
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args) } catch { return args }
+  }
+  const record = recordOf(args)
+  if (record === null) return typeof args === 'string' ? args : safeJson(args)
+  const command = firstString(record, ['command', 'cmd', 'script'])
+  if (command.length > 0) {
+    const rest = Object.entries(record).filter(([key]) => !['command', 'cmd', 'script'].includes(key))
+    return command + (rest.length > 0 ? '\n\n' + rest.map(([key, entry]) => key + ': ' +
+      (typeof entry === 'string' ? entry : JSON.stringify(entry, null, 2))).join('\n') : '')
+  }
+  return JSON.stringify(record, null, 2)
+}
+
 /**
  * 把事件追加到容器里 ✓（**不重画已有的** ✓）。
  *
@@ -358,7 +385,7 @@ export function textOf(event) {
  *   **可选** ✓：不给 ⇒ 按钮按"通道没接通"处理 ✓（置灰 ✓，不假装能用 ✗）。
  */
 export function appendEvents(container, events, context) {
-  if (container === null || container === undefined) return
+  if (container === null || container === undefined) return { follow: null, scrollTop: null }
   /**
    * ★ 要滚的是**真正的滚动容器** ✗，不是消息列表本身 ✓ ——
    *   页面结构改成"外层 `main` 滚、里面 `#messages` 只排"之后 ✓，
@@ -366,19 +393,264 @@ export function appendEvents(container, events, context) {
    *   ⇒ 表现是"新消息永远在屏幕外、看着像卡住" ✓（本轮截图抓到的就是这个 ✓）。
    *   若 DOM 结构改回列表自己滚，这里**也**还能对（取到的就是它自己 ✓）。
    */
-  const scroller = typeof container.closest === 'function'
-    ? (container.closest('main') || container.parentElement || container)
-    : (container.parentElement || container)
+  const scroller = scrollContainerOf(container)
   const follow = shouldAutoScroll(
     { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight },
     80,
   )
   for (const event of Array.isArray(events) ? events : []) {
+    if (context && typeof context.isQuestionEvent === 'function' && context.isQuestionEvent(event)) continue
     const node = renderEvent(event, context)
-    if (node !== null) container.appendChild(node)
+    if (node !== null) {
+      if (classify(event.type) === 'approval' && context && context.dock) {
+        if (!decidedEventFor(context, event)) context.dock.insertBefore(node, context.dock.firstChild)
+        if (typeof context.dockChanged === 'function') context.dockChanged()
+      } else container.appendChild(node)
+    }
   }
   // ★ 用户手动往上翻的时候**不许把他拽回去** ✗（`follow` 是在追加之前量的 ✓）
   if (follow && typeof scroller.scrollTop === 'number') scroller.scrollTop = scroller.scrollHeight
+  /**
+   * ★ 把这一次追加的**两个读数**交出去 ✓（长会话那一单 ✓ —— 裁剪那一步要拿它们做补偿 ✗，
+   *   验收要拿它们证明"补偿真的发生了"✓）。**纯读数** ✓：不改任何状态 ✓。
+   */
+  return { follow, scrollTop: typeof scroller.scrollTop === 'number' ? scroller.scrollTop : null }
+}
+
+/**
+ * ★★ **长会话的窗口**（复刻清单第 6 项 ✓）—— 一条会话最多在屏上留这么多条事件 ✗。
+ *
+ * ## 上界为什么是 **200**（★ 依据写在这儿，改数先改这段话 ✗）
+ *
+ * 1. **它比任何一屏都长得多** ✓：这条消息列表每条约 40–60px（`theme.css` 的
+ *    `#messages { gap: 10px }` + 气泡内边距 ✓）⇒ 200 条 ≈ **8,000–12,000px** ✓，
+ *    而手机视口高 568–915px ✓ ⇒ 屏上同时看得见的不到 **8 条** ✓
+ *    （≈ 25 屏的历史 ✓）—— 用户"往回翻"的时候不会撞到边界 ✓；
+ * 2. **它与 DSH 自己的窗口同量级** ✗（源码读数：`session.js:20` 的
+ *    `HISTORY_PAGE_OPTIONS.maxMessages = 500` ✓）—— 我们没有"取更早"那条通道 ✓
+ *    （见 {@link trimEventWindow} 的说明 ✓）⇒ **不照抄 500** ✗，
+ *    取 200 是为了"既留住足够多的历史、又把节点数钉在上千以下" ✓；
+ * 3. **节点数是确定性判据** ✓：200 条 ×（一条消息 ≈ 4–6 个元素 ✓）≈ 1,200 节点 ✓，
+ *    手机 WebView 完全无压力 ✓；而上千条事件（旧行为）会到 **5,000+ 节点** ✗。
+ *
+ * ★ 这不是虚拟列表 ✗（那要测量、要预估行高 ✓，在这个"追加式"渲染器里会引入新的抖动 ✓）——
+ *   它是**有上界的窗口 + 头部回收** ✓：新事件照旧 `appendChild` ✓，只把最老的移出去 ✓。
+ */
+export const MAX_DRAWN_EVENTS = 200
+
+/**
+ * 那条"更早的消息已收起"的提示行 ✓（自己造的字 ✓，纯 ASCII 属性名 ✓）。
+ *
+ * ★ 只有**对话视图**摆它 ✗（`withNote` ✓）：轨迹视图是"步骤列表" ✓ ——
+ *   它那面自己有"还没有步骤"的占位话 ✓，再加一句"更早的 N 条已收起"就会
+ *   把"轨迹里画了几条"这个读数搅浑 ✓（验收里那条判据是逐条数的 ✓）。
+ */
+function ensureTrimNote(container, hiddenCount, withNote) {
+  if (typeof container.querySelector !== 'function') return null
+  let note = container.querySelector('.ev-trim-note')
+  const text = '更早的 ' + String(hiddenCount) + ' 条已收起（这一页只留最近 ' + String(MAX_DRAWN_EVENTS) + ' 条）'
+  if (!withNote || hiddenCount <= 0) {
+    if (note !== null && note !== undefined && typeof note.remove === 'function') note.remove()
+    return null
+  }
+  if (note === null || note === undefined) {
+    note = document.createElement('div')
+    note.className = 'ev ev-trim-note'
+    note.setAttribute('data-trim-hidden', String(hiddenCount))
+    note.textContent = text
+    container.insertBefore(note, container.firstChild)
+    return note
+  }
+  note.setAttribute('data-trim-hidden', String(hiddenCount))
+  note.textContent = text
+  return note
+}
+
+/**
+ * 一条事件节点**能不能被回收** ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能断言 ✓）。
+ *
+ * ★★ 一条"不许回收"的规矩（**为了不骗用户** ✓）：
+ * · `[data-pending-approval]` —— 那张卡上还有**能按的按钮** ✓，它是现在进行时的交互 ✓
+ *   （用户还没裁决 ✓）⇒ 摘掉它就是"屏幕上少了一次要你决定的事" ✗（最坏的一种 ✓）。
+ *
+ * ★★ 那句提示行 `.ev-trim-note` **算"可回收"** ✗（★ 这是本轮实测抓到的一个死锁 ✓）：
+ *   它住在列表**头部** ✓（`insertBefore(note, firstChild)` ✓）⇒ 若把它判成"不许回收" ✓，
+ *   那么**下一次**裁剪在第一格就 `break` ✓ ⇒ 从此**一条都裁不掉** ✓
+ *   （读数症状：`hidden` 卡在第一次那个数、而列表里的事件数一路涨到两千 ✓ ——
+ *   我第一版就是这样 ✓，屏上看着完全正常 ✓）。它本来就由 `ensureTrimNote` 自己维护 ✓
+ *   （要么被摘、要么在下一批重建 ✓），所以让它跟别的头部节点一起走是安全的 ✓。
+ */
+export function isTrimmableEvent(node) {
+  if (node === null || node === undefined || typeof node.getAttribute !== 'function') return false
+  return node.getAttribute('data-pending-approval') === null
+}
+
+/**
+ * ★★ 把事件窗口裁到 {@link MAX_DRAWN_EVENTS} 以内 ✓ —— **从头部回收** ✗。
+ *
+ * ## 五条口径（每一条都是"不做就会在手机上出错" ✓）
+ *
+ * 1. **只在超了的时候才动 DOM** ✓：没超 ⇒ 一次 `getAttribute` 都不做 ✓
+ *    （每条消息都跑一遍"要不要裁"才是新的卡顿源 ✗）；
+ * 2. ★★ **不碰 `computePageState`** ✗：有内容就 `ready` ✓ 这条规矩**一个字都没改** ✓
+ *    ⇒ "裁剪"永远不会变成"出错清屏"✓（裁决那件事仍归 `eventCount > 0` ✓）；
+ * 3. ★★ **滚动位置不跳** ✗：裁掉的是**已经画在用户上面**的那些节点 ✓ ⇒
+ *    内容整体上移 ✓。补偿用**实测的 `scrollHeight` 差值** ✓（不是预估行高 ✗）：
+ *    `scrollTop += 裁之前的高 − 裁之后的高` ✓ ⇒ 用户正在读的那一条**纹丝不动** ✓；
+ * 4. ★ **`seq` 去重不受影响** ✓：去重那本账（`poller.js` 的 `seen` ✓）**不在这一层** ✗，
+ *    也**不跟着裁** ✓ ⇒ 被回收的 `seq` 若被再次推来，照样被去重掉 ✓
+ *    （这一层因此**不需要**自己记 `seq` ✓ —— 同一个概念只有一个事实来源 ✓）；
+ * 5. ★ 待裁决的审批卡**不回收** ✓（见 {@link isTrimmableEvent} ✓）—— 于是"窗口"在那一种
+ *    情况下会**短暂超上界** ✓，这是**故意的** ✗（宁可多几个节点，也不许把"等你决定"那件事
+ *    从屏上拿走 ✓）。真到那一步的会话，节点数仍由"未裁决的审批数"封住（通常 ≤ 1 ✓）。
+ *
+ * @param {HTMLElement} container 事件列表（`#messages` ✓）
+ * @param {object} [metrics] 追加**之前**量好的读数 ✓（`{scroller, scrollTop, anchor, anchorTop}` ✓）——
+ *   给了它就做滚动补偿 ✓（见下面那段长注释 ✓）
+ * @param {boolean} [withNote] 要不要摆那句"更早的 N 条已收起" ✓（默认要 ✓；轨迹视图传 `false` ✓）
+ * @returns {{ trimmed: number, hidden: number, drawn: number, scrollTop: number|null, screenDelta: number|null }}
+ *   `trimmed` = 这一次摘掉几个节点 ✓、`hidden` = 列表里累计收起了几条 ✓、
+ *   `drawn` = 现在列表里还有几个孩子 ✓（它就是"节点数"那条判据的读数 ✓）、
+ *   `scrollTop` = 补偿之后的滚动位置（没补偿就是 `null` ✓）、
+ *   `screenDelta` = 补偿**之后**锚点相对屏口还差多少 px ✓（≈0 ⇒ 用户那一条没动 ✓）
+ */
+export function trimEventWindow(container, metrics, withNote) {
+  const none = { trimmed: 0, hidden: 0, drawn: 0, scrollTop: null, screenDelta: null }
+  if (!container || !container.children) return none
+  const hiddenBefore = Math.max(0, Number(container.getAttribute('data-trim-hidden-total') || '0'))
+  const rows = Array.from(container.children).filter(node => !node.classList.contains('ev-trim-note'))
+  const excess = Math.max(0, rows.length - MAX_DRAWN_EVENTS)
+  const doomed = []
+  for (const node of rows.slice(0, excess)) {
+    if (!isTrimmableEvent(node)) break
+    doomed.push(node)
+  }
+  if (!doomed.length) return { ...none, hidden: hiddenBefore, drawn: container.children.length }
+  // 保留同一节点及其屏口坐标；不估算行高、gap或提示行高度。
+  const scroller = metrics && metrics.scroller
+  let anchor = metrics && metrics.anchor
+  let anchorTop = metrics && metrics.anchorTop
+  if (anchor && doomed.includes(anchor)) {
+    anchor = rows[doomed.length]
+    anchorTop = anchor && scroller ? anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+  }
+  for (const node of doomed) node.remove()
+  const hidden = hiddenBefore + doomed.length
+  container.setAttribute('data-trim-hidden-total', String(hidden))
+  ensureTrimNote(container, hidden, withNote !== false)
+  let screenDelta = null
+  if (scroller && typeof scroller.scrollTop === 'number') {
+    if (metrics.follow === true) scroller.scrollTop = scroller.scrollHeight
+    else if (anchor && anchor.parentElement === container && typeof anchorTop === 'number') {
+      const delta = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchorTop
+      scroller.scrollTop += delta
+      screenDelta = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchorTop
+    }
+  }
+  return { trimmed: doomed.length, hidden, drawn: container.children.length,
+    scrollTop: scroller ? scroller.scrollTop : null, screenDelta }
+}
+
+export function resetEventWindow(container) {
+  if (container === null || container === undefined || typeof container.querySelector !== 'function') return
+  container.setAttribute('data-trim-hidden-total', '0')
+  const note = container.querySelector('.ev-trim-note')
+  if (note !== null && note !== undefined && typeof note.remove === 'function') note.remove()
+}
+
+/** 事件列表真正在滚的那一层 ✓（`main` ✓；没有它时退回父节点 / 自己 ✓）。 */
+function scrollContainerOf(container) {
+  return typeof container.closest === 'function'
+    ? (container.closest('main') || container.parentElement || container)
+    : (container.parentElement || container)
+}
+
+/**
+ * ★★ 「轨迹」视图要摊开哪些事件 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## 这判据是从哪来的（★ 不是我定的 ✗）
+ *
+ * 复刻清单第 3 项的原话 ✓：轨迹视图 = **同一批事件的另一条渲染路** ✓，
+ * 「把 **`step` / `tool` 那类事件**按**步骤列表**摊开」✓ ——
+ * 而 `step` / `tool` 正是 {@link classify} 已经有的两个种类 ✓
+ * ⇒ 这里**只做挑选** ✓，**不新造分类** ✗（同一件事只有一个真相来源 ✓）。
+ *
+ * ★ 为什么不换一套判据 ✗：`classify()` 是本文件里"什么事件长什么样"的**唯一**判据 ✓
+ *   （审批、思维链、认不出的类型全在它里面 ✓）。在这儿再写一遍 `text.includes('tool')`
+ *   就是第二个真相来源 ✓ —— 改一处漏一处，而且**改错了在屏幕上完全看不出来** ✗。
+ *
+ * @param {object} event 一条事件（`{seq,time,type,data}` ✓）
+ */
+export function isTraceEvent(event) {
+  const view = toViewModel(event)
+  return view.kind === 'step' || view.kind === 'tool'
+}
+
+/**
+ * 一条事件 ⇒ 轨迹视图里那个节点 ✓（`null` = 这条不进轨迹视图 ✓）。
+ *
+ * ## 复用，不是重写（★ 本仓规矩 ✓）
+ *
+ * 认种类走 {@link classify} ✓（在 `toViewModel` 里 ✓）、画法走 {@link renderEvent} ✓ ——
+ * **一个字都没新写** ✗（渲染分支：工具卡 / 一轮分隔线 / 出错 / 认不出的兜底 全在原处 ✓）。
+ * 这一层只回答"哪些进得来"✓（见 {@link isTraceEvent} ✓）。
+ *
+ * ★ 为什么不另写一套"更漂亮的步骤列表" ✗：那正是"两个渲染器"✗ ——
+ *   工具卡上的「展开 / 收起」、出错标记、思维链折叠这些**已经修好的行为**
+ *   会在轨迹视图里**全部消失** ✓（而且消失得看不出来 ✓）。
+ */
+export function renderTraceEvent(event, context) {
+  if (!isTraceEvent(event)) return null
+  return renderEvent(event, context)
+}
+
+/** 实际事件配对的泳道数据；时长模式移除未被任何span覆盖的空闲区间。 */
+export function traceTimeline(events, duration = false) {
+  const source = Array.isArray(events) ? events : []
+  const results = new Map(), starts = new Map()
+  for (const event of source) {
+    const data = event.data || {}
+    const id = data.callId || (data.message && data.message.toolCallId)
+    if (event.type === 'tool/result' && id) results.set(id, Number(event.time))
+    if (event.type === 'request/header' || event.type === 'step/start') {
+      starts.set(String(data.turn) + ':' + String(data.step), Number(event.time))
+    }
+  }
+  let turn = 0, step = 0
+  const spans = []
+  for (const event of source) {
+    const data = event.data || {}, view = toViewModel(event)
+    if (typeof data.turn === 'number') turn = data.turn
+    if (typeof data.step === 'number') step = data.step
+    if (!['user', 'agent', 'reasoning', 'tool', 'step', 'error'].includes(view.kind)) continue
+    const lane = view.kind === 'tool' ? 2 : ['agent', 'reasoning'].includes(view.kind) ? 1 : 0
+    let start = Number(data.startedAt ?? event.time)
+    if (!Number.isFinite(start) && typeof data.startedAt === 'string') start = Date.parse(data.startedAt)
+    let end = start
+    if (typeof data.timeSeconds === 'number' && Number.isFinite(data.timeSeconds)) end = start + Math.max(0, data.timeSeconds * 1000)
+    else if (event.type === 'tool/call' && results.has(data.callId)) end = results.get(data.callId)
+    else if (lane === 1) {
+      const began = starts.get(String(turn) + ':' + String(step))
+      if (Number.isFinite(began) && began <= start) { end = start; start = began }
+    }
+    if (duration && (!Number.isFinite(start) || !Number.isFinite(end))) continue
+    spans.push({ event, view, turn, step, lane, start, end: Math.max(start, end), milliseconds: Math.max(0, end - start) || 0 })
+  }
+  if (!duration) return { spans: spans.map((span, index) => ({ ...span, start: index, end: index + 1 })), extent: spans.length }
+  const sorted = [...spans].sort((a, b) => a.start - b.start)
+  if (!sorted.length) return { spans: [], extent: 0 }
+  const base = sorted[0].start
+  let coveredUntil = base, removedIdle = 0, extent = 0
+  for (const span of sorted) {
+    if (span.start > coveredUntil) removedIdle += span.start - coveredUntil
+    const end = Math.max(span.start + 1, span.end)
+    const projectedStart = span.start - base - removedIdle
+    span.start = projectedStart
+    span.end = end - base - removedIdle
+    coveredUntil = Math.max(coveredUntil, end)
+    extent = Math.max(extent, span.end)
+  }
+  return { spans, extent }
 }
 
 /**
@@ -446,6 +718,7 @@ function renderBodyInto(container, text) {
     }
   }
   container.textContent = text
+  container.setAttribute('data-render-fallback', '渲染器未就绪')
 }
 
 /** 一条事件 ⇒ 一个节点 ✓（`null` = 真的没什么可画的 ✓）。 */
@@ -471,6 +744,35 @@ export function renderEvent(event, context) {
   // ★ 逐字符编 ✓（空格也编成 `%20` ⇒ `decodeURIComponent` 能**原样**还原 ✓）
   wrapper.setAttribute('data-text-head', view.text.slice(0, 64).split('').map((ch) =>
     /[A-Za-z0-9\-_.~]/.test(ch) ? ch : encodeURIComponent(ch)).join(''))
+  /**
+   * ★★ 这条事件自己的 `seq`（长会话那一单 ✓）—— **只有数值型的才写** ✗。
+   *
+   * 为什么要它 ✗：裁剪之后，"屏上那几条**还是不是原来那几条、顺序还对不对**"
+   * 必须**能从 DOM 上直接读出来** ✓ —— 拿 `textContent` 去撞正文是"判据比被判断的
+   * 东西软"（正文里有引号 / 换行 / `<` ✓，本仓今天栽过 9+ 次 ✓）。
+   * 有了它，"最新几条仍在、顺序仍对"就是一条**机械可判**的读数 ✓。
+   * ★ 数值才写 ✗：`seq` 缺失的事件（`poller.js` 允许 ✓）写一个 `"null"` 进去，
+   *   读的人会以为它真有条号 ✓。
+   * ★ 放在**最后**写 ✗ —— 属性顺序就是 DOM dump 里的字符顺序 ✓，
+   *   既有断言里那两条正则（`class="ev ev-user"[^>]*>` 与
+   *   `data-type="assistant/message"[^>]*>`）都是**前缀匹配** ✓，
+   *   插在它们前面就会把既有断言打红 ✓（那是本单绝不许发生的事 ✓）。
+   */
+  const seq = event !== null && typeof event === 'object' ? event.seq : null
+  if (typeof seq === 'number') wrapper.setAttribute('data-seq', String(seq))
+
+  if (view.kind === 'meta') {
+    const details = document.createElement('details')
+    details.className = 'event-meta'
+    const summary = document.createElement('summary')
+    summary.textContent = view.type.startsWith('session-log-deepseek/') ? '会话记录已同步' : '输入队列已更新'
+    const raw = document.createElement('pre')
+    raw.textContent = JSON.stringify(event.data, null, 2)
+    details.appendChild(summary)
+    details.appendChild(raw)
+    wrapper.appendChild(details)
+    return wrapper
+  }
 
   if (view.kind === 'user' || view.kind === 'agent') {
     // ★ 思维链**默认折叠** ✓（口径同官方客户端的"思考"行 ✓）—— 点开才看全文 ✓
@@ -582,6 +884,12 @@ function approvalCard(view, context) {
   })
 
   if (state.showActions) {
+    /**
+     * ★★ 这张卡**还在等用户决定** ✗（长会话那一单 ✓）—— 裁剪那一层看见这个标记就**收手** ✓
+     *   （见 `isTrimmableEvent` ✓）：屏幕上少一次要你决定的事，比多几个 DOM 节点坏得多 ✓。
+     * ★ 只在 `showActions` 为真时写 ✗（已裁决的卡可以照常回收 ✓ —— 它已经没有可点的东西了 ✓）。
+     */
+    card.setAttribute('data-pending-approval', '1')
     const actions = document.createElement('div')
     actions.className = 'approval-actions'
     if (view.options.length > 0) {
@@ -639,10 +947,12 @@ function answerApproval(card, view, option, context) {
     status.textContent = '这一页没有接上裁决通道（按钮本不该能按）'
     return Promise.resolve()
   }
+  let accepted = false
   return Promise.resolve()
     .then(() => answer(view.requestId, option.id))
     .then((result) => {
       const ok = result !== null && typeof result === 'object' && result.ok === true
+      accepted = ok
       const outcome = result !== null && typeof result === 'object' && typeof result.outcome === 'string' ? result.outcome : ''
       status.textContent = ok
         ? '已提交：' + (outcome.length > 0 ? outcome : option.id)
@@ -650,6 +960,8 @@ function answerApproval(card, view, option, context) {
     })
     .catch((error) => {
       status.textContent = '没提交成功：' + (error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      if (!accepted && context && context.channelConnected === true) for (const button of buttons) button.disabled = false
     })
 }
 
@@ -678,7 +990,7 @@ function toolCard(view) {
   if (view.collapsed) {
     const hidden = document.createElement('span')
     hidden.className = 'tool-hidden'
-    hidden.textContent = '还有 ' + view.hiddenLines + ' 行'
+    hidden.textContent = view.hiddenLines > 0 ? '还有 ' + view.hiddenLines + ' 行' : '还有 ' + (view.text.length - view.body.length) + ' 字'
     head.appendChild(hidden)
   }
   const spacer = document.createElement('span')
@@ -700,7 +1012,8 @@ function toolCard(view) {
       body.textContent = expanded ? view.body : view.text
       toggle.textContent = expanded ? '展开' : '收起'
       const hiddenNote = head.querySelector('.tool-hidden')
-      if (hiddenNote !== null) hiddenNote.textContent = expanded ? '还有 ' + view.hiddenLines + ' 行' : '全部'
+      if (hiddenNote !== null) hiddenNote.textContent = expanded
+        ? (view.hiddenLines > 0 ? '还有 ' + view.hiddenLines + ' 行' : '还有 ' + (view.text.length - view.body.length) + ' 字') : '全部'
     })
     head.appendChild(toggle)
   }
@@ -874,40 +1187,140 @@ export function sendFailureHint(message) {
 }
 
 /**
- * 输入框**正下方那一行状态条**该写什么 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ * 那四格的**键**与顺序 ✓（纯 ASCII ✓ —— 验收按 `data-cell="<key>"` 定位那一格 ✗）。
  *
- * ## ★★ 为什么这里**不写**「45% · 488 轮 2525 步 · 1062M tok」✗
- *
- * 用户给的参照物上就是这三个数 ✓，而**今天这条路拿不到它们** ✗ —— 查证过程：
- *   · `session/page` 的结果 schema（`dsh-api-session-controller/lib/typert.host.js:558-580` ✓）
- *     只有 `records` + `hasMore` ✗（`projections` 在**单条会话**级别，
- *     不是这个按页端点给的东西）⇒ 桥 `normalizePage` 里那份 `values` 白名单
- *     （`packages/host/src/dsh-chat-bridge.ts:398-418` ✓）在真机上读到的是**不存在的字段** ✓；
- *   · 那三个数的真身是 DSH 的三个**会话投影** ✓：`sessionStats`（轮/步 ✓）+
- *     `tokenUsage`（token 总数 ✓）+ `contextPressure`（`pressureTokens / contextWindow` = 那个百分比 ✓）
- *     —— 定义分别见 `dsh-session-stats/lib/types/projection.js` 与
- *     `dsh-token-meter/lib/types/usage-projection.js` ✓；
- *   · 而**唯一**能读到投影的现成入口是 `session/projections` ✓ —— 桥已经在
- *     `resolveHeadSeq` 里调过它（`dsh-chat-bridge.ts:246-252` ✓），但**没有把值转给页面** ✗。
- *
- * ⇒ 规矩是**留空比编好** ✓（用户原话）。所以这一行只写页面**真的量到**的两样：
- *   「窗口内已读 N 条」+ 连接状态 ✓ —— 而且**说清它是窗口内的** ✗，
- *   免得被误读成"整个会话的 N 条"✓（那是另一个数 ✓）。
- *
- * ★ 接真数的方案（要改桥，不在本单范围 ✓）见报告第 4 节 ✓。
+ * ★ 顺序 = 真图顺序 ✓：上下文% → 轮 → 步 → tok ✓
+ *   （DSH 自己那一行是「换成 1 个比例格 + 2 颗药丸」的排法 ✓，
+ *   见 `StatsPills` + `ContextMeter` ✓ —— 逐条读数见报告第 1 节 ✓）。
  */
-export function statsStripText(input) {
-  const events = input !== null && typeof input === 'object' && typeof input.eventCount === 'number' && input.eventCount > 0
-    ? Math.floor(input.eventCount)
-    : 0
-  const connection = input !== null && typeof input === 'object' ? input.connection : 'unknown'
-  const parts = []
-  // ★ 一段都没有时**不留空串**（空串会让这一条塌成 0 高 ✓ ⇒ 几何就量不到了 ✗）
-  parts.push(events > 0 ? '窗口内已读 ' + events + ' 条' : '还没读到内容')
-  if (connection === 'offline') parts.push('断线')
-  else if (connection === 'online') parts.push('在线')
-  else parts.push('连接中…')
-  return parts.join(' · ')
+export const STATS_CELL_KEYS = Object.freeze(['context', 'turns', 'steps', 'tokens'])
+
+/** ★ 上下文那格的环：14px viewBox、半径 5.5、描边 2px ✓（逐字抄自 `ContextMeter` ✓）。 */
+export const STATS_RING_RADIUS = 5.5
+/** 环的周长 ✓（`stroke-dasharray` 的第二个数就用它 ✓ —— 与 DSH 同一条算式 ✓）。 */
+export const STATS_RING_CIRCUMFERENCE = 2 * Math.PI * STATS_RING_RADIUS
+/** token 求和要的**四个桶** ✓（名字取自 `dsh-token-meter` 的投影 ✓，一个不许漏 ✗）。 */
+const TOKEN_BUCKETS = Object.freeze(['uncachedInputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens'])
+
+/** 只认**真对象** ✓（数组 / `null` / 标量一律不认 ✗ —— 与桥那一层同一条纪律 ✓）。 */
+function recordOf(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+/**
+ * 取一个**非负安全整数** ✓（取不到 ⇒ `null` ✓ —— **绝不补 0** ✗）。
+ *
+ * ★ 这一行就是"键不存在 = 数据取不到"那条铁律的落点 ✓：
+ *   `0` 是**合法值**（⇒ 返回 `0` ✓），而"没有这个键 / 不是整数 / 是负数"
+ *   一律 `null` ✓ ⇒ 调用方据此**不画那一格** ✗。
+ */
+function countOf(source, key) {
+  const record = recordOf(source)
+  const value = record === null ? undefined : record[key]
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * token 总数怎么念 ✓（纯函数 ✓）—— ★ 判据**逐字抄自** DSH 自己的客户端 ✗，不是我们定的 ✓：
+ *
+ * · `@deepseek-ai/dsh-client-ui-chat/lib/client.js` 的 `formatTokens()` ✓；
+ * · `@deepseek-ai/dsh-client-ui-conversation/lib/client.js` 里那个**同名同体**的函数 ✓
+ *   （两份独立文件逐字相同 ⇒ 这条口径不是某一处的笔误 ✓）。
+ *
+ * ```
+ * scaled = c >= 100 ? round(c) : round(c*10)/10        // ★ ≥100 取整、否则一位小数 ✓
+ * value < 1e3  ⇒ 原数 ✓
+ * value < 1e6  ⇒ scaled(value/1e3) + 「K」✓
+ * 否则          ⇒ scaled(value/1e6) + 「M」✓
+ * ```
+ * 单位后缀取自语言包 ✓（`"number.thousand": "{value}K"` / `"number.million": "{value}M"` ✓）。
+ * ★ 认不出（负数 / `NaN` / 不是数）⇒ 空串 ✓（调用方据此不画那一格 ✗）。
+ */
+export function formatTokenCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return ''
+  const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
+  if (value < 1e3) return String(value)
+  if (value < 1e6) return scaled(value / 1e3) + 'K'
+  return scaled(value / 1e6) + 'M'
+}
+
+/**
+ * 输入框**正下方那一行状态条**该画哪几格 ✓（纯函数 ✓ —— 不碰 DOM ⇒ 能单测 ✓）。
+ *
+ * ## 四格的官方口径（★ 逐条抄自 DSH 自己的客户端 ✗，不是我们定的 ✓）
+ *
+ * | 格子 | 读 | 口径 |
+ * |---|---|---|
+ * | 上下文% | `values.contextPressure` | `used = projectedTokens ?? pressureTokens` ✓；`min(100, round(used / contextWindow × 100))` + `%` ✓ |
+ * | 轮 | `values.sessionStats.turns` | 整数 + 「轮」✓ |
+ * | 步 | `values.sessionStats.steps` | 整数 + 「步」✓ |
+ * | tok | `values.tokenUsage` **四个桶求和** | 见 {@link formatTokenCount} ✓ |
+ *
+ * 出处（都在 `app.asar` 里读出来 ✓）：
+ * · 百分比 ⇒ `dsh-client-ui-conversation/lib/client.js` 的 `contextOccupancy()` ✓
+ *   （`projectedTokens ?? pressureTokens` ✓；缺 used 或 `contextWindow` ⇒ 返回 `null` ⇒
+ *   **那一格不画** ✗ —— 同一条纪律我们照抄 ✓）；
+ * · 轮 / 步 / 求和 ⇒ `dsh-client-ui-chat/lib/client.js` 的 `StatsPills()` ✓
+ *   （`billedInputTokens(usage) + usage.outputTokens` ✓，其中
+ *   `billedInputTokens = uncachedInputTokens + cacheReadTokens + cacheWriteTokens` ✓）；
+ * · 文案 ⇒ 同包中文语言包 `"stats.counts": "{turns} 轮 {steps} 步"` ✓。
+ *
+ * ## ★★ 铁律：**键不存在 = 数据取不到 = 那一格不画** ✗
+ *
+ * 不许退化成 `0` ✗、不许填编造的值 ✗；而 DSH **自己报的真实 0**（例如 `turns: 0`）
+ * **照常显示 `0 轮`** ✓ —— "没有这个数"与"这个数是 0"是两件事 ✓。
+ * 取不到 ⇒ 这一格**整个不产出** ✓ ⇒ 调用方（`renderStatsStrip` ✓）据此决定整条要不要占高度 ✓。
+ *
+ * ★ 比 DSH 多一道守卫 ✗：`tokenUsage` 的四个桶**必须都在**才算得出那一格 ✓ ——
+ *   少一个桶的"和"是一个**偏小的假数** ✓（桥那边的字段真形状是四个都在 ✓；
+ *   真要缺了，宁可这一格不画 ✗，也不报一个错的 tok 数 ✗）。
+ *
+ * @param {unknown} values `boot.chatProjections().values` ✓（**可能有、可能没有**的键 ✓）
+ * @returns {Array<{key: string, text: string, percent?: number}>} 只含**取得到**的那几格 ✓（顺序固定 ✓）
+ */
+export function statsCells(values) {
+  const source = recordOf(values)
+  const cells = []
+
+  // ① 上下文% ✓（`used` 或 `contextWindow` 任一取不到 ⇒ 这一格不画 ✗）
+  const pressure = source === null ? null : recordOf(source.contextPressure)
+  if (pressure !== null) {
+    const projected = countOf(pressure, 'projectedTokens')
+    const reported = countOf(pressure, 'pressureTokens')
+    const used = projected !== null ? projected : reported
+    const window = countOf(pressure, 'contextWindow')
+    if (used !== null && window !== null && window > 0) {
+      const percent = Math.min(100, Math.round((used / window) * 100))
+      cells.push({ key: 'context', text: percent + '%', percent })
+    }
+  }
+
+  // ② 轮 / ③ 步 ✓（各自独立取 ✓ —— 一个取不到不影响另一个 ✓）
+  const stats = source === null ? null : recordOf(source.sessionStats)
+  const turns = countOf(stats, 'turns')
+  if (turns !== null) cells.push({ key: 'turns', text: turns + ' 轮' })
+  const steps = countOf(stats, 'steps')
+  if (steps !== null) cells.push({ key: 'steps', text: steps + ' 步' })
+
+  // ④ tok ✓（四个桶求和 ✓ —— 少一个桶就不算这一格 ✗）
+  const usage = source === null ? null : recordOf(source.tokenUsage)
+  if (usage !== null) {
+    const buckets = TOKEN_BUCKETS.map((key) => countOf(usage, key))
+    if (buckets.every((count) => count !== null)) {
+      const total = buckets.reduce((sum, count) => sum + count, 0)
+      const text = formatTokenCount(total)
+      if (text.length > 0) cells.push({ key: 'tokens', text: text + ' tok' })
+    }
+  }
+
+  return cells
+}
+
+/** 四格拼成一行字 ✓（**只给日志/排障念** ✗ —— DOM 那条路是 {@link mountChat} 里现搭的 ✓）。 */
+export function statsStripText(values) {
+  return statsCells(values)
+    .map((cell) => cell.text)
+    .join(' · ')
 }
 
 /**
@@ -991,13 +1404,89 @@ export function computePageState(input) {
 export function mountChat(options) {
   const root = options.root
   const list = root.querySelector('#messages')
+  /**
+   * ★ 钩子是**外面装的** ✓（`globalThis.__DSHM_CHAT_PAGE__.measure` ✓）——
+   *   页面自己**不定义**它 ✓：没装的时候 `typeof measure !== 'function'` ⇒ 一个字节都不做 ✓
+   *   （生产页面上不花这份钱 ✓，而验收与真机调试框装得上 ✓）。
+   * ★★ **每次现取，不许在装配时缓存** ✗：验收那一套是**先让页面跑完一整帧、
+   *   再把钩子装上**的 ✓（`--dump-dom` 只给一帧 ✓，见本文件头那两条实测 ✓）——
+   *   缓存下来就是"钩子永远装不上"✓，而那看起来完全像"这一条验过了"✗。
+   */
+  const measure = (record) => {
+    const hook = globalThis.__DSHM_CHAT_PAGE__
+    if (hook === null || hook === undefined || typeof hook.measure !== 'function') return
+    try {
+      hook.measure(record)
+    } catch (error) {
+      void error
+    }
+  }
+  const dock = root.querySelector('#interactions')
   const form = root.querySelector('#composer')
   const input = root.querySelector('#input')
   const status = root.querySelector('#status')
   const stateBox = root.querySelector('#state')
   const refresh = root.querySelector('#refresh')
-  /** ★ 输入框正下方那一行状态条（位置与样式先留出来 ✓ —— 内容见 `statsStripText` ✓）。 */
+  /**
+   * ★★ 输入框**正下方**那一行紧凑状态条 ✓ —— 四格：上下文% / 轮 / 步 / tok ✓。
+   *
+   * ## 数据从哪来（★ 页面侧**只有**这一个入口 ✗）
+   *
+   * `boot.chatProjections()` ✓（`app.js:456` ✓）⇒ `{asOfSeq, values}` ✓ ——
+   * 宿主那条流路由把**开场快照自带的投影**接进去 ✓（`rememberProjections` ✓）。
+   * ★ 每次 `paint()` **现取** ✓、不缓存 ✗：投影是"每个会话第一帧一次"✓，
+   *   缓存它就会在切会话之后还念上一个会话的数 ✓（在手机上完全看不出来 ✗）。
+   * ★ 取不到（老宿主 / 没有投影 / 桥还没接上 ✓）⇒ `null` ✓ ⇒ 四格全部不画 ✓。
+   *
+   * ## ★★ 四格全取不到 ⇒ 这条**不占高度** ✗
+   *
+   * 这是**故意**的 ✓，也正是这条口径与改前那条注释的关系 ✗：改前这一行只会写
+   * 「窗口内已读 N 条 · 在线」✓ ⇒ **恒有字** ✓ ⇒ 它的前提是"绝不会塌成 0 高"✓。
+   * 现在这一行**会**塌（没有投影时 ✓），所以：
+   *   · `hidden` 走 `display:none` ✓（`.stats-strip[hidden]` 那条规则是**必须的** ✗ ——
+   *     与 `#messages[hidden]` / `#sessions[hidden]` 同一个坑：作者样式的 `display:flex`
+   *     会盖掉 UA 的 `[hidden]` ✓ ⇒ 不写就是"藏着还占 22px"✓）；
+   *   · ★ 于是**几何断言必须跑在"有投影"的那一档上** ✗ —— 在有投影的夹具里量高度 ✓；
+   *     没有投影的那一档量的是"塌陷"（`display:none` + 高 0 ✓），不是"这条有多高" ✓
+   *     （本仓原话：空串会让这一条塌成 0 高 ⇒ 几何就量不到了 ✗ —— 现在这一条**是**要量的那条 ✓）。
+   *
+   * ## 纯展示（★ 本仓规矩：不假装能用 ✗）
+   *
+   * 四格**不是按钮** ✓（`<span>` ✓，没有 `click`、没有 `cursor:pointer` ✓）——
+   * DSH 自己那三格点开是三个宿主面板 ✓，而它们**只存在于 DSH 自己的 React 页**上 ✓
+   * （我们这一页没有可转发的锚点 ✗）⇒ 按照"要提供交互就该像审批卡那样有真实通道"✓，
+   * 没有通道就**不做**交互 ✗。
+   */
   const statsStrip = root.querySelector('#stats-strip')
+  /**
+   * ★ 上一次画进 DOM 的那四格（`null` = 还没画过 ✓）。
+   *
+   * ★ 为什么要它 ✗：`paint()` 会被**每一批事件**触发 ✓，而四格的值一小时也不变一次 ✓
+   *   ⇒ 不挡住就是"每条消息都重建一次 DOM"✓（白烧电 ✓，还会把环的过渡打断 ✗）。
+   * ★ 初值必须是 `null` 而**不是** `''` ✗：空串与"四格全没有"的键**撞车** ✓
+   *   ⇒ 第一次 `paint()`（那时候正好没有投影）会被当成"没变"而**跳过** ✓
+   *   ⇒ `hidden` 永远不设 ⇒ 那 22px 空带一直在 ✓（塌陷那条断言也就假绿了 ✓）。
+   */
+  let statsDrawnKey = null
+  /**
+   * ★★ 「对话｜轨迹」标签栏（复刻清单第 3 项 ✓）—— 三样东西：两个 tab、两个视图层、一个读数 ✓。
+   *
+   * ★ 视图**不是两套数据** ✗：同一批事件同时喂给 `#messages`（对话 ✓）与 `#trace`（轨迹 ✓），
+   *   只是两条**渲染路**不同 ✓（轨迹那条见 `renderTraceEvent` ✓）。
+   *   ⇒ 切标签**不重画、不清屏、不重新取数** ✓ —— 切回去时对话视图还是原来那一屏 ✓
+   *     （"切一下就白屏"是本仓零容忍的那一类 ✓）。
+   */
+  const tabs = root.querySelector('#tabs')
+  const tabChat = root.querySelector('#tab-chat')
+  const tabTrace = root.querySelector('#tab-trace')
+  const chatView = root.querySelector('#messages')
+  const traceView = root.querySelector('#trace')
+  /**
+   * ★ 轨迹视图里现在**画了几条** ✓（`0` ⇒ 摆一句"还没有步骤"✓）。
+   *   ★ 为什么不用 `traceView.childElementCount` ✗：那就是"拿 DOM 当变量"✓ ——
+   *     那句占位话自己也是一个孩子 ✓ ⇒ 数出来恒 ≥1 ⇒ 占位话**再也撤不掉** ✓。
+   */
+  let traceSteps = 0
 
   // 这一页的**输入**（三样 ✓）—— 状态完全由它们算出来 ✓（不在渲染里各写一份判断 ✗）
   let eventCount = 0
@@ -1027,6 +1516,19 @@ export function mountChat(options) {
    *   ★ 探测结果可能比卡片**晚到** ✓ ⇒ 变了必须把已经画出来的卡**就地重画** ✓（见下 ✓）。
    */
   let approvalChannelConnected = false
+  let questionChannelConnected = false, uploadChannelConnected = false
+  let interactionValues = { active: [], settled: [] }
+  const answeredQuestions = new Set()
+  const questionCards = new Map()
+  const questionEventIds = new Set()
+  const attachmentDrafts = new Map()
+  const activeAttachments = () => attachmentDrafts.get(currentSessionId) || []
+  const dockChanged = () => {
+    if (!dock) return
+    dock.hidden = dock.children.length === 0
+    // 老宿主缺应答能力时保留草稿入口；通道已接通的待办接管输入区。
+    if (form) form.hidden = !dock.hidden && (approvalChannelConnected || questionChannelConnected)
+  }
   /**
    * ★ 那本账之一：`requestId ⇒ 那条 approval/decided` ✓。
    *   ★ 为什么非得有它 ✗：裁决事件可能比那张卡**晚到** ✓（页面是分批轮询的 ✓），
@@ -1045,7 +1547,27 @@ export function mountChat(options) {
       const id = approvalIdOf(event)
       return id.length > 0 ? decidedApprovals.get(id) : undefined
     },
-    answer: options.answerApproval,
+    dock, dockChanged,
+    isQuestionEvent: event => {
+      const data = event.data || {}
+      if ((event.type === 'tool/call' || event.type === 'tool/ptc-dispatch') && data.name === 'ask_user_question') {
+        questionEventIds.add(data.callId || data.subCallId)
+        return true
+      }
+      return event.type === 'tool/result' && questionEventIds.has(data.callId || (data.message && data.message.toolCallId))
+    },
+    answer: async (id, decision) => {
+      const session = currentSessionId
+      const result = await options.answerApproval(id, decision)
+      if (session === currentSessionId && result && result.ok === true) {
+        const drawn = drawnApprovals.get(id)
+        if (drawn) drawn.wrapper.remove()
+        drawnApprovals.delete(id)
+        decidedApprovals.set(id, { type: 'approval/decided', data: { id, decision } })
+        dockChanged()
+      }
+      return result
+    },
   })
 
   /** 这一批里的 `approval/decided` 入账 ✓（返回**这一批新增**的那些 ✓）。 */
@@ -1076,7 +1598,8 @@ export function mountChat(options) {
       const drawn = drawnApprovals.get(id)
       if (drawn === undefined) continue
       drawnApprovals.delete(id)
-      redrawApproval(drawn.wrapper, drawn.event, decided)
+      drawn.wrapper.remove()
+      dockChanged()
     }
   }
 
@@ -1086,8 +1609,9 @@ export function mountChat(options) {
    *   画卡那条路是纯函数 ✓（`appendEvents`/`renderEvent` 不碰页面状态 ✓）。
    */
   const registerDrawnApprovals = (events) => {
-    if (typeof list.querySelectorAll !== 'function') return
-    for (const card of list.querySelectorAll('.approval[data-request]')) {
+    const container = dock || list
+    if (typeof container.querySelectorAll !== 'function') return
+    for (const card of container.querySelectorAll('.approval[data-request]')) {
       const id = String(card.getAttribute('data-request') || '')
       if (id.length === 0 || drawnApprovals.has(id)) continue
       const asked = (Array.isArray(events) ? events : []).filter((event) => approvalIdOf(event) === id)[0]
@@ -1105,9 +1629,123 @@ export function mountChat(options) {
     const next = connected === true
     if (next === approvalChannelConnected) return
     approvalChannelConnected = next
+    dockChanged()
     for (const [id, drawn] of [...drawnApprovals]) {
       redrawApproval(drawn.wrapper, drawn.event, decidedApprovals.get(id))
     }
+  }
+  const renderQuestion = entry => {
+    if (!dock || !entry || typeof entry.callId !== 'string' || !Array.isArray(entry.questions)) return
+    const signature = JSON.stringify(entry)
+    const previous = questionCards.get(entry.callId)
+    if (previous && previous.signature === signature) return
+    if (previous) previous.node.remove()
+    const card = document.createElement('form')
+    card.className = 'question-card'
+    card.setAttribute('data-call-id', entry.callId)
+    const title = document.createElement('div')
+    title.className = 'question-title'
+    title.textContent = entry.state === 'continued' ? '等待你的选择（任务已继续）' : '等待你的选择'
+    card.appendChild(title)
+    const fields = []
+    for (const q of entry.questions) {
+      const field = document.createElement('fieldset')
+      const legend = document.createElement('legend')
+      legend.textContent = q.question || q.header || q.id
+      field.appendChild(legend)
+      if (q.detail) { const detail = document.createElement('p'); detail.textContent = q.detail; field.appendChild(detail) }
+      const inputs = []
+      const custom = document.createElement('textarea')
+      custom.rows = 1
+      custom.placeholder = '补充或自行填写'
+      custom.setAttribute('aria-label', (q.header || q.question || q.id) + ' 自定义回答')
+      custom.disabled = !questionChannelConnected
+      for (const option of Array.isArray(q.options) ? q.options : []) {
+        const label = document.createElement('label')
+        label.className = 'question-option'
+        const choice = document.createElement('input')
+        choice.type = q.multiSelect ? 'checkbox' : 'radio'
+        choice.name = entry.callId + ':' + q.id
+        choice.value = option.label
+        choice.disabled = !questionChannelConnected
+        const text = document.createElement('span')
+        text.textContent = option.label
+        if (option.description) { const detail = document.createElement('small'); detail.textContent = option.description; text.appendChild(detail) }
+        label.append(choice, text)
+        choice.addEventListener('change', () => { if (!q.multiSelect) custom.value = ''; updateSubmit() })
+        inputs.push(choice)
+        field.appendChild(label)
+      }
+      custom.addEventListener('input', () => { if (!q.multiSelect && custom.value.trim()) inputs.forEach(input => { input.checked = false }); updateSubmit() })
+      field.appendChild(custom)
+      fields.push({ q, inputs, custom })
+      card.appendChild(field)
+    }
+    const submit = document.createElement('button')
+    submit.type = 'submit'
+    submit.className = 'question-submit'
+    submit.textContent = '提交选择'
+    const why = document.createElement('div')
+    why.className = 'question-status'
+    why.setAttribute('role', 'status')
+    why.textContent = questionChannelConnected ? '' : '选择应答通道未接通（请重开 DeepSeek Harness）'
+    card.append(submit, why)
+    let busy = false
+    const updateSubmit = () => { submit.disabled = busy || !questionChannelConnected || !fields.length || fields.some(f => !f.inputs.some(i => i.checked) && !f.custom.value.trim()) }
+    updateSubmit()
+    card.addEventListener('submit', async event => {
+      event.preventDefault()
+      if (submit.disabled || typeof options.answerQuestion !== 'function') return
+      const answers = fields.map(f => ({ id: f.q.id, selected: f.inputs.filter(i => i.checked).map(i => i.value), ...(f.custom.value.trim() ? {custom:f.custom.value.trim()} : {}) }))
+      const session = currentSessionId
+      busy = true
+      updateSubmit()
+      fields.forEach(f => [...f.inputs,f.custom].forEach(i => { i.disabled = true }))
+      why.textContent = '正在提交…'
+      try {
+        const result = await options.answerQuestion(entry.callId, answers)
+        if (session !== currentSessionId) return
+        if (!result || result.accepted !== true || result.ok !== true) throw new Error('请求已处理或已超时，本次选择未被接收')
+        answeredQuestions.add(entry.callId)
+        questionCards.delete(entry.callId)
+        card.remove()
+        dockChanged()
+        setNotice('选择已提交')
+      } catch (error) {
+        why.textContent = '没提交成功：' + (error instanceof Error ? error.message : String(error))
+        busy = false
+        fields.forEach(f => [...f.inputs,f.custom].forEach(i => { i.disabled = !questionChannelConnected }))
+        updateSubmit()
+      }
+    })
+    questionCards.set(entry.callId, { node: card, signature })
+    dock.appendChild(card)
+  }
+  const setInteractions = value => {
+    const questions = value && value.values ? value.values.userQuestions : value && value.userQuestions
+    if (!questions || !Array.isArray(questions.active)) return
+    interactionValues = questions
+    const activeIds = new Set(questions.active.map(entry => entry.callId))
+    for (const [id, card] of questionCards) {
+      if (!activeIds.has(id)) { card.node.remove(); questionCards.delete(id) }
+    }
+    for (const entry of questions.active) if (!answeredQuestions.has(entry.callId)) renderQuestion(entry)
+    dockChanged()
+  }
+  const setChannels = channels => {
+    if (!channels || typeof channels !== 'object') return
+    setApprovalChannel(channels.approval === true)
+    const changed = questionChannelConnected !== (channels.question === true)
+    questionChannelConnected = channels.question === true && typeof options.answerQuestion === 'function'
+    uploadChannelConnected = channels.upload === true && typeof options.upload === 'function'
+    if (changed) {
+      for (const card of questionCards.values()) card.node.remove()
+      questionCards.clear()
+      setInteractions({ userQuestions: interactionValues })
+    }
+    dockChanged()
+    paintComposer()
+    console.log('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
   }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
@@ -1115,6 +1753,102 @@ export function mountChat(options) {
    *  刻意**不**用"事后包一层 paint"的写法 ✗：那既容易写成 `const` 重赋值（运行时才炸 ✓），
    *  也正是上一轮记下的坏味道（别靠改别人的东西接线 ✓）。 */
   let paintComposer = () => {}
+
+  /**
+   * 现取一次宿主给的**会话投影** ✓（`boot.chatProjections()` ✓ —— 页面侧唯一入口 ✓）。
+   *
+   * ★ 认不出一律 `null` ✓：老宿主没有这个函数 ✓、它抛 ✓、它给的形状不对 ✓ ——
+   *   三种都当成"取不到"✓ ⇒ 四格全不画 ✓（**绝不许**因此画一个 0 ✗ 或 `-` ✗）。
+   */
+  const readProjectionValues = () => {
+    const boot = globalThis.__DSH_MOBILE_BOOT__
+    const read = boot === null || boot === undefined ? undefined : boot.chatProjections
+    if (typeof read !== 'function') return null
+    try {
+      const snapshot = read()
+      const values = snapshot !== null && typeof snapshot === 'object' ? snapshot.values : null
+      return values !== null && typeof values === 'object' ? values : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  /** 沿用我们现有紧凑条的 56×6 进度条；百分比来自真实投影。 */
+  const contextProgress = (percent) => {
+    const bar = document.createElement('span')
+    bar.className = 'stats-progress'
+    bar.setAttribute('role', 'progressbar')
+    bar.setAttribute('aria-label', '上下文占用')
+    bar.setAttribute('aria-valuemin', '0')
+    bar.setAttribute('aria-valuemax', '100')
+    bar.setAttribute('aria-valuenow', String(percent))
+    const fill = document.createElement('span')
+    fill.className = 'stats-progress-fill'
+    fill.style.width = String(percent) + '%'
+    bar.appendChild(fill)
+    return bar
+  }
+
+  /**
+   * 把那四格画进 DOM ✓（**取不到的那一格整个不产出** ✗ —— 连分隔符也不留 ✓）。
+   *
+   * ★ 次序与 DOM：`span.stats-cell[data-cell=…]` 一串 ✓，两格之间一个
+   *   `span.stats-sep`（「·」✓）—— 分隔符**跟着数据走** ✗（画在"前两格之间"而不是
+   *   "四个位置各留一个"✓，否则缺一格时就会留下一个孤零零的「·」✓）。
+   * ★ `innerHTML` 一个字都不用 ✗（这里全是自己造的字 ✓，但同一条纪律照守 ✓）。
+   */
+  const renderStatsStrip = () => {
+    if (statsStrip === null || statsStrip === undefined) return
+    const values = readProjectionValues()
+    const cells = statsCells(values)
+    const key = cells.map((cell) => cell.key + '=' + cell.text).join('|')
+    // ★ 内容没变 ⇒ 一个字节都不动 ✓（`paint()` 每批事件都会跑 ✓）
+    if (key === statsDrawnKey) return
+    statsDrawnKey = key
+    /**
+     * ★ 真机排障用的一行 ✓（本仓规矩：真机才现形的问题要**在调试框里留一行可念的**✗）——
+     *   用户报"这一条怎么没了 / 怎么少一格"时，这一行就是答案 ✓。
+     * ★ 只在**变了**的时候念 ✓（四格一小时也难得变一次 ✓ —— 不会刷屏 ✓）。
+     * ★ 与 `app.js` 那句"开场快照的投影：… 三个键命中 N/3"配成一对 ✓
+     *   （那句说**宿主给了什么** ✓，这句说**页面画了什么** ✓）。
+     */
+    try {
+      console.log(
+        '[dsh-chat] 状态条：' +
+          (cells.length === 0 ? '（投影取不到 ⇒ 这一条不占高度）' : statsStripText(values)),
+      )
+    } catch (error) {
+      // ★ 念不出来也不许影响画 ✗（老壳的 console 可能被摘掉 ✓）
+      void error
+    }
+    if (typeof statsStrip.replaceChildren === 'function') statsStrip.replaceChildren()
+    else statsStrip.textContent = ''
+    // ★★ 四格全取不到 ⇒ **整条不占高度** ✗（`hidden` 的 `display:none` 写在 theme.css 里 ✓）
+    if (cells.length === 0) {
+      statsStrip.hidden = true
+      return
+    }
+    statsStrip.hidden = false
+    for (let index = 0; index < cells.length; index += 1) {
+      if (index > 0) {
+        const sep = document.createElement('span')
+        sep.className = 'stats-sep'
+        sep.setAttribute('aria-hidden', 'true')
+        sep.textContent = '·'
+        statsStrip.appendChild(sep)
+      }
+      const cell = document.createElement('span')
+      cell.className = 'stats-cell'
+      // ★ 纯 ASCII 的钩子 ✓（验收按它找那一格 ✓，DOM 上看不出区别 ✓）
+      cell.setAttribute('data-cell', cells[index].key)
+      if (cells[index].key === 'context') cell.appendChild(contextProgress(cells[index].percent))
+      const text = document.createElement('span')
+      text.className = 'stats-text'
+      text.textContent = cells[index].text
+      cell.appendChild(text)
+      statsStrip.appendChild(cell)
+    }
+  }
 
   const paint = () => {
     const view = computePageState({ loading, eventCount, error, connection })
@@ -1125,10 +1859,9 @@ export function mountChat(options) {
       normal: pendingSwitch ? '正在切换会话…（下面的内容还在）' : view.statusText,
     })
     if (status !== null && status !== undefined) status.textContent = line
-    // ★ 输入框正下方那一行：**只写真读数** ✓（口径与"为什么不是那三个数"见 `statsStripText` ✓）
-    if (statsStrip !== null && statsStrip !== undefined) {
-      statsStrip.textContent = statsStripText({ eventCount, connection })
-    }
+    // ★ 输入框正下方那一行：**四格只画取得到的那几格** ✓（口径见 `statsCells` ✓、
+    //   塌陷与"为什么不占高度"见 `statsStrip` 那一段 ✓）
+    renderStatsStrip()
     if (typeof options.onStatus === 'function') options.onStatus(line)
     if (stateBox !== null && stateBox !== undefined) {
       stateBox.hidden = view.showInList !== true
@@ -1228,18 +1961,209 @@ export function mountChat(options) {
     }
   }
 
+  const sessionMenu = root.querySelector('#session-menu')
   const hideSessions = () => {
     if (sessionPanel !== null && sessionPanel !== undefined) sessionPanel.hidden = true
+    if (sessionMenu) sessionMenu.setAttribute('aria-expanded', 'false')
   }
+  if (sessionMenu) sessionMenu.addEventListener('click', () => titleButton && titleButton.click())
 
   if (titleButton !== null && titleButton !== undefined) {
     titleButton.addEventListener('click', () => {
       if (sessionPanel === null || sessionPanel === undefined) return
       const willShow = sessionPanel.hidden !== false
       sessionPanel.hidden = !willShow
+      if (sessionMenu) sessionMenu.setAttribute('aria-expanded', String(willShow))
       if (willShow) paintSessions()
     })
   }
+
+  // 轨迹的工具栏、三泳道总览与同源详情。只保留最近200个事件。
+  const traceToolbar = document.createElement('div')
+  traceToolbar.className = 'trace-toolbar'
+  const traceGraph = document.createElement('div')
+  traceGraph.className = 'trace-graph'
+  const traceList = document.createElement('div')
+  traceList.className = 'trace-list'
+  const traceEmpty = document.createElement('div')
+  traceEmpty.className = 'trace-empty'
+  traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
+  let traceEvents = []
+  let actualDuration = false, turnsOpen = true, callsOpen = true
+  const traceSearch = document.createElement('input')
+  traceSearch.type = 'search'
+  traceSearch.placeholder = '搜索轨迹'
+  traceSearch.setAttribute('aria-label', '搜索轨迹')
+  const traceControls = {}
+  for (const [key, label] of [['duration', '时长'], ['turns', '轮次'], ['calls', '调用']]) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = label
+    button.setAttribute('data-trace-control', key)
+    button.setAttribute('aria-pressed', String(key !== 'duration'))
+    traceControls[key] = button
+    traceToolbar.appendChild(button)
+  }
+  traceToolbar.appendChild(traceSearch)
+  const installTrace = () => {
+    if (traceView) traceView.replaceChildren(traceToolbar, traceGraph, traceList, traceEmpty)
+  }
+  const refreshTraceEmpty = () => { traceEmpty.hidden = traceSteps > 0 }
+  const drawTrace = () => {
+    if (!traceView) return
+    const query = traceSearch.value.trim().toLowerCase()
+    const cells = traceTimeline(traceEvents, actualDuration)
+    const visible = cells.spans.filter(span => !query || (span.view.title + ' ' + span.view.text).toLowerCase().includes(query))
+    traceSteps = cells.spans.filter(span => isTraceEvent(span.event)).length
+    traceList.replaceChildren()
+    const turns = new Map(), groups = new Map()
+    for (const span of visible) {
+      const turn = span.turn
+      let section = turns.get(turn)
+      if (!section) {
+        section = document.createElement('details')
+        section.className = 'trace-turn'
+        section.open = turnsOpen
+        const summary = document.createElement('summary')
+        summary.textContent = turn ? '第 ' + turn + ' 轮' : '会话开始'
+        section.appendChild(summary)
+        turns.set(turn, section)
+        traceList.appendChild(section)
+      }
+      let parent = section
+      if (span.lane > 0) {
+        const key = turn + ':' + span.step
+        let group = groups.get(key)
+        if (!group) {
+          group = document.createElement('details')
+          group.className = 'trace-call'
+          group.open = callsOpen
+          const summary = document.createElement('summary')
+          summary.textContent = '调用 ' + (span.step || '记录')
+          group.appendChild(summary)
+          groups.set(key, group)
+          section.appendChild(group)
+        }
+        parent = group
+      }
+      let node = renderTraceEvent(span.event, approvalContext())
+      if (!node) {
+        node = document.createElement('div')
+        node.className = 'trace-record'
+        node.textContent = span.view.title + (span.view.text ? '：' + span.view.text : '')
+      }
+      node.setAttribute('data-trace-seq', String(span.event.seq))
+      parent.appendChild(node)
+    }
+    traceGraph.replaceChildren()
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 360 112')
+    svg.setAttribute('role', 'img')
+    svg.setAttribute('aria-label', '输入、模型、工具三条泳道的会话轨迹')
+    svg.setAttribute('data-mode', actualDuration ? 'duration' : 'sequence')
+    const createSvg = (tag, attrs, text) => {
+      const node = document.createElementNS(svg.namespaceURI, tag)
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value))
+      if (text) node.textContent = text
+      svg.appendChild(node)
+      return node
+    }
+    for (let lane = 0; lane < 3; lane++) {
+      createSvg('text', { x: 0, y: 20 + lane * 30, class: 'trace-lane-label' }, ['输入', '模型', '工具'][lane])
+      createSvg('line', { x1: 38, x2: 358, y1: 24 + lane * 30, y2: 24 + lane * 30, class: 'trace-grid' })
+    }
+    const extent = Math.max(1, cells.extent)
+    for (const span of visible) {
+      const bar = createSvg('rect', { x: 40 + span.start / extent * 316, y: 9 + span.lane * 30,
+        width: Math.max(2, (span.end - span.start) / extent * 316), height: 14, rx: 2,
+        class: 'trace-bar trace-lane-' + span.lane, 'data-seq': span.event.seq, role: 'button', tabindex: 0 })
+      const title = document.createElementNS(svg.namespaceURI, 'title')
+      title.textContent = span.view.title + ' · ' + (span.milliseconds / 1000).toFixed(2) + ' 秒'
+      bar.appendChild(title)
+      bar.setAttribute('aria-label', title.textContent)
+      const reveal = () => {
+        const row = Array.from(traceList.querySelectorAll('[data-trace-seq]')).find(n => n.getAttribute('data-trace-seq') === String(span.event.seq))
+        if (!row) return
+        let parent = row.parentElement
+        while (parent && parent !== traceList) { if (parent.tagName === 'DETAILS') parent.open = true; parent = parent.parentElement }
+        row.scrollIntoView({ block: 'center' })
+        traceList.querySelectorAll('.is-selected').forEach(n => n.classList.remove('is-selected'))
+        row.classList.add('is-selected')
+      }
+      bar.addEventListener('click', reveal)
+      bar.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); reveal() } })
+    }
+    traceGraph.appendChild(svg)
+    const caption = document.createElement('div')
+    caption.className = 'trace-caption'
+    caption.textContent = actualDuration ? '有效时长 ' + (cells.extent / 1000).toFixed(2) + ' 秒（空闲已压缩）' : visible.length + ' 条记录 · 按事件顺序'
+    traceGraph.appendChild(caption)
+    traceEmpty.hidden = visible.length > 0
+    if (!visible.length && query) traceEmpty.textContent = '没有匹配的轨迹记录'
+    else traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
+  }
+  traceControls.duration.addEventListener('click', () => {
+    actualDuration = !actualDuration
+    traceControls.duration.setAttribute('aria-pressed', String(actualDuration))
+    drawTrace()
+  })
+  for (const key of ['turns', 'calls']) traceControls[key].addEventListener('click', () => {
+    if (key === 'turns') turnsOpen = !turnsOpen
+    else callsOpen = !callsOpen
+    const open = key === 'turns' ? turnsOpen : callsOpen
+    traceControls[key].setAttribute('aria-pressed', String(open))
+    traceList.querySelectorAll(key === 'turns' ? '.trace-turn' : '.trace-call').forEach(node => { node.open = open })
+  })
+  traceSearch.addEventListener('input', drawTrace)
+  installTrace()
+  const appendTrace = events => {
+    traceEvents.push(...(Array.isArray(events) ? events : []))
+    traceEvents = traceEvents.slice(-MAX_DRAWN_EVENTS)
+    traceSteps = traceEvents.filter(isTraceEvent).length
+    if (traceView && !traceView.hidden) drawTrace()
+    else {
+      for (const event of Array.isArray(events) ? events : []) {
+        const node = renderTraceEvent(event, approvalContext())
+        if (node) traceList.appendChild(node)
+      }
+      const firstSeq = traceEvents[0] && traceEvents[0].seq
+      for (const node of traceList.querySelectorAll('.ev[data-seq]')) {
+        if (typeof firstSeq === 'number' && Number(node.getAttribute('data-seq')) < firstSeq) node.remove()
+      }
+      trimEventWindow(traceList, null, false)
+    }
+  }
+
+  /**
+   * 切到哪一面 ✓（`'chat'` / `'trace'` ✓）。
+   *
+   * ★★ 这就是"切换行为"那一条的**唯一**真身处 ✗：
+   *   · 两个视图层的 `hidden` 互斥 ✓（**不是**"按钮变个色"✗ —— 断言判的是**换了一屏** ✓）；
+   *   · `aria-selected` 跟着走 ✓（`role=tab` 的可访问性语义 ✓ —— 与 DSH 自己那条一致 ✓）。
+   * ★ 只改这两个层的显隐 ✗：**不动 DOM 结构、不重画、不清屏、不重新取数** ✓。
+   */
+  const showView = (which) => {
+    const trace = which === 'trace'
+    if (chatView !== null && chatView !== undefined) chatView.hidden = trace
+    if (traceView !== null && traceView !== undefined) traceView.hidden = !trace
+    if (tabChat !== null && tabChat !== undefined) {
+      tabChat.classList.toggle('is-active', !trace)
+      tabChat.setAttribute('aria-selected', trace ? 'false' : 'true')
+    }
+    if (tabTrace !== null && tabTrace !== undefined) {
+      tabTrace.classList.toggle('is-active', trace)
+      tabTrace.setAttribute('aria-selected', trace ? 'true' : 'false')
+    }
+    // ★ 从没有过步骤 ⇒ 切过去的时候才第一次摆那句占位话 ✓
+    if (trace) drawTrace()
+  }
+
+  if (tabs !== null && tabs !== undefined) {
+    if (tabChat !== null && tabChat !== undefined) tabChat.addEventListener('click', () => showView('chat'))
+    if (tabTrace !== null && tabTrace !== undefined) tabTrace.addEventListener('click', () => showView('trace'))
+  }
+  // ★ 开场就按标记定一次 ✓ —— 页面上写死的 `is-active` / `aria-selected` 与这段必须一致 ✓
+  showView('chat')
 
   /** 外面喂列表 ✓（`currentId` 变了就顺手把草稿换过来 ✓）。 */
   const setSessions = (next, currentId, titleText) => {
@@ -1254,8 +2178,27 @@ export function mountChat(options) {
         input.value = getDraft(drafts, currentId)
       }
       currentSessionId = currentId
+      if (dock) dock.replaceChildren()
+      questionCards.clear()
+      answeredQuestions.clear()
+      questionEventIds.clear()
+      interactionValues = { active: [], settled: [] }
+      dockChanged()
+    }
+    const badge = root.querySelector('#subagent-count')
+    const current = sessions.find(item => item.id === currentSessionId)
+    const stats = current && current.subagentStats
+    const total = stats && Number.isInteger(stats.total) && stats.total >= 0 ? stats.total : null
+    if (badge) {
+      badge.hidden = total === null || total === 0
+      const running = stats && Number.isInteger(stats.running) && stats.running >= 0 ? stats.running : null
+      badge.textContent = total === null ? '' : '● ' + (running !== null && running > 0 ? running : total)
+      badge.classList.toggle('is-running', running !== null && running > 0)
+      badge.title = total === null ? '' : '子智能体 ' + total + ' 个' + (running === null ? '（运行状态未知）' : '，运行中 ' + running + ' 个')
+      if (total !== null) console.log('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
     }
     paintSessions()
+    paintComposer()
   }
 
   /** 写一条临时消息 ✓（并立刻重画 ✓）。 */
@@ -1271,6 +2214,22 @@ export function mountChat(options) {
       // ★ 第一趟回应到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓；空会话也该清 ✓）
       list.innerHTML = ''
       eventCount = 0
+      /**
+       * ★★ 轨迹视图**跟着一起换** ✓（同一个会话的另一条渲染路 ✓）——
+       *   只清对话那一层、留着上一任会话的步骤列表，就是"两条视图说两件不同的事"✓
+       *   （在手机上表现为"切了会话，轨迹里还是上一个会话"✗，而且完全看不出来 ✓）。
+       */
+      if (traceView !== null && traceView !== undefined && typeof traceView.replaceChildren === 'function') {
+        traceEvents = []
+        traceSearch.value = ''
+        traceList.replaceChildren()
+        traceGraph.replaceChildren()
+        installTrace()
+      } else if (traceView !== null && traceView !== undefined) {
+        traceView.textContent = ''
+      }
+      traceSteps = 0
+      refreshTraceEmpty()
       pendingSwitch = false
       /**
        * ★ 那两本审批账**跟着清** ✓：它们记的是"屏幕上这几张卡"✓
@@ -1278,6 +2237,13 @@ export function mountChat(options) {
        */
       decidedApprovals.clear()
       drawnApprovals.clear()
+      if (dock) dock.querySelectorAll('.ev-approval').forEach(node => node.remove())
+      dockChanged()
+      /**
+       * ★★ 裁剪那件事的状态**跟着换会话一起归零** ✗（长会话那一单 ✓）——
+       *   见 `resetEventWindow`：只摘那句"更早的 N 条已收起"✓（清屏上面已经做过了 ✓）。
+       */
+      resetEventWindow(list)
       paintSessions()
     }
     if (Array.isArray(events) && events.length > 0) {
@@ -1294,7 +2260,82 @@ export function mountChat(options) {
        *   ③ 裁决比卡晚到的那种 ⇒ 把**已经画出来**的卡就地改成"已处理"✓。
        */
       const freshDecided = collectDecided(events)
-      appendEvents(list, events, approvalContext())
+      /**
+       * ★★ 追加**之前**量一次读数 ✓ —— 裁剪那一步要用它做滚动补偿 ✗
+       *   （长会话那一单 ✓：见 `trimEventWindow` ✓）。两样东西：
+       *   · 滚动容器与它当下的 `scrollTop` ✓；
+       *   · **锚点**：现在屏口最上面那一条事件 ✓，以及它在屏口里的位置 ✓
+       *     （裁完之后要靠这一对把它**钉回原地** ✓ —— 这是"补偿"的全部机制 ✓）。
+       */
+      const scrollerNow = scrollContainerOf(list)
+      const windowMetrics = {
+        scroller: scrollerNow,
+        scrollTop: scrollerNow.scrollTop,
+        /**
+         * ★★ **追加之前**的 `scrollHeight` ✓ —— 补偿那个式子里的基准 ✓
+         *   （少喂这一个字段 ⇒ 补偿静默地不生效 ✓：我实测过这一种，
+         *   读数只是"没补偿"✓，而代码看起来完全正常 ✗）。
+         */
+        scrollHeight: scrollerNow.scrollHeight,
+        anchor: null,
+        anchorTop: null,
+        follow: null,
+        evictedHeight: 0,
+      }
+      if (typeof scrollerNow.getBoundingClientRect === 'function') {
+        /**
+         * ★ 锚点取法：**第一条"下沿还在屏口里面"的节点** ✓（`bottom - box.top > 0` ✓）——
+         *   屏口之上那些已经完全看不见了 ✓，拿它们当锚点会让补偿从"用户看不到的地方"起算 ✓。
+         * ★ 判据只用**几何** ✗（不认 `data-seq`、不认事件类型 ✓）——
+         *   这一层不该知道"哪种事件更重要"✓（那是 `classify` 的事 ✓）。
+         */
+        const box = scrollerNow.getBoundingClientRect()
+        for (const node of Array.prototype.slice.call(list.children)) {
+          if (node.getBoundingClientRect().bottom - box.top > 0) {
+            windowMetrics.anchor = node
+            windowMetrics.anchorTop = node.getBoundingClientRect().top - box.top
+            break
+          }
+        }
+      }
+      const appended = appendEvents(list, events, approvalContext())
+      windowMetrics.follow = appended.follow
+      windowMetrics.scrollTop = windowMetrics.scrollTop
+      /**
+       * ★★ 轨迹视图走**同一条批次** ✓（同一批事件的另一条渲染路 ✓ ——
+       *   `renderTraceEvent` 只挑 `step` / `tool` ✓，画法**复用** `renderEvent` ✓）。
+       */
+      appendTrace(events)
+      /**
+       * ★★ 长会话：**画完之后**才回收头部 ✗（先回收的话，新事件就会补在空出来的位置上 ✓
+       *   —— 那既丢内容、又让滚动补偿的差值算不准 ✓）。
+       * ★ 这一步**不管** `computePageState` ✗：`eventCount` 是"一共收到过多少条" ✓
+       *   （只增不减 ✓），所以"有内容 ⇒ ready"那条规矩**一个字都没动** ✓ ——
+       *   裁剪**不可能**变成"出错清屏"✓。
+       */
+      const trim = trimEventWindow(list, windowMetrics)
+      const traceTrim = { trimmed: 0 }
+      refreshTraceEmpty()
+      /**
+       * ★ 把这一步的**读数**交出去 ✓（给验收与真机调试框 ✓ —— 见 `measure` ✓）。
+       *   纯读数、不改任何状态 ✓；没装钩子时一个字节都不做 ✓。
+       */
+      measure({
+        replaced: willReplace === true,
+        batch: events.length,
+        follow: appended.follow,
+        scrollTopBefore: windowMetrics.scrollTop,
+        anchorTop: windowMetrics.anchorTop,
+        hasAnchor: windowMetrics.anchor !== null,
+        scrollTopAfterAppend: appended.scrollTop,
+        trimmed: trim.trimmed,
+        trimHidden: trim.hidden,
+        scrollDelta: trim.screenDelta,
+        scrollTopAfterTrim: trim.scrollTop,
+        traceTrimmed: traceTrim.trimmed,
+        drawn: trim.drawn,
+        note: trim.hidden > 0,
+      })
       registerDrawnApprovals(events)
       settleDrawnApprovals(freshDecided)
     }
@@ -1328,7 +2369,7 @@ export function mountChat(options) {
    * ★ 发送键 = `form` 里那颗 `button` ✓ —— **取法与改前逐字相同** ✗
    *   （原来那颗是方块文字「发送」✓，现在换成了圆形箭头 ✓，但那**不影响**这条取值 ✓）。
    */
-  const sendButton = form === null || form === undefined ? null : form.querySelector('button')
+  const sendButton = form === null || form === undefined ? null : form.querySelector('button[type=submit]')
 
   const growInput = () => {
     if (input === null || input === undefined || input.style === undefined) return
@@ -1342,10 +2383,74 @@ export function mountChat(options) {
     }
   }
 
+  const attachmentsBox = root.querySelector('#attachments')
+  const attachmentInput = root.querySelector('#attachment-input')
+  const attachButton = root.querySelector('[data-tool=attach]')
+  const paintAttachments = () => {
+    if (!attachmentsBox) return
+    attachmentsBox.replaceChildren()
+    const files = activeAttachments()
+    attachmentsBox.hidden = !files.length
+    for (const file of files) {
+      const chip = document.createElement('div')
+      chip.className = 'attachment-chip' + (file.error ? ' is-error' : '')
+      const text = document.createElement('span')
+      text.textContent = file.name + (file.uploading ? ' · 上传中…' : file.error ? ' · ' + file.error : ' · ' + file.size + ' 字节')
+      chip.appendChild(text)
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.textContent = '×'
+      remove.setAttribute('aria-label', '移除附件 ' + file.name)
+      remove.disabled = sending
+      remove.addEventListener('click', () => {
+        attachmentDrafts.set(currentSessionId, activeAttachments().filter(entry => entry !== file))
+        paintComposer()
+      })
+      chip.appendChild(remove)
+      attachmentsBox.appendChild(chip)
+    }
+  }
+  const addAttachments = async files => {
+    if (!uploadChannelConnected || connection !== 'online' || !currentSessionId) return
+    const session = currentSessionId
+    for (const source of Array.from(files || [])) {
+      const file = { name: source.name, size: source.size, uploading: true, receiptId: '', error: '' }
+      const pending = attachmentDrafts.get(session) || []
+      pending.push(file)
+      attachmentDrafts.set(session, pending)
+      paintComposer()
+      try {
+        // 单帧协议32MiB，base64展开后仍须留足JSON和加密帧空间。
+        if (source.size > 20 * 1024 * 1024) throw new Error('附件超过20MiB单次上传上限')
+        const bytes = new Uint8Array(await source.arrayBuffer())
+        const value = await options.upload(session, source.name, bytes)
+        if (!value || value.ok !== true || typeof value.receiptId !== 'string' || !value.receiptId) throw new Error('宿主没有返回附件收据')
+        file.receiptId = value.receiptId
+        console.log('[dsh-chat] 附件上传：' + source.name + ' ' + bytes.length + ' 字节，收据已取得')
+      } catch (error) {
+        file.error = error instanceof Error ? error.message : String(error)
+        console.log('[dsh-chat] 附件上传失败：' + file.error)
+      }
+      file.uploading = false
+      if (session === currentSessionId) paintComposer()
+    }
+  }
+  if (attachButton) attachButton.addEventListener('click', () => { if (!attachButton.disabled && attachmentInput) attachmentInput.click() })
+  if (attachmentInput) attachmentInput.addEventListener('change', () => { const files = Array.from(attachmentInput.files || []); attachmentInput.value = ''; void addAttachments(files) })
+
   paintComposer = () => {
+    const files = activeAttachments()
+    const hasReceipts = files.some(file => file.receiptId.length > 0)
+    const uploadPending = files.some(file => file.uploading || file.error)
+    paintAttachments()
+    if (attachButton) {
+      attachButton.disabled = sending || !uploadChannelConnected || connection !== 'online' || !currentSessionId
+      attachButton.setAttribute('aria-disabled', String(attachButton.disabled))
+      attachButton.title = uploadChannelConnected ? '添加附件（单个≤20MiB）' : '附件通道未接通（请重开 DeepSeek Harness）'
+    }
     if (input !== null && input !== undefined) input.disabled = sending
     if (sendButton !== null && sendButton !== undefined) {
-      sendButton.disabled = sending || !canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection })
+      sendButton.disabled = sending || uploadPending || !(hasReceipts ? connection === 'online' : canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection }))
       /**
        * ★★ 这里原来写的是 `sendButton.textContent = sending ? '发送中…' : '发送'` ✗。
        *   新键子的**形状**是圆形箭头 ✓ ⇒ 那行字不能再当"按钮内容"写了 ✓（会把箭头抹掉 ✗）：
@@ -1361,6 +2466,16 @@ export function mountChat(options) {
     }
   }
 
+  const commandButton = root.querySelector('[data-tool=command]')
+  if (commandButton) commandButton.addEventListener('click', () => {
+    if (!input || input.disabled) return
+    if (!input.value.startsWith('/')) input.value = '/' + input.value
+    input.focus()
+    if (typeof input.setSelectionRange === 'function') input.setSelectionRange(1, 1)
+    growInput()
+    paintComposer()
+  })
+
   if (input !== null && input !== undefined) {
     input.addEventListener('input', () => {
       growInput()
@@ -1372,7 +2487,10 @@ export function mountChat(options) {
     form.addEventListener('submit', async (submitEvent) => {
       if (submitEvent.preventDefault) submitEvent.preventDefault()
       const current = input === null || input === undefined ? '' : String(input.value || '')
-      if (!canSend({ text: current, sending, connection })) {
+      const session = currentSessionId
+      const files = activeAttachments()
+      const receiptIds = files.filter(file => file.receiptId).map(file => file.receiptId)
+      if (sending || files.some(file => file.uploading || file.error) || !(receiptIds.length ? connection === 'online' : canSend({ text: current, sending, connection }))) {
         // ★ 按了没反应是最糟的 ✓ —— 断线时说清楚 ✓
         if (connection === 'offline') setNotice('断线中，等连上再发（字还在）')
         return
@@ -1384,14 +2502,16 @@ export function mountChat(options) {
       paintComposer()
       setNotice('发送中…')
       try {
-        await options.send(begun.pending)
+        await options.send(begun.pending, receiptIds)
+        attachmentDrafts.set(session, [])
         sending = false
         sendSettled(true, begun.pending)
         setNotice('已发出')
       } catch (error) {
         // ★★ 失败 ⇒ **原文放回输入框** ✗（"发出去的字突然没了"是我最想避免的一种）
         const settled = sendSettled(false, begun.pending)
-        if (input !== null && input !== undefined) input.value = settled.draft
+        if (session === currentSessionId && input !== null && input !== undefined) input.value = settled.draft
+        else drafts = putDraft(drafts, session, settled.draft)
         sending = false
         growInput()
         setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
@@ -1401,7 +2521,7 @@ export function mountChat(options) {
   }
 
   paint()
-  return {
+  const api = {
     /** ★ 交给 `new ChatPoller({ …page.handlers })` ✓ */
     handlers: { onEvents: handleEvents, onError: handleError },
     /** 喂会话列表 ✓（第三个参数是标题栏文字 ✓）。 */
@@ -1412,12 +2532,48 @@ export function mountChat(options) {
     drafts: () => ({ ...drafts }),
     /** 切换是否还等着替换 ✓。 */
     isSwitching: () => pendingSwitch,
-    appendEvents: (events) => appendEvents(list, events, approvalContext()),
+    /**
+     * ★★ 切到「对话」/「轨迹」✓（复刻清单第 3 项 ✓）。
+     *
+     * ★ 为什么把它交出去 ✗：那一单的验收要能**按真实点击路径**切 ✓ ——
+     *   夹具里 `dispatchEvent(new Event('click'))` 打的就是这颗键 ✓，
+     *   与用户手指按下去走的是同一条路 ✓（不是"直接调内部函数"那种假判据 ✓）。
+     * ★ 轨迹视图当前摊开了几条 ✓（纯读数 ✓ —— 验收要能证明"换了一屏"而不是"按钮变了色"✗）。
+     */
+    switchView: showView,
+    traceSteps: () => traceSteps,
+    /**
+     * ★★ 长会话那一单的**纯读数** ✓（不碰任何状态 ✓）—— 验收与真机调试框都念得出来 ✓。
+     *   · `maxDrawn`：屏上**最多**留多少条事件 ✓（上界的**唯一**真身处 = `MAX_DRAWN_EVENTS` ✓）；
+     *   · `trimNote`：那句"更早的 N 条已收起"**现在在不在屏上** ✓（`null` = 不在 ✓）；
+     *   · `drawn`：现在屏上真有几条事件节点 ✓（`#messages` 的孩子数 ✓ —— 它就是"节点数"那条判据 ✓）；
+     *   · `liveSeqs`：屏上这几条的 `data-seq` ✓（顺序即 DOM 顺序 ✓ ⇒ "最新几条仍在、顺序仍对"可判 ✓）。
+     */
+    limits: () => ({
+      maxDrawn: MAX_DRAWN_EVENTS,
+      drawn: list === null || list === undefined ? -1 : list.children.length,
+      trimNote: (() => {
+        const note = list === null || list === undefined || typeof list.querySelector !== 'function'
+          ? null
+          : list.querySelector('.ev-trim-note')
+        return note === null || note === undefined ? null : { text: note.textContent, hidden: note.getAttribute('data-trim-hidden') }
+      })(),
+      liveSeqs: list === null || list === undefined || typeof list.querySelectorAll !== 'function'
+        ? []
+        : Array.prototype.slice.call(list.querySelectorAll('.ev[data-seq]')).map((node) => Number(node.getAttribute('data-seq'))),
+    }),
+    appendEvents: (events) => {
+      appendEvents(list, events, approvalContext())
+      appendTrace(events)
+    },
     /**
      * ★★ 裁决通道**探测结果**从外面喂进来 ✓（`app.js` 探一次 ✓）——
      *   探到接通 ⇒ 卡片上那两颗按钮才可点 ✓；探不到 ⇒ 一直置灰 ✓（不假装能用 ✗）。
      */
     setApprovalChannel,
+    setChannels,
+    setInteractions,
+    addAttachments,
     setConnection: (next) => {
       connection = next === 'offline' ? 'offline' : next === 'online' ? 'online' : 'unknown'
       paint()
@@ -1428,4 +2584,19 @@ export function mountChat(options) {
     },
     state: () => computePageState({ loading, eventCount, error, connection }),
   }
+  /**
+   * ★★ 把这套读数挂到那个**取证钩子**上 ✓（长会话那一单 ✓）——
+   *   `globalThis.__DSHM_CHAT_PAGE__` 由**外面**建（验收的夹具 ✓ / 真机调试框 ✓）；
+   *   没建的时候一个字节都不做 ✓（生产页面上不花这份钱 ✓）。
+   *
+   * ★ 为什么在这儿挂、而不是在 `app.js` 里 ✗：`app.js` 这一单里**不许改** ✓
+   *   （它已经发货了 ✓）；而"页面自己报出屏上有几条"这件事本来就属于**画**那一半 ✓。
+   */
+  try {
+    const hook = globalThis.__DSHM_CHAT_PAGE__
+    if (hook !== null && hook !== undefined && typeof hook === 'object') hook.page = api
+  } catch (error) {
+    void error
+  }
+  return api
 }

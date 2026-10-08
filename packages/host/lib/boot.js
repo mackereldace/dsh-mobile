@@ -3971,6 +3971,50 @@
     return out
   }
 
+  /**
+   * 反向二进制：与 protocol.encodeBinary 共用 $dshmBytes 约定。
+   * boot.js 不能 import，浏览器内联仅替换 Buffer 的 base64 转换；宿主复用 decodeBinary。
+   * 字节视图保留 byteOffset/byteLength，递归编码返回新值，不改上传源对象。
+   */
+  var BYTES_TAG = '$dshmBytes'
+  function encodeBinaryValue(value) {
+    var shape = Object.prototype.toString.call(value)
+    var bytes
+    if (ArrayBuffer.isView(value) && shape === '[object Uint8Array]') {
+      bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    } else if (shape === '[object ArrayBuffer]') {
+      bytes = new Uint8Array(value)
+    }
+    if (bytes !== undefined) {
+      var raw = ''
+      for (var i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i])
+      var marker = {}
+      marker[BYTES_TAG] = btoa(raw)
+      return marker
+    }
+    if (Array.isArray(value)) {
+      var listChanged = false
+      var list = value.map(function (item) {
+        var next = encodeBinaryValue(item)
+        if (next !== item) listChanged = true
+        return next
+      })
+      return listChanged ? list : value
+    }
+    if (value !== null && typeof value === 'object') {
+      var changed = false
+      var out = {}
+      var keys = Object.keys(value)
+      for (var k = 0; k < keys.length; k++) {
+        var decoded = encodeBinaryValue(value[keys[k]])
+        if (decoded !== value[keys[k]]) changed = true
+        out[keys[k]] = decoded
+      }
+      return changed ? out : value
+    }
+    return value
+  }
+
   function utf8(text) {
     return new TextEncoder().encode(text)
   }
@@ -5741,7 +5785,6 @@
      * （改 protocol 那套时，这里要一起改 —— 两处必须逐字一致）。
      * ★ 解码**不猜**：只有"恰好一个键、键名就是这个、值是字符串"才算标记。
      */
-    var BYTES_TAG = '$dshmBytes'
     function decodeBinaryValue(value) {
       if (Object.prototype.toString.call(value) === '[object Array]') {
         var listChanged = false
@@ -6033,7 +6076,7 @@
       ? dshRpcId
       : 'web-' + b64u(crypto.getRandomValues(new Uint8Array(8)))
     // 信封与 DSH 的 client-request 逐字段一致（type/rpcId/method/payload）
-    var message = { type: 'client-request', rpcId: rpcId, method: endpoint, payload: payload }
+    var message = { type: 'client-request', rpcId: rpcId, method: endpoint, payload: encodeBinaryValue(payload) }
     var self = this
     return new Promise(function (resolve, reject) {
       // 两个都要存：只存 resolve 的话，链路一断这个 Promise 就永远既不 resolve
@@ -24686,7 +24729,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1008021720'
+    var BOOT_STAMP = 'BUILD-1008061540'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

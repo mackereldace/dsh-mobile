@@ -12,6 +12,11 @@
     --danger: #B3261E; --danger-line: #E8C4C1;
     /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
     --send-bg: #679EFE; --send-ink: #FFFFFF;
+    /* ★ 标签栏（复刻清单第 3 项 ✓）：未选中 = tertiary 一档灰 ✓、选中 = 品牌主色 ✓
+       两个值是 `app.asar` 里 `dsh-client-ui-theme` 的真身 ✓：
+       `--dsw-alias-state-business-primary` = `--dsw-static-deepseek-500` = **#4176e6** ✓、
+       `--dsw-alias-label-tertiary` = `--dsw-static-neutral-bluish-600` = **#81858c** ✓。 */
+    --tab-ink: #81858c; --tab-ink-active: #4176e6;
   }
   :root {
     --bg: #EEF0F4; --surface: #FFFFFF; --tint: #F4F7FA;
@@ -21,6 +26,8 @@
     --danger: #B3261E; --danger-line: #E8C4C1;
     /* ★ 发送键：浅蓝底 + 白箭头 ✓（真图采样 `rgb(103,158,254)` ✓ —— 见报告第 1 节 ✓） */
     --send-bg: #679EFE; --send-ink: #FFFFFF;
+    /* ★ 标签栏的两个颜色 ✓（取值与出处见上面 light 那一块 ✓） */
+    --tab-ink: #81858c; --tab-ink-active: #4176e6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -30,6 +37,9 @@
       --rail: #E9EBEF; --accent: #4FBF7F; --code-bg: #101317;
       --danger: #F2B8B5; --danger-line: #5A2A28;
       --send-bg: #679EFE; --send-ink: #FFFFFF;
+      /* ★ 暗色：同一两个语义槽 = 亮一档的静态色 ✓
+         （`--dsw-static-deepseek-400` = **#7aaaff** ✓、`--dsw-static-neutral-bluish-400` = **#adb2b8** ✓） */
+      --tab-ink: #adb2b8; --tab-ink-active: #7aaaff;
     }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -66,8 +76,130 @@
   header .sub { margin: 3px 0 0; font-size: 12px; color: var(--ink3); }
   header .grow { flex: 1; }
   header button { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--ink2); font-size: 17px; }
+  /**
+   * ─────────────── 「对话｜轨迹」标签栏（复刻清单第 3 项 ✓）───────────────
+   *
+   * ## 参照读数（★ 两路取证，逐条见报告第 1 节 ✓）
+   *
+   * ① **真机读数**：隔离无头 Chrome + 移动视口，量 DSH 自己那条标签栏 ✓；
+   * ② **源码印证**：`app.asar` ⇒ `@deepseek-ai/dsh-client-ui-conversation/lib/client.js`
+   *    里那条**未压缩的 CSS 原文** ✓（逐字抄在这里，改一个数都要先改报告 ✗）：
+   *
+   * ```
+   * .…_tabs { z-index:1; grid-column:1/-1; gap:36px; margin-top:10px; padding-left:8px;
+   *            display:flex; position:relative }
+   * .…_tab  { color:var(--dsw-alias-label-tertiary); cursor:pointer; background:0 0; border:none;
+   *            padding:0 0 9px; font-size:13px; font-weight:500; line-height:16px; position:relative }
+   * .…_tab:after { content:""; background:0 0; border-radius:2px; height:2px;
+   *            position:absolute; bottom:-1px; left:0; right:0 }
+   * .…_tabActive { color: var(--dsw-alias-state-business-primary) }
+   * .…_tabActive:after { background: var(--dsw-alias-state-business-primary) }
+   * ```
+   *
+   * ⇒ 逐项落到本页 ✓：**指示条 2px / 圆角 2px / 压在底线下方 1px** ✓、
+   *   **字号 13px / 字重 500 / 行高 16px / 下内边距 9px** ✓、
+   *   **两标签间距 36px / 左缩进 8px / 距标题 10px** ✓、
+   *   未选中是 **tertiary 一档灰**、选中换成 **品牌主色** ✓（本页写成变量 ✓，浅/暗各一套 ✓）。
+   *
+   * ## ★ 两处**故意的**偏差（★ 写在明处，不许当没看见 ✗）
+   *
+   * 1. **没有 `grid-column: 1/-1`** ✓ —— 那是 DSH 那套 `display:grid` 页头的产物 ✓；
+   *    我们这一页的页头是 `flex` ✓ ⇒ 这条属性在这儿**没有意义** ✗（照抄反而会误导下一个读的人 ✓）。
+   * 2. **指示条的基线**：DSH 那条 `bottom:-1px` 是压在它自己页头的 1px 分隔线上 ✓；
+   *    我们页头没有那条线 ✓ ⇒ 用页头自己的 `border-bottom` 当基线 ✓（同一条视觉规则 ✓）。
+   */
+  .tabs {
+    flex: none; display: flex; position: relative; z-index: 1;
+    /* ★ padding-left 的取值见下面那段（真机 28 = 侧栏轨道 20 + 源码 8 ✓） */
+    gap: 36px; margin: 0; padding: 0 0 0 28px;
+  }
+  /**
+   * ★★ 左边那 20px：把**真机上的侧栏轨道**补回来 ✗（截图逐像素量出来的 ✓）。
+   *
+   * ## 真机读数（`docs/ui/08-conversation.png` ✓ —— 824×1830 @dpr2 = 412×915 ✓）
+   *
+   * | 量到的 | 设备像素 | 换算 CSS |
+   * |---|---|---|
+   * | 选中那颗的文字左沿 | 57 | **28.5** |
+   * | 连着指示条的色块 | 56..107 | **28 .. 53.5**（宽 25.5 ✓） |
+   * | 未选中那颗的文字 | 181..230 | **90.5 .. 115** |
+   * | 两颗的文字**中心距** | 119..206 ⇒ 143 | **71.5** |
+   * | 指示条 | 56..107，高 **4 行**（148–151 ✓） | 高 **2px** ✓ |
+   * | 顶栏底 / 指示条 | 150 / 148 | 页头底 = 75 ✓、指示条 74–75 ✓ |
+   *
+   * ⇒ 「两颗标签的字面中心距 **71.5**」= 真机上**两个盒子都是 26 宽、间距 36** ✓
+   *   （26 + 36 = 62 ✗ 对不上 ✓ ⇒ 这里**不是** 26 宽的等宽盒，见下 ✓）。
+   *
+   * ## ★ 与源码 CSS 的两个差值（★ 都写在这儿，不许当没看见 ✗）
+   *
+   * 1. **左边 28 而不是 8** ✗：源码里 `.…_tabs` 确实是 `padding-left: 8px` ✓，
+   *    但它住在**会话面板**里 ✓，而真机上面板左边还有 **20px 的侧栏轨道** ✓
+   *    （顶栏那颗汉堡就画在 17–26.5 ✓）⇒ 28 = 20 + 8 ✓ —— **两个数都印上了** ✓。
+   *    我们这一页**没有侧栏** ✗ ⇒ 不补这 20px 的话，标签会比正文还靠左 18px ✓
+   *    （正文气泡的左内沿在 **26.5** ✓）—— 那才是"抄了个数字、丢了意图" ✗。
+   * 2. **指示条 28..53.5（宽 25.5）而不是 13** ✗：源码只说 `left:0; right:0` ✓，
+   *    宽度 = 那颗的盒子宽 ✓；真机上量到 **25.5** ✓ ⇒ 那颗盒子不是"字宽 13" ✗
+   *    （两个字 13px 各 13px + 一点点字距 ✓ 正好 25.5 ✓）。
+   *    ⇒ 我们这颗**不写死宽度** ✗，让它由文字撑开 ✓（与真机同一条规矩 ✓）。
+   */
+  .tab {
+    position: relative; margin: 0; padding: 0 0 9px; border: 0; background: transparent;
+    color: var(--tab-ink); font: inherit; font-size: 13px; font-weight: 500; line-height: 16px;
+    cursor: pointer;
+  }
+  .tab::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; border-radius: 2px; background: transparent;
+  }
+  .tab.is-active { color: var(--tab-ink-active); }
+  .tab.is-active::after { background: var(--tab-ink-active); }
+  /* ★ 轨迹视图：同一批事件的另一条渲染路 ✓（渲染分支全在 ui.js 里复用 ✓，这里只管排布 ✓） */
+  #trace { padding: 6px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+  #trace[hidden] { display: none; }
+  #trace .trace-empty { padding: 18px 6px 0; font-size: 12.5px; line-height: 1.6; color: var(--ink3); }
+  /**
+   * ★★ 对话那一层的 `hidden` 要**显式写出来** ✗（不能只靠浏览器默认的 `display:none` ✓）。
+   *
+   * 为什么 ✗：`#messages` 自己是 `display:flex` ✓，而 `display` 是**作者样式** ⇒
+   * 它会盖掉 `[hidden]` 的 UA 默认值 ✓ —— 表现就是"切到轨迹以后，对话那一屏
+   * **还在底下**"✓（两屏叠在一起、滚动也串 ✓，而且看起来完全不像切换 ✓）。
+   * ★ 与 `#sessions[hidden]` / `#state[hidden]` 是同一个坑、同一条修法 ✓。
+   */
+  #messages[hidden] { display: none; }
   #status { padding: 0 20px 8px; font-size: 11px; color: var(--ink3); min-height: 22px; }
-  main { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+  /**
+   * ★★ `min-height: 0`：让 `main` 真正成为**滚不动就自己滚**的那一层 ✗。
+   *
+   * flex 项默认 `min-height: auto` ⇒ 它**不肯缩到比内容还矮** ✓
+   * （`overflow: auto` 在这种情况下形同虚设 ✓ —— 它会把底栏顶下去 ✓）。
+   * 两个视图层（对话 / 轨迹）都住在这个滚动容器里 ✓ ⇒ 这一行是"轨迹再长也不许动输入栏"
+   * 的**结构性**保证 ✓（与下面那条断言 `#composer` 逐像素不动 ✓ 一起成立 ✓）。
+   *
+   * ## ★ 一处**我自己判错的现场**（写在明处 ✗）
+   *
+   * 我第一版把断言写成"里面那张 `.composer-card` 的底边不动"✓，读到 **391 → 359** ✗
+   * ⇒ 当场判定"输入栏被顶上去了" ✓ 并写了"实测"两个字 ✗。
+   * **那是假红** ✓：卡片高度跟着 `textarea` **自己长**✓（`growInput` ✓，夹具刚往框里写过字 ✓），
+   * 两次读数之间它本来就会差几像素 ✓。稳的那一层是 `#composer` ✓（实测两次都是
+   * `y=271 / h=120 / bottom=391` ✓）⇒ 判据已改成它 ✓。
+   * ★ 教训与 §4.1ct 里那条同款 ✗：**先说结论、后看读数** ✓ —— 读数一列出来就知道自己错了 ✓。
+   */
+  main { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+  /**
+   * ★★ 关掉浏览器的**滚动锚定**（`overflow-anchor` ✓）✗（长会话那一单 ✓）
+   *
+   * ## 为什么非关不可 ✗（★ 这是本轮实测抓到的 ✗）
+   *
+   * 那一层是长会话的滚动容器 ✓，而长会话的**头部一直在被回收** ✗ ⇒ Chrome 的
+   * scroll anchoring 会把"锚定节点被摘掉"当成"内容变了"✓，然后**自己**改 `scrollTop` ✓
+   * —— 而页面里那条"补偿"（记录并还原滚动位置 ✓）**也算了一遍** ✓
+   * ⇒ 两个东西互相打架：实测读数里 `scrollTop` 会**一路往 0 漂** ✓
+   * （用户正读历史，却被慢慢拽回顶部 ✓ —— 比"跳一下"更糟 ✓，而且看起来完全不像 bug ✗）。
+   * ⇒ 本仓那条铁律：**同一个概念只能有一个含义** ✓ —— 滚动位置由**我们**负责 ✓，
+   *   浏览器不许再插一手 ✓（这也正是 DSH 自己那条路的样子：它用语义锚点 + `retain/preserve`
+   *   自己补偿 ✓，见 `dsh-client-ui-chat/lib/client.js:4740-4830` ✓）。
+   */
+  main { overflow-anchor: none; }
   #state { padding: 28px 26px 0; }
   #state[hidden] { display: none; }
   .state { text-align: center; }
@@ -101,8 +233,34 @@
   .ev-tool .tool-body { margin: 0; padding: 10px 12px; background: var(--code-bg); font-size: 12px; line-height: 1.45; color: var(--ink2); white-space: pre-wrap; word-break: break-all; }
   .ev-step { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--ink3); }
   .ev-step::before, .ev-step::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  /**
+   * ★★ 「更早的 N 条已收起」那句提示（复刻清单第 6 项 ✓ —— 长会话的窗口 ✓）。
+   *
+   * ## 为什么它**不是一颗按钮** ✗
+   *
+   * DSH 自己那个位置是**能点的**（`chat.loadOlder` = 「加载更早」✓ —— 源码：
+   * `dsh-client-ui-chat/lib/client.js:5272-5280` 那颗 `<button onClick={scroll.loadEarlier}>` ✓），
+   * 因为**它有那条通道**（`SessionPage` 的 `beforeSeq` 分页 ✓，`session.js:20` 的
+   * `maxMessages: 500` ✓）。我们这一页**没有**那条通道 ✗
+   * （页面只认 `mobile/dsh/follow` ✓，没有"往前取一页"的本地路由 ✓）
+   * ⇒ 按本仓那条铁律「**不假装能用**」✗：这里就**只写一句实话** ✓，
+   *   没有 `cursor`、没有 `:active`、没有 `click` ✓ —— 与四格状态条同一条口径 ✓。
+   *
+   * ## 几何：与 `.dim.small` 同族（★ 不新造一套字号 ✗）
+   *
+   * 12px / `--ink3` / 居中 ✓ —— 它是列表里的**一行说明**，不是一条消息 ✓；
+   * 上下各留一点，免得它跟第一条气泡粘在一起 ✓。
+   */
+  .ev-trim-note {
+    text-align: center; font-size: 12px; line-height: 1.5; color: var(--ink3);
+    padding: 2px 0 4px;
+  }
   .dim { color: var(--ink3); }
   .small { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .event-meta { color: var(--ink3); font-size: 11px; }
+  .event-meta > summary { cursor: pointer; }
+  .event-meta:not([open]) > pre { display: none; }
+  .event-meta > pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
   /**
    * ───────────────────────── 输入栏（1:1 复刻 DSH 手机端）─────────────────────────
    *
@@ -196,12 +354,62 @@
   /* 发送中 ⇒ 图标收起来、只留一句字（**形状不变** ✓，见报告第 3 节的断言口径 ✓） */
   .composer[data-sending="1"] .send-icon { display: none; }
   .composer[data-sending="1"] .send-label { display: block; }
-  /* ★ 输入框**正下方**那一行状态条：位置与字号照参照物 ✓，内容只写真读数 ✓ */
+  /**
+   * ───────────── 输入框**正下方**那条紧凑状态条（四格：上下文% / 轮 / 步 / tok）─────────────
+   *
+   * ## 几何从哪来（★ 两路，写清哪条是哪条 ✗）
+   *
+   * ① **DSH 自己那条**（`[data-composer-stats]` ✓）—— 读的是 `app.asar` 里
+   *    `0.2.0-rc.2` 两个包里**未压缩的 CSS 原文** ✓（本机那份运行时页面取不到，
+   *    见报告第 1 节那条现场 ✓）：
+   *    · `.bOPqQW_root { gap: 12px; font-size: calc(var(--dsh-content-font-size-secondary,13px) - 1px); line-height: calc(20px + …secondary,0px) }` ✓；
+   *    · `.bOPqQW_pill { gap: 6px; padding: 1px 8px; border-radius: 999px; color: var(--dsw-alias-label-tertiary) }` ✓；
+   *    · `.JObwrW_trigger`（上下文那一格 ✓）`{ gap: 6px; padding: 1px 8px; font-size: var(…secondary,13px); line-height: calc(20px + …) }` ✓；
+   *    · 环 `{ viewBox 0 0 14 14; r 5.5; stroke-width 2px }` ✓（track = `--dsw-alias-border-l3` ✓、
+   *      fill = `--dsw-alias-label-tertiary` ✓，`stroke-linecap: round` ✓）；
+   *    · 分隔符 `.bOPqQW_sep { margin: 0 6px }` ✓。
+   *    ⇒ 由 `--dsh-content-font-size-secondary` 在主题里的真值（**13px** ✓，
+   *      `dsh-client-ui-theme/lib/client.js` ✓）推出：**字号 12px / 行高 20px / 一格高 22px**
+   *      ✓ —— 22px 就是"≤22px，原为 26px"那个真值 ✓。
+   *
+   * ② **我们自己在手机上的那条**（`#dshm-stats` ✓，`boot.js` 里那套，真机实测过 ✓）：
+   *    `min-height: 21px` / `font-size: 12px` / `line-height: 15px` / `gap: 6px` ✓ ——
+   *    与本页这一条**同量级** ✓（12px 那条口径两处一致 ✓）。
+   *
+   * ## 逐项落到本页 ✓（★ 与上面两条读数对得上 ✗）
+   *
+   * · **高 22px** = 行高 20 + 上下各 1px ✓（与 DSH 那一格**逐像素相同** ✓）；
+   * · **字号 12px** ✓（DSH：`--dsh-content-font-size-secondary` 13px − 1px ✓）；
+   * · **四格间距**：格与格之间走**分隔符**（`gap: 6px` ✓ —— 与 DSH 那颗药丸内部的 6px 同值 ✓）；
+   * · **分隔符「·」**：★ DSH 那条写的是 `color: var(--dsw-alias-separator-primary)` ✓
+   *   而**那个 token 在 DSH 主题里根本不存在** ✗（`boot.js` 里那条注释早记过这一笔 ✓：
+   *   桥接时 9 个 token 有 8 个有值、唯独它空 ✓）⇒ 它实际**继承**了文字的 tertiary 色 ✓
+   *   ⇒ 我们这里干脆**继承**（一个字都不写 ✓ —— 这才是与真图相同的计算值 ✓）；
+   * · **环 2px**：`stroke-width: 2px` ✓（真值 ✓）、`fill: none` ✓、`stroke-linecap: round` ✓；
+   * · **纯展示**：★ 没有 `:active` / `:hover` / `cursor` ✗ —— 四格不是按钮 ✓（不假装能用 ✓）。
+   */
   .stats-strip {
-    flex: none; padding: 0 20px; font-size: 11px; line-height: 16px;
+    flex: none; display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 1px 20px; font-size: 12px; line-height: 20px;
     color: var(--ink3); font-variant-numeric: tabular-nums;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /**
+   * ★★ 塌陷：四格全取不到 ⇒ **不占高度** ✗。
+   *
+   * ★ 这一条**非有不可** ✗（与 `#messages[hidden]` / `#sessions[hidden]` / `#state[hidden]`
+   *   是同一个坑 ✓）：`.stats-strip` 自己是 `display:flex` ✓ —— 那是**作者样式** ✓，
+   *   它会盖掉 UA 给 `[hidden]` 的 `display:none` ✓ ⇒ 不写这一条就是"元素藏了、仍占 22px"✓
+   *   （量出来是一个 22px 的空带 ✓，在手机上看就是输入框底下多一条空白 ✗）。
+   */
+  .stats-strip[hidden] { display: none; }
+  /** 一格 ✓（环 + 字 ✓ —— 与 DSH 那颗药丸同一个内间距 6px ✓）。 */
+  .stats-strip .stats-cell { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .stats-strip .stats-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /** 上下文那一格的环 ✓（14×14、2px 描边 ✓ —— 与 DSH 的 `ContextMeter` 同一组几何 ✓）。 */
+  .stats-strip .stats-ring { flex: none; display: block; width: 14px; height: 14px; }
+  .stats-strip .stats-ring-track { fill: none; stroke: var(--line); stroke-width: 2px; }
+  .stats-strip .stats-ring-fill { fill: none; stroke: var(--ink3); stroke-width: 2px; stroke-linecap: round; }
   /* ★ 安全区：**不再写死 22px** ✗ —— 用 boot.js:68 那条口径 ✓（键盘开着时它已经让过位了 ✓） */
   .homebar {
     flex: none; height: max(env(safe-area-inset-bottom, 0px), var(--dshm-gesture-bottom, 22px));
@@ -222,3 +430,80 @@
 .approval .approval-option[disabled] { opacity: .55; }
 .approval .approval-why { padding: 0 12px 10px; font-size: 11px; color: var(--ink3); }
 .approval .approval-raw { margin: 0; padding: 9px 12px; background: var(--code-bg); border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.45; color: var(--ink3); white-space: pre-wrap; word-break: break-all; }
+
+/* chat 页顶栏遵循壳的安全区与 52px 高度；本页自行拥有导航 DOM。 */
+.app { padding-top: max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px)); }
+.chat-top { height: var(--dshm-top-h, 52px); padding: 0 10px; border-bottom: 1px solid var(--line); gap: 8px; }
+.chat-top > .icon { flex: none; }
+.chat-top .title { text-align: center; font-size: 16px; }
+.chat-top .title::after { content: none; }
+#sessions { position: absolute; z-index: 30; left: 0; right: 20%; top: calc(var(--dshm-top-h, 52px) + max(env(safe-area-inset-top, 0px), var(--dshm-safe-top, 0px))); max-height: 65%; box-shadow: 0 8px 20px #0003; }
+.stats-progress { display: inline-block; flex: none; width: 56px; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); }
+.stats-progress-fill { display: block; height: 100%; background: var(--tab-ink-active); border-radius: inherit; }
+.stats-strip { padding-left: 0; padding-right: 0; }
+@media (max-width: 360px) { .stats-strip { gap: 3px; font-size: 11px; } .stats-strip .stats-cell { gap: 3px; } }
+.tool-btn:disabled { opacity: .4; }
+.subagent-count { margin-left: auto; padding-right: 14px; color: var(--ink2); font-size: 12px; }
+.subagent-count[hidden] { display: none; }
+/* Markdown 排版仅作用于正文；审美由用户判断。 */
+.bubble { white-space: normal !important; }
+.bubble[data-render-fallback] { white-space: pre-wrap !important; }
+.bubble > :first-child { margin-top: 0; }
+.bubble > :last-child { margin-bottom: 0; }
+.bubble p { margin: 0 0 8px; }
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: 14px 0 8px; font-size: 1.1em; line-height: 1.45; }
+.bubble ul, .bubble ol { margin: 6px 0 10px; padding-left: 1.5em; }
+.bubble code { font-size: .88em; padding: 1px 4px; border-radius: 4px; background: var(--code-bg); overflow-wrap: anywhere; }
+.bubble .dshm-md-code { margin: 8px 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; white-space: pre; max-width: 100%; }
+.bubble .dshm-md-code code { padding: 0; background: transparent; overflow-wrap: normal; }
+.bubble .dshm-md-lang { display: block; color: var(--ink3); font-size: 11px; margin-bottom: 5px; }
+.bubble .dshm-md-table { display: block; overflow-x: auto; border-collapse: collapse; margin: 8px 0; max-width: 100%; }
+.bubble .dshm-md-table th, .bubble .dshm-md-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.bubble blockquote { margin: 8px 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--ink2); }
+.bubble .dshm-md-math { max-width: 100%; overflow-x: auto; }
+
+/* 图形轨迹：三泳道总览，折叠控制作用于真实详情。 */
+.trace-toolbar { display:flex; align-items:center; gap:6px; margin-bottom:12px; }
+.trace-toolbar button { border:1px solid var(--line); border-radius:5px; padding:5px 8px; background:var(--surface); color:var(--ink2); font:inherit; font-size:12px; white-space:nowrap; }
+.trace-toolbar button[aria-pressed=true] { color:var(--tab-ink-active); background:var(--tint); }
+.trace-toolbar input { flex:1; min-width:0; width:100%; border:1px solid var(--line); border-radius:5px; padding:6px 8px; background:var(--surface); color:var(--ink); font:inherit; font-size:12px; }
+.trace-graph { border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--surface); margin-bottom:14px; }
+.trace-graph svg { width:100%; display:block; }
+.trace-lane-label { fill:var(--ink2); font-size:11px; }
+.trace-grid { stroke:var(--line-soft); }
+.trace-bar { cursor:pointer; fill:var(--tab-ink-active); }
+.trace-lane-0 { fill:#a2a8b2; } .trace-lane-2 { fill:var(--accent); }
+.trace-bar:hover, .trace-bar:focus { stroke:var(--ink); stroke-width:1; }
+.trace-caption { color:var(--ink3); font-size:11px; }
+.trace-list { display:flex; flex-direction:column; gap:12px; }
+.trace-turn > summary { font-weight:600; font-size:14px; padding:8px 0; color:var(--ink); cursor:pointer; }
+.trace-call { border-left:2px solid var(--line); padding-left:10px; margin:5px 0 12px; }
+.trace-call > summary { color:var(--ink2); font-size:12px; padding:5px 0; cursor:pointer; }
+.trace-call .ev { margin:6px 0; }
+.trace-record { font-size:13px; line-height:1.6; margin:8px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.trace-list .is-selected { outline:2px solid var(--tab-ink-active); outline-offset:3px; }
+.trace-empty[hidden] { display:none; }
+
+/* 输入区接管：待办独立于消息窗口，处理后回到草稿。 */
+#interactions { flex:none; max-height:45vh; overflow:auto; padding:10px 14px; border-top:1px solid var(--line); background:var(--surface); }
+#interactions[hidden], #composer[hidden], .attachments[hidden] { display:none; }
+#interactions .approval { margin:0 0 8px; }
+#interactions .ev { margin:0; }
+.question-card { padding:10px 2px; border:0; margin:0; }
+.question-title { font-weight:600; margin-bottom:10px; }
+.question-card fieldset { border:0; padding:0; margin:0 0 12px; min-width:0; }
+.question-card legend { font-size:14px; margin-bottom:6px; }
+.question-card p, .question-status { font-size:12px; color:var(--ink2); margin:5px 0; }
+.question-option { display:flex; align-items:flex-start; gap:8px; border:1px solid var(--line); border-radius:7px; padding:9px 10px; margin:5px 0; font-size:13px; }
+.question-option:has(input:checked) { border-color:var(--tab-ink-active); background:var(--tint); }
+.question-option input { accent-color:var(--tab-ink-active); margin:3px 0 0; }
+.question-option small { display:block; font-size:11px; color:var(--ink2); }
+.question-card textarea { width:100%; resize:vertical; padding:8px; border:1px solid var(--line); border-radius:7px; background:var(--surface); color:var(--ink); font:inherit; font-size:13px; }
+.question-submit { border:0; border-radius:6px; padding:8px 14px; color:white; background:var(--tab-ink-active); font:inherit; font-size:13px; }
+.question-submit:disabled { opacity:.45; }
+.attachments { display:flex; flex-direction:column; gap:5px; padding:0 0 8px; }
+.attachment-chip { display:flex; gap:8px; font-size:12px; color:var(--ink2); padding:5px 8px; background:var(--tint); border-radius:5px; }
+.attachment-chip span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.attachment-chip button { border:0; background:none; color:var(--ink2); font:inherit; }
+.attachment-chip.is-error { color:var(--danger); }
+.subagent-count.is-running { color:var(--accent); }
