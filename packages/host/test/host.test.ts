@@ -1264,6 +1264,29 @@ test('能力位门禁：未授予 fsWrite 时写操作被拒绝，且记录审�
   }
 })
 
+test('会话页的引用与原版附件先受设备 fsRead 门禁约束，再进入本地桥或网关', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: false } })
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    for (const [endpoint, args] of [
+      ['mobile/dsh/references', { sessionId: 's-1', query: 'private', quoted: true }],
+      ['session/attachment', { request: { sessionId: 's-1', attachmentId: 'image-1' } }],
+    ] as const) {
+      const result = await mobile.call(endpoint, { args })
+      assert.equal(result.ok, false)
+      assert.equal(result.error?.code, ErrorCode.CapabilityDenied)
+      assert.match(result.error?.message ?? '', /fsRead/)
+    }
+    assert.equal(env.calls.length, 0, '拒绝发生在任何文件、会话查询或附件网关调用之前')
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: true } })
+    const allowed = await mobile.call('session/attachment', { args: { request: { sessionId: 's-1', attachmentId: 'image-1' } } })
+    assert.equal(allowed.ok, true)
+    assert.equal(env.calls.at(-1)?.method, 'attachment')
+  } finally { env.cleanup() }
+})
+
 test('界面启动与发消息所需调用不得被门禁拦（真实故障的回归）', async () => {
   const env = await setup()
   try {

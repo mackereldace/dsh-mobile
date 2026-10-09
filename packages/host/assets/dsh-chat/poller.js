@@ -232,9 +232,10 @@ export const FOLLOW_TURN_WINDOW_MIN_TURNS = 2
  * @param {string} sessionId 会话 id ✓（空串 ⇒ 调用方**不许**开流 ✗）
  * @returns {{ address: { kind: 'session', sessionId: string }, maxMessages: number, turnWindow: { minMessages: number, minTurns: number } }}
  */
-export function followRequest(sessionId) {
+export function followRequest(sessionId, options = {}) {
   return {
-    address: { kind: 'session', sessionId: typeof sessionId === 'string' ? sessionId : '' },
+    address: options.address?.kind === 'subagent' ? { ...options.address } : { kind: 'session', sessionId: typeof sessionId === 'string' ? sessionId : '' },
+    ...(options.assistantStream === true ? { assistantStream: true } : {}),
     maxMessages: FOLLOW_MAX_MESSAGES,
     // ★ 每次都新建一个对象 ✗（不是共享常量 ✓）：共享的那份一旦被谁改一下，
     //   后续每一条流的窗口都跟着变 ✓ —— 那是「第二个事实来源」的另一种写法 ✓

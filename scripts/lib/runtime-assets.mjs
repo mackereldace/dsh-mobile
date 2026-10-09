@@ -57,6 +57,15 @@ export const RUNTIME_ASSETS = [
   'dsh-chat/app.js',
   'dsh-chat/ui.js',
   'dsh-chat/poller.js',
+  'dsh-chat/projection.js',
+  'dsh-chat/conversation.js',
+  'dsh-chat/trace.js',
+  'dsh-chat/composer.js',
+  'dsh-chat/navigation.js',
+  'dsh-chat/native-tokens.css',
+  'dsh-chat/native.css',
+  'dsh-chat/file-panel.css',
+  'dsh-chat/whale.svg',
   'codex/ui.js',
 ]
 

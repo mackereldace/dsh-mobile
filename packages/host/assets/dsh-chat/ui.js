@@ -21,6 +21,12 @@
  */
 
 /** 与boot手机调试框共用一个写入器；没有诊断口的旧客户端仍留控制台日志。 */
+import { createProjection } from './projection.js'
+import { mountConversation, icon } from './conversation.js'
+import { mountTrace } from './trace.js'
+import { mountComposerControls } from './composer.js'
+import { mountNavigation } from './navigation.js'
+
 export function chatLog(text) {
   try { console.log(text) } catch (error) { void error }
   const boot = globalThis.__DSH_MOBILE_BOOT__
@@ -1413,6 +1419,7 @@ export function computePageState(input) {
 export function mountChat(options) {
   const root = options.root
   const list = root.querySelector('#messages')
+  let projection = createProjection('')
   /**
    * ★ 钩子是**外面装的** ✓（`globalThis.__DSHM_CHAT_PAGE__.measure` ✓）——
    *   页面自己**不定义**它 ✓：没装的时候 `typeof measure !== 'function'` ⇒ 一个字节都不做 ✓
@@ -1743,6 +1750,7 @@ export function mountChat(options) {
   }
   const setChannels = channels => {
     if (!channels || typeof channels !== 'object') return
+    nativeControls.setCapabilities(channels)
     setApprovalChannel(channels.approval === true)
     const changed = questionChannelConnected !== (channels.question === true)
     questionChannelConnected = channels.question === true && typeof options.answerQuestion === 'function'
@@ -1808,7 +1816,7 @@ export function mountChat(options) {
    */
   const renderStatsStrip = () => {
     if (statsStrip === null || statsStrip === undefined) return
-    const values = readProjectionValues()
+    const values = projection.snapshot().values
     const cells = statsCells(values)
     const key = cells.map((cell) => cell.key + '=' + cell.text).join('|')
     // ★ 内容没变 ⇒ 一个字节都不动 ✓（`paint()` 每批事件都会跑 ✓）
@@ -1889,7 +1897,12 @@ export function mountChat(options) {
         stateBox.appendChild(card)
       }
     }
-    // ★ 输入区的可用状态跟着页面状态走 ✓（断线时那颗按钮要立刻变灰 ✓）
+    const empty = eventCount === 0 && !loading && !error && connection === 'online' && !pendingSwitch
+    const app = root.querySelector('.app'), welcome = root.querySelector('#welcome')
+    app?.classList.toggle('is-empty', empty)
+    if (welcome) welcome.hidden = !empty
+    if (tabs) tabs.hidden = empty
+    if (stateBox && empty) stateBox.hidden = true
     paintComposer()
   }
 
@@ -1902,255 +1915,57 @@ export function mountChat(options) {
    *   处理器根本没接上 ⇒ 画面空白、**渲染脚本的体积从 258KB 掉到 72KB 才露馅** ✗）。
    */
   // ── 会话切换：列表、草稿、切换（★ 不清屏 ✓）────────────────────────────
-  const sessionPanel = root.querySelector('#sessions')
   const titleButton = root.querySelector('#title')
-
-  /** 画会话列表 ✓（当前那个打勾 ✓；正在跑 / 等审批的带标记 ✓）。 */
+  const prepareSwitch = () => {
+    if (input) drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
+    pendingSwitch = true; sawResponseSinceSwitch = false; notice = ''; error = ''
+    paint()
+  }
+  const nativeNavigation = mountNavigation({
+    root,
+    onSwitch: (id, metadata) => { prepareSwitch(); return options.onSwitch?.(id, metadata) },
+    onCreate: request => { prepareSwitch(); return options.onCreate?.(request) },
+    onRename: options.rename, onFiles: options.onFiles,
+    onRefresh: () => { loading = true; error = ''; notice = ''; paint(); return options.onRefresh?.() },
+    onError: text => setNotice(text), onNotice: text => setNotice(text), onLog: chatLog,
+  })
   const paintSessions = () => {
-    if (sessionPanel === null || sessionPanel === undefined) return
-    sessionPanel.innerHTML = ''
-    // ★ 「＋ 新会话」—— 没有它，一个还没有会话的手机**什么也做不了** ✗
-    //   （输入框发出去只会得到"缺 sessionId"的错 ✓）
-    const createRow = document.createElement('button')
-    createRow.type = 'button'
-    createRow.className = 'session-row session-create'
-    createRow.textContent = '＋ 新会话'
-    createRow.addEventListener('click', () => {
-      hideSessions()
-      // ★ 与"切到某个已有会话"同一套状态 ✓：旧内容先留着，等新会话的**第一趟回应**到了才替换 ✓
-      pendingSwitch = true
-      sawResponseSinceSwitch = false
-      paint()
-      if (typeof options.onCreate === 'function') options.onCreate()
-    })
-    sessionPanel.appendChild(createRow)
-
-    const ordered = sortSessions(sessions)
-    if (ordered.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'state-hint'
-      empty.textContent = '这台电脑上没有别的会话'
-      sessionPanel.appendChild(empty)
-      return
-    }
-    for (const item of ordered) {
-      const row = document.createElement('button')
-      row.type = 'button'
-      row.className = 'session-row' + (item.id === currentSessionId ? ' is-current' : '')
-      const name = document.createElement('span')
-      name.className = 'session-title'
-      name.textContent = item.title !== undefined && item.title.length > 0 ? item.title : item.id
-      row.appendChild(name)
-      if (item.awaitingApproval === true || item.running === true) {
-        const flag = document.createElement('span')
-        flag.className = 'session-flag'
-        flag.textContent = item.awaitingApproval === true ? '等审批' : '在跑'
-        row.appendChild(flag)
-      }
-      if (item.id === currentSessionId) {
-        const mark = document.createElement('span')
-        mark.className = 'session-mark'
-        mark.textContent = '✓'
-        row.appendChild(mark)
-      }
-      row.addEventListener('click', () => {
-        if (item.id === currentSessionId) {
-          hideSessions()
-          return
-        }
-        // ★ 切走前先把当前草稿**存进柜子** ✓（切回来字还在 ✓）
-        if (input !== null && input !== undefined) drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
-        pendingSwitch = true
-        sawResponseSinceSwitch = false
-        hideSessions()
-        paint()
-        if (typeof options.onSwitch === 'function') options.onSwitch(item.id)
-      })
-      sessionPanel.appendChild(row)
-    }
+    sessions = nativeNavigation.setSessions(sessions, currentSessionId)
   }
 
-  const sessionMenu = root.querySelector('#session-menu')
-  const hideSessions = () => {
-    if (sessionPanel !== null && sessionPanel !== undefined) sessionPanel.hidden = true
-    if (sessionMenu) sessionMenu.setAttribute('aria-expanded', 'false')
-  }
-  if (sessionMenu) sessionMenu.addEventListener('click', () => titleButton && titleButton.click())
-
-  if (titleButton !== null && titleButton !== undefined) {
-    titleButton.addEventListener('click', () => {
-      if (sessionPanel === null || sessionPanel === undefined) return
-      const willShow = sessionPanel.hidden !== false
-      sessionPanel.hidden = !willShow
-      if (sessionMenu) sessionMenu.setAttribute('aria-expanded', String(willShow))
-      if (willShow) paintSessions()
-    })
-  }
-
-  // 轨迹的工具栏、三泳道总览与同源详情。只保留最近200个事件。
-  const traceToolbar = document.createElement('div')
-  traceToolbar.className = 'trace-toolbar'
-  const traceGraph = document.createElement('div')
-  traceGraph.className = 'trace-graph'
-  const traceList = document.createElement('div')
-  traceList.className = 'trace-list'
-  const traceEmpty = document.createElement('div')
-  traceEmpty.className = 'trace-empty'
-  traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
-  let traceEvents = []
-  let actualDuration = false, turnsOpen = true, callsOpen = true
-  const traceSearch = document.createElement('input')
-  traceSearch.type = 'search'
-  traceSearch.placeholder = '搜索轨迹'
-  traceSearch.setAttribute('aria-label', '搜索轨迹')
-  const traceControls = {}
-  for (const [key, label] of [['duration', '时长'], ['turns', '轮次'], ['calls', '调用']]) {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.textContent = label
-    button.setAttribute('data-trace-control', key)
-    button.setAttribute('aria-pressed', String(key !== 'duration'))
-    traceControls[key] = button
-    traceToolbar.appendChild(button)
-  }
-  traceToolbar.appendChild(traceSearch)
-  const installTrace = () => {
-    if (traceView) traceView.replaceChildren(traceToolbar, traceGraph, traceList, traceEmpty)
-  }
-  const refreshTraceEmpty = () => { traceEmpty.hidden = traceSteps > 0 }
-  const drawTrace = () => {
-    if (!traceView) return
-    const query = traceSearch.value.trim().toLowerCase()
-    const cells = traceTimeline(traceEvents, actualDuration)
-    const visible = cells.spans.filter(span => !query || (span.view.title + ' ' + span.view.text).toLowerCase().includes(query))
-    traceSteps = cells.spans.filter(span => isTraceEvent(span.event)).length
-    traceList.replaceChildren()
-    const turns = new Map(), groups = new Map()
-    for (const span of visible) {
-      const turn = span.turn
-      let section = turns.get(turn)
-      if (!section) {
-        section = document.createElement('details')
-        section.className = 'trace-turn'
-        section.open = turnsOpen
-        const summary = document.createElement('summary')
-        summary.textContent = turn ? '第 ' + turn + ' 轮' : '会话开始'
-        section.appendChild(summary)
-        turns.set(turn, section)
-        traceList.appendChild(section)
-      }
-      let parent = section
-      if (span.lane > 0) {
-        const key = turn + ':' + span.step
-        let group = groups.get(key)
-        if (!group) {
-          group = document.createElement('details')
-          group.className = 'trace-call'
-          group.open = callsOpen
-          const summary = document.createElement('summary')
-          summary.textContent = '调用 ' + (span.step || '记录')
-          group.appendChild(summary)
-          groups.set(key, group)
-          section.appendChild(group)
-        }
-        parent = group
-      }
-      let node = renderTraceEvent(span.event, approvalContext())
-      if (!node) {
-        node = document.createElement('div')
-        node.className = 'trace-record'
-        node.textContent = span.view.title + (span.view.text ? '：' + span.view.text : '')
-      }
-      node.setAttribute('data-trace-seq', String(span.event.seq))
-      parent.appendChild(node)
-    }
-    traceGraph.replaceChildren()
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-    svg.setAttribute('viewBox', '0 0 360 112')
-    svg.setAttribute('role', 'img')
-    svg.setAttribute('aria-label', '输入、模型、工具三条泳道的会话轨迹')
-    svg.setAttribute('data-mode', actualDuration ? 'duration' : 'sequence')
-    const createSvg = (tag, attrs, text) => {
-      const node = document.createElementNS(svg.namespaceURI, tag)
-      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value))
-      if (text) node.textContent = text
-      svg.appendChild(node)
-      return node
-    }
-    for (let lane = 0; lane < 3; lane++) {
-      createSvg('text', { x: 0, y: 20 + lane * 30, class: 'trace-lane-label' }, ['输入', '模型', '工具'][lane])
-      createSvg('line', { x1: 38, x2: 358, y1: 24 + lane * 30, y2: 24 + lane * 30, class: 'trace-grid' })
-    }
-    const extent = Math.max(1, cells.extent)
-    for (const span of visible) {
-      const bar = createSvg('rect', { x: 40 + span.start / extent * 316, y: 9 + span.lane * 30,
-        width: Math.max(2, (span.end - span.start) / extent * 316), height: 14, rx: 2,
-        class: 'trace-bar trace-lane-' + span.lane, 'data-seq': span.event.seq, role: 'button', tabindex: 0 })
-      const title = document.createElementNS(svg.namespaceURI, 'title')
-      title.textContent = span.view.title + ' · ' + (span.milliseconds / 1000).toFixed(2) + ' 秒'
-      bar.appendChild(title)
-      bar.setAttribute('aria-label', title.textContent)
-      const reveal = () => {
-        const row = Array.from(traceList.querySelectorAll('[data-trace-seq]')).find(n => n.getAttribute('data-trace-seq') === String(span.event.seq))
-        if (!row) return
-        let parent = row.parentElement
-        while (parent && parent !== traceList) { if (parent.tagName === 'DETAILS') parent.open = true; parent = parent.parentElement }
-        row.scrollIntoView({ block: 'center' })
-        traceList.querySelectorAll('.is-selected').forEach(n => n.classList.remove('is-selected'))
-        row.classList.add('is-selected')
-      }
-      bar.addEventListener('click', reveal)
-      bar.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); reveal() } })
-    }
-    traceGraph.appendChild(svg)
-    const caption = document.createElement('div')
-    caption.className = 'trace-caption'
-    caption.textContent = actualDuration ? '有效时长 ' + (cells.extent / 1000).toFixed(2) + ' 秒（空闲已压缩）' : visible.length + ' 条记录 · 按事件顺序'
-    traceGraph.appendChild(caption)
-    traceEmpty.hidden = visible.length > 0
-    if (!visible.length && query) traceEmpty.textContent = '没有匹配的轨迹记录'
-    else traceEmpty.textContent = '这个会话还没有可以摊开的步骤（工具与轮次会出现在这里）'
-  }
-  traceControls.duration.addEventListener('click', () => {
-    actualDuration = !actualDuration
-    traceControls.duration.setAttribute('aria-pressed', String(actualDuration))
-    drawTrace()
+  const nativeConversation = mountConversation({
+    container: list, renderMarkdown: renderBodyInto, maxRows: MAX_DRAWN_EVENTS,
+    onOlder: beforeSeq => options.onOlder?.(beforeSeq), loadAttachment: options.loadAttachment,
+    onMeasure: record => measure({ ...record, trimHidden: 0, trimmed: 0, drawn: record.drawn }),
   })
-  for (const key of ['turns', 'calls']) traceControls[key].addEventListener('click', () => {
-    if (key === 'turns') turnsOpen = !turnsOpen
-    else callsOpen = !callsOpen
-    const open = key === 'turns' ? turnsOpen : callsOpen
-    traceControls[key].setAttribute('aria-pressed', String(open))
-    traceList.querySelectorAll(key === 'turns' ? '.trace-turn' : '.trace-call').forEach(node => { node.open = open })
+  const nativeTrace = mountTrace({ container: traceView, renderMarkdown: renderBodyInto,
+    onOlder: beforeSeq => options.onOlder?.(beforeSeq) })
+  const nativeControls = mountComposerControls({
+    root,
+    getSession: () => ({ sessionId: currentSessionId, address: nativeNavigation.session(currentSessionId)?.address }),
+    onCatalog: options.catalog, onSelectModel: options.selectModel, onCommand: options.command,
+    onReferences: options.references, onCancel: options.cancel, onGoal: options.goal,
+    onRefresh: request => options.refreshProjections?.(request),
+    onSubmit: () => form?.requestSubmit(), onError: text => setNotice(text),
   })
-  traceSearch.addEventListener('input', drawTrace)
-  installTrace()
-  const appendTrace = events => {
-    traceEvents.push(...(Array.isArray(events) ? events : []))
-    traceEvents = traceEvents.slice(-MAX_DRAWN_EVENTS)
-    traceSteps = traceEvents.filter(isTraceEvent).length
-    if (traceView && !traceView.hidden) drawTrace()
-    else {
-      for (const event of Array.isArray(events) ? events : []) {
-        const node = renderTraceEvent(event, approvalContext())
-        if (node) traceList.appendChild(node)
-      }
-      const firstSeq = traceEvents[0] && traceEvents[0].seq
-      for (const node of traceList.querySelectorAll('.ev[data-seq]')) {
-        if (typeof firstSeq === 'number' && Number(node.getAttribute('data-seq')) < firstSeq) node.remove()
-      }
-      trimEventWindow(traceList, null, false)
+  const drawTrace = () => { nativeTrace.show(); traceSteps = nativeTrace.count() }
+  const appendTrace = () => { nativeTrace.update(projection.snapshot()); traceSteps = nativeTrace.count() }
+  const applyValues = (values, metadata = {}) => {
+    if (metadata.sessionId && metadata.sessionId !== currentSessionId) return
+    if (values && typeof values === 'object') {
+      projection.setValues(values, { asOfSeq: metadata.asOfSeq })
+      const merged = projection.snapshot().values
+      nativeControls.setValues(merged); nativeNavigation.setValues(merged, { sessionId: currentSessionId })
+      sessions = nativeNavigation.sessions()
     }
+    if (typeof metadata.hasMore === 'boolean') projection.ingest({ events: [], hasMore: metadata.hasMore })
+    if (!pendingSwitch) {
+      nativeConversation.update(projection.snapshot(), { preserveAnchor: metadata.preserveAnchor === true })
+      appendTrace()
+    }
+    paint()
   }
 
-  /**
-   * 切到哪一面 ✓（`'chat'` / `'trace'` ✓）。
-   *
-   * ★★ 这就是"切换行为"那一条的**唯一**真身处 ✗：
-   *   · 两个视图层的 `hidden` 互斥 ✓（**不是**"按钮变个色"✗ —— 断言判的是**换了一屏** ✓）；
-   *   · `aria-selected` 跟着走 ✓（`role=tab` 的可访问性语义 ✓ —— 与 DSH 自己那条一致 ✓）。
-   * ★ 只改这两个层的显隐 ✗：**不动 DOM 结构、不重画、不清屏、不重新取数** ✓。
-   */
   const showView = (which) => {
     const trace = which === 'trace'
     if (chatView !== null && chatView !== undefined) chatView.hidden = trace
@@ -2176,37 +1991,23 @@ export function mountChat(options) {
 
   /** 外面喂列表 ✓（`currentId` 变了就顺手把草稿换过来 ✓）。 */
   const setSessions = (next, currentId, titleText) => {
-    sessions = Array.isArray(next) ? next : []
-    if (typeof titleText === 'string' && titleButton !== null && titleButton !== undefined) {
-      titleButton.textContent = titleText
-    }
+    sessions = nativeNavigation.setSessions(Array.isArray(next) ? next : [], currentId, titleText)
     if (typeof currentId === 'string' && currentId !== currentSessionId) {
-      if (input !== null && input !== undefined) {
-        // 存起旧的、换上新的（★ 这就是"切回来字还在"的全部机制 ✓）
+      if (input) {
         drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
         input.value = getDraft(drafts, currentId)
       }
       currentSessionId = currentId
+      pendingSwitch = true; sawResponseSinceSwitch = false
+      projection = createProjection(currentSessionId)
+      nativeControls.setSession({ sessionId: currentSessionId, address: nativeNavigation.session(currentSessionId)?.address })
+      nativeControls.setValues({})
       if (dock) dock.replaceChildren()
-      questionCards.clear()
-      answeredQuestions.clear()
-      questionEventIds.clear()
+      questionCards.clear(); answeredQuestions.clear(); questionEventIds.clear()
+      decidedApprovals.clear(); drawnApprovals.clear()
       interactionValues = { active: [], settled: [] }
       dockChanged()
     }
-    const badge = root.querySelector('#subagent-count')
-    const current = sessions.find(item => item.id === currentSessionId)
-    const stats = current && current.subagentStats
-    const total = stats && Number.isInteger(stats.total) && stats.total >= 0 ? stats.total : null
-    if (badge) {
-      badge.hidden = total === null || total === 0
-      const running = stats && Number.isInteger(stats.running) && stats.running >= 0 ? stats.running : null
-      badge.textContent = total === null ? '' : '● ' + total + ' 个子智能体'
-      badge.classList.toggle('is-running', running !== null && running > 0)
-      badge.title = total === null ? '' : '子智能体 ' + total + ' 个' + (running === null ? '（运行状态未知）' : '，运行中 ' + running + ' 个')
-      if (total !== null) chatLog('[dsh-chat] 子智能体：总数=' + total + ' 运行中=' + (running === null ? '未知' : running))
-    }
-    paintSessions()
     paintComposer()
   }
 
@@ -2217,139 +2018,34 @@ export function mountChat(options) {
   }
 
   const handleEvents = (events) => {
-    const willReplace = resolveDelivery(pendingSwitch, sawResponseSinceSwitch, events) === 'replace'
-    if (pendingSwitch) sawResponseSinceSwitch = true
+    const willReplace = pendingSwitch
     if (willReplace) {
-      // ★ 第一趟回应到了 ⇒ 这时候才替换 ✗（切换的瞬间不许清屏 ✓；空会话也该清 ✓）
-      list.innerHTML = ''
-      eventCount = 0
-      /**
-       * ★★ 轨迹视图**跟着一起换** ✓（同一个会话的另一条渲染路 ✓）——
-       *   只清对话那一层、留着上一任会话的步骤列表，就是"两条视图说两件不同的事"✓
-       *   （在手机上表现为"切了会话，轨迹里还是上一个会话"✗，而且完全看不出来 ✓）。
-       */
-      if (traceView !== null && traceView !== undefined && typeof traceView.replaceChildren === 'function') {
-        traceEvents = []
-        traceSearch.value = ''
-        traceList.replaceChildren()
-        traceGraph.replaceChildren()
-        installTrace()
-      } else if (traceView !== null && traceView !== undefined) {
-        traceView.textContent = ''
-      }
-      traceSteps = 0
-      refreshTraceEmpty()
-      pendingSwitch = false
-      /**
-       * ★ 那两本审批账**跟着清** ✓：它们记的是"屏幕上这几张卡"✓
-       *   （留着只会指向已经摘下来的 DOM 节点 ✓）。
-       */
-      decidedApprovals.clear()
-      drawnApprovals.clear()
+      projection = createProjection(currentSessionId)
+      eventCount = 0; pendingSwitch = false; sawResponseSinceSwitch = true
+      decidedApprovals.clear(); drawnApprovals.clear()
       if (dock) dock.querySelectorAll('.ev-approval').forEach(node => node.remove())
-      dockChanged()
-      /**
-       * ★★ 裁剪那件事的状态**跟着换会话一起归零** ✗（长会话那一单 ✓）——
-       *   见 `resetEventWindow`：只摘那句"更早的 N 条已收起"✓（清屏上面已经做过了 ✓）。
-       */
-      resetEventWindow(list)
-      paintSessions()
+      dockChanged(); paintSessions()
     }
-    if (Array.isArray(events) && events.length > 0) {
-      error = ''
-      // ★ 刻意**不**在这里清临时消息 ✗：那样"没发出去：…（字还在输入框里）"会被
-      //   下一趟历史轮询**冲掉** ✓ —— 用户根本没看清就没了 ✓（与"字丢了"同一类伤害 ✓）。
-      //   清空时机只有**用户的下一次动作**：再发一次 ✓ / 点刷新 ✓。
-      eventCount += events.length
-      /**
-       * ★★ 次序：**先记账、再画卡、最后就地摘按钮** ✗ ——
-       *   ① 这一批里的 `approval/decided` 先入账 ✓（同一批里 asked 也在时，
-       *      画卡那一步才查得到"它已经处理过了"✓）；
-       *   ② 画 ✓（`appendEvents` 内部的 `decidedFor` 读的就是那本账 ✓）；
-       *   ③ 裁决比卡晚到的那种 ⇒ 把**已经画出来**的卡就地改成"已处理"✓。
-       */
-      const freshDecided = collectDecided(events)
-      /**
-       * ★★ 追加**之前**量一次读数 ✓ —— 裁剪那一步要用它做滚动补偿 ✗
-       *   （长会话那一单 ✓：见 `trimEventWindow` ✓）。两样东西：
-       *   · 滚动容器与它当下的 `scrollTop` ✓；
-       *   · **锚点**：现在屏口最上面那一条事件 ✓，以及它在屏口里的位置 ✓
-       *     （裁完之后要靠这一对把它**钉回原地** ✓ —— 这是"补偿"的全部机制 ✓）。
-       */
-      const scrollerNow = scrollContainerOf(list)
-      const windowMetrics = {
-        scroller: scrollerNow,
-        scrollTop: scrollerNow.scrollTop,
-        /**
-         * ★★ **追加之前**的 `scrollHeight` ✓ —— 补偿那个式子里的基准 ✓
-         *   （少喂这一个字段 ⇒ 补偿静默地不生效 ✓：我实测过这一种，
-         *   读数只是"没补偿"✓，而代码看起来完全正常 ✗）。
-         */
-        scrollHeight: scrollerNow.scrollHeight,
-        anchor: null,
-        anchorTop: null,
-        follow: null,
-        evictedHeight: 0,
+    const incoming = Array.isArray(events) ? events : []
+    const freshDecided = collectDecided(incoming)
+    for (const event of incoming) {
+      approvalContext().isQuestionEvent(event)
+      const requestId = approvalIdOf(event)
+      if (classify(String(event.type || '')) === 'approval' && !decidedApprovals.has(requestId) && !drawnApprovals.has(requestId)) {
+        const card = renderEvent(event, approvalContext())
+        if (card) (dock || list)?.appendChild(card)
       }
-      if (typeof scrollerNow.getBoundingClientRect === 'function') {
-        /**
-         * ★ 锚点取法：**第一条"下沿还在屏口里面"的节点** ✓（`bottom - box.top > 0` ✓）——
-         *   屏口之上那些已经完全看不见了 ✓，拿它们当锚点会让补偿从"用户看不到的地方"起算 ✓。
-         * ★ 判据只用**几何** ✗（不认 `data-seq`、不认事件类型 ✓）——
-         *   这一层不该知道"哪种事件更重要"✓（那是 `classify` 的事 ✓）。
-         */
-        const box = scrollerNow.getBoundingClientRect()
-        for (const node of Array.prototype.slice.call(list.children)) {
-          if (node.getBoundingClientRect().bottom - box.top > 0) {
-            windowMetrics.anchor = node
-            windowMetrics.anchorTop = node.getBoundingClientRect().top - box.top
-            break
-          }
-        }
-      }
-      const appended = appendEvents(list, events, approvalContext())
-      windowMetrics.follow = appended.follow
-      windowMetrics.scrollTop = windowMetrics.scrollTop
-      /**
-       * ★★ 轨迹视图走**同一条批次** ✓（同一批事件的另一条渲染路 ✓ ——
-       *   `renderTraceEvent` 只挑 `step` / `tool` ✓，画法**复用** `renderEvent` ✓）。
-       */
-      appendTrace(events)
-      /**
-       * ★★ 长会话：**画完之后**才回收头部 ✗（先回收的话，新事件就会补在空出来的位置上 ✓
-       *   —— 那既丢内容、又让滚动补偿的差值算不准 ✓）。
-       * ★ 这一步**不管** `computePageState` ✗：`eventCount` 是"一共收到过多少条" ✓
-       *   （只增不减 ✓），所以"有内容 ⇒ ready"那条规矩**一个字都没动** ✓ ——
-       *   裁剪**不可能**变成"出错清屏"✓。
-       */
-      const trim = trimEventWindow(list, windowMetrics)
-      const traceTrim = { trimmed: 0 }
-      refreshTraceEmpty()
-      /**
-       * ★ 把这一步的**读数**交出去 ✓（给验收与真机调试框 ✓ —— 见 `measure` ✓）。
-       *   纯读数、不改任何状态 ✓；没装钩子时一个字节都不做 ✓。
-       */
-      measure({
-        replaced: willReplace === true,
-        batch: events.length,
-        follow: appended.follow,
-        scrollTopBefore: windowMetrics.scrollTop,
-        anchorTop: windowMetrics.anchorTop,
-        hasAnchor: windowMetrics.anchor !== null,
-        scrollTopAfterAppend: appended.scrollTop,
-        trimmed: trim.trimmed,
-        trimHidden: trim.hidden,
-        scrollDelta: trim.screenDelta,
-        scrollTopAfterTrim: trim.scrollTop,
-        traceTrimmed: traceTrim.trimmed,
-        drawn: trim.drawn,
-        note: trim.hidden > 0,
-      })
-      registerDrawnApprovals(events)
-      settleDrawnApprovals(freshDecided)
     }
-    loading = false
-    paint()
+    projection.ingest(incoming)
+    nativeControls.setValues(projection.snapshot().values)
+    const snapshot = projection.snapshot()
+    eventCount = snapshot.records.filter(record => record.visible !== false && ['user', 'assistant', 'tool', 'error'].includes(record.kind)).length
+    if (incoming.length) error = ''
+    nativeConversation.update(snapshot)
+    appendTrace()
+    registerDrawnApprovals(incoming); settleDrawnApprovals(freshDecided)
+    measure({ replaced: willReplace, batch: incoming.length, drawn: nativeConversation.limits().drawn, projected: snapshot.records.length })
+    loading = false; paint()
   }
   const handleError = (message) => {
     // ★ 出错**不清屏** ✗ —— 有内容就走状态行 ✓，没内容才占屏 ✓（判据在 computePageState 里）
@@ -2360,17 +2056,6 @@ export function mountChat(options) {
     notice = ''
     paint()
   }
-
-  if (refresh !== null && refresh !== undefined) {
-    refresh.addEventListener('click', () => {
-      loading = true
-      error = ''
-      notice = ''
-      paint()
-      if (typeof options.onRefresh === 'function') options.onRefresh()
-    })
-  }
-
 
   // ── 输入区：清空要立刻（手感 ✓），但失败**把字放回去**（见 canSend/sendBegin/sendSettled ✓）──
   let sending = false
@@ -2457,7 +2142,10 @@ export function mountChat(options) {
       attachButton.setAttribute('aria-disabled', String(attachButton.disabled))
       attachButton.title = uploadChannelConnected ? '添加附件（单个≤20MiB）' : '附件通道未接通（请重开 DeepSeek Harness）'
     }
-    if (input !== null && input !== undefined) input.disabled = sending
+    const address = nativeNavigation.session(currentSessionId)?.address
+    const readOnlyChild = address?.kind === 'subagent' && address.mode !== 'continuable'
+    if (input) input.disabled = sending || readOnlyChild
+    if (attachButton && address?.kind === 'subagent') { attachButton.disabled = true; attachButton.title = '子智能体不支持文件附件' }
     if (sendButton !== null && sendButton !== undefined) {
       sendButton.disabled = sending || uploadPending || !(hasReceipts ? connection === 'online' : canSend({ text: input === null || input === undefined ? '' : input.value, sending: false, connection }))
       /**
@@ -2473,17 +2161,10 @@ export function mountChat(options) {
     if (form !== null && form !== undefined && form.dataset !== undefined) {
       form.dataset.sending = sending ? '1' : '0'
     }
+    nativeControls.setConnection(connection)
+    nativeControls.setRunning(projection.snapshot().status.running)
+    if (sendButton && readOnlyChild) { sendButton.disabled = true; sendButton.title = '此子智能体仅支持查看' }
   }
-
-  const commandButton = root.querySelector('[data-tool=command]')
-  if (commandButton) commandButton.addEventListener('click', () => {
-    if (!input || input.disabled) return
-    if (!input.value.startsWith('/')) input.value = '/' + input.value
-    input.focus()
-    if (typeof input.setSelectionRange === 'function') input.setSelectionRange(1, 1)
-    growInput()
-    paintComposer()
-  })
 
   if (input !== null && input !== undefined) {
     input.addEventListener('input', () => {
@@ -2511,11 +2192,12 @@ export function mountChat(options) {
       paintComposer()
       setNotice('发送中…')
       try {
-        await options.send(begun.pending, receiptIds)
+        const commandHandled = await nativeControls.handleSubmit({ text: begun.pending, receiptIds })
+        if (!commandHandled) await options.send(begun.pending, receiptIds, { sessionId: session, address: nativeNavigation.session(session)?.address })
         attachmentDrafts.set(session, [])
         sending = false
         sendSettled(true, begun.pending)
-        setNotice('已发出')
+        if (session === currentSessionId) setNotice('已发出')
       } catch (error) {
         // ★★ 失败 ⇒ **原文放回输入框** ✗（"发出去的字突然没了"是我最想避免的一种）
         const settled = sendSettled(false, begun.pending)
@@ -2523,7 +2205,7 @@ export function mountChat(options) {
         else drafts = putDraft(drafts, session, settled.draft)
         sending = false
         growInput()
-        setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
+        if (session === currentSessionId) setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
       }
       paintComposer()
     })
@@ -2535,6 +2217,26 @@ export function mountChat(options) {
     handlers: { onEvents: handleEvents, onError: handleError },
     /** 喂会话列表 ✓（第三个参数是标题栏文字 ✓）。 */
     setSessions,
+    setValues: applyValues,
+    prependHistory: page => {
+      projection.ingest({ events: page.events, hasMore: page.hasMore })
+      eventCount = projection.snapshot().events.length
+      nativeConversation.update(projection.snapshot(), { preserveAnchor: true }); appendTrace(); paint()
+    },
+    projection: () => projection.snapshot(),
+    ingestStream: (frame, metadata) => {
+      projection.ingestStream(frame, metadata)
+      const snapshot = projection.snapshot()
+      nativeConversation.update(snapshot); appendTrace(); paint()
+      return snapshot.stream
+    },
+    replaceStream: (baseline, metadata) => {
+      projection.replaceStream(baseline, metadata)
+      nativeConversation.update(projection.snapshot()); appendTrace(); paint()
+    },
+    controls: nativeControls,
+    navigation: nativeNavigation,
+    dispose: () => { nativeConversation.dispose(); nativeTrace.dispose(); nativeControls.dispose(); nativeNavigation.dispose() },
     /** 当前会话 id ✓。 */
     current: () => currentSessionId,
     /** 草稿柜读数 ✓（开发壳与测试用 ✓）。 */
@@ -2560,7 +2262,7 @@ export function mountChat(options) {
      */
     limits: () => ({
       maxDrawn: MAX_DRAWN_EVENTS,
-      drawn: list === null || list === undefined ? -1 : list.children.length,
+      drawn: nativeConversation.limits().drawn,
       trimNote: (() => {
         const note = list === null || list === undefined || typeof list.querySelector !== 'function'
           ? null
@@ -2571,10 +2273,7 @@ export function mountChat(options) {
         ? []
         : Array.prototype.slice.call(list.querySelectorAll('.ev[data-seq]')).map((node) => Number(node.getAttribute('data-seq'))),
     }),
-    appendEvents: (events) => {
-      appendEvents(list, events, approvalContext())
-      appendTrace(events)
-    },
+    appendEvents: handleEvents,
     /**
      * ★★ 裁决通道**探测结果**从外面喂进来 ✓（`app.js` 探一次 ✓）——
      *   探到接通 ⇒ 卡片上那两颗按钮才可点 ✓；探不到 ⇒ 一直置灰 ✓（不假装能用 ✗）。

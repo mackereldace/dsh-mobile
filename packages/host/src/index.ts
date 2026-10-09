@@ -1054,6 +1054,8 @@ export function createMobileHost(options: {
       // 反向控制（M5）：手机的文件与控制权
       'phone/files': 'phoneFs',
       'phone/control': 'phoneControl',
+      'mobile/dsh/references': 'fsRead',
+      'session/attachment': 'fsRead',
     }
 
     let need = required[endpoint]
@@ -2519,6 +2521,8 @@ export function createMobileHost(options: {
     // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
     // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
     if (endpoint.startsWith('mobile/dsh/')) {
+      const gate = capabilityCheck(device, endpoint)
+      if (!gate.ok) throw Object.assign(new Error(gate.message), { code: gate.code })
       // ★ 这里用**动态 import** ✗ 而不是文件顶部的静态 import ✓ ——
       //   顶部那一段是**别的单正在改的地方** ✗，插进去就会把两单搅在同一次提交里 ✓。
       //   动态 import 只加载一次（模块系统自己缓存 ✓），代价可以忽略 ✓。
@@ -3623,6 +3627,15 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         'app.js': 'app.js',
         'ui.js': 'ui.js',
         'poller.js': 'poller.js',
+        'projection.js': 'projection.js',
+        'conversation.js': 'conversation.js',
+        'trace.js': 'trace.js',
+        'composer.js': 'composer.js',
+        'navigation.js': 'navigation.js',
+        'native-tokens.css': 'native-tokens.css',
+        'native.css': 'native.css',
+        'file-panel.css': 'file-panel.css',
+        'whale.svg': 'whale.svg',
       }
       /**
        * ★★ 这里必须显式标类型 ✗ —— `npm test` 是**擦类型**跑的 ✓、从不做类型检查 ✓，
@@ -3660,7 +3673,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           'cache-control': 'no-store, must-revalidate',
           pragma: 'no-cache',
           'content-security-policy':
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
+            "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data: blob:",
           'referrer-policy': 'no-referrer',
           'x-content-type-options': 'nosniff',
           'x-dsh-mobile': 'dsh-chat-page',
@@ -3810,7 +3823,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           return true
         }
         const body = asset
-        const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8'
+        const type = name.endsWith('.css') ? 'text/css; charset=utf-8' : name.endsWith('.svg') ? 'image/svg+xml' : 'text/javascript; charset=utf-8'
         res.writeHead(200, {
           'content-type': type,
           'content-length': String(body.length),

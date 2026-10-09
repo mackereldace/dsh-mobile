@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-09",
+  "source": "DSH 0.2.0-rc.2 installed ASAR",
+  "regression": {
+    "files": 62,
+    "suites": 154,
+    "pass": 975,
+    "fail": 0,
+    "total": 975,
+    "durationMs": 9440.767042,
+    "excluded": [
+      "packages/client/test/boot-surface.test.ts"
+    ],
+    "exclusionReason": "Existing WIP notification-phase assertion and live timer; assertion not weakened"
+  },
+  "fixtureChecks": 23,
+  "mutationGroupsKilled": 54,
+  "mutationGroups": [
+    "projection (8)",
+    "conversation (7)",
+    "composer (5)",
+    "trace (6)",
+    "navigation (5)",
+    "child prompt (7)",
+    "state-prefix hiding",
+    "trace history cursor",
+    "native-image-bytes",
+    "approval-attachment",
+    "approval-replay",
+    "reference-permission",
+    "image-permission",
+    "local-bridge-permission",
+    "ordinary-address",
+    "projection-read-order",
+    "history-switch-isolation",
+    "unsorted-history-edge",
+    "stale-image-cache",
+    "native-projection-request",
+    "rename-confirmation",
+    "history-follow"
+  ],
+  "browserEvidence": "Project page with synthetic contract fixtures; not native page or real phone",
+  "historyAnchorResidualPx": 0.5,
+  "domRecordLimit": 200,
+  "nativeVisualApproved": false,
+  "realPhoneVerified": false
+}

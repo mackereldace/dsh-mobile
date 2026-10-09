@@ -14906,6 +14906,7 @@
     return { element: element, refresh: refresh }
   }
 
+  var standaloneChatFiles
   function buildFilesSheet() {
     var root = document.createElement('div')
     root.id = 'dsh-mobile-sheet'
@@ -23511,6 +23512,16 @@
       //   （本仓规矩：不新造渲染器）。
       renderMarkdownInto: renderMarkdownInto,
       debugLine: debugBoxLine,
+      // 会话页复用现有文件面板；不安装依赖原版 React 布局的整套外壳。
+      openFiles: function (targetDir) {
+        if (standaloneChatFiles === undefined) {
+          standaloneChatFiles = buildFilesSheet()
+          ensureDomRoot().appendChild(standaloneChatFiles.root)
+        }
+        return openFilesSheet(standaloneChatFiles, function () {
+          return globalThis.__DSH_MOBILE_BOOT__.tunnel
+        }, targetDir)
+      },
       splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,
