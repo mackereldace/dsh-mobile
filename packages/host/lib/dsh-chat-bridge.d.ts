@@ -72,7 +72,7 @@ import type { ApprovalBroker } from './dsh-approval.ts';
 import { type QuestionBroker } from './dsh-question.ts';
 /** 调一次 DSH 网关端点 ✓（生产里就是 `invokeGatewayEndpoint(gateway, …)` ✓）。 */
 export type GatewayCaller = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>;
-/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
+/** 手机页面使用本桥的业务路径；上游 typert 参数留在宿主转换。 */
 export declare const DSH_CHAT_PATHS: {
     readonly sessions: "mobile/dsh/sessions";
     readonly read: "mobile/dsh/read";
@@ -90,6 +90,12 @@ export declare const DSH_CHAT_PATHS: {
     readonly upload: "mobile/dsh/upload";
     readonly capabilities: "mobile/dsh/capabilities";
     readonly interactions: "mobile/dsh/interactions";
+    readonly catalog: "mobile/dsh/catalog";
+    readonly selectModel: "mobile/dsh/select-model";
+    readonly command: "mobile/dsh/command";
+    readonly references: "mobile/dsh/references";
+    readonly cancel: "mobile/dsh/cancel";
+    readonly goal: "mobile/dsh/goal";
 };
 /** 依赖（注入 ⇒ 单测里是假的 ✓）。 */
 export interface DshChatDeps {
@@ -276,8 +282,7 @@ export declare function normalizePage(value: unknown): Record<string, unknown>;
  *
  * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
  *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
- * · 这三个投影外面还有 `contextBreakdown` / `turnOutline` / `goal` / `subagent*` 等 16 个键 ✓
- *   （生产实测 `values` 一共 19 个键 ✓）—— **一个都不转** ✗，理由同模块注释第 2 条 ✓。
+ * · 其余内部投影仍不整包转出；目标栏另外使用逐字段验证的原版 `goal` 视图。
  */
 export declare function normalizeValues(value: unknown): Record<string, unknown>;
 /**

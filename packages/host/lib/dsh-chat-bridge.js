@@ -71,7 +71,7 @@
 import { ErrorCode } from './protocol/index.js';
 import { normalizeAnswers, normalizeQuestionView, readDshChatChannels, sharedQuestionBroker } from "./dsh-question.js";
 import { readHostRpcResult } from "./gateway-rpc.js";
-/** 我们自己的路径 ✓（手机认这四个 ✓）。 */
+/** 手机页面使用本桥的业务路径；上游 typert 参数留在宿主转换。 */
 export const DSH_CHAT_PATHS = {
     sessions: 'mobile/dsh/sessions',
     read: 'mobile/dsh/read',
@@ -89,6 +89,12 @@ export const DSH_CHAT_PATHS = {
     upload: 'mobile/dsh/upload',
     capabilities: 'mobile/dsh/capabilities',
     interactions: 'mobile/dsh/interactions',
+    catalog: 'mobile/dsh/catalog',
+    selectModel: 'mobile/dsh/select-model',
+    command: 'mobile/dsh/command',
+    references: 'mobile/dsh/references',
+    cancel: 'mobile/dsh/cancel',
+    goal: 'mobile/dsh/goal',
 };
 /**
  * 处理一条 `mobile/dsh/*` 调用 ✓。
@@ -112,10 +118,311 @@ export async function handleDshChatEndpoint(deps, endpoint, payload, signal) {
     if (endpoint === DSH_CHAT_PATHS.upload)
         return uploadFile(deps, args, signal);
     if (endpoint === DSH_CHAT_PATHS.capabilities)
-        return { ok: true, channels: readDshChatChannels() };
+        return { ok: true, channels: chatChannels() };
     if (endpoint === DSH_CHAT_PATHS.interactions)
         return readInteractions(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.catalog)
+        return readCatalog(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.selectModel)
+        return selectModel(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.command)
+        return executeCommand(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.references)
+        return readReferences(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.cancel)
+        return cancelSession(deps, args, signal);
+    if (endpoint === DSH_CHAT_PATHS.goal)
+        return operateGoal(deps, args, signal);
     return undefined;
+}
+/** controls 只说明本桥版本接通；每次操作仍以原版业务服务的回执为准。 */
+function chatChannels() {
+    return { ...readDshChatChannels(), controls: true };
+}
+/** 原版 0.2.0-rc.2 的三个目录，不提供静态模型或权限替身。 */
+async function readCatalog(deps, args, signal) {
+    const kind = args['kind'];
+    if (kind === 'models') {
+        const value = unwrap(await deps.call('session/modelCatalog', { args: {} }, signal));
+        return { ok: true, kind, catalog: modelCatalogView(value) };
+    }
+    if (kind === 'permissions') {
+        const value = unwrap(await deps.call('permissionPresets/catalog', { args: {} }, signal));
+        return { ok: true, kind, catalog: permissionCatalogView(value) };
+    }
+    if (kind === 'commands') {
+        const agentId = requireString(args, 'sessionId');
+        const value = unwrap(await deps.call('commands/list', { args: { agentId } }, signal));
+        return { ok: true, kind, catalog: commandCatalogView(value) };
+    }
+    throw new Error('目录 kind 只支持 models、permissions、commands');
+}
+async function selectModel(deps, args, signal) {
+    assertOrdinaryControls(args);
+    const sessionId = requireString(args, 'sessionId');
+    const request = {
+        sessionId,
+        provider: requireString(args, 'provider'),
+        model: requireString(args, 'model'),
+    };
+    if (args['reasoningEffort'] !== undefined)
+        request['reasoningEffort'] = requireString(args, 'reasoningEffort');
+    const value = requireRecord(unwrap(await deps.call('session/selectModel', { args: { request } }, signal)), '模型选择回执');
+    return { ok: true, sessionId, selected: modelSelectionView(value['selected']) };
+}
+/** 原版 commands/execute 的附件类型是 image 或 file；现有上传收据映射为 file。 */
+async function executeCommand(deps, args, signal) {
+    assertOrdinaryControls(args);
+    const sessionId = requireString(args, 'sessionId');
+    const line = requireString(args, 'line');
+    if (!line.trimStart().startsWith('/'))
+        throw new Error('命令必须是完整的 / 指令');
+    const submittedAttachments = receiptIdsOf(args).map(receiptId => ({ type: 'file', receiptId }));
+    const value = unwrap(await deps.call('commands/execute', { args: { agentId: sessionId, line, submittedAttachments } }, signal));
+    // 原版 undefined 是命令未匹配，调用方可将原文交给普通发送通道。
+    if (value === undefined)
+        return { ok: true, sessionId, matched: false };
+    const execution = requireRecord(value, '命令回执');
+    const commandId = requireString(execution, 'commandId');
+    const result = requireRecord(execution['result'], '命令结果');
+    if (result['kind'] === 'error') {
+        throw Object.assign(new Error(requireString(result, 'text')), { code: 'dsh/command-failed', commandId });
+    }
+    if (result['kind'] !== 'success')
+        throw new Error('命令通道返回了不可识别的结果');
+    const normalized = { kind: 'success' };
+    if (typeof result['text'] === 'string')
+        normalized['text'] = result['text'];
+    if (isSeqCursor(result['sourceEventSeq']))
+        normalized['sourceEventSeq'] = result['sourceEventSeq'];
+    return { ok: true, sessionId, matched: true, commandId, result: normalized };
+}
+/** 引号中的 @ 引用只列文件；未加引号时按原版并列文件与会话候选。 */
+async function readReferences(deps, args, signal) {
+    const sessionId = requireString(args, 'sessionId');
+    if (typeof args['query'] !== 'string')
+        throw new Error('参数缺失：query');
+    if (args['quoted'] !== undefined && typeof args['quoted'] !== 'boolean')
+        throw new Error('quoted 须为布尔值');
+    const payload = { args: { agentId: sessionId, query: args['query'] } };
+    const filesPromise = deps.call('fileReferences/list', payload, signal);
+    const sessionsPromise = args['quoted'] === true ? Promise.resolve([]) : deps.call('sessionReferenceResolver/candidates', payload, signal);
+    const [files, sessions] = await Promise.all([filesPromise, sessionsPromise]);
+    return { ok: true, sessionId, files: fileReferenceView(unwrap(files)), sessions: sessionReferenceView(unwrap(sessions)) };
+}
+/** 只有 continuable 子会话有原版停止通道；one-shot/unknown 不伪装为可继续会话。 */
+async function cancelSession(deps, args, signal) {
+    const address = asRecord(args['address']);
+    let sessionId;
+    let value;
+    if (address?.['kind'] === 'subagent') {
+        if (address['mode'] !== 'continuable')
+            throw new Error('当前子智能体没有 continuable 停止能力');
+        sessionId = requireString(address, 'childSessionId');
+        const parentSessionId = requireString(address, 'parentSessionId');
+        value = unwrap(await deps.call('subagents/interruptByParent', { args: { childSessionId: sessionId, parentSessionId, mode: 'continuable' } }, signal));
+    }
+    else {
+        if (args['address'] !== undefined && address?.['kind'] !== 'session')
+            throw new Error('会话 address 格式不符');
+        sessionId = requireString(address ?? args, 'sessionId');
+        value = unwrap(await deps.call('session/cancel', { args: { request: { sessionId } } }, signal));
+    }
+    if (asRecord(value)?.['accepted'] !== true)
+        throw new Error('停止通道未确认接受请求');
+    return { ok: true, sessionId, accepted: true };
+}
+/** Goal mutations use the original compare-and-set ref; this endpoint never creates a goal. */
+async function operateGoal(deps, args, signal) {
+    assertOrdinaryControls(args);
+    const sessionId = requireString(args, 'sessionId');
+    const action = args['action'];
+    if (action !== 'get' && action !== 'edit' && action !== 'pause' && action !== 'resume' && action !== 'clear') {
+        throw new Error('目标 action 只支持 get、edit、pause、resume、clear');
+    }
+    const upstream = { agentId: sessionId };
+    if (action !== 'get')
+        upstream['ref'] = goalRefView(args['ref']);
+    if (action === 'edit') {
+        const source = requireRecord(args['request'], '目标编辑 request');
+        const request = {};
+        if (source['objective'] !== undefined) {
+            const objective = requireString(source, 'objective');
+            if (objective.trim().length === 0)
+                throw new Error('目标 objective 不能为空');
+            request['objective'] = objective;
+        }
+        if (source['maxGoalRounds'] !== undefined) {
+            if (!positiveCount(source['maxGoalRounds']))
+                throw new Error('maxGoalRounds 须为正安全整数');
+            request['maxGoalRounds'] = source['maxGoalRounds'];
+        }
+        if (Object.keys(request).length === 0)
+            throw new Error('目标编辑至少需要 objective 或 maxGoalRounds');
+        upstream['request'] = request;
+    }
+    const value = unwrap(await deps.call(`goals/${action}`, { args: upstream }, signal));
+    if (action === 'clear')
+        return { ok: true, sessionId, ref: goalRefView(value) };
+    if (action === 'get' && value === undefined)
+        return { ok: true, sessionId, goal: null };
+    return { ok: true, sessionId, goal: goalLiveView(value) };
+}
+/** Model selection, commands, and goals follow the native ordinary-session controls policy. */
+function assertOrdinaryControls(args) {
+    if (asRecord(args['address'])?.['kind'] === 'subagent')
+        throw new Error('当前子智能体不支持此会话控件');
+}
+function receiptIdsOf(args) {
+    const ids = args['receiptIds'] === undefined ? [] : args['receiptIds'];
+    if (!Array.isArray(ids) || !ids.every((value) => typeof value === 'string' && value.trim().length > 0) || new Set(ids).size !== ids.length) {
+        throw new Error('附件收据格式不符：receiptIds 须为不重复的非空字符串数组');
+    }
+    return ids;
+}
+function requireRecord(value, label) {
+    const record = asRecord(value);
+    if (record === null)
+        throw new Error(`${label}格式不符`);
+    return record;
+}
+function requireArray(value, label) {
+    if (!Array.isArray(value))
+        throw new Error(`${label}格式不符`);
+    return value;
+}
+function modelSelectionView(value) {
+    const selection = requireRecord(value, '模型选择');
+    const result = { provider: requireString(selection, 'provider'), model: requireString(selection, 'model') };
+    if (typeof selection['reasoningEffort'] === 'string')
+        result['reasoningEffort'] = selection['reasoningEffort'];
+    return result;
+}
+function describedEntry(value, label) {
+    const entry = requireRecord(value, label);
+    return { id: requireString(entry, 'id'), name: requireString(entry, 'name'), ...(typeof entry['description'] === 'string' ? { description: entry['description'] } : {}) };
+}
+function modelCatalogView(value) {
+    const catalog = requireRecord(value, '模型目录');
+    const groups = requireArray(catalog['groups'], '模型分组').map(value => {
+        const group = requireRecord(value, '模型分组');
+        return {
+            id: requireString(group, 'id'), name: requireString(group, 'name'),
+            models: requireArray(group['models'], '模型列表').map(value => {
+                const entry = requireRecord(value, '模型');
+                const model = describedEntry(entry, '模型');
+                if (entry['reasoning'] !== undefined) {
+                    const reasoning = requireRecord(entry['reasoning'], '推理等级');
+                    model['reasoning'] = {
+                        efforts: requireArray(reasoning['efforts'], '推理等级列表').map(value => describedEntry(value, '推理等级')),
+                        ...(typeof reasoning['defaultEffort'] === 'string' ? { defaultEffort: reasoning['defaultEffort'] } : {}),
+                    };
+                }
+                return model;
+            }),
+        };
+    });
+    const routableProviders = requireArray(catalog['routableProviders'], '可路由提供方');
+    if (!routableProviders.every(value => typeof value === 'string'))
+        throw new Error('可路由提供方格式不符');
+    const failures = requireArray(catalog['failures'], '模型目录错误').map(value => {
+        const failure = requireRecord(value, '模型目录错误');
+        return { id: requireString(failure, 'id'), name: requireString(failure, 'name'), message: requireString(failure, 'message') };
+    });
+    return { default: modelSelectionView(catalog['default']), routableProviders, groups, failures };
+}
+function permissionCatalogView(value) {
+    const catalog = requireRecord(value, '权限目录');
+    const options = (value) => requireArray(value, '权限选项').map(value => {
+        const option = requireRecord(value, '权限选项');
+        return { value: requireString(option, 'value'), name: requireString(option, 'name'), ...(typeof option['description'] === 'string' ? { description: option['description'] } : {}) };
+    });
+    return { options: options(catalog['options']), defaultOptions: options(catalog['defaultOptions']), defaultPreset: requireString(catalog, 'defaultPreset') };
+}
+function commandCatalogView(value) {
+    return requireArray(value, '命令目录').map(value => {
+        const descriptor = requireRecord(value, '命令条目');
+        if (typeof descriptor['description'] !== 'string')
+            throw new Error('命令 description 格式不符');
+        const result = { name: requireString(descriptor, 'name'), description: descriptor['description'] };
+        if (typeof descriptor['definitionId'] === 'string')
+            result['definitionId'] = descriptor['definitionId'];
+        if (descriptor['input'] !== undefined) {
+            const input = requireRecord(descriptor['input'], '命令输入');
+            if (typeof input['hint'] !== 'string')
+                throw new Error('命令输入 hint 格式不符');
+            result['input'] = { hint: input['hint'], ...(typeof input['attachments'] === 'boolean' ? { attachments: input['attachments'] } : {}) };
+        }
+        return result;
+    });
+}
+function fileReferenceView(value) {
+    return requireArray(value, '文件引用').map(value => {
+        const entry = requireRecord(value, '文件引用');
+        if (entry['kind'] !== 'file' && entry['kind'] !== 'directory')
+            throw new Error('文件引用 kind 格式不符');
+        return { path: requireString(entry, 'path'), kind: entry['kind'] };
+    });
+}
+function sessionReferenceView(value) {
+    return requireArray(value, '会话引用').map(value => {
+        const entry = requireRecord(value, '会话引用');
+        if (typeof entry['sameWorkspace'] !== 'boolean' || typeof entry['createdAt'] !== 'number' || !Number.isFinite(entry['createdAt']))
+            throw new Error('会话引用格式不符');
+        return {
+            mention: requireString(entry, 'mention'), sessionId: requireString(entry, 'sessionId'), label: requireString(entry, 'label'),
+            sameWorkspace: entry['sameWorkspace'], createdAt: entry['createdAt'],
+            ...(typeof entry['displayTitle'] === 'string' ? { displayTitle: entry['displayTitle'] } : {}),
+            ...(typeof entry['cwd'] === 'string' ? { cwd: entry['cwd'] } : {}),
+        };
+    });
+}
+function positiveCount(value) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+function goalRefView(value) {
+    const ref = requireRecord(value, '目标 ref');
+    if (!positiveCount(ref['revision']))
+        throw new Error('目标 revision 须为正安全整数');
+    return { id: requireString(ref, 'id'), revision: ref['revision'] };
+}
+function goalIdentityView(value) {
+    const goal = requireRecord(value, '目标');
+    const phase = goal['phase'];
+    if (phase !== 'active' && phase !== 'paused' && phase !== 'blocked' && phase !== 'complete')
+        throw new Error('目标 phase 格式不符');
+    if (!positiveCount(goal['maxGoalRounds']))
+        throw new Error('目标 maxGoalRounds 格式不符');
+    const result = { ...goalRefView(goal), objective: requireString(goal, 'objective'), phase, maxGoalRounds: goal['maxGoalRounds'] };
+    if (goal['blockedReason'] !== undefined) {
+        const reason = requireRecord(goal['blockedReason'], '目标阻塞原因');
+        result['blockedReason'] = { code: requireString(reason, 'code'), message: requireString(reason, 'message') };
+    }
+    return result;
+}
+function goalCountersView(value) {
+    if (!isSeqCursor(value['roundsStarted']) || typeof value['createdAt'] !== 'number' || !Number.isFinite(value['createdAt']) ||
+        typeof value['updatedAt'] !== 'number' || !Number.isFinite(value['updatedAt']))
+        throw new Error('目标轮数或时间格式不符');
+    return { roundsStarted: value['roundsStarted'], createdAt: value['createdAt'], updatedAt: value['updatedAt'] };
+}
+function goalLiveView(value) {
+    const goal = requireRecord(value, '目标回执');
+    if (goal['activation'] !== 'armed' && goal['activation'] !== 'disarmed')
+        throw new Error('目标 activation 格式不符');
+    return { ...goalIdentityView(goal), ...goalCountersView(goal), activation: goal['activation'] };
+}
+/** Durable goal projection has no process-local activation. Invalid/missing values stay absent. */
+function goalProjectionView(value) {
+    const source = asRecord(value);
+    if (source === null)
+        return null;
+    try {
+        return { goal: goalIdentityView(source['goal']), ...goalCountersView(source) };
+    }
+    catch {
+        return null;
+    }
 }
 /** 前台回 waterfall；continued 回 DSH 自己的答案端点。false 绝不写成成功。 */
 async function answerQuestion(deps, args, signal) {
@@ -149,7 +456,7 @@ async function readInteractions(deps, args, signal) {
     const sessionId = requireString(args, 'sessionId');
     const projection = asRecord(unwrap(await deps.call('session/projections', { args: { request: { sessionId } } }, signal)));
     const values = withPendingQuestions(deps, sessionId, normalizeValues(projection?.['values']));
-    return { ok: true, sessionId, values: { userQuestions: values['userQuestions'] ?? { active: [], settled: [] } }, channels: readDshChatChannels() };
+    return { ok: true, sessionId, values: { userQuestions: values['userQuestions'] ?? { active: [], settled: [] } }, channels: chatChannels() };
 }
 function withPendingQuestions(deps, sessionId, values) {
     const pending = (deps.questionBroker ?? sharedQuestionBroker()).pending(sessionId);
@@ -239,7 +546,7 @@ async function listSessions(deps, signal) {
  *     实测这一次是 `3 KB / 3 ms` ✓（冷会话首次 `39 ms` ✓），而页面每 `900 ms` 才轮询一次 ✓。
  */
 async function readPage(deps, args, signal) {
-    const { headSeq, values: projections } = await resolveHeadSeq(deps, args, signal);
+    const { headSeq, values: projections, projectionSeq } = await resolveHeadSeq(deps, args, signal);
     const values = withPendingQuestions(deps, requestSessionId(args), projections);
     /**
      * ★ `head < 0` ⇒ 这个会话**一条事件都没有** ✓ ⇒ 正确答案就是"空的一页" ✓。
@@ -256,6 +563,10 @@ async function readPage(deps, args, signal) {
     return {
         ok: true,
         ...page,
+        // Native session/page only carries records/hasMore. Identity and cursor come from this exact request.
+        sessionId: requestSessionId(args),
+        asOfSeq: request['throughSeq'],
+        ...(projectionSeq === null ? {} : { valuesAsOfSeq: projectionSeq }),
         /**
          * ★ 投影值**盖在** `session/page` 自带的那份之上 ✓：
          * 真机上后者根本不存在 ✗（实测 ✓），这份是刚读到的真投影 ✓；
@@ -268,9 +579,10 @@ async function readPage(deps, args, signal) {
 async function sendPrompt(deps, args, signal) {
     const sessionId = requireString(args, 'sessionId');
     const text = typeof args['text'] === 'string' ? args['text'] : '';
-    const receiptIds = args['receiptIds'] === undefined ? [] : args['receiptIds'];
-    if (!Array.isArray(receiptIds) || !receiptIds.every(value => typeof value === 'string' && value.trim().length > 0) || new Set(receiptIds).size !== receiptIds.length)
-        throw new Error('附件收据格式不符：receiptIds 须为不重复的非空字符串数组');
+    const receiptIds = receiptIdsOf(args);
+    const address = asRecord(args['address']);
+    if (address?.['kind'] === 'subagent')
+        return sendSubagentPrompt(deps, args, address, sessionId, text, receiptIds, signal);
     if (text.trim().length === 0 && receiptIds.length === 0)
         throw Object.assign(new Error('参数缺失：text'), { code: ErrorCode.Internal });
     const mode = args['mode'] === 'steer' ? 'steer' : 'queue';
@@ -303,6 +615,53 @@ async function sendPrompt(deps, args, signal) {
      */
     deps.recordPrompt?.({ sessionId, rpcId: requestId }, 'mobile/dsh/send');
     return { ok: true, requestId, mode, sessionId, value: value === undefined ? null : value };
+}
+/**
+ * 原版 SessionClient.prompt 的子地址分支：subagents/prompt，delivery 取 queue/steer。
+ * 来源：0.2.0-rc.2 app.asar，dsh-api-session-controller/lib/types/client/sessions/session.js:194-213，
+ * dsh-subagent/lib/typert.host.js:14-35。目录里的 one-shot/unknown 仍可读，不能续发。
+ * 现有上传收据表示 file；原版在续发前拒绝 file，不消费收据，也不降级发到父会话。
+ */
+async function sendSubagentPrompt(deps, args, address, sessionId, text, receiptIds, signal) {
+    if (address['mode'] !== 'continuable') {
+        throw Object.assign(new Error('当前子智能体没有 continuable 续发能力'), { code: 'subagent/not-resumable' });
+    }
+    const parentSessionId = requireString(address, 'parentSessionId');
+    const childSessionId = requireString(address, 'childSessionId');
+    if (!parentSessionId.trim() || !childSessionId.trim() || childSessionId !== sessionId) {
+        throw Object.assign(new Error('子智能体地址的 parentSessionId/childSessionId 无效，或 childSessionId 与 sessionId 不一致'), { code: 'gateway/bad-request' });
+    }
+    if (receiptIds.length > 0) {
+        throw Object.assign(new Error('子智能体续发不接受文件附件，文字和附件保留以便重新发送'), {
+            code: 'subagent/attachment-invalid', details: { reason: 'SUBAGENT_FILE_UNSUPPORTED' },
+        });
+    }
+    if (!text.trim())
+        throw Object.assign(new Error('参数缺失：text'), { code: ErrorCode.Internal });
+    if (args['mode'] !== undefined && args['mode'] !== 'queue' && args['mode'] !== 'steer') {
+        throw Object.assign(new Error('子智能体消息 mode 只支持 queue 或 steer'), { code: 'gateway/bad-request' });
+    }
+    const delivery = args['mode'] === 'steer' ? 'steer' : 'queue';
+    if (args['clientTimeZone'] !== undefined && (typeof args['clientTimeZone'] !== 'string' || !args['clientTimeZone'].trim())) {
+        throw Object.assign(new Error('clientTimeZone 须为非空时区字符串'), { code: 'subagent/invalid-time-zone' });
+    }
+    if (args['requestId'] !== undefined && (typeof args['requestId'] !== 'string' || !args['requestId'].trim())) {
+        throw Object.assign(new Error('requestId 须为非空字符串'), { code: 'gateway/bad-request' });
+    }
+    const requestId = typeof args['requestId'] === 'string'
+        ? args['requestId'] : `dshm-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+    const request = {
+        requestId, parentSessionId, childSessionId, mode: 'continuable', delivery,
+        content: [{ type: 'text', text }],
+        ...(args['clientTimeZone'] === undefined ? {} : { clientTimeZone: args['clientTimeZone'] }),
+    };
+    const value = asRecord(unwrap(await deps.call('subagents/prompt', { args: { request } }, signal)));
+    if (typeof value?.['messageId'] !== 'string' || !value['messageId'].trim()) {
+        throw new Error('子智能体续发通道没有返回有效的 messageId 回执');
+    }
+    // The actual child's accepted inbox message keeps this request identity.
+    deps.recordPrompt?.({ sessionId: childSessionId, rpcId: requestId }, 'mobile/dsh/send');
+    return { ok: true, requestId, mode: delivery, sessionId: childSessionId, value: { messageId: value['messageId'] } };
 }
 /**
  * 新建一个会话 ✓（`session/create` ✓）。
@@ -500,6 +859,8 @@ export function normalizeSessions(value) {
             current: record['current'] === true || record['isCurrent'] === true || record['active'] === true,
             updatedAt: typeof record['updatedAt'] === 'number' ? record['updatedAt'] : null,
             blank: record['blank'] === true,
+            ...(typeof record['agentAvailable'] === 'boolean' ? { agentAvailable: record['agentAvailable'] } : {}),
+            ...optionalString(record, 'cwd'),
             ...(subagentStats === undefined ? {} : { subagentStats }),
             /**
              * ★ 两个**真形状里就有**的可选字段，原样透传 ✓（**都不是新造的名字** ✓）：
@@ -614,8 +975,7 @@ export function normalizePage(value) {
  *
  * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
  *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
- * · 这三个投影外面还有 `contextBreakdown` / `turnOutline` / `goal` / `subagent*` 等 16 个键 ✓
- *   （生产实测 `values` 一共 19 个键 ✓）—— **一个都不转** ✗，理由同模块注释第 2 条 ✓。
+ * · 其余内部投影仍不整包转出；目标栏另外使用逐字段验证的原版 `goal` 视图。
  */
 export function normalizeValues(value) {
     const source = value !== null && typeof value === 'object' ? value : {};
@@ -629,6 +989,11 @@ export function normalizeValues(value) {
     copyIfPresent(source, out, 'permissions');
     copyIfPresent(source, out, 'subagentCatalog');
     copyIfPresent(source, out, 'lastPromptAt');
+    // A real null is the authoritative pre-create/clear edge; absence is not a fabricated clear.
+    if (source['goal'] === null)
+        out['goal'] = null;
+    else
+        copyView(source, out, 'goal', goalProjectionView);
     copyView(source, out, 'userQuestions', value => {
         const view = normalizeQuestionView(value);
         return view === null ? null : { active: view.active, settled: view.settled };
@@ -770,6 +1135,12 @@ export function pageRequest(args, headSeq) {
         request['maxMessages'] = args['maxMessages'];
     if (typeof args['turnWindow'] === 'number')
         request['turnWindow'] = args['turnWindow'];
+    const turnWindow = asRecord(args['turnWindow']);
+    if (turnWindow !== null) {
+        if (!positiveCount(turnWindow['minMessages']) || !positiveCount(turnWindow['minTurns']))
+            throw new Error('turnWindow 须包含正安全整数 minMessages、minTurns');
+        request['turnWindow'] = { minMessages: turnWindow['minMessages'], minTurns: turnWindow['minTurns'] };
+    }
     /**
      * ★★ `throughSeq`：页面的（**非负** ✓）优先 ✓，否则用实测/兜底拿到的 head ✓。
      *
@@ -903,16 +1274,16 @@ async function resolveHeadSeq(deps, args, signal) {
     // ★ 页面给的游标优先 ✓；但投影**这一次照读** ✓（状态条的三个数只在它里面 ✗）
     const provided = providedThroughSeq(args);
     if (provided !== null)
-        return { headSeq: provided, values: projectionValuesOf(snapshot) };
+        return { headSeq: provided, values: projectionValuesOf(snapshot), projectionSeq: snapshot?.asOfSeq ?? null };
     if (snapshot !== null) {
         if (snapshot.asOfSeq !== null)
-            return { headSeq: snapshot.asOfSeq, values: projectionValuesOf(snapshot) };
+            return { headSeq: snapshot.asOfSeq, values: projectionValuesOf(snapshot), projectionSeq: snapshot.asOfSeq };
         failures.push('session/projections 没给 asOfSeq');
     }
     const fromList = await headSeqFromList(deps, sessionId, signal, failures);
     if (fromList !== null) {
         // ★ head 是从**列表**里拿的 ⇒ 投影没读到 ⇒ `values` 空表 ✓（不编 ✗）
-        return { headSeq: fromList, values: projectionValuesOf(snapshot) };
+        return { headSeq: fromList, values: projectionValuesOf(snapshot), projectionSeq: snapshot?.asOfSeq ?? null };
     }
     throw Object.assign(new Error(`取不到会话「${sessionId}」的 head 序号（${failures.join('；')}）`), {
         code: ErrorCode.Internal,
