@@ -192,7 +192,7 @@ it('仅附件消息可发送；空消息、重复/坏收据、字符串假bytes�
 it('capabilities 只报告已挂载通道；挂载 prepend/global 同实例，卸载释放真实请求和状态', async () => {
   setDshChatChannels({ approval: false, question: false, upload: false })
   const { call } = gateway()
-  assert.deepEqual(await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.capabilities, payload({})), { ok: true, channels: { approval: false, question: false, upload: false } })
+  assert.deepEqual(await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.capabilities, payload({})), { ok: true, channels: { approval: false, question: false, upload: false, controls: true } })
   let teardown: (() => void) | undefined
   let actual: { name: string; handler: (request: unknown, next: () => unknown) => unknown; options: unknown } | undefined
   assert.equal(mountQuestionChannel({
