@@ -26,6 +26,8 @@ function deferred<T = unknown>() {
   return { promise, resolve, reject }
 }
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)) }
+/** 把「加载 → 会话列表 → 取数 → 回到 online → 探测」这条微任务链彻底跑完。 */
+const settle = async () => { for (let i = 0; i < 12; i++) await flush() }
 
 class Frames implements AsyncIterableIterator<Frame> {
   private pending: ((value: IteratorResult<Frame>) => void) | null = null
@@ -71,6 +73,8 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
   const steps: string[] = [], errors: string[] = [], channels: Data[] = [], interactions: Data[] = [], logs: string[] = []
   /** 每次 setChannels 的探测失败原因（'' = 探测成功）；用来证明「没问成」不再被当成「真没接通」。 */
   const channelProbes: string[] = []
+  /** 每次 setChannels 的完整探测元信息（confirmed / probeError / retrying / exhausted）。 */
+  const channelMeta: (Data | undefined)[] = []
   const blobs: Blob[] = [], revoked: string[] = [], attributes = new Map<string, string>()
   const location = { href: url, search: new URL(url).search }
   const setTimer = (fn: () => void, ms: number) => { const id = ++nextTimer; timers.set(id, { ms, fn }); return id }
@@ -98,6 +102,7 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
     setChannels: (value: Data, probe?: Data) => {
       channels.push(structuredClone(value))
       channelProbes.push(typeof probe?.probeError === 'string' ? probe.probeError : '')
+      channelMeta.push(probe === undefined ? undefined : structuredClone(probe))
     },
     setInteractions: (value: Data) => { interactions.push(structuredClone(value)) },
     prependHistory: (value: Data) => { steps.push('history'); projection.ingest({ events: value.events, hasMore: value.hasMore }) },
@@ -134,7 +139,7 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
   }, { filename: 'dsh-chat/app.js' })
   await flush()
   return {
-    boot, page, callbacks, calls, streams, steps, errors, channels, channelProbes, interactions, logs, location, blobs, revoked,
+    boot, page, callbacks, calls, streams, steps, errors, channels, channelProbes, channelMeta, interactions, logs, location, blobs, revoked,
     handle: (method: string, handler: RpcHandler) => rpcHandlers.set(method, handler),
     timerDelays: () => [...timers.values()].map(timer => timer.ms),
     runTimers: async (ms: number) => { for (const [id, timer] of [...timers]) if (timer.ms === ms) { timers.delete(id); timer.fn() }; await flush() },
@@ -288,6 +293,114 @@ describe('production chat app wiring and native addressing', () => {
       await flush()
       assert.deepEqual(p.channels.at(-1), { approval: true, question: true, upload: true, controls: true })
       assert.equal(p.channelProbes.at(-1), '')
+    } finally { await p.dispose() }
+  })
+
+  it('迟到的初始探测失败不许覆盖更新的成功结果（请求序号）', async () => {
+    // ★ 2026-10-12 补边界①：加载时那次探测与 online 那次会并发。
+    //   旧实现谁后到谁生效 ⇒ 迟到的**初始** false/错误会盖掉已经成功的在线探测 ✗。
+    let calls = 0
+    let failFirst!: (reason: Error) => void
+    const first = new Promise((_, reject) => { failFirst = reject })
+    const good = { approval: true, question: true, upload: true, controls: true }
+    const p = await mounted({
+      streaming: false,
+      handlers: { 'mobile/dsh/capabilities': () => (calls++ === 0 ? first : Promise.resolve({ channels: good })) },
+    })
+    try {
+      await settle()
+      assert.deepEqual(p.channels.at(-1), good, 'online 那次探测应已成功落地')
+      failFirst(new Error('迟到的初始失败'))
+      await settle()
+      assert.deepEqual(p.channels.at(-1), good, '迟到的旧结果不得覆盖更新的成功结果')
+      assert.equal(p.channelProbes.at(-1), '', '被丢弃的结果也不该污染探测状态')
+    } finally { await p.dispose() }
+  })
+
+  it('在线且附件未确认时按 1→2→4→8 秒有界重查，用尽即停不永久轮询', async () => {
+    // ★ 2026-10-12 补边界②：首次与 online 都报 upload:false、而 fileUploads 之后才注册时，
+    //   连接一直 online 也必须有**有界**自动重查，否则永远停在「未接通」✗。
+    let probes = 0
+    const p = await mounted({
+      streaming: false,
+      handlers: { 'mobile/dsh/capabilities': () => { probes++; return { channels: { approval: true, question: true, upload: false, controls: true } } } },
+    })
+    const retryDelays = () => p.timerDelays().filter(ms => ms === 1000 || ms === 2000 || ms === 4000 || ms === 8000)
+    try {
+      await settle()
+      assert.deepEqual(retryDelays(), [1000], '第一次退避应是 1000ms')
+      for (const delay of [1000, 2000, 4000, 8000]) {
+        await p.runTimers(delay)
+        assert.deepEqual(retryDelays(), delay === 8000 ? [] : [delay * 2], delay + 'ms 之后的下一档退避不对')
+      }
+      // 用尽：不再排新的重查，且如实标记 exhausted（UI 改提示「可重新检测」）
+      assert.equal(p.channelMeta.at(-1)?.exhausted, true)
+      const settledProbes = probes
+      await p.runTimers(1000); await p.runTimers(2000); await p.runTimers(4000); await p.runTimers(8000)
+      assert.equal(probes, settledProbes, '退避用尽后不得继续轮询')
+      assert.deepEqual(retryDelays(), [])
+    } finally { await p.dispose() }
+  })
+
+  it('离线与页面销毁都会取消退避重查', async () => {
+    let probes = 0
+    const p = await mounted({
+      streaming: false,
+      handlers: { 'mobile/dsh/capabilities': () => { probes++; return { channels: { approval: true, question: true, upload: false, controls: true } } } },
+    })
+    const retryDelays = () => p.timerDelays().filter(ms => ms === 1000 || ms === 2000 || ms === 4000 || ms === 8000)
+    try {
+      await settle()
+      assert.deepEqual(retryDelays(), [1000])
+      // 掉线 ⇒ 退避重查必须停（否则是永不停止的后台请求）
+      p.handle('mobile/dsh/read', () => { throw new Error('掉线') })
+      // 把取数循环自己的定时器也放出来，让这一趟读真的失败（退避重查的 1000ms 不放）
+      for (const delay of p.timerDelays().filter(ms => ms !== 1000 && ms !== 2000 && ms !== 4000 && ms !== 8000)) {
+        await p.runTimers(delay)
+        if (p.steps.includes('connection:offline')) break
+      }
+      await settle()
+      assert.ok(p.steps.includes('connection:offline'), '读失败应先掉线')
+      assert.deepEqual(retryDelays(), [], '离线后不得残留退避重查')
+      // 销毁：dispose() 自身断言 timers.size === 0（销毁后不得再发请求）
+      const before = probes
+      await p.dispose()
+      assert.deepEqual(retryDelays(), [])
+      assert.equal(probes, before, '销毁后不得再有探测发出')
+    } finally { void p }
+  })
+
+  it('瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查', async () => {
+    // ★ 2026-10-12 补边界③：瞬时失败只是「没问成」，不该把已确认的能力抹成全 false；
+    //   而成功的 read 回执带通道能力时，应认作已确认并清掉退避重查。
+    let calls = 0, reads = 0
+    const good = { approval: true, question: true, upload: true, controls: true }
+    const p = await mounted({
+      streaming: false,
+      handlers: {
+        // 首轮探测：宿主说附件还没注册（online 前不会排退避）；之后每次探测都失败，
+        // 于是 online 那次探测**本会**排一个 1000ms 退避 —— 正好检验 read 回执能否清掉它。
+        'mobile/dsh/capabilities': () => (calls++ === 0
+          ? { channels: { approval: true, question: true, upload: false, controls: true } }
+          : Promise.reject(new Error('瞬时失败'))),
+        // 首轮 read 回执带通道能力 ⇒ 认作已确认，顺带清掉退避重查；之后不带，别把状态又刷回去
+        'mobile/dsh/read': () => (reads++ === 0
+          ? { events: [], values: {}, valuesAsOfSeq: 0, hasMore: false, channels: good }
+          : { events: [], values: {}, valuesAsOfSeq: 0, hasMore: false }),
+      },
+    })
+    const retryDelays = () => p.timerDelays().filter(ms => ms === 1000 || ms === 2000 || ms === 4000 || ms === 8000)
+    try {
+      await settle()
+      assert.ok(p.channelProbes.includes('瞬时失败'), 'online 那次探测应确实失败过（否则本组断言会空转）')
+      assert.deepEqual(p.channels.at(-1), good, 'read 回执的已确认能力应落地')
+      assert.deepEqual(retryDelays(), [], 'read 回执确认后不得残留退避重查')
+      // 之后一次纯探测失败（read 不再带能力兜底）：不得抹掉已确认的 upload:true
+      await p.callbacks.onRefresh()
+      await settle()
+      assert.deepEqual(p.channels.at(-1), good, '瞬时失败不得抹掉已确认能力')
+      assert.equal(p.channelProbes.at(-1), '瞬时失败', '但失败原因要如实保留')
+      assert.equal(p.channelMeta.at(-1)?.confirmed, false)
     } finally { await p.dispose() }
   })
 })
