@@ -9,6 +9,7 @@ const params = new URLSearchParams(location.search)
 try { const theme = localStorage.getItem('dsh-mobile.theme'); if (['system', 'dark', 'light'].includes(theme)) document.documentElement.setAttribute('data-theme', theme) } catch { /* Storage may be unavailable. */ }
 let currentId = params.get('session') || '', currentAddress = null, currentTitle = ''
 let sessionEpoch = 0, sessions = [], latestProjections = null, projectionTimer = null, interactionTimer = null
+let creationEpoch = 0
 let interactionEpoch = 0, interactionInFlight = 0, projectionRead = 0, received = 0
 let streamToken = 0, streamIterator = null, streamLatchFire = null, reopenTimer = null, reopenAttempt = 0, poller = null
 let connectionMode = 'unknown', destroyed = false
@@ -168,7 +169,9 @@ const page = mountChat({
   root: document,
   onSwitch: changeSession,
   onCreate: async request => {
+    const epoch = sessionEpoch, creation = ++creationEpoch
     const value = await rpc('mobile/dsh/create', request || {})
+    if (destroyed || epoch !== sessionEpoch || creation !== creationEpoch) { void loadSessions(); return }
     if (typeof value?.sessionId !== 'string' || !value.sessionId) throw new Error('DSH 没给出新会话的 id')
     return changeSession(value.sessionId)
   },

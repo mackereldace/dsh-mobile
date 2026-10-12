@@ -1933,7 +1933,7 @@ export function mountChat(options) {
     onManage: nativeManagement ? kind => { nativeStatistics.close(); nativeControls.back?.(); nativeManagement.open(kind) } : undefined,
     onBackendChange: typeof options.manage === 'function' ? backend => {
       if (backend === 'dsh') return
-      if (sending || activeAttachments().some(file => file.uploading)) throw new Error('请等当前发送或上传结束后再切换来源')
+      if (pendingSends.size || [...attachmentDrafts.values()].some(files => files.some(file => file.uploading))) throw new Error('请等当前发送或上传结束后再切换来源')
       const ready = activeAttachments().filter(file => file.receiptId).map(({ name, size, receiptId }) => ({ name, size, receiptId, uploading: false, error: '' }))
       try { globalThis.sessionStorage?.setItem('dshm-attachments:' + currentSessionId, JSON.stringify(ready)) } catch { /* In-page drafts still remain valid. */ }
       navigateMobileBackend(backend, root)
@@ -2079,7 +2079,7 @@ export function mountChat(options) {
   }
 
   // ── 输入区：清空要立刻（手感 ✓），但失败**把字放回去**（见 canSend/sendBegin/sendSettled ✓）──
-  let sending = false
+  const pendingSends = new Set()
   /**
    * ★ 发送键 = `form` 里那颗 `button` ✓ —— **取法与改前逐字相同** ✗
    *   （原来那颗是方块文字「发送」✓，现在换成了圆形箭头 ✓，但那**不影响**这条取值 ✓）。
@@ -2102,6 +2102,7 @@ export function mountChat(options) {
   const attachmentInput = root.querySelector('#attachment-input')
   const attachButton = root.querySelector('[data-tool=attach]')
   const paintAttachments = () => {
+    const sending = pendingSends.has(currentSessionId)
     if (!attachmentsBox) return
     attachmentsBox.replaceChildren()
     const files = activeAttachments()
@@ -2180,6 +2181,7 @@ export function mountChat(options) {
   if (attachmentInput) attachmentInput.addEventListener('change', () => { const files = Array.from(attachmentInput.files || []); attachmentInput.value = ''; void addAttachments(files) })
 
   paintComposer = () => {
+    const sending = pendingSends.has(currentSessionId)
     const files = activeAttachments()
     const hasReceipts = files.some(file => file.receiptId.length > 0)
     const uploadPending = files.some(file => file.uploading || file.error)
@@ -2225,6 +2227,7 @@ export function mountChat(options) {
       if (submitEvent.preventDefault) submitEvent.preventDefault()
       const current = input === null || input === undefined ? '' : String(input.value || '')
       const session = currentSessionId
+      const sending = pendingSends.has(session)
       const files = activeAttachments()
       const receiptIds = files.filter(file => file.receiptId).map(file => file.receiptId)
       if (sending || files.some(file => file.uploading || file.error) || !(receiptIds.length ? connection === 'online' : canSend({ text: current, sending, connection }))) {
@@ -2234,7 +2237,7 @@ export function mountChat(options) {
       }
       const begun = sendBegin(current)
       if (input !== null && input !== undefined) input.value = begun.draft
-      sending = true
+      pendingSends.add(session)
       growInput()
       paintComposer()
       setNotice('发送中…')
@@ -2242,7 +2245,7 @@ export function mountChat(options) {
         const commandHandled = await nativeControls.handleSubmit({ text: begun.pending, receiptIds })
         if (!commandHandled) await options.send(begun.pending, receiptIds, { sessionId: session, address: nativeNavigation.session(session)?.address })
         attachmentDrafts.set(session, [])
-        sending = false
+        pendingSends.delete(session)
         sendSettled(true, begun.pending)
         if (session === currentSessionId) setNotice('已发出')
       } catch (error) {
@@ -2250,7 +2253,7 @@ export function mountChat(options) {
         const settled = sendSettled(false, begun.pending)
         if (session === currentSessionId && input !== null && input !== undefined) input.value = settled.draft
         else drafts = putDraft(drafts, session, settled.draft)
-        sending = false
+        pendingSends.delete(session)
         growInput()
         if (session === currentSessionId) setNotice(sendFailureHint(error instanceof Error ? error.message : String(error)))
       }
