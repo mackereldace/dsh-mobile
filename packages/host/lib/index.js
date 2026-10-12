@@ -535,6 +535,13 @@ export function createMobileHost(options) {
             'phone/control': 'phoneControl',
             'mobile/dsh/references': 'fsRead',
             'session/attachment': 'fsRead',
+            'mobile/manage/capabilities': 'fsRead',
+            'mobile/manage/settings/read': 'fsRead',
+            'mobile/manage/plugins/list': 'fsRead',
+            'mobile/manage/plugins/read': 'fsRead',
+            'mobile/manage/settings/write': 'fsWrite',
+            'mobile/manage/plugins/configure': 'fsWrite',
+            'mobile/manage/plugins/set-enabled': 'fsWrite',
         };
         let need = required[endpoint];
         // 前缀规则：workspaceFiles 下的**未知**写类操作也按 fsWrite 处理，
@@ -1927,6 +1934,18 @@ export function createMobileHost(options) {
     async function invokeLocalEndpoint(endpoint, payload, signal, device) {
         if (!endpoint.startsWith('mobile/'))
             return undefined;
+        if (endpoint.startsWith('mobile/manage/')) {
+            const gate = capabilityCheck(device, endpoint);
+            if (!gate.ok)
+                throw Object.assign(new Error(gate.message), { code: gate.code });
+            const { handleManagementEndpoint, MOBILE_MANAGEMENT_PATHS } = await import("./mobile-management.js");
+            if (!Object.values(MOBILE_MANAGEMENT_PATHS).includes(endpoint))
+                throw new Error('未知管理接口');
+            return handleManagementEndpoint({
+                call: (target, args, innerSignal) => invokeGatewayEndpoint(options.gateway, target, args, innerSignal ?? signal),
+                codex: { managementRequest: (method, args, innerSignal) => getCodexBridge().managementRequest(method, args, innerSignal) },
+            }, endpoint, payload, signal);
+        }
         // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
         // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
         // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
@@ -2989,6 +3008,10 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                 'trace.js': 'trace.js',
                 'composer.js': 'composer.js',
                 'navigation.js': 'navigation.js',
+                'stats.js': 'stats.js',
+                'shell.js': 'shell.js',
+                'management.js': 'management.js',
+                'management.css': 'management.css',
                 'native-tokens.css': 'native-tokens.css',
                 'native.css': 'native.css',
                 'file-panel.css': 'file-panel.css',

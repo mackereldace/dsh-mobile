@@ -24,6 +24,9 @@
  *    （否则一个猜到 id 的请求就能把别人的审批"代答"）；
  * 3. **不支持的审批类型一律拒绝**（回 JSON-RPC error），绝不"默认放行" ✗。
  */
+/** Codex CLI 0.161.0 的原生管理 RPC；不提供任意方法透传。 */
+export declare const CODEX_MANAGEMENT_METHODS: readonly ["config/read", "config/batchWrite", "configRequirements/read", "model/list", "plugin/installed", "plugin/read"];
+export type CodexManagementMethod = typeof CODEX_MANAGEMENT_METHODS[number];
 export interface CodexBridgeOptions {
     /** CLI 可执行文件；缺省见 `detectCodexCli()`。 */
     readonly cliPath?: string;
@@ -172,7 +175,7 @@ export declare class CodexAppServerProcess {
     private consume;
     private dispatch;
     private write;
-    request(method: string, params: unknown): Promise<unknown>;
+    request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
     notify(method: string, params: unknown): void;
     respond(id: number, result: unknown): void;
     respondError(id: number, code: number, message: string): void;
@@ -210,6 +213,8 @@ export declare class CodexBridge {
         readonly pending: number;
     };
     status(): Promise<Record<string, unknown>>;
+    /** 仅宿主管理适配器使用；参数和返回值由适配器白名单裁剪。 */
+    managementRequest(method: CodexManagementMethod, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
     listThreads(args: Record<string, unknown>): Promise<Record<string, unknown>>;
     /**
      * 列出电脑上的"项目"（桌面版侧栏就是按它分组的）。

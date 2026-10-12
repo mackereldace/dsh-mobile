@@ -20,8 +20,11 @@ export const CODEX_PAGE_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1115">
 <title>Codex</title>
+<link rel="stylesheet" href="/mobile/chat/native-tokens.css">
+<link rel="stylesheet" href="/mobile/chat/file-panel.css">
+<link rel="stylesheet" href="/mobile/chat/management.css">
 </head>
-<body>
+<body data-mobile-backend="codex">
 <header id="bar">
   <button id="menu" class="icon" title="会话">&#9776;</button>
   <span id="title">Codex</span>
@@ -88,6 +91,7 @@ export const CODEX_PAGE_HTML = `<!doctype html>
 </script>
 <script src="/mobile/boot.js" data-dsh-mobile="1"></script>
 <script src="${CODEX_PAGE_SCRIPT_PATH}"></script>
+<script type="module" src="/mobile/chat/management.js"></script>
 </body>
 </html>`;
 //# sourceMappingURL=codex-page.js.map

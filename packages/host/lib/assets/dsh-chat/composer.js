@@ -878,6 +878,8 @@ export function mountComposerControls(options) {
   if (initial) setSession(initial)
   return {
     setSession, setValues, setConnection, setCapabilities, setRunning, handleInput, handleSubmit, openCommands, openReferences,
+    available: () => menuKind !== null,
+    back() { if (!menuKind) return false; closeMenu(true); return true },
     dispose() {
       if (disposed) return
       disposed = true; epoch++; referenceEpoch++; goalRead++; catalogs.clear(); busy.clear()

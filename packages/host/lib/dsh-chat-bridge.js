@@ -971,7 +971,13 @@ export function normalizePage(value) {
  * ★ 桥**不替页面算这个百分比** ✗：算出来就是往数据层里塞显示口径 ✓（四舍五入/封顶都是画法 ✓）；
  *   而**缺字段时返回 `null` 而不是 `0`** 这条纪律，写在报告里交给页面 ✓。
  *
- * ## 白名单纪律（为什么三个投影要**逐字段**过一遍 ✗）
+ * ### 4. `contextBreakdown` — 上下文详情中的启发式组成
+ *
+ * 本机 DSH 0.2.0-rc.2 `dsh-token-meter/lib/types/breakdown-projection.js` 的
+ * `wire.viewSchema`：`systemTokens` / `toolsTokens` / `messageTokens` 均为非负整数。
+ * 这是保留表面的启发式估算；不能冒充提供方报告的上下文压力或 token 用量。
+ *
+ * ## 白名单纪律（统计与详情投影均逐字段验证）
  *
  * · **认不出就整个键都不输出** ✗（源里没有 / 不是对象 / 字段不是合法数字 ✓）——
  *   **绝不补 0** ✓、绝不补 `null` 占位 ✓（本仓栽过"编一个看起来合理的数"✓）；
@@ -1001,6 +1007,7 @@ export function normalizeValues(value) {
     copyView(source, out, 'sessionStats', sessionStatsView);
     copyView(source, out, 'tokenUsage', tokenUsageView);
     copyView(source, out, 'contextPressure', contextPressureView);
+    copyView(source, out, 'contextBreakdown', contextBreakdownView);
     return out;
 }
 /**
@@ -1053,6 +1060,17 @@ function contextPressureView(value) {
     const window = source['contextWindow'];
     if (typeof window === 'number' && Number.isSafeInteger(window) && window > 0)
         out['contextWindow'] = window;
+    return Object.keys(out).length === 0 ? null : out;
+}
+/** Native dsh-token-meter context composition; preserve real zeroes and omit absent/invalid fields. */
+function contextBreakdownView(value) {
+    const source = asRecord(value);
+    if (source === null)
+        return null;
+    const out = {};
+    countField(source, out, 'systemTokens');
+    countField(source, out, 'toolsTokens');
+    countField(source, out, 'messageTokens');
     return Object.keys(out).length === 0 ? null : out;
 }
 /** 只认**真对象** ✓（数组 / `null` / 标量一律不认 ✗ —— 认不出就别猜 ✓）。 */

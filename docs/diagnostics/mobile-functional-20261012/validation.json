@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-12",
+  "sourceCommit": "4052ffe7fc17bcbb1e7a968889e5e5c9f4a911de",
+  "sourceBuildTypecheck": {
+    "exit": 0,
+    "config": "tsconfig.build.json"
+  },
+  "topLevelBootDuplicateFunctions": [],
+  "sourceSyntaxChecks": 19,
+  "regression": {
+    "files": 66,
+    "tests": 1046,
+    "suites": 161,
+    "pass": 1046,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "excluded": [
+      "packages/client/test/boot-surface.test.ts"
+    ],
+    "exclusionReason": "Prior notification-phase WIP remains red. The unsandboxed full retry stalled and its boot-surface process was stopped after eight minutes. Do not count it as complete."
+  },
+  "initialCompleteSandboxRun": {
+    "tests": 1125,
+    "pass": 1119,
+    "fail": 6,
+    "failures": [
+      "known boot-surface notification bridge phase",
+      "2 headless geometry fixture startup failures",
+      "codex bridge delta timing (independent retry 12/12 passed)",
+      "2 pairing-security loopback listen EPERM (unsandboxed scoped regression passed)"
+    ]
+  },
+  "browser": {
+    "dsh": {
+      "viewports": [
+        "412x915",
+        "390x844",
+        "360x800"
+      ],
+      "themes": [
+        "dark",
+        "light"
+      ],
+      "checksPerScenario": 28,
+      "scenarios": 6
+    },
+    "codex": {
+      "viewport": "390x844",
+      "theme": "dark",
+      "checks": 6
+    },
+    "totalPass": 174,
+    "totalFail": 0,
+    "data": "synthetic fixture; production boot API and page code"
+  },
+  "mutation": {
+    "trace": 16,
+    "filesAndContext": 14,
+    "management": 28,
+    "browser": 6,
+    "total": 64,
+    "killed": 64,
+    "browserEachFail": 1,
+    "browserEachOthersPass": 27
+  },
+  "unverified": [
+    "real mobile keyboard and safe area",
+    "OS file chooser",
+    "production tunnel receipt in corresponding desktop session",
+    "actual management writes and directory browsing",
+    "same-data original DSH visual comparison and user aesthetic acceptance"
+  ]
+}
