@@ -69,6 +69,8 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
   let nextTimer = 0, selected = '', sessions: Data[] = [], disposed = false
   let projection = createProjection(''), callbacks: Data = {}
   const steps: string[] = [], errors: string[] = [], channels: Data[] = [], interactions: Data[] = [], logs: string[] = []
+  /** 每次 setChannels 的探测失败原因（'' = 探测成功）；用来证明「没问成」不再被当成「真没接通」。 */
+  const channelProbes: string[] = []
   const blobs: Blob[] = [], revoked: string[] = [], attributes = new Map<string, string>()
   const location = { href: url, search: new URL(url).search }
   const setTimer = (fn: () => void, ms: number) => { const id = ++nextTimer; timers.set(id, { ms, fn }); return id }
@@ -93,7 +95,10 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
       steps.push('values'); projection.setValues(values, { asOfSeq: metadata.asOfSeq })
       if (typeof metadata.hasMore === 'boolean') projection.ingest({ events: [], hasMore: metadata.hasMore })
     },
-    setChannels: (value: Data) => { channels.push(structuredClone(value)) },
+    setChannels: (value: Data, probe?: Data) => {
+      channels.push(structuredClone(value))
+      channelProbes.push(typeof probe?.probeError === 'string' ? probe.probeError : '')
+    },
     setInteractions: (value: Data) => { interactions.push(structuredClone(value)) },
     prependHistory: (value: Data) => { steps.push('history'); projection.ingest({ events: value.events, hasMore: value.hasMore }) },
     projection: () => projection.snapshot(),
@@ -129,7 +134,7 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
   }, { filename: 'dsh-chat/app.js' })
   await flush()
   return {
-    boot, page, callbacks, calls, streams, steps, errors, channels, interactions, logs, location, blobs, revoked,
+    boot, page, callbacks, calls, streams, steps, errors, channels, channelProbes, interactions, logs, location, blobs, revoked,
     handle: (method: string, handler: RpcHandler) => rpcHandlers.set(method, handler),
     timerDelays: () => [...timers.values()].map(timer => timer.ms),
     runTimers: async (ms: number) => { for (const [id, timer] of [...timers]) if (timer.ms === ms) { timers.delete(id); timer.fn() }; await flush() },
@@ -226,6 +231,63 @@ describe('production chat app wiring and native addressing', () => {
       p.callbacks.onFiles()
       await p.callbacks.onSwitch('b', { title: 'Beta' }); await flush(); p.callbacks.onFiles()
       assert.deepEqual(workspaces, ['/work/a', '/work/b'])
+    } finally { await p.dispose() }
+  })
+  it('附件通道在宿主补注册后自动恢复：探测失败如实上报，恢复在线后重查，不再停在「未接通」', async () => {
+    // ★ 2026-10-12 真实缺陷的客户端一半：旧实现只在加载时探一次、catch 直接全 false，
+    //   恢复在线不重查 ⇒ 页面整个生命周期都停在「附件通道未接通」，用户只能反复重启。
+    let probes = 0, reads = 0
+    const p = await mounted({
+      streaming: false,
+      handlers: {
+        // 第 1 次问：宿主还没注册 fileUploads（真·未接通）；之后问：一律已接通。
+        'mobile/dsh/capabilities': () => ({ channels: { approval: true, question: true, upload: probes++ > 0, controls: true } }),
+        // 首轮取数失败 ⇒ 掉线；随后成功 ⇒ 回到在线（触发自动重查）。
+        'mobile/dsh/read': () => (reads++ === 0
+          ? Promise.reject(new Error('暂时联系不上'))
+          : Promise.resolve({ events: [], values: {}, valuesAsOfSeq: 0, hasMore: false })),
+      },
+    })
+    try {
+      // 初次探测：宿主答「附件还没接通」，不是探测失败 ⇒ probeError 为空
+      assert.deepEqual(p.channels.at(-1), { approval: true, question: true, upload: false, controls: true })
+      assert.equal(p.channelProbes.at(-1), '')
+      const before = p.calls.filter(call => call.method === 'mobile/dsh/capabilities').length
+      // 掉线 → 恢复在线：应当**自动重查**通道（不必刷新、不必重启）
+      await p.runTimers(500)   // reopenDelayMs(0)：重开取数循环
+      await p.runTimers(900)   // poller 间隔：这一趟取数成功 ⇒ 回到 online
+      assert.ok(p.steps.includes('connection:offline'), '首轮取数失败应先掉线')
+      assert.ok(p.steps.includes('connection:online'), '随后取数成功应回到在线')
+      assert.ok(
+        p.calls.filter(call => call.method === 'mobile/dsh/capabilities').length > before,
+        '恢复在线必须自动重查通道能力',
+      )
+      assert.deepEqual(p.channels.at(-1), { approval: true, question: true, upload: true, controls: true })
+    } finally { await p.dispose() }
+  })
+
+  it('通道探测失败被如实标记为「没问成」，不再与「真没接通」混为一谈', async () => {
+    // ★ 2026-10-12：旧实现在 probeChannels 的 catch 里直接 page.setChannels({全 false})，
+    //   把「断网/宿主没初始化完」伪装成「附件服务不存在」，UI 于是让用户去重启 —— 死循环的另一半。
+    let probes = 0
+    const p = await mounted({
+      handlers: {
+        'mobile/dsh/capabilities': () => {
+          if (probes++ === 0) throw new Error('隧道还没就绪')
+          return { channels: { approval: true, question: true, upload: true, controls: true } }
+        },
+      },
+    })
+    try {
+      // 探测没问成 ⇒ probeError 带上真实原因，UI 才能说「暂时联系不上」而不是「请重启」
+      assert.deepEqual(p.channels.at(-1), { approval: false, question: false, upload: false, controls: false })
+      assert.equal(p.channelProbes.at(-1), '隧道还没就绪')
+      assert.ok(p.logs.some(line => line.includes('探测未完成') && line.includes('隧道还没就绪')), '调试框要留一行可念的日志')
+      // 手动刷新即重问：宿主补上附件服务后立刻恢复，无需重启电脑
+      await p.callbacks.onRefresh()
+      await flush()
+      assert.deepEqual(p.channels.at(-1), { approval: true, question: true, upload: true, controls: true })
+      assert.equal(p.channelProbes.at(-1), '')
     } finally { await p.dispose() }
   })
 })

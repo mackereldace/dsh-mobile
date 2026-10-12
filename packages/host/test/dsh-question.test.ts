@@ -215,3 +215,35 @@ it('capabilities 只报告已挂载通道；挂载 prepend/global 同实例，�
     assert.equal(sharedQuestionBroker().pending('s1').length, 0)
   } finally { teardown?.() }
 })
+
+it('fileUploads 晚于插件注册时附件通道仍是活的：现取服务，不再冻结成 false', async () => {
+  // ★ 2026-10-12 真实缺陷：原版 fileUploads 是宿主作用域服务
+  //   （FileUploads extends TypertRemoteService，super(ctx,'fileUploads')），
+  //   注册时序不由本插件决定。旧实现只读一次并冻结 ⇒ 挂载那一刻没注册就永远是 false，
+  //   重启复现同一竞态 ⇒ 用户「重启→仍未接通→再重启」的死循环。
+  //   这里钉死：服务后来出现 ⇒ 下一次读能力必须已经是 true（不需重启、不硬写 true）。
+  setDshChatChannels({ approval: false, question: false, upload: false })
+  let service: { upload?: unknown } | undefined          // 模拟「挂载时尚未注册」
+  const ctx = {
+    get: (name: string) => (name === 'fileUploads' ? service : undefined),
+    on() { return () => {} },
+    effect(callback: () => () => void) { ctx.teardown = callback() },
+    teardown: undefined as unknown as (() => void) | undefined,
+  }
+  const { call } = gateway()
+  assert.equal(mountQuestionChannel(ctx as never), true)
+  try {
+    // 挂载那一刻服务还没来 ⇒ 老实报 false（不硬写 true、不拿上传当探针）
+    assert.equal(readDshChatChannels().upload, false)
+    // ★ 服务随后注册 ⇒ 活探针必须立刻看见，无需重启
+    service = { upload() {} }
+    assert.equal(readDshChatChannels().upload, true)
+    const caps = await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.capabilities, payload({}))
+    assert.deepEqual(caps, { ok: true, channels: { approval: false, question: true, upload: true, controls: true } })
+    // 服务消失也如实回到 false（不是单调 true）
+    service = undefined
+    assert.equal(readDshChatChannels().upload, false)
+  } finally { ctx.teardown?.() }
+  // 卸载后探针撤销，不残留 true
+  assert.deepEqual(readDshChatChannels(), { approval: false, question: false, upload: false })
+})

@@ -13,6 +13,8 @@ let creationEpoch = 0
 let interactionEpoch = 0, interactionInFlight = 0, projectionRead = 0, received = 0
 let streamToken = 0, streamIterator = null, streamLatchFire = null, reopenTimer = null, reopenAttempt = 0, poller = null
 let connectionMode = 'unknown', destroyed = false
+/** 通道探针的最新失败原因（'' = 上次探测成功）。用于把「暂时问不到」与「真没接通」分开。 */
+let channelProbeError = ''
 const imageURLs = new Map(), questionCallIds = new Set()
 if (params.get('parent') && currentId) currentAddress = { kind: 'subagent', parentSessionId: params.get('parent'), childSessionId: currentId, mode: params.get('mode') || 'unknown' }
 
@@ -28,7 +30,12 @@ const requestFor = (id = currentId, address = currentAddress) => ({ sessionId: i
 const valid = (id, epoch) => !destroyed && id === currentId && epoch === sessionEpoch
 function setConnection(next) {
   if (connectionMode === next) return
+  const previous = connectionMode
   connectionMode = next; page.setConnection(next)
+  // ★ 恢复在线后**重查通道**（2026-10-12 修 ✓）：装机的 fileUploads 是宿主作用域服务，
+  //   注册晚于页面首次探测时，初次那份 upload:false 会一直留着 ⇒ 用户只能反复重启 ✗。
+  //   这里在**每次**回到在线时重问一次，通道一就绪立刻恢复，不必刷新页面 ✗。
+  if (next === 'online' && previous !== 'online') void probeChannels()
 }
 function clearImages() {
   for (const entry of imageURLs.values()) if (entry.url) URL.revokeObjectURL(entry.url)
@@ -175,7 +182,9 @@ const page = mountChat({
     if (typeof value?.sessionId !== 'string' || !value.sessionId) throw new Error('DSH 没给出新会话的 id')
     return changeSession(value.sessionId)
   },
-  onRefresh: async () => { void loadSessions(); return refreshFetch() },
+  // ★ 手动刷新也重问一次通道（2026-10-12 修 ✓）：已经在线时 setConnection 不会触发迁移，
+  //   没有这一句，用户「刷新了还是未接通」就只能去重启电脑 ✗。
+  onRefresh: async () => { void loadSessions(); void probeChannels(); return refreshFetch() },
   refreshProjections,
   onOlder: historyPage,
   loadAttachment,
@@ -274,9 +283,17 @@ async function probeChannels() {
   try {
     const value = await rpc('mobile/dsh/capabilities')
     if (!value?.channels) throw new Error('宿主没有返回通道能力')
+    channelProbeError = ''
     page.setChannels(value.channels)
-    chatLog('[dsh-chat] 控件通道：' + (value.channels.controls ? '已接通' : '尚未安装，请重开 DSH'))
-  } catch { page.setChannels({ approval: false, question: false, upload: false, controls: false }) }
+    chatLog('[dsh-chat] 控件通道：' + (value.channels.controls ? '已接通' : '尚未安装，请重开 DSH') + ' · 附件=' + (value.channels.upload ? '已接通' : '未接通'))
+  } catch (reason) {
+    // ★ 探测失败**不再**直接全 false（2026-10-12 修 ✓）：断网/宿主尚未初始化完只是「没问成」，
+    //   不是「附件服务不存在」✗ —— 原来在这里抹成全 false，于是整个页面生命周期都停在「未接通」，
+    //   而恢复在线又不重查 ⇒ 用户只能一遍遍重启 ✗。现在把失败原因如实交给 UI，恢复在线后自动重问。
+    channelProbeError = reason?.message || String(reason)
+    chatLog('[dsh-chat] 控件通道：探测未完成（' + channelProbeError + '），连接恢复后自动重查')
+    page.setChannels({ approval: false, question: false, upload: false, controls: false }, { probeError: channelProbeError })
+  }
 }
 function syncTheme() {
   const explicit = document.documentElement.getAttribute('data-theme')

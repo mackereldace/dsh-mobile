@@ -1533,6 +1533,8 @@ export function mountChat(options) {
    */
   let approvalChannelConnected = false
   let questionChannelConnected = false, uploadChannelConnected = false
+  /** 上一次通道探测的失败原因（'' = 探测成功）。空 ⇒ 是真没接通，非空 ⇒ 只是没问成。 */
+  let channelProbeError = ''
   let interactionValues = { active: [], settled: [] }
   const answeredQuestions = new Set()
   const questionCards = new Map()
@@ -1748,13 +1750,14 @@ export function mountChat(options) {
     for (const entry of questions.active) if (!answeredQuestions.has(entry.callId)) renderQuestion(entry)
     dockChanged()
   }
-  const setChannels = channels => {
+  const setChannels = (channels, probe) => {
     if (!channels || typeof channels !== 'object') return
     nativeControls.setCapabilities(channels)
     setApprovalChannel(channels.approval === true)
     const changed = questionChannelConnected !== (channels.question === true)
     questionChannelConnected = channels.question === true && typeof options.answerQuestion === 'function'
     uploadChannelConnected = channels.upload === true && typeof options.upload === 'function'
+    channelProbeError = typeof probe?.probeError === 'string' ? probe.probeError : ''
     if (changed) {
       for (const card of questionCards.values()) card.node.remove()
       questionCards.clear()
@@ -1762,7 +1765,7 @@ export function mountChat(options) {
     }
     dockChanged()
     paintComposer()
-    chatLog('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
+    chatLog('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected + (channelProbeError ? ' 探测=' + channelProbeError : ''))
   }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
@@ -2136,7 +2139,13 @@ export function mountChat(options) {
     if (address?.kind === 'subagent' && address.mode !== 'continuable') return '此子智能体仅支持查看'
     if (!currentSessionId) return '请先选择或新建会话'
     if (connection !== 'online') return '电脑尚未连接，请连接后添加附件'
-    if (!uploadChannelConnected) return '附件通道未接通，请退出并重开电脑上的 DeepSeek Harness'
+    if (!uploadChannelConnected) {
+      // ★ 2026-10-12 修：不再一律让用户「再重启一次」✗ —— 重启对「只是没问成」和
+      //   「宿主还在初始化」都无效，那正是用户被困住的死循环 ✓。
+      //   按真实原因分两类：探测没问成（会自动重查）/ 宿主确实没提供附件服务。
+      if (channelProbeError) return '附件通道暂时联系不上电脑（' + channelProbeError + '），恢复连接后会自动重试'
+      return '电脑上的 DeepSeek Harness 没有提供附件服务（fileUploads 未注册），请更新或重装后重试'
+    }
     return ''
   }
   const uploadAttachment = async (session, file) => {
