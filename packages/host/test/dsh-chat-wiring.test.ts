@@ -405,6 +405,58 @@ describe('production chat app wiring and native addressing', () => {
   })
 })
 
+describe('attachment capability receipts share one request order', () => {
+  it('a late initial capabilities result cannot overwrite a newer successful history receipt', async () => {
+    const waiting: ReturnType<typeof deferred<Data>>[] = []
+    const good = { approval: true, question: true, upload: true, controls: true }
+    const p = await mounted({ streaming: false, handlers: {
+      'mobile/dsh/capabilities': () => { const request = deferred<Data>(); waiting.push(request); return request.promise },
+      'mobile/dsh/read': () => ({ events: [], values: {}, valuesAsOfSeq: 0, hasMore: false, channels: good }),
+    } })
+    try {
+      await settle()
+      assert.ok(waiting.length >= 2, 'initial and online probes must both be in flight')
+      assert.deepEqual(p.channels.at(-1), good, 'the newer history receipt must confirm availability')
+      waiting[0]!.resolve({ channels: { ...good, upload: false } })
+      await settle()
+      assert.deepEqual(p.channels.at(-1), good, 'the older capability result must not disable the attachment entry')
+      assert.equal(p.channelProbes.at(-1), '')
+    } finally { await p.dispose(); for (const request of waiting) request.resolve({ channels: good }) }
+  })
+  for (const method of ['mobile/dsh/read', 'mobile/dsh/interactions']) {
+    it('a late ' + method + ' receipt cannot overwrite a newer successful capability probe', async () => {
+      const delayed = deferred<Data>()
+      const good = { approval: true, question: true, upload: true, controls: true }
+      let probes = 0, reads = 0, delayedStarted = false
+      const p = await mounted({ streaming: method !== 'mobile/dsh/read', handlers: {
+        'mobile/dsh/capabilities': () => ({ channels: { ...good, upload: ++probes > 2 } }),
+        [method]: () => {
+          if (method === 'mobile/dsh/read' && reads++ === 0) return { events: [], values: {}, valuesAsOfSeq: 0, hasMore: false }
+          delayedStarted = true
+          return delayed.promise
+        },
+      } })
+      try {
+        if (method === 'mobile/dsh/interactions') await p.emit(snapshot([], {}, 0))
+        await settle()
+        assert.equal(probes, 2, 'the initial and online probes must establish the unavailable baseline')
+        const delay = method === 'mobile/dsh/read' ? p.timerDelays().find(ms => ms >= 900 && ![1000, 2000, 4000, 8000].includes(ms)) : 30
+        assert.notEqual(delay, undefined, 'the receipt poll must be scheduled')
+        await p.runTimers(delay!)
+        await settle()
+        assert.ok(delayedStarted, 'the older receipt request must have started')
+        await p.runTimers(1000)
+        await settle()
+        assert.deepEqual(p.channels.at(-1), good, 'a later retry must confirm availability')
+        delayed.resolve({ events: [], values: {}, valuesAsOfSeq: 0, hasMore: false, channels: { ...good, upload: false } })
+        await settle()
+        assert.deepEqual(p.channels.at(-1), good, method + ' must not replace the newer confirmed capability')
+        assert.equal(p.channelMeta.at(-1)?.confirmed, true)
+      } finally { await p.dispose(); delayed.resolve({ events: [], values: {} }) }
+    })
+  }
+})
+
 describe('production chat data delivery, isolation and history edge', () => {
   it('polling delivers sorted events before opening projection values and history metadata', async () => {
     const p = await mounted({ streaming: false, handlers: { 'mobile/dsh/read': () => ({ events: [e(2), e(1)], values: { status: 'running' }, valuesAsOfSeq: 2, hasMore: true }) } })
