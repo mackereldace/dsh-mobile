@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 // @ts-expect-error Browser JavaScript module.
-import { statisticsDetails } from '../assets/dsh-chat/stats.js'
+import { statisticsDetails, statisticsPresentation } from '../assets/dsh-chat/stats.js'
 
 describe('mobile statistics preserve the original full-session projection semantics', () => {
   it('uses projected context pressure, preserves real zero components and marks estimates', () => {
@@ -23,5 +23,24 @@ describe('mobile statistics preserve the original full-session projection semant
     const result = statisticsDetails('steps', { sessionStats: { turns: 400, steps: 2500, llmMs: 2250, toolMs: 350, ttftMs: 1000, ttftSteps: 4, decodeMs: 2000, decodeTokens: 100 } })
     assert.deepEqual(result.rows, [['轮次', '400'], ['步骤', '2,500'], ['模型耗时', '2.3 秒'], ['工具耗时', '350 ms'], ['平均首 token 延迟', '250 ms'], ['生成速度', '50.0 token/秒']])
     assert.match(result.note, /完整会话/)
+  })
+  it('scales composition segments to reported context occupancy instead of summing two distinct estimates', () => {
+    const result = statisticsPresentation('context', { contextPressure: { projectedTokens: 643000, contextWindow: 1000000 }, contextBreakdown: { systemTokens: 1500, toolsTokens: 6300, messageTokens: 410000 } })
+    assert.equal(result.reading, '64%'); assert.equal(result.summary, '~643K / 1M')
+    assert.ok(Math.abs(result.segments.reduce((sum: number, part: { width: number }) => sum + part.width, 0) - 64) < 1e-10)
+    assert.deepEqual(result.rows.map((row: { value: string }) => row.value), ['~1.5K', '~6.3K', '~410K'])
+    assert.equal(statisticsPresentation('context', { contextPressure: { projectedTokens: 0, contextWindow: 1024 } }).reading, '0%')
+    assert.deepEqual(statisticsPresentation('context', { contextPressure: { projectedTokens: 0, contextWindow: 1024 } }).segments, [])
+  })
+  it('keeps a partial token report without inventing a header total or a perfect cache hit', () => {
+    assert.equal(statisticsPresentation('tokens', { tokenUsage: { outputTokens: 7 } }).summary, '')
+    const result = statisticsPresentation('tokens', { tokenUsage: { uncachedInputTokens: 1, cacheReadTokens: 99999, cacheWriteTokens: 0, outputTokens: 1 } })
+    assert.equal(result.summary, '100,001 tok'); assert.equal(result.rows[0].value, '99.999%')
+    assert.equal(statisticsPresentation('tokens', { tokenUsage: { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 } }).summary, '0 tok')
+  })
+  it('formats native timing readings while omitting unknown latency and speed', () => {
+    const result = statisticsPresentation('turns', { sessionStats: { llmMs: 2523000, toolMs: 548000, ttftMs: 8100, ttftSteps: 3, decodeTokens: 482, decodeMs: 2000 } })
+    assert.deepEqual(result.rows.map((row: { value: string }) => row.value), ['42 分 3 秒', '9 分 8 秒', '2.7 秒', '241 tok/s'])
+    assert.deepEqual(statisticsPresentation('turns', { sessionStats: { llmMs: 0 } }).rows, [{ label: '模型用时', value: '0 秒' }])
   })
 })
