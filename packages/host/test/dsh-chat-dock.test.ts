@@ -12,6 +12,7 @@ import { mountMobileShell } from '../assets/dsh-chat/shell.js'
  * are replaced at their import boundaries, each with its own behavior suite. */
 class Element {
   className = ''; hidden = false; disabled = false; textContent = ''; dataset = {}; style = {}
+  value = ''
   children: Element[] = []; parentElement: Element | null = null
   attributes = new Map<string, string>(); listeners = new Map<string, Function[]>()
   readonly tagName: string
@@ -37,9 +38,10 @@ const source = readFileSync(new URL('../assets/dsh-chat/ui.js', import.meta.url)
 const idle = () => {}
 const asked = (id = 'approval-1') => ({ seq: 1, time: 1, type: 'approval/asked', data: { id, toolName: 'bash', callId: 'call-1', reason: 'Run the fixture check' } })
 const decided = (id = 'approval-1') => ({ seq: 2, time: 2, type: 'approval/decided', data: { id, outcome: 'allowed-once' } })
-function mounted(answerApproval: (id: string, decision: string) => Promise<Data> = async () => ({ ok: true })) {
+function mounted(answerApproval: (id: string, decision: string) => Promise<Data> = async () => ({ ok: true }), send?: Function) {
   const list = new Element('div'), dock = new Element('div'), form = new Element('form')
   const ids = new Map([['#messages', list], ['#interactions', dock], ['#composer', form]])
+  const input = new Element('textarea'); if (send) ids.set('#input', input)
   const root = { querySelector: (selector: string) => ids.get(selector) ?? null }
   let sessions: Data[] = []
   const context: Data = {
@@ -47,18 +49,38 @@ function mounted(answerApproval: (id: string, decision: string) => Promise<Data>
     mountNavigation: () => ({ setSessions: (next: Data[]) => (sessions = next), sessions: () => sessions, session: (id: string) => sessions.find(item => item.id === id), setValues: idle, dispose: idle }),
     mountConversation: () => ({ update: idle, limits: () => ({ drawn: 0 }), dispose: idle }),
     mountTrace: () => ({ show: idle, update: idle, count: () => 0, dispose: idle }),
-    mountComposerControls: () => ({ setSession: idle, setValues: idle, setCapabilities: idle, setConnection: idle, setRunning: idle, dispose: idle }),
+    mountComposerControls: () => ({ setSession: idle, setValues: idle, setCapabilities: idle, setConnection: idle, setRunning: idle, handleSubmit: async () => false, dispose: idle }),
     icon: idle,
   }
   const entry = source.replace(/^import .+ from '.+'\n/gm, '').replace(/\bexport /g, '')
   runInNewContext(entry + '\nthis.mount = mountChat', context, { filename: 'real-chat-ui.js' })
-  const page = context.mount({ root, answerApproval })
+  const page = context.mount({ root, answerApproval, send })
   page.setSessions([{ id: 's', title: 'Fixture' }], 's')
-  return { page, list, dock, form }
+  return { page, list, dock, form, input }
 }
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)) }
 
 describe('native page approval dock integration', () => {
+  it('pending sends only disable their own session and late failure restores that session draft', async () => {
+    let rejectA!: (error: Error) => void, resolveB!: () => void
+    const a = new Promise<void>((_, reject) => { rejectA = reject }), b = new Promise<void>(resolve => { resolveB = resolve })
+    const sent: string[] = []
+    const { page, form, input } = mounted(undefined, (_text: string, _receipts: unknown, target: Data) => { sent.push(target.sessionId); return target.sessionId === 's' ? a : b })
+    const submit = () => form.listeners.get('submit')![0]!({ preventDefault() {} })
+    try {
+      page.setConnection('online'); input.value = 'A draft'
+      const pendingA = submit(); await flush(); assert.equal(input.disabled, true)
+      page.setSessions([{ id: 's' }, { id: 'b' }], 'b'); page.setConnection('online')
+      assert.equal(input.disabled, false)
+      input.value = 'B draft'; const pendingB = submit(); await flush(); assert.equal(input.disabled, true)
+      rejectA(new Error('A failed')); await pendingA
+      assert.equal(input.disabled, true, 'A settling must not unlock B while B is pending')
+      resolveB(); await pendingB; assert.equal(input.disabled, false)
+      page.setSessions([{ id: 's' }, { id: 'b' }], 's')
+      assert.equal(input.value, 'A draft'); assert.equal(input.disabled, false)
+      assert.deepEqual(sent, ['s', 'b'])
+    } finally { page.dispose() }
+  })
   it('attaches a pending approval to the dock once and enables it when the channel arrives', () => {
     const { page, dock, list, form } = mounted()
     try {

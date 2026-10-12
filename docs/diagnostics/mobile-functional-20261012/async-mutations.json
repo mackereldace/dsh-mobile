@@ -1,0 +1,37 @@
+{
+  "tested": 4,
+  "killed": 4,
+  "baselineTests": 26,
+  "baselinePass": true,
+  "restoredPass": true,
+  "results": [
+    {
+      "name": "late-create-overwrites-selection",
+      "killed": true,
+      "failedTests": [
+        "late creation keeps the session selected after the request and concurrent creations keep the latest intent"
+      ]
+    },
+    {
+      "name": "pending-send-locks-other-session",
+      "killed": true,
+      "failedTests": [
+        "pending sends only disable their own session and late failure restores that session draft"
+      ]
+    },
+    {
+      "name": "timeout-unlocks-duplicate-write",
+      "killed": true,
+      "failedTests": [
+        "timed-out writes stay locked across retry, fresh reads and close/reopen until real settlement and readback"
+      ]
+    },
+    {
+      "name": "late-readback-keeps-fabricated-draft",
+      "killed": true,
+      "failedTests": [
+        "late successful acknowledgement displays the actual readback even when the backend overrides the submitted value"
+      ]
+    }
+  ]
+}

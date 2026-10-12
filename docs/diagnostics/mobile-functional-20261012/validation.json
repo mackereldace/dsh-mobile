@@ -1,6 +1,5 @@
 {
   "date": "2026-10-12",
-  "sourceCommit": "4052ffe7fc17bcbb1e7a968889e5e5c9f4a911de",
   "sourceBuildTypecheck": {
     "exit": 0,
     "config": "tsconfig.build.json"
@@ -8,10 +7,10 @@
   "topLevelBootDuplicateFunctions": [],
   "sourceSyntaxChecks": 19,
   "regression": {
-    "files": 66,
-    "tests": 1046,
-    "suites": 161,
-    "pass": 1046,
+    "files": 67,
+    "tests": 1052,
+    "suites": 162,
+    "pass": 1052,
     "fail": 0,
     "cancelled": 0,
     "skipped": 0,
@@ -59,10 +58,11 @@
     "filesAndContext": 14,
     "management": 28,
     "browser": 6,
-    "total": 64,
-    "killed": 64,
+    "total": 68,
+    "killed": 68,
     "browserEachFail": 1,
-    "browserEachOthersPass": 27
+    "browserEachOthersPass": 27,
+    "asyncReviewFixes": 4
   },
   "unverified": [
     "real mobile keyboard and safe area",
@@ -70,5 +70,21 @@
     "production tunnel receipt in corresponding desktop session",
     "actual management writes and directory browsing",
     "same-data original DSH visual comparison and user aesthetic acceptance"
-  ]
+  ],
+  "sourceCoordinate": "Final sourceCommit is recorded in build.json",
+  "review": {
+    "modelRole": "c4c_reviewer",
+    "reviewedInitialCommit": "4052ffe7fc17bcbb1e7a968889e5e5c9f4a911de",
+    "tests": 54,
+    "readonlySnapshotFilesChecked": 609,
+    "readonlySnapshotChanged": 0,
+    "findings": [
+      "late create overwrites selected session",
+      "timed-out management mutation can be retried while pending",
+      "global send state disables another session"
+    ],
+    "fixes": "new creation generation; per-session pending send set; backend write lock until actual settlement and authoritative readback; late success clears the submitted draft before readback",
+    "newDirectedTests": 6,
+    "newMutationCases": 4
+  }
 }

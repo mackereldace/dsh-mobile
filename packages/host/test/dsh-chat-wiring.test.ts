@@ -139,6 +139,20 @@ async function mounted({ streaming = true, url = 'https://phone.example/mobile/c
 }
 
 describe('production chat app wiring and native addressing', () => {
+  it('late creation keeps the session selected after the request and concurrent creations keep the latest intent', async () => {
+    const first = deferred(), second = deferred(), third = deferred()
+    const creates = [first, second, third]
+    const p = await mounted({ handlers: { 'mobile/dsh/create': () => creates.shift()!.promise } })
+    try {
+      const stale = p.callbacks.onCreate({}); await flush()
+      await p.callbacks.onSwitch('b'); first.resolve({ sessionId: 'late' }); await stale
+      assert.equal(p.boot.chatStatus().sessionId, 'b')
+      const older = p.callbacks.onCreate({}), latest = p.callbacks.onCreate({}); await flush()
+      third.resolve({ sessionId: 'latest' }); await latest
+      second.resolve({ sessionId: 'older' }); await older
+      assert.equal(p.boot.chatStatus().sessionId, 'latest')
+    } finally { await p.dispose() }
+  })
   it('ordinary navigation stays ordinary in the URL, follow request and refreshed list', async () => {
     const p = await mounted()
     try {

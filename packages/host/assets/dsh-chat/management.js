@@ -33,6 +33,10 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
   let page = null, section = 'general', selected = null, data = null, capability = null, epoch = 0, disposed = false, cleanupConnection = null
   let busy = false, feedback = '', failure = '', opener = null, selectedBackend = backend
   const drafts = new Map()
+  // RPC has no cancellation contract. Keep a timed-out write locked until its
+  // actual promise settles and a new read confirms the server's revision.
+  const pendingWrites = new Map(), unconfirmedWrites = new Set()
+  const writeBlocked = () => busy || pendingWrites.has(selectedBackend) || unconfirmedWrites.has(selectedBackend)
   const trace = text => { try { boot?.debugLine?.('[mobile-manage] ' + text) } catch { /* Diagnostics must not interrupt an operation. */ } }
   const notify = () => { onStateChange?.(); boot?.reportBackAvailable?.() }
   const releaseConnection = () => { cleanupConnection?.(); cleanupConnection = null }
@@ -40,10 +44,26 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
     if (typeof call !== 'function') throw new Error('管理通道还没接通，请退出并重开电脑上的宿主')
     let timer
     const mutating = /\/(write|configure|set-enabled)$/.test(path)
-    const target = selectedBackend + ' ' + path
-    const timeout = new Promise((_, reject) => { timer = win.setTimeout(() => reject(new Error(mutating ? '操作超时，结果尚未确认；请重新读取状态后再试' : '读取超时，请检查电脑连接后重试')), 10000) })
+    const backend = selectedBackend, target = backend + ' ' + path
+    let timedOut = false
+    const operation = Promise.resolve().then(() => call('mobile/manage/' + path, { backend, ...args }))
+    if (mutating) pendingWrites.set(backend, operation)
+    const settled = result => {
+      if (!mutating || pendingWrites.get(backend) !== operation) return
+      pendingWrites.delete(backend)
+      if (timedOut && result?.ok === true) drafts.delete(backend + ':' + (path.startsWith('plugins/') ? args.id : '') + ':' + (args.fieldId || args.id))
+      if (timedOut && page && selectedBackend === backend && !disposed) {
+        feedback = '后台操作已结束，正在重新确认状态'; void load()
+      }
+    }
+    operation.then(settled, settled)
+    const timeout = new Promise((_, reject) => { timer = win.setTimeout(() => {
+      timedOut = true
+      if (mutating) unconfirmedWrites.add(backend)
+      reject(new Error(mutating ? '操作超时，结果尚未确认；等待后台操作结束并重新读取后才能再次提交' : '读取超时，请检查电脑连接后重试'))
+    }, 10000) })
     try {
-      const result = await Promise.race([call('mobile/manage/' + path, { backend: selectedBackend, ...args }), timeout])
+      const result = await Promise.race([operation, timeout])
       if (!object(result) || result.ok !== true) throw new Error(result?.error?.message || result?.reason || '后端没有确认此操作')
       trace(target + '：已收到回执')
       return result
@@ -71,7 +91,7 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
     return control.value
   }
   const write = async (path, args) => {
-    if (busy) return
+    if (writeBlocked()) return
     const ticket = epoch; busy = true; failure = ''; feedback = ''; render()
     try {
       const result = await request(path, args)
@@ -91,16 +111,16 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
         control.value = String(field.choices.findIndex(choice => Object.is(choice.value, field.value)))
       } else if (field.type === 'json') { control = element('textarea', 'management-control'); control.value = JSON.stringify(field.value, null, 2); control.rows = 4 }
       else { control = element('input', 'management-control'); control.type = field.type === 'boolean' ? 'checkbox' : field.type === 'number' ? 'number' : 'text'; if (field.type === 'boolean') control.checked = field.value === true; else control.value = field.value === null ? '' : String(field.value ?? '') }
-      control.id = id; control.disabled = !field.writable || busy; form.appendChild(control)
+      control.id = id; control.disabled = !field.writable || writeBlocked(); form.appendChild(control)
       if (field.type === 'number') for (const name of ['min', 'max', 'step']) if (Number.isFinite(field[name])) control.setAttribute(name, field[name])
       const draftKey = selectedBackend + ':' + (pluginId || '') + ':' + field.id
       if (drafts.has(draftKey)) { if (field.type === 'boolean') control.checked = drafts.get(draftKey); else control.value = drafts.get(draftKey) }
       control.addEventListener('input', () => drafts.set(draftKey, field.type === 'boolean' ? control.checked : control.value))
       status(form, field.reason || field.applyMessage)
-      const save = button('保存', () => {}); save.type = 'submit'; save.disabled = !field.writable || busy; form.appendChild(save)
+      const save = button('保存', () => {}); save.type = 'submit'; save.disabled = !field.writable || writeBlocked(); form.appendChild(save)
       form.addEventListener('submit', event => {
         event.preventDefault()
-        if (busy || !field.writable) return
+        if (writeBlocked() || !field.writable) return
         try {
           const value = fieldValue(field, control)
           void write(pluginId ? 'plugins/configure' : 'settings/write', pluginId ? { id: pluginId, fieldId: field.id, value, revision: field.revision } : { id: field.id, value, revision: field.revision })
@@ -130,6 +150,7 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
       content.appendChild(tabs)
     }
     status(content, failure, 'management-error'); status(content, feedback, 'management-success')
+    if (pendingWrites.has(selectedBackend) || unconfirmedWrites.has(selectedBackend)) status(content, '有一项操作尚未确认，暂时不能再次提交；你可以返回会话或重新读取状态。')
     if (page === 'settings' && section === 'connection') {
       const container = element('div', 'management-connection'); content.appendChild(container)
       if (typeof boot?.mountConnectionSettings === 'function') cleanupConnection = boot.mountConnectionSettings(container)
@@ -155,7 +176,7 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
       status(content, plugin?.description); status(content, data.configReason || plugin?.reason)
       if (plugin && typeof plugin.enabled === 'boolean') {
         const toggle = button(plugin.enabled ? '停用插件' : '启用插件', () => void write('plugins/set-enabled', { id: plugin.id, enabled: !plugin.enabled, revision: plugin.revision }))
-        toggle.disabled = busy || !plugin.canToggle; content.appendChild(toggle)
+        toggle.disabled = writeBlocked() || !plugin.canToggle; content.appendChild(toggle)
       }
       fields(content, data.fields, selected)
       if (!data.fields?.length && !data.configReason) status(content, '此插件没有公开的配置项。')
@@ -184,7 +205,10 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
       if (ticket !== epoch || !page || disposed) return
       if (!capability.available) throw new Error(capability.reason || '后端尚不可用')
       const result = await request(page === 'settings' ? 'settings/read' : selected ? 'plugins/read' : 'plugins/list', selected ? { id: selected } : {})
-      if (ticket === epoch && page && !disposed) data = result
+      if (ticket === epoch && page && !disposed) {
+        data = result
+        if (!pendingWrites.has(selectedBackend)) unconfirmedWrites.delete(selectedBackend)
+      }
     } catch (reason) { if (ticket === epoch && page) failure = message(reason) }
     finally { if (ticket === epoch && page && !disposed) { busy = false; render() } }
   }
