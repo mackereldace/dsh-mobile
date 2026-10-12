@@ -1,0 +1,82 @@
+▶ 附件通道：按真实状态分层，不猜也不劝重装
+  ✔ 探测没问成 ⇒ 说「暂时联系不上」，如实带上原因，不劝重装 (4.544791ms)
+  ✔ 还没确认过（初始化中）⇒ 说「正在确认」，绝不出现重装建议 (0.744916ms)
+  ✔ 已确认仍未就绪且重试用尽 ⇒ 如实说未就绪，并给出「可重新检测」的出路 (0.6195ms)
+  ✔ 已确认宿主没有该服务 ⇒ 如实呈现，不给泛化重装建议 (0.560625ms)
+  ✔ 已确认接通 ⇒ 不阻断；离线 ⇒ 说未连接（各归各的因，不混） (0.536917ms)
+  ✔ 选择器在用户点击的同步调用栈里打开，绝不等通道探测 (0.514709ms)
+✔ 附件通道：按真实状态分层，不猜也不劝重装 (7.998708ms)
+▶ native page approval dock integration
+  ✔ pending sends only disable their own session and late failure restores that session draft (5.71125ms)
+  ✔ attaches a pending approval to the dock once and enables it when the channel arrives (1.883917ms)
+  ✔ a later decision removes its card and restores the composer; replay cannot resurrect it (0.982041ms)
+  ✔ out-of-order history containing the decision and request never takes over input (0.671417ms)
+  ✔ only an accepted approval receipt dismisses the pending card (3.053209ms)
+✔ native page approval dock integration (13.063042ms)
+▶ mobile statistics preserve the original full-session projection semantics
+  ✔ uses projected context pressure, preserves real zero components and marks estimates (10.174708ms)
+  ✔ does not fabricate missing data or a total from incomplete billing buckets (0.131125ms)
+  ✔ counts all billing buckets and uses the complete input as cache-rate denominator (0.069791ms)
+  ✔ shows full-session turn counts, latency and generation rate independently of the DOM window (0.070958ms)
+  ✔ scales composition segments to reported context occupancy instead of summing two distinct estimates (0.282833ms)
+  ✔ keeps a partial token report without inventing a header total or a perfect cache hit (0.113291ms)
+  ✔ formats native timing readings while omitting unknown latency and speed (0.113084ms)
+✔ mobile statistics preserve the original full-session projection semantics (12.06325ms)
+▶ production chat app wiring and native addressing
+  ✔ late creation keeps the session selected after the request and concurrent creations keep the latest intent (8.849542ms)
+  ✔ ordinary navigation stays ordinary in the URL, follow request and refreshed list (2.218958ms)
+  ✔ selected children survive a roots refresh and send using their captured native address (2.076708ms)
+  ✔ child projections and rename use the exact original RPC request and real confirmation (1.265209ms)
+  ✔ send and control callbacks propagate rejected receipts and keep their original request (1.031209ms)
+  ✔ files enter the original panel using the current workspace and report absent integration (0.686291ms)
+  ✔ 附件通道在宿主补注册后自动恢复：探测失败如实上报，恢复在线后重查，不再停在「未接通」 (1.39875ms)
+  ✔ 通道探测失败被如实标记为「没问成」，不再与「真没接通」混为一谈 (0.739083ms)
+  ✔ 迟到的初始探测失败不许覆盖更新的成功结果（请求序号） (1.197042ms)
+  ✔ 在线且附件未确认时按 1→2→4→8 秒有界重查，用尽即停不永久轮询 (1.081584ms)
+  ✔ 离线与页面销毁都会取消退避重查 (1.037875ms)
+  ✔ 瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查 (1.552ms)
+✔ production chat app wiring and native addressing (23.841375ms)
+▶ attachment capability receipts share one request order
+  ✔ a late initial capabilities result cannot overwrite a newer successful history receipt (1.36075ms)
+  ✔ a late mobile/dsh/read receipt cannot overwrite a newer successful capability probe (2.127041ms)
+  ✔ a late mobile/dsh/interactions receipt cannot overwrite a newer successful capability probe (2.045291ms)
+✔ attachment capability receipts share one request order (5.652ms)
+▶ production chat data delivery, isolation and history edge
+  ✔ polling delivers sorted events before opening projection values and history metadata (1.374ms)
+  ✔ in-flight stream, projection, interaction and history from the old session cannot overwrite the new one (1.145459ms)
+  ✔ same-session projection reads reject an older completion even when its cursor is newer (0.595917ms)
+  ✔ a disposed old poll cannot deliver its values, history edge or errors into the new session (1.172333ms)
+  ✔ older history sorts and deduplicates without reopening its completed edge after reconnect (0.858666ms)
+  ✔ dense assistant streams settle after their real event and a revision gap reopens once (1.398666ms)
+✔ production chat data delivery, isolation and history edge (6.673916ms)
+▶ production chat resource closure and image policy
+  ✔ every HTML/module dependency is both shipped and served, with blob images permitted by the real page CSP (8.900583ms)
+✔ production chat resource closure and image policy (8.927708ms)
+▶ production chat native image lifetime
+  ✔ accepts restored native attachment bytes and copies the exact typed-array view (1.67325ms)
+  ✔ uses native attachment IDs, caches per session and revokes each blob on switch or disposal (0.894ms)
+  ✔ an old attachment response cannot allocate an image after switching sessions (0.639459ms)
+  ✔ an old failure after A→B→A cannot evict the new image entry or leak its blob (0.664916ms)
+✔ production chat native image lifetime (3.974459ms)
+✔ 真实 Cordis waterfall：手机 prepend 回答后下游不会再被调用 (2.120708ms)
+✔ 不同 session 的同 callId 不能代答；错误题号/多选/未知选项都不能结清请求 (0.229417ms)
+✔ 多选加自定义文字可以完整回答；pending 快照改写不会影响真正待答题目 (0.0975ms)
+✔ 前台 TTL 与原始 signal 释放后交回官方下游，没有永远吞掉桌面卡 (4.78425ms)
+✔ legacy 没有官方 callId：只给可回指真实 pending 的临时标识；无会话/坏卡直接交回下游 (0.440125ms)
+✔ continued 回答使用装机 wire：agentId/callId/answer；false 与后端错误不会假报成功 (0.358834ms)
+✔ userQuestions 真投影保留两种状态/计划详情/选项；白名单丢掉内部字段 (0.295417ms)
+✔ interactions 合并 legacy 前台卡与 continued 投影，按 session 隔离且不重复 (0.485167ms)
+✔ 前台即便 session head=-1，read 也返回真实待答卡 (0.263125ms)
+✔ 子智能体仍不进会话表；父 catalog 数与过滤前真实 running 对上，缺读数不编 0 (0.238125ms)
+✔ 附件 bytes 逐字进入官方 fileUploads/upload，返回真正 receipt 供 prompt 使用 (0.230625ms)
+✔ 仅附件消息可发送；空消息、重复/坏收据、字符串假bytes与缺收据结果都被拒绝 (0.222375ms)
+✔ capabilities 只报告已挂载通道；挂载 prepend/global 同实例，卸载释放真实请求和状态 (0.235583ms)
+✔ fileUploads 晚于插件注册时附件通道仍是活的：现取服务，不再冻结成 false (0.069917ms)
+ℹ tests 58
+ℹ suites 8
+ℹ pass 58
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 145.445208

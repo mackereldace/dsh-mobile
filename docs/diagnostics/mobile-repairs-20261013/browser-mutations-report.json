@@ -1,0 +1,95 @@
+{
+  "results": [
+    {
+      "name": "left-push",
+      "checks": 48,
+      "failed": [
+        "汉堡展开主页面push侧栏"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-kD80F1"
+    },
+    {
+      "name": "right-push",
+      "checks": 48,
+      "failed": [
+        "文件与主侧栏互斥且只有一个位移"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-oFeE5p"
+    },
+    {
+      "name": "floating",
+      "checks": 48,
+      "failed": [
+        "输入栏外层透明浮动"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-TYKz35"
+    },
+    {
+      "name": "tab-height",
+      "checks": 48,
+      "failed": [
+        "顶栏52px与二级栏44px"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-UafCZb"
+    },
+    {
+      "name": "picker-activation",
+      "checks": 48,
+      "failed": [
+        "附件按钮同步触发系统选择器"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-fXzvqR"
+    },
+    {
+      "name": "management-readback",
+      "checks": 48,
+      "failed": [
+        "设置用版本保存并以回读确认"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-tWE99T"
+    },
+    {
+      "name": "statistics-surface",
+      "checks": 48,
+      "failed": [
+        "Token详情背景清晰且至少90%不透明",
+        "上下文详情背景清晰且至少90%不透明",
+        "会话详情背景清晰且至少90%不透明"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-HfMBZW"
+    },
+    {
+      "name": "menu-blur",
+      "checks": 48,
+      "failed": [
+        "原版浮层模糊阴影与输入卡描边已解析"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-HLz30G"
+    },
+    {
+      "name": "menu-shadow",
+      "checks": 48,
+      "failed": [
+        "原版浮层模糊阴影与输入卡描边已解析"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-XF5oMc"
+    },
+    {
+      "name": "native-touch",
+      "checks": 48,
+      "failed": [
+        "真实触摸从中央右滑打开主侧栏",
+        "真实触摸从中央左滑打开文件面板"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-JtOaUb"
+    },
+    {
+      "name": "stats-anchor",
+      "checks": 48,
+      "failed": [
+        "详情面板锚定对应底部读数上方"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-A7JptA"
+    }
+  ]
+}

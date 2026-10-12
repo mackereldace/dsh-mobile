@@ -1,0 +1,39 @@
+{
+  "results": [
+    {
+      "name": "shared-receipt-gate",
+      "checks": 3,
+      "failed": [
+        "a late mobile/dsh/read receipt cannot overwrite a newer successful capability probe",
+        "a late mobile/dsh/interactions receipt cannot overwrite a newer successful capability probe"
+      ],
+      "otherChecksPassed": 1,
+      "exitCode": 1,
+      "log": "shared-receipt-gate.log"
+    },
+    {
+      "name": "history-request-order",
+      "checks": 3,
+      "failed": [
+        "a late mobile/dsh/read receipt cannot overwrite a newer successful capability probe"
+      ],
+      "otherChecksPassed": 2,
+      "exitCode": 1,
+      "log": "history-request-order.log"
+    },
+    {
+      "name": "interaction-request-order",
+      "checks": 3,
+      "failed": [
+        "a late mobile/dsh/interactions receipt cannot overwrite a newer successful capability probe"
+      ],
+      "otherChecksPassed": 2,
+      "exitCode": 1,
+      "log": "interaction-request-order.log"
+    }
+  ],
+  "allKilled": true,
+  "baselineChecks": 3,
+  "source": "main owned app.js plus newly passing wiring tests; no production connection",
+  "root": "/private/tmp/dshm-receipt-mutations-20261013-74af0nh4"
+}

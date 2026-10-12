@@ -1,0 +1,39 @@
+▶ attachment capability receipts share one request order
+  ✔ a late initial capabilities result cannot overwrite a newer successful history receipt (3.648292ms)
+  ✔ a late mobile/dsh/read receipt cannot overwrite a newer successful capability probe (2.084041ms)
+  ✖ a late mobile/dsh/interactions receipt cannot overwrite a newer successful capability probe (2.19125ms)
+✖ attachment capability receipts share one request order (8.448167ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 2
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 84.221833
+
+✖ failing tests:
+
+test at packages/host/test/dsh-chat-wiring.test.ts:427:5
+✖ a late mobile/dsh/interactions receipt cannot overwrite a newer successful capability probe (2.19125ms)
+  AssertionError [ERR_ASSERTION]: mobile/dsh/interactions must not replace the newer confirmed capability
+  + actual - expected
+
+    {
+      approval: true,
+      controls: true,
+      question: true,
+  +   upload: false
+  -   upload: true
+    }
+
+      at TestContext.<anonymous> (file:///private/tmp/dshm-receipt-mutations-20261013-74af0nh4/interaction-request-order/packages/host/test/dsh-chat-wiring.test.ts:453:16)
+      at async Test.run (node:internal/test_runner/test:1113:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: { approval: true, question: true, upload: false, controls: true },
+    expected: { approval: true, question: true, upload: true, controls: true },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

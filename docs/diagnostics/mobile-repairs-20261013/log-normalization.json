@@ -1,0 +1,89 @@
+{
+  "policy": "Only remove line-ending whitespace and extra blank lines at EOF for Git; original temporary logs remain untouched. Assertion text and numbers are unchanged.",
+  "files": [
+    {
+      "file": "attachment-m1-race.log",
+      "originalSha256": "182f4fe3fb8a16b6601aaa03a06258f090ee3878bdf55d0437d225ab480337b9",
+      "archivedSha256": "6203319cc818a4dbb72824f7fff25b4c4d1ece45168c88be9b9de890b6470fc6",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "attachment-m2-backoff.log",
+      "originalSha256": "769e2c49e0177df4441064b0923088ec82024eb654984f28856f86ba3d919b3c",
+      "archivedSha256": "f482ff6e895b45c41844f40c27b52261aa6ba2751531821fec7374ee520c02cb",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "attachment-m3-offline.log",
+      "originalSha256": "e42a9de66b2e61a43cd961bd4ae590cddcb280800bf262f7985623aa9d3fb19b",
+      "archivedSha256": "421c389b808174ea19c609e3c9a90b81f2a4f5111e69abcc9778b387c78e1ebf",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "attachment-m4-preserve.log",
+      "originalSha256": "37d9257b17e65be0820f0bd1a175a29da6f0ba88ad932959d6dcacee73e988bd",
+      "archivedSha256": "e5c1ae146b42c14aa149d64d8982840c3f7b6ea001c21af1a376f0595b9f67c8",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "attachment-m5-readreceipt.log",
+      "originalSha256": "3a56b49247b8a79560850f189bcd1b7971ffd876768418c52057d0225b141c0e",
+      "archivedSha256": "99d69f125e380ce14b42defa734214968aa5f4c5084de1c1872cf03b4ebf8474",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "build.log",
+      "originalSha256": "18f4378052bd30cac7ea2250bf12b3af859b25d88898ab1e2773225f420efa68",
+      "archivedSha256": "18f4378052bd30cac7ea2250bf12b3af859b25d88898ab1e2773225f420efa68",
+      "changedOnlyTrailingWhitespace": false
+    },
+    {
+      "file": "initial-regression-incomplete.log",
+      "originalSha256": "d1f0ffeb9af253d459cf3bcedaea083eca68445a4d7857e0a9626771fda1f917",
+      "archivedSha256": "d1f0ffeb9af253d459cf3bcedaea083eca68445a4d7857e0a9626771fda1f917",
+      "changedOnlyTrailingWhitespace": false
+    },
+    {
+      "file": "old-review-snapshot-validation.log",
+      "originalSha256": "0849b525d82fb5013282eef106b3a6885f2e9bc63a79c5dc8e8aadfc09a126a2",
+      "archivedSha256": "842ed4ed18f55b1efd64c3e787209c93cded81ec05218d1ccf75c12e43712fc0",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "receipt-history-request-order.log",
+      "originalSha256": "d6b8eb432037fa4e6d8b9fdf742c776674136b90e5625b2fd8503115ae35c543",
+      "archivedSha256": "44bdf189fbde2a751b19d816aee7feb801fa06de66b9edc82c7c540eaf9dd63f",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "receipt-interaction-request-order.log",
+      "originalSha256": "eb1df735e9a642f8875024fb81a4d5b55bc4238bc7b5a567d6b611da2d6f1672",
+      "archivedSha256": "d50f1e0ef17e291152d3d1916c5d74680894ec4342923c39fc585410953714c8",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "receipt-race-after-fix.log",
+      "originalSha256": "8e406aaea7d54eeb21ec991e6c901a5cb8d3d91094eb398f2af59e3d32c8fefc",
+      "archivedSha256": "8e406aaea7d54eeb21ec991e6c901a5cb8d3d91094eb398f2af59e3d32c8fefc",
+      "changedOnlyTrailingWhitespace": false
+    },
+    {
+      "file": "receipt-race-before-fix.log",
+      "originalSha256": "760731e0520bf9064d19c10bf28358a13b57dc17922776b55391c0fd51501cac",
+      "archivedSha256": "f99db541a7841b2aa54f4cced6fc175f81ed719fa188736417e5431c1b93e106",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "receipt-shared-receipt-gate.log",
+      "originalSha256": "00a414874f2f97e01f53b24f40c178c444c11e173a3810fb3bc31e3587ccb484",
+      "archivedSha256": "4345a9182798d80fcbe36cde358bca0f06a594740d9c65c2acf466a06bde32d3",
+      "changedOnlyTrailingWhitespace": true
+    },
+    {
+      "file": "related-regression.log",
+      "originalSha256": "3d84134fcef382b4bec9313f089d60355692ee2a5970b2b01f9aff094e4cd659",
+      "archivedSha256": "3d84134fcef382b4bec9313f089d60355692ee2a5970b2b01f9aff094e4cd659",
+      "changedOnlyTrailingWhitespace": false
+    }
+  ]
+}

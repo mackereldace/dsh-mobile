@@ -1,0 +1,2510 @@
+{
+  "reports": [
+    {
+      "label": "dsh-412x915-dark",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            412,
+            915
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              412,
+              915
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 779
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 741,
+              "bottom": 879,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 50.5,
+              "right": 350.5,
+              "top": 770,
+              "bottom": 881,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 100,
+              "right": 400,
+              "top": 698,
+              "bottom": 881,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 741,
+              "bottom": 879,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 50.5,
+              "right": 350.5,
+              "top": 770,
+              "bottom": 881,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 100,
+              "right": 400,
+              "top": 698,
+              "bottom": 881,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 615,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            412,
+            915
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 741,
+            "bottom": 879,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 50.5,
+            "right": 350.5,
+            "top": 770,
+            "bottom": 881,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 100,
+            "right": 400,
+            "top": 698,
+            "bottom": 881,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 763,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "SPAN",
+            "class": "session-flag",
+            "width": 42,
+            "scrollWidth": 42,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 264,
+            "scrollWidth": 264,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 412,
+            "scrollWidth": 412,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 412,
+            "scrollWidth": 412,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "dark"
+    },
+    {
+      "label": "dsh-390x844-dark",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            390,
+            844
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              390,
+              844
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 708
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 670,
+              "bottom": 808,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 39.5,
+              "right": 339.5,
+              "top": 699,
+              "bottom": 810,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 78,
+              "right": 378,
+              "top": 627,
+              "bottom": 810,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 670,
+              "bottom": 808,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 39.5,
+              "right": 339.5,
+              "top": 699,
+              "bottom": 810,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 78,
+              "right": 378,
+              "top": 627,
+              "bottom": 810,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 544,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            390,
+            844
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 670,
+            "bottom": 808,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 39.5,
+            "right": 339.5,
+            "top": 699,
+            "bottom": 810,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 78,
+            "right": 378,
+            "top": 627,
+            "bottom": 810,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 692,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "SPAN",
+            "class": "session-flag",
+            "width": 42,
+            "scrollWidth": 42,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 250,
+            "scrollWidth": 250,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 390,
+            "scrollWidth": 390,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 390,
+            "scrollWidth": 390,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "dark"
+    },
+    {
+      "label": "dsh-360x800-dark",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            360,
+            800
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              360,
+              800
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 664
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(48, 49, 54, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 626,
+              "bottom": 764,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 23,
+              "right": 323,
+              "top": 655,
+              "bottom": 766,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 48,
+              "right": 348,
+              "top": 583,
+              "bottom": 766,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 626,
+              "bottom": 764,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 23,
+              "right": 323,
+              "top": 655,
+              "bottom": 766,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(48, 49, 54, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 48,
+              "right": 348,
+              "top": 583,
+              "bottom": 766,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 500,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            360,
+            800
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 626,
+            "bottom": 764,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 23,
+            "right": 323,
+            "top": 655,
+            "bottom": 766,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(48, 49, 54, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(255, 255, 255, 0.06) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 48,
+            "right": 348,
+            "top": 583,
+            "bottom": 766,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 648,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 230,
+            "scrollWidth": 230,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 360,
+            "scrollWidth": 360,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 360,
+            "scrollWidth": 360,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "dark"
+    },
+    {
+      "label": "dsh-412x915-light",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            412,
+            915
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              412,
+              915
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 779
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 741,
+              "bottom": 879,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 50.5,
+              "right": 350.5,
+              "top": 770,
+              "bottom": 881,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 100,
+              "right": 400,
+              "top": 698,
+              "bottom": 881,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 741,
+              "bottom": 879,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 50.5,
+              "right": 350.5,
+              "top": 770,
+              "bottom": 881,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 100,
+              "right": 400,
+              "top": 698,
+              "bottom": 881,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 615,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            412,
+            915
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 741,
+            "bottom": 879,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 50.5,
+            "right": 350.5,
+            "top": 770,
+            "bottom": 881,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 100,
+            "right": 400,
+            "top": 698,
+            "bottom": 881,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 763,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "SPAN",
+            "class": "session-flag",
+            "width": 42,
+            "scrollWidth": 42,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 248,
+            "scrollWidth": 248,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 264,
+            "scrollWidth": 264,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 412,
+            "scrollWidth": 412,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 412,
+            "scrollWidth": 412,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "light"
+    },
+    {
+      "label": "dsh-390x844-light",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            390,
+            844
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              390,
+              844
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 708
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 670,
+              "bottom": 808,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 39.5,
+              "right": 339.5,
+              "top": 699,
+              "bottom": 810,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 78,
+              "right": 378,
+              "top": 627,
+              "bottom": 810,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 670,
+              "bottom": 808,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 39.5,
+              "right": 339.5,
+              "top": 699,
+              "bottom": 810,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 78,
+              "right": 378,
+              "top": 627,
+              "bottom": 810,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 544,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            390,
+            844
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 670,
+            "bottom": 808,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 39.5,
+            "right": 339.5,
+            "top": 699,
+            "bottom": 810,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 78,
+            "right": 378,
+            "top": 627,
+            "bottom": 810,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 692,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "SPAN",
+            "class": "session-flag",
+            "width": 42,
+            "scrollWidth": 42,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 234,
+            "scrollWidth": 234,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 250,
+            "scrollWidth": 250,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 390,
+            "scrollWidth": 390,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 390,
+            "scrollWidth": 390,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "light"
+    },
+    {
+      "label": "dsh-360x800-light",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            360,
+            800
+          ]
+        },
+        {
+          "label": "顶栏52px与二级栏44px",
+          "pass": true,
+          "detail": {
+            "header": 52,
+            "tabs": 44,
+            "viewport": [
+              360,
+              800
+            ],
+            "dock": 144
+          }
+        },
+        {
+          "label": "真实子智能体运行灯",
+          "pass": true
+        },
+        {
+          "label": "输入栏外层透明浮动",
+          "pass": true
+        },
+        {
+          "label": "拉到底末尾内容位于输入卡上方",
+          "pass": true,
+          "detail": {
+            "last": 459,
+            "composer": 664
+          }
+        },
+        {
+          "label": "汉堡展开主页面push侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏含工作区插件设置与来源",
+          "pass": true
+        },
+        {
+          "label": "关闭侧栏保留阅读锚点及草稿",
+          "pass": true
+        },
+        {
+          "label": "文件目录使用生产body portal并且可见",
+          "pass": true
+        },
+        {
+          "label": "文件与主侧栏互斥且只有一个位移",
+          "pass": true
+        },
+        {
+          "label": "文件关闭恢复且锚点偏差≤2px",
+          "pass": true
+        },
+        {
+          "label": "上下文详情为真实投影且可见",
+          "pass": true
+        },
+        {
+          "label": "上下文弹层保留三段颜色及真实图例",
+          "pass": true
+        },
+        {
+          "label": "token详情含全部计费桶",
+          "pass": true
+        },
+        {
+          "label": "Token总量与图标位于标题行",
+          "pass": true
+        },
+        {
+          "label": "上下文详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "会话详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "Token详情背景清晰且至少90%不透明",
+          "pass": true,
+          "detail": "rgba(248, 249, 250, 0.94)"
+        },
+        {
+          "label": "三个详情面板均留在视口内",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 626,
+              "bottom": 764,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 23,
+              "right": 323,
+              "top": 655,
+              "bottom": 766,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 48,
+              "right": 348,
+              "top": 583,
+              "bottom": 766,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "详情面板锚定对应底部读数上方",
+          "pass": true,
+          "detail": [
+            {
+              "kind": "context",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 12,
+              "right": 276,
+              "top": 626,
+              "bottom": 764,
+              "gap": 8
+            },
+            {
+              "kind": "turns",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 23,
+              "right": 323,
+              "top": 655,
+              "bottom": 766,
+              "gap": 6
+            },
+            {
+              "kind": "tokens",
+              "background": "rgba(248, 249, 250, 0.94)",
+              "backdrop": "blur(40px) saturate(1.5)",
+              "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+              "left": 48,
+              "right": 348,
+              "top": 583,
+              "bottom": 766,
+              "gap": 6
+            }
+          ]
+        },
+        {
+          "label": "原版浮层模糊阴影与输入卡描边已解析",
+          "pass": true
+        },
+        {
+          "label": "附件按钮同步触发系统选择器",
+          "pass": true
+        },
+        {
+          "label": "上传失败可重试且草稿保留",
+          "pass": true
+        },
+        {
+          "label": "重试得到真实收据",
+          "pass": true
+        },
+        {
+          "label": "发送失败保留文字附件及收据",
+          "pass": true
+        },
+        {
+          "label": "中央右滑打开同一主侧栏",
+          "pass": true
+        },
+        {
+          "label": "侧栏同方向滑动不重复开关",
+          "pass": true
+        },
+        {
+          "label": "主侧栏反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "中央左滑使用同一文件目录入口",
+          "pass": true
+        },
+        {
+          "label": "文件面板反向滑动返回聊天",
+          "pass": true
+        },
+        {
+          "label": "可横滚代码区不被侧滑导航抢走",
+          "pass": true
+        },
+        {
+          "label": "设置用版本保存并以回读确认",
+          "pass": true
+        },
+        {
+          "label": "插件启停展示后端确认状态",
+          "pass": true
+        },
+        {
+          "label": "滑动条可调整显示窗口",
+          "pass": true
+        },
+        {
+          "label": "滑动条可平移显示窗口",
+          "pass": true
+        },
+        {
+          "label": "从工具条起拖产生时间选区并高亮记录",
+          "pass": true
+        },
+        {
+          "label": "轨迹拖选不会打开左右面板",
+          "pass": true
+        },
+        {
+          "label": "AND搜索仅过滤表格而不改变时间域",
+          "pass": true
+        },
+        {
+          "label": "原生键盘让位一次且顶栏保持位置",
+          "pass": true,
+          "detail": {
+            "app": 500,
+            "pad": "",
+            "headerTop": 0
+          }
+        },
+        {
+          "label": "聚焦与键盘状态不能滚走整页顶栏",
+          "pass": true
+        },
+        {
+          "label": "聊天与轨迹保留200条挂载上限",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        },
+        {
+          "label": "真实触摸从中央右滑打开主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭主侧栏",
+          "pass": true
+        },
+        {
+          "label": "真实触摸从中央左滑打开文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸反向关闭文件面板",
+          "pass": true
+        },
+        {
+          "label": "真实触摸横滚代码且不打开侧栏",
+          "pass": true
+        }
+      ],
+      "errors": [],
+      "evidence": {
+        "initial": {
+          "header": 52,
+          "tabs": 44,
+          "viewport": [
+            360,
+            800
+          ],
+          "dock": 144
+        },
+        "statistics": [
+          {
+            "kind": "context",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 12,
+            "right": 276,
+            "top": 626,
+            "bottom": 764,
+            "gap": 8
+          },
+          {
+            "kind": "turns",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 23,
+            "right": 323,
+            "top": 655,
+            "bottom": 766,
+            "gap": 6
+          },
+          {
+            "kind": "tokens",
+            "background": "rgba(248, 249, 250, 0.94)",
+            "backdrop": "blur(40px) saturate(1.5)",
+            "shadow": "rgba(0, 0, 0, 0.04) 0px 0px 0px 0.5px, rgba(0, 0, 0, 0.04) 0px 3px 8px 0px, rgba(0, 0, 0, 0.05) 0px 0px 20px 0px",
+            "left": 48,
+            "right": 348,
+            "top": 583,
+            "bottom": 766,
+            "gap": 6
+          }
+        ],
+        "final": {
+          "headerTop": 0,
+          "tabHeight": 44,
+          "rootScroll": 0,
+          "composerTop": 648,
+          "dockHeight": 160
+        },
+        "nativeTouchTarget": [
+          {
+            "tag": "BUTTON",
+            "class": "session-row is-running",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "SECTION",
+            "class": "session-group",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "visible",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "session-groups",
+            "width": 214,
+            "scrollWidth": 214,
+            "overflowX": "auto",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "DIV",
+            "class": "",
+            "width": 230,
+            "scrollWidth": 230,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "BODY",
+            "class": "",
+            "width": 360,
+            "scrollWidth": 360,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          },
+          {
+            "tag": "HTML",
+            "class": "",
+            "width": 360,
+            "scrollWidth": 360,
+            "overflowX": "hidden",
+            "touchAction": "auto"
+          }
+        ],
+        "nativeCodeScroll": {
+          "left": 105,
+          "drawer": "closed",
+          "files": null
+        }
+      },
+      "url": "/mobile/chat",
+      "theme": "light"
+    },
+    {
+      "label": "codex-390x844-dark",
+      "ok": true,
+      "checks": [
+        {
+          "label": "完整生产 boot 保留原始 API 身份",
+          "pass": true
+        },
+        {
+          "label": "实际视口尺寸",
+          "pass": true,
+          "detail": [
+            390,
+            844
+          ]
+        },
+        {
+          "label": "Codex 共用侧滑宽度",
+          "pass": true,
+          "detail": {
+            "left": 249.60000610351562,
+            "width": 390
+          }
+        },
+        {
+          "label": "Codex 原生默认设置通道",
+          "pass": true
+        },
+        {
+          "label": "Codex 关闭管理页恢复聊天和遮罩",
+          "pass": true
+        },
+        {
+          "label": "没有页面异常",
+          "pass": true,
+          "detail": []
+        }
+      ],
+      "errors": [],
+      "evidence": {},
+      "url": "/mobile/codex",
+      "theme": "system"
+    }
+  ],
+  "directory": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-Py5abP"
+}

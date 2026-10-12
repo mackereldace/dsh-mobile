@@ -1,0 +1,1769 @@
+✔ boot.js 与宿主完成握手：会话标识一致、主机指纹一致、能力位来自宿主 (81.713583ms)
+✔ 经加密隧道完成一元 RPC 与流式 RPC (42.45475ms)
+✔ 固定指纹不匹配时拒绝握手（防中间人 / 换机） (19.180625ms)
+✔ 已撤销设备无法完成握手 (33.259417ms)
+✔ serverNonceBase 在 ServerHello 与 ServerAuthOk 中必须一致（防拼装） (25.810541ms)
+✔ ★★ 带附件表的帧 ⇒ 交一枚真正的 multipart Response（字节活着到还原那一刻） (23.626083ms)
+✔ ★★ 整条链：带附件表的帧 ⇒ 传输层交出 multipart Response ⇒ 字节逐字节回来 (29.905875ms)
+✔ markdown 渲染器：能返回、且块级元素齐全 (9.590708ms)
+✔ markdown 渲染器：行内语法与任务勾选 (4.119166ms)
+✔ markdown 渲染器：HTML 不执行、危险协议降级（两个经典洞） (5.707ms)
+✔ 公式：整段拿走、不被 markdown 吃乱；货币写法不当作公式（用户反馈） (18.117791ms)
+✔ markdown 渲染器：未闭合的围栏也不会卡住（边界） (4.54175ms)
+✔ 命名空间读写：写 `dsh-mobile.device-key:<指纹>` 能落进本机与壳的库，并能读回来 (43.308ms)
+✔ 命名空间读回：按当前源对应的指纹能读回那条身份 (4.56425ms)
+✔ ★★ 按指纹取身份：源 A 上恢复的是 A 的私钥（vault 里同时有 A 与 B） (2.812167ms)
+✔ ★★★ 源 B 绝不能拿到 A 的身份（vault 里 A 的两种形态都在；B 自己没有私钥） (3.580125ms)
+✔ ★ 归属对不上时绝不使用旧键（壳里那份旧键属于 A，当前源属于 B） (0.953625ms)
+✔ ★ 旧键迁移：旧键 + 可反查出归属 ⇒ 新键在、旧键没了、身份仍然可用（且幂等） (1.265667ms)
+✔ ★ 确定不了归属就不动：只有 device-key、没有旧 host 配置 ⇒ 旧键原样保留 (0.727667ms)
+✔ ★ 确定不了归属就不动：旧 host 配置里没有指纹字段 ⇒ 一样什么都不做 (0.743291ms)
+✔ ★ lastGoodEndpoint 只在"同源"时才当首选（壳侧 forgetLastGoodEndpoint 失效的网页侧补法） (1.182166ms)
+✔ ★ 宿主目录：能记下多条、active 标对（且目录写进壳的库 ⇒ 跨源 ✓） (1.074333ms)
+✔ ★「忘记当前电脑」只清当前宿主：另一台宿主的身份必须还在（与 handleDeviceRejection 同一个安全属性 ✓） (1.170458ms)
+✔ ★ 宿主明确拒绝时只清当前宿主：同一把库里 A 与 B 两条身份，在 A 上被拒 ⇒ B 那四条必须还在 (3.8095ms)
+✔ ★ 面板：列出所有宿主、标出当前那台；**老包（没有切换桥）** ⇒ 一颗按钮都不许有 ✗ (1.249584ms)
+✔ ★★ P1b：新包有切换桥 ⇒ 非当前那台画**真按钮**，点下去把**真能用的 URL** 交给壳 ✓ (1.742041ms)
+✔ ★★ 面板行名用宿主自己报的**机器名**（拿不到就不许编 ✗） (10.407375ms)
+✔ ★ 壳里带名字的槽必须给本宿主补上名字（且**只补名字**、绝不把别家的地址记进来 ✗） (2.792542ms)
+▶ standalone conversation files use the production boot and visible portal
+  ✔ opens synchronously outside the transformed app and cancels the baseline exactly once on close (36.7165ms)
+  ✔ missing tunnel and baseline errors show retry and stay closeable (1.203541ms)
+  ✔ a baseline that never arrives becomes a ten-second error with retry and stream cancellation (0.634875ms)
+  ✔ opening a new target discards the old baseline and late records (1.192375ms)
+  ✔ a settled baseline awaiting its next microtask cannot write into the next target (2.271583ms)
+  ✔ directory reads time out, stop the loading clock, and can retry without closing the pane (1.511834ms)
+  ✔ late directory results cannot replace the newly opened session directory (0.922083ms)
+  ✔ file read timeout presents retry, and leaving preview prevents late content from replacing the list (1.571458ms)
+  ✔ an unavailable optional opening-apps catalog cannot freeze directory access (0.909875ms)
+  ✔ file preview, capabilities, root directory, and workspace list retain their back hierarchy (2.865084ms)
+  ✔ connection settings reuse the existing renderer and release mounted content (2.101792ms)
+  ✔ NO_SHELL delegates native back to the page without a React shell or persistent listeners (4.155709ms)
+✔ standalone conversation files use the production boot and visible portal (57.04875ms)
+✔ 内容区左滑开面板、反向推到位关掉 (606.549166ms)
+✔ 面板上短拖回弹：不关、且内联样式清干净 (603.109375ms)
+✔ 抽屉：内容区右滑打开、反向左滑推到位关闭 (601.57675ms)
+✔ 抽屉：短拖回弹，且内联 left 被清掉 (603.397083ms)
+✔ 蒙层与遮罩上反向滑也能关（手指不必落在面板上） (1205.956334ms)
+✔ 拖动期间主页面**同步**让位（用户反馈的"脱节"） (867.3295ms)
+✔ 面板关着（display:none）时量不到宽度，仍必须能打开（真机就栽在这里） (151.080792ms)
+✔ **打开也跟手**：拖到一半时面板/内容/顶栏同帧同位，提前松手回弹到关闭 ✓ (675.505584ms)
+✔ 上一笔的收尾回调**不得覆盖**新手势（"偶尔对不上"的结构性根因） (697.154208ms)
+✔ 同方向再滑什么也不做（不退、也不重复打开） (604.745625ms)
+✔ 面板开着时，**内容区**上同方向的横滑不跟手（用户反馈"边栏动而不返回"） (959.018ms)
+✔ 边栏开着时，遮罩上同方向的横滑**既不返回也不推主界面**（用户反馈"反过来了"） (631.167125ms)
+✔ 宽表格：横向滚动容器在深处（≥5 层）时也必须拦住手势（用户反馈） (606.919667ms)
+✔ 竖向滑动不抢（滚动消息不会开关面板） (62.850542ms)
+✔ 拖动被打断（竖向滚动 / 浏览器取消）→ 回弹而不是卡在半路 (425.181042ms)
+✔ A 本机 IP 与 hostname 自动受信：manifest 不再需要手传 IP (14.016458ms)
+✔ A 外部地址与伪造域名一律拒绝（含"名字里含本机 IP"与通配 DNS 写法） (2.402042ms)
+✔ A 换网后**立刻**生效（同一个宿主对象，不重启） (2.458042ms)
+✔ A 推导失败时退回静态列表（不放开闸门） (2.230792ms)
+✔ A 收紧开关：trustLocalNames=false 之后只剩 IP 字面量 (0.757625ms)
+✔ B2 loopback 删除设备：内存表与 devices.json **同时**更新（不需要重启） (11.021125ms)
+[dsh-mobile] 中继外拨已启动：wss://relay.example.com/attach（房间 fd459398ec70b4c76c8d0c429eba73b1，空闲池 2）
+[dsh-mobile] 中继回源通道已启动：https://relay.example.com/attach-http（房间 fd459398ec70b4c76c8d0c429eba73b1）
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 回源通道出错，将重试
+✔ B2 ?revoked=1 只清已撤销的；不存在的 id 返回 404；缺参数 400 (14.293916ms)
+✔ B2 伪造回环 Host + 非回环 socket ⇒ 403，且**不泄露设备信息**，并记审计 (2.756208ms)
+✔ B2 ★收紧后：局域网用**本机真实 IP** 也**调不到**管理路由（只允许 loopback） (2.260208ms)
+✔ B3 自检把"现在到底好不好、缺什么"一次说完（数字全是真的） (42.011708ms)
+✔ B3 自检拿不到 DSH 产物时报"未知"，不编命中率 (2.492625ms)
+✔ B3 自检里的信任推导随网卡变化（同一进程内换网） (1.819166ms)
+✔ B3 自检与管理路由都在栅栏之内：外部 Host 一律 403 (1.83375ms)
+✔ B1 证书生成失败会在 manifest 里明说（不是静默） (2.486375ms)
+✔ P1a 配对页：身份按「带指纹优先、基名兜底」读（键名改了，读者必须跟着改） (17.555208ms)
+✔ P1a 配对页「解除」：这台宿主的四条身份键、两种形态都真删，且不动别的宿主 (11.621875ms)
+✔ P1a 诊断页：有带指纹身份就显示它；一个身份都没有时写「未知」，不写「尚未配对」 (14.156458ms)
+✔ P1a manifest 机器名是**可选**字段：拿得到就带，拿不到这个键**不出现** (3.443375ms)
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 回源通道出错，将重试
+▶ PWA 图标：手写 PNG 编码器（回退路径）
+  ✔ 签名、IHDR 字段、IEND 都对（8 位 RGBA、非隔行） (48.640625ms)
+  ✔ IDAT 解压后长度正确、且每行的 filter 字节都是 0 (6.139042ms)
+  ✔ maskable 变体与普通版不同，但同样是合法 PNG (85.697458ms)
+  ✔ 画出来的像素确实是"深底 + 白色前景"（不是全黑或全白） (1.266208ms)
+  ✔ 同一尺寸只算一次（缓存返回同一个 Buffer） (0.418916ms)
+  ✔ 像素数不对时立刻报错（而不是生成一张坏图） (0.349375ms)
+✔ PWA 图标：手写 PNG 编码器（回退路径） (145.564ms)
+▶ PWA 图标：生成物（官方鲸鱼）
+  ✔ 三张都在（192 / 512 / maskable-512），且都是尺寸正确的合法 PNG (0.19275ms)
+  ✔ 普通版与 maskable 版是**两张不同的图**（安全区不同，不能拿同一张糊弄） (0.142167ms)
+  ✔ 服务出去的就是生成物本身（iconPng 不再走"代码画"的那条路） (14.761958ms)
+✔ PWA 图标：生成物（官方鲸鱼） (15.363ms)
+▶ PWA manifest：可安装性清单
+  ✔ 名字 / short_name / start_url / 独立窗口 / 192 与 512 图标齐全 (0.167583ms)
+✔ PWA manifest：可安装性清单 (0.210709ms)
+▶ parseAuthority：Host 与 Origin 两种形态
+  ✔ IPv4 裸 authority (1.278625ms)
+  ✔ 带 scheme 的 Origin（早期这里拼成 http://http://… 导致全量 403） (1.798125ms)
+  ✔ IPv6 带方括号：Host 与 Origin 归一化后**必须一致** (0.11025ms)
+  ✔ 不接受的输入返回 undefined，而不是抛错 (0.067708ms)
+✔ parseAuthority：Host 与 Origin 两种形态 (4.350375ms)
+▶ matchesTrusted：信任判定（宽了是安全问题）
+  ✔ 端口精确匹配 (0.966625ms)
+  ✔ IPv6 条目按带方括号的形式匹配（写进配置的就是这个形式） (0.070459ms)
+  ✔ 端口不同则不匹配（不能因为同主机就放行另一个端口） (0.056667ms)
+  ✔ **不同的 IPv6 地址不得匹配**（前缀相同也不行） (0.056291ms)
+  ✔ 未加方括号的 IPv6 authority 被直接拒绝（浏览器始终会加方括号） (0.669042ms)
+  ✔ IPv4 条目不得匹配 IPv6 来源，反之亦然 (0.138917ms)
+  ✔ 不带端口的条目匹配任意端口（局域网 IP 变动时少改配置） (0.081541ms)
+✔ matchesTrusted：信任判定（宽了是安全问题） (2.203625ms)
+▶ 附件还原：客户端与协议层的契约
+  ✔ ★★ 顺序：还原在 entry.resolve(response) 之前（位置先后判，不用 includes） (5.254041ms)
+  ✔ ★ 客户端按 path 推断根（["value",…] ⇒ result；["data"] ⇒ result.value） (0.152083ms)
+  ✔ ★ 两边都要求"末端必须是 null，否则拒绝替换"（不覆盖已有真值） (0.089625ms)
+  ✔ ★ 两边都拒绝空路径（不猜它该放到哪） (0.057458ms)
+  ✔ ★ 两边的字节都不是"再解一次 base64"：直接用已还原的 bytes (0.085292ms)
+  ✔ ★★ 传输层里必须**先**试着交 multipart，再退回 JSON（顺序反了等于没修） (2.790458ms)
+  ✔ ★★ 分片形状与 DSH 的 fullResponse 逐字段一致（metadata + bytes-<n> + 三项附件表） (2.392334ms)
+  ✔ ★★ 交出去之前，落点一律写回 null 占位（DSH 的硬校验只认 null） (0.703708ms)
+✔ 附件还原：客户端与协议层的契约 (12.230417ms)
+✔ 反向二进制：普通请求保留信封、DSH rpcId 和业务值，源对象不变 (61.292375ms)
+✔ 反向二进制：浏览器实际加密帧编码与 protocol.encodeBinary 逐字段一致 (22.648792ms)
+✔ 反向二进制：图片数组完整往返，宿主与手机收到的每张图片都是原始 Uint8Array (32.623833ms)
+✔ 反向二进制：嵌套对象、非零偏移视图、ArrayBuffer 和 Buffer 完整往返，不编码底层额外字节 (20.745083ms)
+✔ 反向二进制：空字节数组与空 ArrayBuffer 保留 Uint8Array 类型，普通空数组保持数组 (15.172375ms)
+✔ 反向二进制：320 KiB 图片逐字节往返，无截断、无 base64 参数栈溢出 (103.367417ms)
+✔ 反向二进制：同名标签带额外字段保持普通业务对象，非字节业务值不变 (15.437ms)
+▶ 二进制通道的两端契约
+  ✔ ★ 标记键名两边逐字一致（飘了就是"类型不对"那个报错） (0.392166ms)
+  ✔ ★ 客户端两个解码点都接上了（一元响应 + 流式） (0.168708ms)
+  ✔ ★ 客户端解码**不猜**：只有"恰好一个键、键名就是标记、值是字符串"才算 (0.102542ms)
+  ✔ ★ 宿主两个编码点都接上了（一元响应 + 流式） (0.044792ms)
+  ✔ ★ 宿主侧确实从 protocol 引入（而不是自己又写一份） (0.068291ms)
+✔ 二进制通道的两端契约 (1.188ms)
+▶ 取证探针的行为不变量
+  ✔ ★ 真实产物里的探针区：三条不变量都在（尤其"不吃事件"） (1.086625ms)
+  ✔ ★★ 判据会响：一份"加了 preventDefault"的坏样本必须被报出来 (0.291791ms)
+  ✔ ★★ 判据会响：滥用 `passive: false` 也算"想吃事件"的写法吗？——不算，但必须仍有 elementFromPoint (0.174ms)
+✔ 取证探针的行为不变量 (2.570417ms)
+▶ 来源登记表：怎么记、怎么查
+  ✔ 记进去就查得到，同一个 rpcId 只记一条 (0.278375ms)
+  ✔ 超出上限就丢最旧的（登记表不是历史账本） (0.065208ms)
+  ✔ 按会话取最近一条（工具读不到会话时的退路） (0.064917ms)
+✔ 来源登记表：怎么记、怎么查 (0.769625ms)
+▶ 从隧道帧里认出「人打的消息提交」
+  ✔ session/prompt 的 request 里取 sessionId + requestId (0.340667ms)
+  ✔ 别的端点一个都不认（登记失败最多是答不上来，绝不动调用形状） (0.044125ms)
+  ✔ 形状不对（缺 requestId / 缺 sessionId / 畸形的 payload）都返回 undefined (0.044959ms)
+✔ 从隧道帧里认出「人打的消息提交」 (0.50825ms)
+▶ 从会话消息里取「最后一条人类消息」的 rpcId
+  ✔ 跳过注入型消息，只认 source.kind === user (0.093375ms)
+  ✔ 最后一条人类消息没有 rpcId 就**停在那儿**，不许往前捡更早那条手机消息 (0.047625ms)
+  ✔ 一条人类消息都没有 ⇒ undefined (0.049709ms)
+✔ 从会话消息里取「最后一条人类消息」的 rpcId (0.278792ms)
+▶ 三态判据：mobile / computer / unknown
+  ✔ 登记表里有 ⇒ mobile + 设备名（exact） (3.439916ms)
+  ✔ rpcId 有但登记表里没有 ⇒ computer（heuristic，不许说成 100% 确定） (0.051667ms)
+  ✔ 没有 rpcId ⇒ unknown（那不是人打进来的） (0.033208ms)
+✔ 三态判据：mobile / computer / unknown (3.5795ms)
+▶ 工具定义：能读会话、返回值不含 undefined
+  ✔ 从 exec.agent.session 读到手机那条 ⇒ mobile (0.201917ms)
+  ✔ 读不到会话时不瞎猜：没有 sessionId 参数就答 unknown (0.035875ms)
+  ✔ 读不到会话但给了 sessionId ⇒ 按该会话最近一条手机提交回答，并标成 heuristic (0.037375ms)
+  ✔ deriveMessages 抛错也不把工具弄崩（答不上来比崩掉好） (0.047792ms)
+✔ 工具定义：能读会话、返回值不含 undefined (0.365208ms)
+▶ 接线：登记表挂到服务面 + 隧道那条路登记
+  ✔ ★ 登记表由 createMobileHost 建、挂在服务面对象上（工具与适配器都从那儿取） (0.11325ms)
+  ✔ ★★ 隧道那条路：用 promptRefOfTunnelCall 取 rpcId，且**在网关调用成功之后**才登记 (0.049292ms)
+  ✔ ★ 手机的第二条通道（mobile/dsh/send）也接了登记：桥拿得到 device (0.039083ms)
+✔ 接线：登记表挂到服务面 + 隧道那条路登记 (0.231167ms)
+▶ 接线：工具注册链 + 那句止损
+  ✔ ★★ client_source 真的被注册进工具表（动态 import，且注册发生在手机工具之后） (0.051792ms)
+  ✔ ★ 注册链仍然是 `void import(...).then(async …).catch(...)`：异常仍被同一个 catch 兜住 (0.060417ms)
+  ✔ ★ 桥里的登记回调是**可选**的（既有 `{ call }` 构造不许被弄红 ✗） (0.03775ms)
+  ✔ ★★ 止损那句必须真的进了 phone_notify / phone_send 共用的 semantics 里 (0.0855ms)
+✔ 接线：工具注册链 + 那句止损 (0.272917ms)
+▶ Codex 桥：懒启动与归一化
+  ✔ 没被使用时**不拉起**子进程（status 只报状态） (0.362542ms)
+  ✔ threads/list 把服务端大对象归一化成手机要的几个字段 (32.5535ms)
+✔ Codex 桥：懒启动与归一化 (33.344875ms)
+▶ Codex 桥：一轮 turn 的事件与审批
+  ✖ 增量进事件流；审批挂起等手机裁决，裁决后 turn 才收尾 (34.02125ms)
+  ✔ 游标语义：since=N 只拿 N 之后的事件，且**不推进**未消费的游标 (42.267208ms)
+  ✔ 审批超时**自动拒绝**（不是自动批准） (89.538459ms)
+  ✔ 猜出来的审批 id 一律拒绝（不能让别的请求代答） (0.578625ms)
+✖ Codex 桥：一轮 turn 的事件与审批 (166.764458ms)
+▶ Codex 桥：项目 / 复制(fork) / 被占用
+  ✔ projects/list 归一化出"名字 + 根目录"（手机用它决定新会话放哪） (27.008875ms)
+  ✔ thread/fork 能复制一条**被占用**的会话（手机继续电脑那条的正解） (27.141041ms)
+  ✔ 发给被占用的会话：给人的是"被占用 + 怎么办"，不是一串原始错误 (23.608667ms)
+✔ Codex 桥：项目 / 复制(fork) / 被占用 (77.967167ms)
+▶ Codex 桥：端点分发
+  ✔ 会话管理：改名 / 归档 / 删除 都能走通 (26.350792ms)
+  ✔ mobile/codex/status 与 threads/list 走同一条分发器 (27.161583ms)
+  ✔ 未知端点与缺参数都明确报错（不静默成功） (29.38575ms)
+✔ Codex 桥：端点分发 (83.050334ms)
+▶ Codex 管理桥
+  ✔ 白名单管理 RPC 正常调用，未知 RPC 即使来自 JavaScript 也不透传 (57.318625ms)
+  ✔ 并发管理读取必须等同一初始化完成 (60.262917ms)
+  ✔ 取消后的迟到响应不会串到下一次请求；已取消写在发出前拒绝 (178.585709ms)
+  ✔ 新会话读取真实最新默认，保存后不被旧模型/审批/沙箱硬编码覆盖 (57.676167ms)
+  ✔ 新会话明确参数优先于全局默认，不影响旧会话 writer-lock 路径 (53.90525ms)
+  ✔ 默认读取失败保持已有安全策略，不能扩大审批或文件权限 (53.024209ms)
+  ✔ 新会话沿用原生命名权限方案，明确 sandbox 优先且不能双重指定 (53.625333ms)
+  ✔ 明确细粒度审批参数优先于原生默认 (57.432959ms)
+✔ Codex 管理桥 (573.151667ms)
+▶ explainCaptureFailure：★ 把系统原文翻成人话（且认得的是实测那一句）
+  ✔ ★★ 本机实测的权限失败 ⇒ 告诉他去哪儿开，并说清要重开 App (1.790833ms)
+  ✔ 英文权限措辞也认（同一件事的不同说法） (0.07125ms)
+  ✔ ★ 认不出的原文**原样带出来**（不许吞掉 —— 真正的原因往往就在里面） (0.05425ms)
+  ✔ 连原文都没有 ⇒ 至少把退出码说出来（不编故事） (0.057667ms)
+✔ explainCaptureFailure：★ 把系统原文翻成人话（且认得的是实测那一句） (2.6935ms)
+▶ isFresh / shouldCapture：★ 别把首页变成"一直在截屏"
+  ✔ 新鲜度按 TTL 判，默认 30 秒 (0.273291ms)
+  ✔ ★ 首页不可见 / 正在抓 / 没过节流窗口 ⇒ 都不抓 (0.072959ms)
+  ✔ 第一次（没抓过）⇒ 抓；过了窗口 ⇒ 抓 (0.048167ms)
+✔ isFresh / shouldCapture：★ 别把首页变成"一直在截屏" (0.476042ms)
+▶ decideShow：★★ 只要有图就一直显示它（绝不因为一次失败抹掉 ✗）
+  ✔ 有图 ⇒ 显示图（哪怕刚抓失败 / 图旧了） (0.06275ms)
+  ✔ 没图 ⇒ 才画示意屏 (0.187333ms)
+✔ decideShow：★★ 只要有图就一直显示它（绝不因为一次失败抹掉 ✗） (0.427875ms)
+▶ captureShot：命令怎么调 / 失败怎么抛
+  ✔ 成功路径：先 screencapture、再 sips 降采样，并回报抓取时刻 (1.291958ms)
+  ✔ ★★ 权限失败 ⇒ 抛出的错误是**人话**（不是系统原文） (0.489042ms)
+  ✔ ★ 降采样失败**不算致命**（大不了发原图）—— 但超过上限必须拒绝 (0.216625ms)
+  ✔ ★ 命令说成功、文件却不在 ⇒ 也算失败（不许当成功继续） (0.081333ms)
+  ✔ ★ 图是空的 ⇒ 失败（空图发到手机上就是一块白 ✗） (0.079458ms)
+  ✔ 抓之前先删旧文件（免得把上一次的图当这一次的 ✓） (0.051ms)
+✔ captureShot：命令怎么调 / 失败怎么抛 (2.348041ms)
+▶ 设备调用带上会话 id
+  ✔ 带上时：入队与取件里都带着它（这一条就是"点击落到会话"的地基） (0.372ms)
+  ✔ ★ 不带时：**字段不出现**（而不是一个显式的 undefined） (0.216ms)
+  ✔ ★ 空字符串当作"没带"（不写进队列，免得手机拿到一个空链接） (0.113125ms)
+  ✔ ★ 没有会话 id 的旧调用照旧可用（向后兼容：点通知只打开 App） (0.826167ms)
+✔ 设备调用带上会话 id (2.100792ms)
+▶ 端侧请求：默认全禁
+  ✔ 未启用的能力：入队直接失败，且**不会**留在队列里 (0.706458ms)
+  ✔ 授权是**按设备**记的：给平板开的能力不会顺带打开手机 (0.076542ms)
+  ✔ 未知能力名一律拒绝（避免"拼错名字就等于绕过"） (0.052791ms)
+✔ 端侧请求：默认全禁 (1.207167ms)
+▶ 端侧请求：只投递一次
+  ✔ 第二次取待办时，已投递的请求不再出现 (0.079416ms)
+  ✔ 结果回报后请求出队，并可查到结果 (0.084375ms)
+✔ 端侧请求：只投递一次 (0.219375ms)
+▶ 端侧请求：过期即作废
+  ✔ 超过存活期的请求出队时不再投递（两分钟前的"提醒我"不该突然弹出） (39.757458ms)
+  ✔ 中途停用能力：未投递的请求不会被投递 (0.138791ms)
+✔ 端侧请求：过期即作废 (40.005708ms)
+▶ 端侧请求：结果有界且按设备隔离
+  ✔ 结果只保留最近若干条（长时间运行内存不无界增长） (0.462417ms)
+  ✔ 别的设备回报同一个 id 不会写入结果（结果按设备隔离） (0.049792ms)
+✔ 端侧请求：结果有界且按设备隔离 (0.567958ms)
+▶ 端侧能力扩容（2026-09：2 个 → 5 个）
+  ✔ 新能力（剪贴板 / 震动 / 打开链接）默认同样是禁用的 (0.110375ms)
+  ✔ 未知能力要报"没有这个能力"，而不是"需要先在手机上允许" (0.0555ms)
+  ✔ 启用后新能力走的是同一条投递/回报链路（不为新能力开小灶） (0.116542ms)
+✔ 端侧能力扩容（2026-09：2 个 → 5 个） (0.320125ms)
+▶ 端侧请求：通知标题随请求一起走（2026-10-05）
+  ✔ ★ 入队时给的标题，手机取待办时原样拿到 (0.04825ms)
+  ✔ ★ 不给标题就不放这个键（老调用行为逐字不变 ⇒ 手机自己退回旧标题） (0.040458ms)
+  ✔ ★ 标题不参与"取件与回执"的判据（两台设备各拿各的，不串台） (0.07475ms)
+✔ 端侧请求：通知标题随请求一起走（2026-10-05） (0.195833ms)
+▶ 端侧能力授权：播种（2026-10-05）
+  ✔ ★ 记下来的能力，播种之后在内存队列里就是「已允许」 (0.075708ms)
+  ✔ ★ 负例：一条记录都没有 ⇒ 播种是空操作，照旧默认全禁 (0.094625ms)
+  ✔ ★ 播种跳过不在册的能力名，也去重（`devices.json` 可以手改，不许因此让宿主起不来） (0.029792ms)
+  ✔ ★ 播种之后「取消允许」照样能减掉（播种不是「钉死」） (0.039208ms)
+✔ 端侧能力授权：播种（2026-10-05） (0.273083ms)
+▶ 端侧能力授权：落盘 + 重启后仍然记得（2026-10-05）
+  ✔ ★ 手机点「允许」⇒ 落进 devices.json；重启后（新 DeviceStore 读同一目录）仍认这台设备 (2.332875ms)
+  ✔ ★★ 负例：从没记录过（老 devices.json 里没有这个键）⇒ 播种之后仍然 not enabled (1.59ms)
+  ✔ ★ 撤销（手机点「不用」）也要落盘 —— 别只加不减 (1.257208ms)
+  ✔ ★ 设备被移除 ⇒ 允许记录一并消失（不留孤儿），重启后也不认它 (1.222709ms)
+  ✔ ★ 文件里混进垃圾（有人手改过）⇒ 只留字符串 / 去掉重复，且**不抛错**（启动路径不许炸） (0.850875ms)
+  ✔ ★ 宿主接线：启动时真的用 `devices.json` 播种（去掉那一段 ⇒ 上面那条「重启后仍认」必须红） (0.925583ms)
+✔ 端侧能力授权：落盘 + 重启后仍然记得（2026-10-05） (8.26675ms)
+▶ 端侧推送：目标不按"当前连接"选（第 90 轮真机 bug）
+  ✔ 正连着本机的那台（"当前"）⇒ 命中 (0.611542ms)
+  ✔ ★★ 已切到另一台电脑的那台（本机隧道里没有它）⇒ **同样命中**（本次要修的正是这条） (0.060084ms)
+  ✔ ★ online 这个字段翻转不改变结果（把"当前连接"从筛选条件里去掉） (0.062917ms)
+  ✔ 显式指定 deviceId ⇒ 只发给它（多台候选时也不外溢） (0.220333ms)
+  ✔ 没给 deviceId ⇒ 发给**所有**可用且已启用的设备（集合是确定的，不是"随便挑一台"） (0.062875ms)
+  ✔ 已撤销 / 已过期的设备**不许**被广播到（不能因为"广播"就把闸门放宽） (0.04725ms)
+  ✔ 一台可用的都没有 ⇒ 明确报出来（而不是静默成功） (0.163917ms)
+  ✔ 设备都在、但都没启用该能力 ⇒ 理由仍是 `not enabled`（手机据此知道要去授权） (0.144375ms)
+  ✔ 显式指定的设备已被撤销 ⇒ 说清是哪一台（而不是回一句"没有设备在线"） (0.078292ms)
+✔ 端侧推送：目标不按"当前连接"选（第 90 轮真机 bug） (2.031792ms)
+▶ 端侧队列：广播到多台之后，取件与回执都不许串台
+  ✔ ★ 各取各的：先来取的那台不会把**别人那份**一起取走（否则一台重复弹、另一台永远收不到） (0.245125ms)
+  ✔ ★ 交给手机的字段里**没有**内部的目标设备字段（队列内部记账不外泄） (0.180958ms)
+  ✔ ★ 回执也按目标隔离：另一台拿同一个 id 回报写不进这份结果 (0.272209ms)
+✔ 端侧队列：广播到多台之后，取件与回执都不许串台 (0.836917ms)
+▶ 宿主接线：候选来源必须是"已配对设备"，不是"当前的会话"
+  ✔ ★ 候选来自 `store.list()`（已配对设备 ✓），而不是 `sessions`（当前连接 ✗） (0.214792ms)
+  ✔ ★ 判定只有一处：`selectDeliveryTargets` 在宿主里恰好被调用 1 次 (0.141375ms)
+✔ 宿主接线：候选来源必须是"已配对设备"，不是"当前的会话" (0.486583ms)
+▶ ★★ 封闭词汇：只有 allowed-once 是放行
+  ✔ 词汇就是 DSH 那四个（逐字） (0.520333ms)
+  ✔ ★ 手机上那两颗按钮 = 封闭词汇的子集，且没有「总是允许」 (0.088292ms)
+  ✔ ★★ 页面那份按钮表与宿主这份逐字一致（id 与文案都不许漂移） (6.74125ms)
+  ✔ ★★ 词汇外的 decision 一律规范化成 unavailable（绝不放行） (0.351125ms)
+  ✔ ★★ decision ⇒ outcome 是逐字对应（对调会被打红） (0.149167ms)
+✔ ★★ 封闭词汇：只有 allowed-once 是放行 (8.268083ms)
+▶ ★ 中间人的账：id 对不上就什么都不改
+  ✔ 没这条请求 ⇒ found:false、pending 不动、等在原地 (0.111541ms)
+  ✔ ★ 没有 id ⇒ 根本不登记（等也是白等 ⇒ 交回下游 ✓） (0.043833ms)
+  ✔ ★ pending() 给出在等的那些（按登记次序） (0.120958ms)
+  ✔ ★ abortAll 收摊：每一条按 cancelled 结掉（不是放行 ✓） (0.053208ms)
+  ✔ ★ 请求自己的 signal 中止 ⇒ 立刻 cancelled（不干等 TTL） (0.107ms)
+  ✔ ★ 同一个 id 又登记一次 ⇒ 旧的那条交回下游（不许代答） (0.0485ms)
+✔ ★ 中间人的账：id 对不上就什么都不改 (0.601958ms)
+▶ ★★ TTL：超时不是"答一个词"，而是把请求交回下游
+  ✔ ★★ 没人答 ⇒ 到期返回 null（= 交回下游，不吞掉官方那张卡） (23.995083ms)
+  ✔ ★ 默认 TTL 是个正数（不是 0、不是无限） (0.326209ms)
+✔ ★★ TTL：超时不是"答一个词"，而是把请求交回下游 (24.461583ms)
+▶ ★★ 应答者（真 cordis waterfall）
+  ✔ ★★ 认领：对得上账 ⇒ 手机那一票生效，且**下游一次都不跑** (3.018833ms)
+  ✔ ★★ prepend：上游（先注册、不调 next 的转发器）挡在前面时，手机仍然轮得到 (0.850042ms)
+  ✔ ★ 没这条账 ⇒ 原样交回下游（我们不认识的审批一颗按钮都不该给） (0.795667ms)
+  ✔ ★ 工具名/调用 id 对不上（同会话里换了一条 ask）⇒ 交回下游，绝不冒名放行 (0.887209ms)
+  ✔ ★★ 手机不答 ⇒ 到期后交回下游（桌面卡照常出现） (22.533041ms)
+  ✔ ★★ 词汇外的值走完整条链 ⇒ 交回 DSH 的绝不是 allowed-once (0.506125ms)
+  ✔ ★ 应答者自己出错 ⇒ 只交回下游（绝不因为"手机这条路坏了"否掉一次审批） (0.410083ms)
+✔ ★★ 应答者（真 cordis waterfall） (29.1705ms)
+▶ ★★ 共享实例：等与答必须在同一张表里
+  ✔ ★★ sharedApprovalBroker() 两次拿到的是同一个（否则"等了却永远答不上"） (0.153458ms)
+  ✔ ★★ 在一边登记、从另一边裁决 ⇒ 真的能结上 (0.102416ms)
+✔ ★★ 共享实例：等与答必须在同一张表里 (0.340584ms)
+▶ ★★ 审批卡：按 DOM 问它行为（不是"按钮画出来了"）
+  ✔ ★ 记账事件（approval/decided）**不画卡**（否则同一件事凭空多一张） (0.512542ms)
+  ✔ ★★ 两颗按钮的 decision 就是封闭词汇里那两个（页面不许自造词） (0.696042ms)
+  ✔ ★★ 通道没接通 ⇒ 两颗都置灰 + 说清理由（不假装能用） (0.135667ms)
+  ✔ ★★ 通道接通 ⇒ 可点（且点下去真的打到 answer） (1.728208ms)
+  ✔ ★★ 已经裁决过 ⇒ **一颗按钮都不给** + 标题写出结果 (0.111834ms)
+  ✔ ★ 裁决的是**另一条**请求 ⇒ 这张卡照样给按钮（不许张冠李戴） (0.07725ms)
+  ✔ ★ 认不出 id ⇒ 不给按钮、把原文摊开（看不懂就什么都不做 ✗） (0.069458ms)
+  ✔ ★ 按下去之后**立刻置灰**（同一次审批不许提交两次） (2.074166ms)
+  ✔ ★★ 落空（重复点/已超时）⇒ 卡片上写出"没落到任何在等的审批上" (1.455708ms)
+  ✔ ★ 提交失败（抛）⇒ 也说出来（一个安静的按钮最坏） (1.542ms)
+✔ ★★ 审批卡：按 DOM 问它行为（不是"按钮画出来了"） (8.842709ms)
+▶ 附件通道：按真实状态分层，不猜也不劝重装
+  ✔ 探测没问成 ⇒ 说「暂时联系不上」，如实带上原因，不劝重装 (3.672833ms)
+  ✔ 还没确认过（初始化中）⇒ 说「正在确认」，绝不出现重装建议 (0.670458ms)
+  ✔ 已确认仍未就绪且重试用尽 ⇒ 如实说未就绪，并给出「可重新检测」的出路 (0.547042ms)
+  ✔ 已确认宿主没有该服务 ⇒ 如实呈现，不给泛化重装建议 (1.06925ms)
+  ✔ 已确认接通 ⇒ 不阻断；离线 ⇒ 说未连接（各归各的因，不混） (0.722833ms)
+  ✔ 选择器在用户点击的同步调用栈里打开，绝不等通道探测 (0.921041ms)
+✔ 附件通道：按真实状态分层，不猜也不劝重装 (8.063167ms)
+▶ mobile/dsh 桥：端点分发
+  ✔ 不认识的端点 ⇒ undefined（让它继续往下走） (0.34925ms)
+  ✔ 列会话：用 **`_request`** 这个参数名调 session/list（不是 request） (0.414958ms)
+  ✔ 读一页：用 **`request`** 这个参数名调 session/page，且请求里**带 head 当 throughSeq** (0.404875ms)
+  ✔ ★★ 页面给了 throughSeq ⇒ head 照页面的用（**不问网关**）；但**投影照读一次**（状态条那三个数只在它里面） (0.122292ms)
+  ✔ ★★ 页面给了 throughSeq、而投影读不到 ⇒ **照样读得出消息**，`values` 是空表（不编 ✗） (0.113667ms)
+  ✔ ★★ head = -1（这个会话一条事件都没有）⇒ 直接给空页，**不拿 -1 去调 session/page** (0.084209ms)
+  ✔ ★ session/projections 拿不到 ⇒ 退到 session/list 的 projections.asOfSeq（用户点名的来源） (0.593667ms)
+  ✔ ★ 两个来源都没有 asOfSeq ⇒ **抛错**，且一个缺必填项的 session/page 都不许发 (0.461ms)
+  ✔ 发消息：调 session/prompt，且 requestId 由桥生成 (0.260875ms)
+  ✔ 发消息：mode=steer 透传（插话），别的值一律当 queue (0.10975ms)
+✔ mobile/dsh 桥：端点分发 (3.465459ms)
+▶ ★★ 会话页状态条：三个投影的真值（session/projections ⇒ values）
+  ✔ ★★ 三个投影都取到，且与投影里的原值**逐字段一致**（四个格子各自读得到） (0.159166ms)
+  ✔ ★ 调 `session/projections` 的参数名就是真名 `request`（不是猜的 ✗） (0.067083ms)
+  ✔ context composition is explicitly whitelisted, while other internal projections stay private (0.057583ms)
+  ✔ contextBreakdown preserves valid zeroes without inventing absent counts or leaking extra fields (0.069666ms)
+  ✔ ★★ 取不到投影 ⇒ 输出里**没有**那三个键（**不是 0** ✗ —— 不编 ✓） (0.089542ms)
+  ✔ ★★ 投影在、但字段缺 / 不是数字 ⇒ **缺哪个就少哪个键**（不补 0 ✗） (0.074333ms)
+  ✔ ★★ 真数据赢：`session/page` 自带的老式 `values` 不许盖住真投影 (0.094125ms)
+✔ ★★ 会话页状态条：三个投影的真值（session/projections ⇒ values） (0.699458ms)
+▶ mobile/dsh 桥：坏参数要说得出话
+  ✔ 发消息缺 sessionId / text ⇒ 抛错且点名缺哪个 (0.22ms)
+  ✔ 读一页既没有 sessionId 也没有 address ⇒ 抛错（**不猜**） (0.074125ms)
+  ✔ 网关说 ok:false ⇒ 把它的原文抛出来（手机上要能念） (0.058791ms)
+  ✔ 网关自己抛 ⇒ 原样冒上去（head 问到了，是 session/page 那一步抛的） (0.123834ms)
+✔ mobile/dsh 桥：坏参数要说得出话 (0.962083ms)
+▶ unwrap：两种真实形状都要解得出
+  ✔ ★ 信封形（`dispatchRpc` 那条路）：{ok:true,value} ⇒ 取 value (0.106334ms)
+  ✔ ★★ 裸值形（`invoke` 那条路 = 真机上走的就是它）：没有 ok 字段 ⇒ 整体当业务值 (0.047125ms)
+  ✔ ★ 失败信封（{ok:false,error}）⇒ 仍然抛，且带 DSH 的原文（手机上要能念） (0.051916ms)
+  ✔ ★★★ 边界：裸值里恰好有个 ok:false 字段 ⇒ **不许**误判成失败（它不是失败信封） (0.064208ms)
+✔ unwrap：两种真实形状都要解得出 (0.310416ms)
+▶ normalizeSessions：真形状（sessionId / items）与老式形状（id / sessions）都要出
+  ✔ ★★★ 真形状：{items:[{sessionId,…}]} ⇒ 不再被丢掉（改前这里的长度是 0） (0.061375ms)
+  ✔ ★★ 老式形状：{sessions:[{id}]} ⇒ 兼容照样出（回退到 id） (0.048084ms)
+  ✔ 两个键都在 ⇒ 以 sessionId 为准（与真形状一致） (0.035458ms)
+  ✔ ★ 空 items ⇒ []，不崩 (0.027584ms)
+  ✔ 两个键都没有的条目丢掉（点不动的东西不进界面） (0.043791ms)
+  ✔ ★★ 标题的真身在 projections.values.title ⇒ 要取出来（顶层没有 title ✗） (0.025834ms)
+  ✔ ★ 投影里没有 title ⇒ 空串（**不编** ✗） (0.033458ms)
+  ✔ ★ 真形状的字段逐个对上：updatedAt / running / blank (0.029167ms)
+  ✔ ★ status 不是真形状的字段 ⇒ 恒为空串（**不编** ✗） (0.024334ms)
+  ✔ 状态位归一：running/busy、awaiting/awaitingApproval、current/isCurrent/active（都是老式回退 ✓） (0.038583ms)
+  ✔ 坏输入不抛：null / 数组 / 字符串 / 容器不是数组 ⇒ 空表 (0.042792ms)
+✔ normalizeSessions：真形状（sessionId / items）与老式形状（id / sessions）都要出 (0.492458ms)
+▶ normalizeSessions：屏蔽子智能体的对话（只按 origin，不按 parentSessionId）
+  ✔ ★★★ 三种真身混在一起：子智能体滤掉，普通会话与 fork 分支都留下 (0.07675ms)
+  ✔ ★★ 只有 parentSessionId、没有 origin ⇒ **不许**当子智能体滤掉（fork 出来的分支是真会话） (0.026416ms)
+  ✔ ★ 判据是**严格等值**：origin 是别的字符串 / 不是字符串 ⇒ 都不屏蔽（认不出就留着） (0.039541ms)
+  ✔ ★ 全程只剩子智能体 ⇒ 空表（不是"崩"也不是"全留"） (0.032167ms)
+  ✔ ★ 老式形状（`sessions` / `id`）也照样屏蔽 —— 判据与容器名无关 (0.032958ms)
+  ✔ ★★ 两个可选字段**原样透传**：有就带出真值，没有就**不出现这个键**（不编 ✗） (0.038625ms)
+✔ normalizeSessions：屏蔽子智能体的对话（只按 origin，不按 parentSessionId） (0.297917ms)
+▶ normalizePage：事件白名单 + 值白名单
+  ✔ records 里的 event 归一成 seq/time/type/data (0.052458ms)
+  ✔ values 只转白名单里的字段（DSH 的内部结构不会被整坨转出去） (0.039042ms)
+  ✔ 坏输入不抛：非对象 ⇒ 空事件表 (0.029834ms)
+✔ normalizePage：事件白名单 + 值白名单 (0.147833ms)
+▶ pageRequest：throughSeq **必带**，其余游标仍原样透传
+  ✔ 认识的字段照搬，别的丢掉 (0.055792ms)
+  ✔ ★★ throughSeq 必带：是 number、>= 0、**不许是 -1**（页面没给时用 head） (0.040541ms)
+  ✔ 页面给了非负的 throughSeq ⇒ 就用页面的（head 边都不碰） (0.021791ms)
+  ✔ ★★ 页面给 -1 / -0 / 负数 ⇒ **不照搬**，改用 head（照搬就是静默空白） (0.027708ms)
+  ✔ ★ 页面没给、head 也没有 ⇒ **抛错**（不许发出一个缺必填项的请求） (0.064625ms)
+  ✔ 子智能体那套 address 原样透传（同一端点 ✓） (0.028834ms)
+  ✔ 非数字的 beforeSeq 不当数字用（宁可不要，也不猜） (0.025375ms)
+✔ pageRequest：throughSeq **必带**，其余游标仍原样透传 (0.3145ms)
+▶ mobile/dsh/create：没有会话的手机也能开工
+  ✔ 只搬调用方真给了的字段（cwd / workspaceId / agentPreset），其余交给 DSH (0.080791ms)
+  ✔ 什么都不给 ⇒ 发一个空 request（让 DSH 自己决定），不替它编参数 (0.033542ms)
+  ✔ ★ DSH 没给出会话 id ⇒ **算失败**（"以为建好了、其实没有"比报错糟得多） (0.046666ms)
+  ✔ 网关说 ok:false ⇒ 把原文抛出来（手机上要能念） (0.042542ms)
+✔ mobile/dsh/create：没有会话的手机也能开工 (0.236833ms)
+▶ DSH composer：目录与输入语法
+  ✔ 原版文件语法保留空格引号、目录开放引号，并拒绝不可表示的路径 (0.405875ms)
+  ✔ 只匹配光标处的活跃 token；带引号文件查询可以含空格 (0.486625ms)
+  ✔ 精确名称优先；中文别名只匹配原版 definitionId，不能越过作用域覆盖 (0.08625ms)
+  ✔ 模型与等级显示真实目录名称；模型菜单有 root/model/effort 三个 pane (6.845291ms)
+  ✔ 模型选择只在真实投影改变后更新显示，不把 pending 选择伪装成成功 (4.548541ms)
+  ✔ 模型切换失败保留原模型、显示真实错误并恢复可操作状态 (4.833834ms)
+  ✔ 未提供实际目录时不产生模型选项；目录失败可重试 (3.279542ms)
+  ✔ 旧会话目录迟到不得覆盖新会话模型；重连重新读取目录 (3.91775ms)
+✔ DSH composer：目录与输入语法 (25.143042ms)
+▶ DSH composer：权限、命令、引用和停止
+  ✔ 未获宿主 controls 能力时不请求目录或目标，保留旧 slash 插入入口 (0.8265ms)
+  ✔ 普通权限选项无需额外确认，真实命令回执前显示原权限 (4.231959ms)
+  ✔ 完全权限和 Auto review 只有勾选风险确认后才提交 (7.858292ms)
+  ✔ 切换会话撤销风险确认，旧复选状态不能用于新会话 (4.416458ms)
+  ✔ 命令提交使用被冻结的草稿，附件只交给声明支持附件的真实命令 (1.875916ms)
+  ✔ 目录加载失败必须阻止降级成普通消息；原版未知命令才返回 false (2.078458ms)
+  ✔ 已匹配指令未被接纳或带附件的 handler 失败都抛错，不能消费附件 (2.978083ms)
+  ✔ 提交在等待目录时切换会话，旧提交抛错且绝不发到新会话 (3.041ms)
+  ✔ 从真实目录选择带参数命令只插入前缀，bare 命令委托主线原提交流程 (4.527875ms)
+  ✔ 带引号的 @ 查询仅提供文件候选；引用插入采用真实 mention (5.112209ms)
+  ✔ 旧引用结果不污染新查询；目录选择继续向下钻取 (5.739292ms)
+  ✔ 停止按钮捕获 click、阻断普通提交，并使用真实子智能体地址 (3.299292ms)
+✔ DSH composer：权限、命令、引用和停止 (46.536416ms)
+▶ DSH composer：目标投影和 CAS 操作
+  ✔ 目标为空或已完成时不画 dock；普通消息投影不重复查询目标 (4.413792ms)
+  ✔ armed/disarmed 来自真实 get activation；pause/resume 使用当前 ref (6.374208ms)
+  ✔ 编辑目标传 request/objective，失败保留编辑草稿，清除只在成功回执后隐藏 (6.025625ms)
+  ✔ 旧目标 get 不能覆盖新 revision 的 durable 投影 (2.677458ms)
+✔ DSH composer：目标投影和 CAS 操作 (19.684375ms)
+▶ native chat controls: catalogs and model selection
+  ✔ exposes new controls only from the installed bridge capabilities (0.818708ms)
+  ✔ reads native model groups, reasoning choices and isolated provider failures without a session lookup (0.862ms)
+  ✔ reads the real permission catalog and retains Auto as a current-session option (0.125791ms)
+  ✔ scopes command descriptors to the receiving agent and retains declared attachment support (0.100625ms)
+  ✔ rejects unknown catalogs and missing command agent identity before contacting the gateway (0.22925ms)
+  ✔ reports unavailable or malformed catalogs without offering a fabricated menu (0.096167ms)
+  ✔ selects exactly the requested provider, model and reasoning effort and displays the actual selection receipt (0.098666ms)
+  ✔ omits an absent reasoning effort and rejects failed selection without an optimistic result (0.076166ms)
+  ✔ rejects missing model fields, malformed receipts, and subagent-only addresses (0.106084ms)
+✔ native chat controls: catalogs and model selection (3.205625ms)
+▶ native chat controls: commands and receipt-backed attachments
+  ✔ executes the original permission command with no invented policy service (0.204708ms)
+  ✔ maps existing upload receipts to native file attachments in submission order (0.083583ms)
+  ✔ distinguishes an unrecognized command from a successful handler (0.041833ms)
+  ✔ throws ordinary handler and attachment-admission errors so drafts and receipts remain retryable (0.0935ms)
+  ✔ rejects duplicate/blank receipts and non-command text before any side effect (0.1525ms)
+✔ native chat controls: commands and receipt-backed attachments (0.690333ms)
+▶ native chat controls: references and cancellation
+  ✔ looks up both native reference sources with the same agent, query and cancellation signal (0.273416ms)
+  ✔ does not query or fabricate session candidates for a quoted file mention (0.05825ms)
+  ✔ surfaces lookup failures and refuses malformed candidate lists (0.07725ms)
+  ✔ cancels an ordinary session only after the service acknowledges the signal (0.085542ms)
+  ✔ interrupts continuable children through their original parent address (0.049084ms)
+  ✔ rejects missing parent identity, one-shot/unknown children, and malformed addresses before cancellation (0.102167ms)
+✔ native chat controls: references and cancellation (0.752667ms)
+▶ native chat controls: compare-and-set goal and durable projection
+  ✔ gets a real live activation and treats the native undefined response as no current goal (0.161958ms)
+  ✔ edits only caller-provided objective/cap fields using the expected current revision (0.057708ms)
+  ✔ pauses/resumes/clears through the corresponding service and preserves the tombstone ref (0.091958ms)
+  ✔ never creates/completes a goal and rejects absent/stale-shaped refs or empty edits before gateway work (0.284209ms)
+  ✔ surfaces compare-and-set conflicts without replacing the caller goal (0.743042ms)
+  ✔ whitelists native durable goal fields, preserves real clears, and does not invent missing activation (0.336959ms)
+✔ native chat controls: compare-and-set goal and durable projection (1.763625ms)
+▶ native chat history: exact identity and separate projection cursor
+  ✔ retains native cwd and agent availability for workspace navigation without inventing workspace identifiers (0.264416ms)
+  ✔ returns requested identity/cursor when a native page contains only records and hasMore (0.326041ms)
+  ✔ keeps subagent identity tied to the requested child and does not let legacy page metadata replace it (0.07ms)
+  ✔ does not fabricate a projection cursor when only explicit history throughSeq is available (0.07425ms)
+  ✔ accepts the native turn-aligned object and rejects malformed turn window values (0.102917ms)
+✔ native chat history: exact identity and separate projection cursor (0.924042ms)
+▶ native conversation global window and user disclosure
+  ✔ state receipts update controls without emitting metadata JSON into the conversation (1.206458ms)
+  ✔ history prepend preserves reading rather than enabling bottom follow on a short folded page (28.706875ms)
+  ✔ one page budget spans several expanded process groups and standalone messages (10.555333ms)
+  ✔ PTC children consume the global budget and their later and earlier pages remain reachable (9.755667ms)
+  ✔ nested PTC expansion and an adjacent final answer share the same record budget (12.111041ms)
+  ✔ process pages retain the entire logical history and reach both ends (8.915708ms)
+  ✔ default running process folds on completion after its automatic native toggle event (0.457875ms)
+  ✔ actual manual process choices persist across updates and are scoped to each session (0.3305ms)
+  ✔ manual tool and reasoning disclosure survives replacement without learning programmatic toggles (0.552958ms)
+  ✔ a prepared tool ignores summary activation and cannot save an accidental open preference (0.248ms)
+  ✔ closing one expanded process releases its shared record budget to the other group (12.511208ms)
+  ✔ plain records retain 200 rows, earlier windows are reachable, and disposal detaches the view (19.655291ms)
+✔ native conversation global window and user disclosure (105.708416ms)
+▶ native page approval dock integration
+  ✔ pending sends only disable their own session and late failure restores that session draft (5.766667ms)
+  ✔ attaches a pending approval to the dock once and enables it when the channel arrives (2.307542ms)
+  ✔ a later decision removes its card and restores the composer; replay cannot resurrect it (1.217833ms)
+  ✔ out-of-order history containing the decision and request never takes over input (0.8405ms)
+  ✔ only an accepted approval receipt dismisses the pending card (1.934625ms)
+✔ native page approval dock integration (12.689416ms)
+▶ mobile management write recovery
+  ✔ late successful acknowledgement displays the actual readback even when the backend overrides the submitted value (4.228167ms)
+  ✔ timed-out writes stay locked across retry, fresh reads and close/reopen until real settlement and readback (1.308459ms)
+  ✔ late acknowledgement from a timed-out backend cannot overwrite the new backend or lock it (0.846125ms)
+  ✔ a confirmed failure preserves the edited field and allows a subsequent deliberate retry (0.906375ms)
+✔ mobile management write recovery (7.889375ms)
+▶ native navigation uses original Session and SubagentCatalogEntry facts
+  ✔ groups by full cwd, shows Windows/Unix basename, and keeps fork sessions (1.713834ms)
+  ✔ searches title and ID with multi-term AND and no mutation (0.230875ms)
+  ✔ accepts only the catalog array and the three original modes (0.249083ms)
+  ✔ keeps unknown running counts unknown and never counts mode as activity (0.281334ms)
+  ✔ shows real waiting/running and unknown status rather than inventing child activity (0.166542ms)
+✔ native navigation uses original Session and SubagentCatalogEntry facts (3.492833ms)
+▶ native navigation DOM and durable switching
+  ✔ hamburger opens the workspace drawer; title opens its separate menu (2.359042ms)
+  ✔ filters actual drawer rows by title and ID and keeps the search field mounted (0.385042ms)
+  ✔ calls ordinary switch/create without altering messages or drafts (3.337833ms)
+  ✔ renders the real total/running badge and opens catalog without a invented item envelope (0.601041ms)
+  ✔ routes all three original child modes and preserves synthetic children across list refresh (1.468ms)
+  ✔ uses real child summaries for running labels while retaining the catalog address (0.287041ms)
+  ✔ ignores old-session projection responses after switching (0.219167ms)
+  ✔ shows host titles and directory text as text, including markup characters (0.129292ms)
+  ✔ writes readable diagnostics only when authoritative navigation facts change (0.447917ms)
+✔ native navigation DOM and durable switching (9.476166ms)
+▶ native title menu receipts and lifecycle
+  ✔ copies the real current ID and reports clipboard rejection accurately (0.241209ms)
+  ✔ renames only after the correct host receipt and trims user input (0.269209ms)
+  ✔ keeps the title unchanged and form retryable on a missing, false or wrong-session receipt (0.276708ms)
+  ✔ blocks empty and IME-composition submission, and does not submit twice while pending (0.144666ms)
+  ✔ does not let a late rename receipt or rejection alter another session (0.444084ms)
+  ✔ calls the real files/refresh callbacks and disables unavailable capabilities (1.261ms)
+  ✔ closes by backdrop, outside click and Escape, with focus restored and drawer Tab wrapped (0.807458ms)
+  ✔ dispose removes global listeners and suppresses late pending results (0.788209ms)
+✔ native title menu receipts and lifecycle (4.37925ms)
+▶ ChatPoller：去重 / 排序 / 游标
+  ✔ 第一次取：收下事件，游标走到最大 seq (0.645833ms)
+  ✔ ★ 同一个 seq 再来一次 ⇒ 不重复画（轮询重叠/重连重取都会撞上） (0.065375ms)
+  ✔ ★ 没有 seq 的事件：**画出来**但不进游标（丢掉它们等于丢内容） (0.051333ms)
+  ✔ 空这一趟 ⇒ 照样回调一次空数组（界面据此知道"没新的"，不用猜） (0.042417ms)
+  ✔ 坏输入不抛：null / 非数组 / 里面混垃圾 (0.0495ms)
+✔ ChatPoller：去重 / 排序 / 游标 (1.250292ms)
+▶ ChatPoller：循环与在飞合并
+  ✔ start 会取一次，并把下一趟排上（间隔 = intervalMs） (2.054166ms)
+  ✔ ★ 重复 start 不会叠出第二个循环（幂等） (0.263042ms)
+  ✔ ★ 定时器到点 ⇒ 用**当前游标**去取（游标在手机手里） (0.5485ms)
+  ✔ stop 之后不再取（并把定时器撤掉） (0.306ms)
+  ✔ stop 之后游标与已收下的事件**都还在**（回来接着画） (0.218125ms)
+  ✔ dispose 之后 refreshNow 什么也不做 (0.076958ms)
+✔ ChatPoller：循环与在飞合并 (3.674458ms)
+▶ ChatPoller：出错时的行为（最容易画错的一格）
+  ✔ ★ 取数抛错 ⇒ 报错、**游标不动**、已画的不清空，下一趟还会试 (0.56175ms)
+  ✔ 取数返回 null ⇒ 当空这一趟（不抛） (0.934083ms)
+✔ ChatPoller：出错时的行为（最容易画错的一格） (1.577375ms)
+▶ ChatPoller：空闲退避（2026-10-08 新增 ✓）
+  ✔ ★ 空闲 30 秒：read 调用从 33 次（固定 900ms）降到 ≤8 次 —— 这是"退避真的生效"的计数判据 ✗ (0.805625ms)
+  ✔ ★ 来了新事件 ⇒ 立刻回最快档（intervalMs 原值 ✓）—— 否则档位只会一路上涨 ✗ (0.407541ms)
+✔ ChatPoller：空闲退避（2026-10-08 新增 ✓） (1.331125ms)
+▶ followRequest：`session/follow` 的请求形状
+  ✔ ★ 形状逐字段对上官方客户端（address 判别联合 + 500 + {50,2}） (0.137ms)
+  ✔ ★★ 请求里**没有** `cursor`、也**没有**裸 `sessionId` —— 这两个字段在 SessionFollowRequest 里根本不存在 ✗ (0.044458ms)
+  ✔ ★ 不带 `assistantStream`（它是官方客户端的逐字流选项 ⇒ 点了就得认它的开场基线 ✗） (0.031167ms)
+  ✔ ★ 空 id 也**不抛**（由调用方判「不许开流」 ✓）—— 但 address 里就是空串，绝不悄悄换成别的会话 ✗ (0.023375ms)
+  ✔ ★ `turnWindow` 每次都新建一个对象（共享常量会被谁改一下，之后每条流的窗口都跟着变 ✗） (0.037833ms)
+✔ followRequest：`session/follow` 的请求形状 (0.341917ms)
+▶ frameEvents：一帧 `session/follow` ⇒ 事件数组
+  ✔ ★ snapshot = 整窗：`records[].event` **逐条**取出来，顺序不变 (0.079875ms)
+  ✔ ★ 空快照 ⇒ 空数组（**照样要喂一次** ✓ —— 那是「这个会话没有内容」这句明确的话 ✓） (0.025959ms)
+  ✔ ★ 增量帧：`{type:event}` ⇒ 就那一条 (0.026625ms)
+  ✔ ★ 认不出的帧（assistant-stream / 将来新增的）⇒ 空数组，而且**绝不抛** ✗ (0.02875ms)
+  ✔ ★ 坏记录（null / 非对象 / 没有 event）一律跳过 ⇒ 渲染那一步不会因为一帧垃圾而炸 ✗ (0.030417ms)
+  ✔ ★ `{type:event}` 里没有 event ⇒ 空数组（不抛 ✓） (0.021125ms)
+✔ frameEvents：一帧 `session/follow` ⇒ 事件数组 (0.259042ms)
+▶ reopenDelayMs：重开阶梯
+  ✔ ★ 阶梯：0.5s / 1s / 2s / 4s / 8s ⇒ 之后**封顶 8s** (0.038041ms)
+  ✔ ★ 怪输入不许出 NaN（NaN 的超时 = 永不重开 ✓，而症状只是「页面不动」✗） (0.038708ms)
+✔ reopenDelayMs：重开阶梯 (0.096959ms)
+▶ 流 + 去重（复用 ChatPoller 那一套）：重开 = 新快照 + seq 去重
+  ✔ ★★ 同一条流重开（又来一次同一个快照）⇒ **一条都不重画**，新来的那几条只画一次 (0.094208ms)
+  ✔ ★★ 去重账**每个会话一套** —— 跨会话复用同一本账，新会话头几条会被静默丢掉 ✗ (0.09475ms)
+  ✔ ★ 去重器**不 start() 就一个定时器都不排**（流模式下 read 永远不被调用 ✓） (2.392666ms)
+✔ 流 + 去重（复用 ChatPoller 那一套）：重开 = 新快照 + seq 去重 (2.642167ms)
+▶ DSH source-derived shared transcript projection
+  ✔ stream chunks become one stable assistant, then final replaces rather than doubles text (1.254041ms)
+  ✔ duplicates and reversed delivery produce the same projection and retain prefix history (0.632709ms)
+  ✔ result arriving before call attaches to the same callId and keeps input plus output (0.267917ms)
+  ✔ preparation, dispatch and result are one tool row with terminal error state (5.98ms)
+  ✔ PTC nested calls attach to root, preserve child results and remain cycle-safe (0.300667ms)
+  ✔ content blocks retain text/reasoning/image/text ordering and unknown block payloads (0.068958ms)
+  ✔ block-end can replace streamed content without changing authored order (0.109291ms)
+  ✔ completion exposes final answer independently from earlier process and inline reasoning (0.163959ms)
+  ✔ last assistant containing tool calls is process rather than final answer (0.113583ms)
+  ✔ terminal aborted retains partial assistant and stops pending tools (0.47175ms)
+  ✔ terminal error retains partial assistant and stops pending tools (0.105ms)
+  ✔ retry clears failed live content while preserving assistant key (0.130375ms)
+  ✔ step closure stops its unfinished tool while a later step continues running (0.129167ms)
+  ✔ history containing only an orphan PTC result preserves root and parent identity (0.078ms)
+  ✔ malformed boundary metadata does not crash or synthesize turn zero (0.05625ms)
+  ✔ model-facing replacement assistant copies do not replace the visible durable reply (0.061167ms)
+  ✔ values are authoritative for running state; paging metadata survives value updates (0.126583ms)
+  ✔ keeps more than 200 loaded events and rows; UI limits cannot discard history (1.909792ms)
+  ✔ mutating inputs or snapshots cannot mutate retained ledger and values (0.147583ms)
+  ✔ unknown event kinds retain inspection payload rather than vanish (0.110875ms)
+  ✔ projects the checked-in real assistant fixture without leaking replayState into prose (1.319042ms)
+  ✔ native follow frames own no fake Session seq and settle into their stable assistant slot (0.340208ms)
+  ✔ native revision and index duplicates cannot double append a delta (0.096667ms)
+  ✔ native reconnect baseline reconstructs packed text reasoning tools and original chunk boundaries (0.490541ms)
+  ✔ native preparation yields to the durable tool call and result without duplicating a callId (0.172167ms)
+  ✔ native revision gap freezes the known prefix until a reconnect baseline repairs it (0.125125ms)
+  ✔ native chunk index and end index gaps request a baseline without inventing missing content (0.231625ms)
+  ✔ native abandoned retry clears its own partial and rejects late frames from the old attempt (0.0875ms)
+  ✔ native connection generation rejects old frames and old baselines after revision reset (0.09825ms)
+  ✔ native durable final stays authoritative over live suffixes and interrupted settlement (0.116958ms)
+  ✔ native failed attempt settlement retires partial content and preserves its real event (0.137792ms)
+  ✔ native end requires the named durable settlement in the matching turn and step (0.361375ms)
+  ✔ native invalid compact baseline requests rebaseline instead of publishing a truncated prefix (0.060834ms)
+  ✔ native stream frames and compact baselines remain detached from outside edits (0.070958ms)
+  ✔ sequenced values reject older model goal and permission baselines while a new turn folds running (0.13875ms)
+  ✔ sequenced turn end defeats stale running values and fresh values still control the same cursor (0.071667ms)
+  ✔ sequenced partial value updates preserve other fields and keep the status observation cursor (0.119792ms)
+  ✔ sequenced ingest uses the value snapshot cursor and ignores a late historical turn boundary (0.059875ms)
+✔ DSH source-derived shared transcript projection (17.066584ms)
+✔ 同步与输入队列事件归记账类；未知事件仍保留 (0.346958ms)
+✔ 真实 tool/call 外层不混进命令，JSON 参数解开换行 (0.238583ms)
+✔ 长命令截断且全文可取；坏 JSON 原样保留 (0.085292ms)
+▶ mobile statistics preserve the original full-session projection semantics
+  ✔ uses projected context pressure, preserves real zero components and marks estimates (11.1175ms)
+  ✔ does not fabricate missing data or a total from incomplete billing buckets (0.135833ms)
+  ✔ counts all billing buckets and uses the complete input as cache-rate denominator (0.076791ms)
+  ✔ shows full-session turn counts, latency and generation rate independently of the DOM window (0.077916ms)
+  ✔ scales composition segments to reported context occupancy instead of summing two distinct estimates (0.299084ms)
+  ✔ keeps a partial token report without inventing a header total or a perfect cache hit (0.873416ms)
+  ✔ formats native timing readings while omitting unknown latency and speed (0.338458ms)
+✔ mobile statistics preserve the original full-session projection semantics (13.48ms)
+▶ mobile/dsh/send continuation uses the native subagents/prompt contract
+  ✔ sends the exact direct-parent address with queue delivery, text and optional browser zone (1.466209ms)
+  ✔ passes steer as delivery and never puts an ordinary sessionId/mode into the child wire request (0.113709ms)
+  ✔ defaults child delivery to queue and creates a caller identity when none is provided (0.104833ms)
+  ✔ rejects one-shot, unknown and missing child modes before making a gateway call (0.345208ms)
+  ✔ requires both actual parent and child IDs and an exact match with the requested sessionId (0.32425ms)
+  ✔ rejects file receipts before admission and leaves the text and receipts unchanged (0.626708ms)
+  ✔ validates receipt and text input without inventing an attachment-only continuation (0.476666ms)
+  ✔ rejects unsupported delivery values and malformed optional identity/zone fields (0.296875ms)
+  ✔ requires a real messageId receipt; generic accepted/ok acknowledgements are insufficient (0.332792ms)
+  ✔ does not register an unacknowledged pending inbox message (0.157833ms)
+  ✔ rejects gateway failures without retrying through the ordinary Session or its parent (0.127792ms)
+  ✔ propagates admission cancellation once and never records a cancelled message (0.084334ms)
+  ✔ keeps ordinary session/prompt behavior, file receipts and legacy queue fallback (0.1205ms)
+✔ mobile/dsh/send continuation uses the native subagents/prompt contract (5.527542ms)
+▶ native shared projection trajectory
+  ✔ has exactly one tool call/result row and correct three lanes with true timing (1.881875ms)
+  ✔ search is case-insensitive multi-term AND across summary and expanded OUT detail (0.25ms)
+  ✔ selection is inclusive overlap rather than requiring the entire record inside range (0.24425ms)
+  ✔ duration removes every idle interval but preserves concurrent overlapping work (0.187292ms)
+  ✔ sequence mode has equal widths and omits neither input nor model lane (0.299292ms)
+  ✔ turns and calls independently collapse real rows into summaries (0.344208ms)
+  ✔ toolbar changes actual table disclosure and duration geometry (1.719333ms)
+  ✔ AND search filters table and dims graph matches without changing the complete domain (0.454833ms)
+  ✔ table and graph focus each other and expand tool IN/OUT without nested details (1.791417ms)
+  ✔ range highlights matching rows and keeps the whole table and graph, including empty focus (0.598ms)
+  ✔ range focus inside a folded turn still selects the original tool bar and scrolls its summary row (0.818458ms)
+  ✔ range inputs and graph pointer dragging share recorded-time selection (0.805125ms)
+  ✔ 200-row DOM cap retains logical history and earlier/newer windows are reachable (8.568ms)
+  ✔ window normalization enforces original zoom limits and clamps both ends (0.256459ms)
+  ✔ a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click (0.584625ms)
+  ✔ bar taps select a record; drags from children and range handles adjust the selection (2.806208ms)
+  ✔ the final pointer position commits a short drag even when move events are coalesced (0.511583ms)
+  ✔ mobile scrollbar handles resize a window, its thumb pans, and reset restores the full domain (0.845375ms)
+  ✔ wheel zoom retains its anchor and horizontal wheel pans without changing selection (0.530625ms)
+  ✔ secondary-button plot panning works from a bar and cancellation restores the viewport (3.312708ms)
+  ✔ a secondary-button tap clears selection and slider keyboard limits do not move the opposite edge (1.071833ms)
+  ✔ pointer cancellation and lost capture discard only the draft, and unrelated pointers cannot finish it (0.424958ms)
+  ✔ search, collapse, and table paging do not change the viewport or full timeline (12.262083ms)
+  ✔ selection retains all logical records and focuses earlier rows under the hard 200-node cap (8.787458ms)
+  ✔ history prepending preserves viewport and selection by record anchors; live appends preserve window width (1.333666ms)
+  ✔ live updates wait until pointer commit so the active drag has a stable coordinate mapping (0.785709ms)
+  ✔ sequence selection includes untimed records, duration skips them, and Escape clears focus (2.002583ms)
+  ✔ switching to duration clears an untimed selection instead of inventing a timing range (0.589666ms)
+  ✔ a session switch cancels the old pointer and restoring a session restores its disclosure and window (0.850542ms)
+  ✔ loading server history sends the oldest durable sequence rather than an absent cursor (0.218417ms)
+  ✔ update preserves disclosure; switching session resets focus; disposal removes DOM (0.341334ms)
+✔ native shared projection trajectory (56.35275ms)
+✔ 真实泳道与默认顺序；内部同步不制造轨迹调用 (0.928791ms)
+✔ 工具时长按真实callId结果配对，压缩空闲不双算重叠 (0.1535ms)
+✔ 时长不编数字；坏时间在时长图中跳过，ISO startedAt可解析 (0.106791ms)
+▶ classify：事件类型 ⇒ 画法
+  ✔ 认得出常见几类 (0.311084ms)
+  ✔ 大小写与前后缀都不挑 (0.058958ms)
+  ✔ ★ 认不出 ⇒ other（**不是**丢弃 —— 丢弃就再也查不出来） (0.049333ms)
+✔ classify：事件类型 ⇒ 画法 (0.958958ms)
+▶ titleFor：界面上不出现内部名
+  ✔ 工具类按内容细分，且是中文 (0.064708ms)
+  ✔ 思考 / 出错 / 一轮各自有名字 (0.039167ms)
+  ✔ 认不出的类型：**原样显示类型名**（总比一行空白强） (0.04375ms)
+✔ titleFor：界面上不出现内部名 (0.222083ms)
+▶ isFailure：宁可少标红，也不许把正常输出染红
+  ✔ exitCode 非 0 ⇒ 失败；0 / 缺 ⇒ 不是 (0.07425ms)
+  ✔ status 的三种写法 / ok:false / failed:true / error 有内容 ⇒ 失败 (0.050583ms)
+  ✔ 坏输入不抛 (0.037333ms)
+✔ isFailure：宁可少标红，也不许把正常输出染红 (0.248916ms)
+▶ toViewModel：折叠与失败标记
+  ✔ ★ 消息类再长也**不折**（那是正文，折了就没法读） (0.209417ms)
+  ✔ ★ 工具类超阈值 ⇒ 折叠，并**说清还藏了几行** (0.09325ms)
+  ✔ 短的工具输出不折 (0.036042ms)
+  ✔ ★ 一行的超长输出也会折（按字符数，不只看行数） (0.0385ms)
+  ✔ 失败从数据里认出来 ⇒ isError（工具块据此标红） (0.029333ms)
+  ✔ 认不出的类型：**仍然有 title 与 text**（不静默丢） (0.059125ms)
+  ✔ 坏输入不抛 (0.026916ms)
+✔ toViewModel：折叠与失败标记 (0.568042ms)
+▶ textOf：尽量掏出一段能读的文字，掏不出就不编
+  ✔ 字符串 / {text} / {message} / content parts 都认 (0.064667ms)
+  ✔ command / output / summary 也认（工具事件常有这几个键） (0.048125ms)
+  ✔ 认不出的对象 ⇒ 退回 JSON（**看得见**比空白强） (0.040125ms)
+  ✔ ★ 认出货真价实的正文时**绝不**退回 JSON（正文里不许出现 {"turn":） (0.03275ms)
+  ✔ null / 缺 data ⇒ 空串（不编） (0.024333ms)
+  ✔ ★★ 真事件形状（`data.message.content[]`）⇒ 掏出来的是**正文**，不是整坨 JSON (0.041458ms)
+✔ textOf：尽量掏出一段能读的文字，掏不出就不编 (0.311625ms)
+▶ assistantText / thinkingOf：正文与思维链**分开**取（口径同官方客户端）
+  ✔ 真事件：正文只取 text 块，思维链只取 reasoning 块 (0.696875ms)
+  ✔ ★ `reasoning` 块不进正文（哪怕是**空**的 reasoning 也不许留空行） (0.126042ms)
+  ✔ 没有正文块 ⇒ 空串（不编 ✗ —— 页面据此写"这条没有文字内容"） (0.070416ms)
+  ✔ 坏输入不抛 (0.053167ms)
+  ✔ `data.content` 是**字符串**时：它本来就是整段正文（走 textOf ✓，不是块数组 ✗） (0.082708ms)
+✔ assistantText / thinkingOf：正文与思维链**分开**取（口径同官方客户端） (1.154333ms)
+▶ toViewModel：真事件 ⇒ agent 气泡装正文、思维链另走 thinking
+  ✔ ★★ 真事件：text === 正文（不是 JSON），thinking === 思维链，且**仍然不折** (0.124042ms)
+  ✔ 没有 reasoning 的普通消息：thinking 是空串（不编 ✗） (0.078ms)
+✔ toViewModel：真事件 ⇒ agent 气泡装正文、思维链另走 thinking (0.261375ms)
+▶ computePageState：三种"没内容"的屏 + 一条压倒一切的规矩
+  ✔ ★ 空 + 正在读 ⇒ loading (0.16725ms)
+  ✔ ★ 空 + 出错 ⇒ error（把原话写出来 + 一句下一步） (0.062666ms)
+  ✔ ★ 空 + 断线 ⇒ offline（告诉用户先查网络） (0.06225ms)
+  ✔ ★ 空 + 什么都没有 ⇒ empty（邀请他发一条） (0.052333ms)
+  ✔ ★ 空 + 既断线又出错 ⇒ **错误优先**（它更具体） (0.048958ms)
+  ✔ ★★ 有内容 + 出错 ⇒ **仍然是 ready**（画面绝不被错误覆盖） (0.051625ms)
+  ✔ ★★ 有内容 + 断线 ⇒ 同样 ready，只在状态行说"正在重连" (0.067459ms)
+  ✔ ★ 有内容 + 一切正常 ⇒ 状态行**是空的**（不写废话） (0.052667ms)
+  ✔ ★ showInList 的真值表：**只有 ready 是 false**（有内容就绝不占屏） (0.087083ms)
+  ✔ 坏输入不抛（null / 缺字段 / 乱类型 ⇒ empty） (0.070292ms)
+✔ computePageState：三种"没内容"的屏 + 一条压倒一切的规矩 (0.878875ms)
+▶ 输入区：能不能发 / 高度 / ★ 失败不许丢字
+  ✔ 空与纯空白都不能发（按了没反应最糟 ⇒ 由按钮禁用挡住） (0.160333ms)
+  ✔ 正在发 / 断线 ⇒ 不能发 (0.068125ms)
+  ✔ 输入框高度夹在 min..max 之间（超过就自己滚，别把消息区挤没） (0.083917ms)
+  ✔ ★★ 按下发送那一刻：输入框清空、但**原文留了一份** (0.057292ms)
+  ✔ ★★ 成功 ⇒ 留存丢掉；失败 ⇒ **原文放回输入框**（这是本轮最要紧的一条） (0.072709ms)
+  ✔ 失败那句话必须**说清字还在**（别只写"失败"） (0.060083ms)
+  ✔ 坏输入不抛（sendBegin / sendSettled 收到非字符串） (0.047917ms)
+✔ 输入区：能不能发 / 高度 / ★ 失败不许丢字 (0.68ms)
+▶ 会话列表：顺序要稳，别让用户点不准
+  ✔ ★ 等审批 > 在跑 > 其余；其余按最近更新降序 (0.774667ms)
+  ✔ ★ 同分时按 id ⇒ **顺序确定**（每次刷新都换位置等于点不准） (0.105084ms)
+  ✔ 不改原数组（列表是外面喂进来的，别被我们搅乱） (0.058958ms)
+  ✔ 坏输入不抛（null / 混垃圾） (0.050375ms)
+✔ 会话列表：顺序要稳，别让用户点不准 (1.082333ms)
+▶ 会话过滤：空查询就是全部
+  ✔ 标题与 id 都能搜到，大小写不挑 (0.156583ms)
+  ✔ 坏输入不抛 (0.06075ms)
+✔ 会话过滤：空查询就是全部 (0.277834ms)
+▶ ★ 切换：替换还是追加（决定"切换时会不会白屏"）
+  ✔ ★★ 切换后的**第一趟回应**（此前没收到过）⇒ 替换 —— 哪怕它是空的（空会话也要把旧内容清掉） (0.07875ms)
+  ✔ ★★ 切换之后**已经收到过回应**了 ⇒ 后续一律追加（不然每趟都把画面重画一遍 ✗） (0.041625ms)
+  ✔ 没在切换 ⇒ 一律追加（不管收没收到过回应） (0.045958ms)
+✔ ★ 切换：替换还是追加（决定"切换时会不会白屏"） (0.248125ms)
+▶ ★ 草稿柜：按会话分开存（切走再切回来，字还在）
+  ✔ 各存各的，互不影响 (0.087709ms)
+  ✔ 清空就把那一条删掉（别留空串占位置） (0.030917ms)
+  ✔ 不改原对象（纯函数式：给一份进、还一份新的出） (0.029167ms)
+  ✔ 坏输入不抛（null / 非字符串 / 空 id） (0.03575ms)
+✔ ★ 草稿柜：按会话分开存（切走再切回来，字还在） (0.265625ms)
+▶ 审批：★★ 会改变电脑上正在发生的事，所以比"发送"更保守
+  ✔ 审批事件被认成一类（排在工具之前判） (0.04175ms)
+  ✔ ★ 只有"在问"的那一条是审批卡；decided / policy 是记账（不许再画一张） (0.021875ms)
+  ✔ ★★ 那两颗按钮来自封闭词汇的子集，且只有"在问"的事件才有 (0.075959ms)
+  ✔ ★ 认不出是哪条请求（没有 id）⇒ 不给按钮 + 原文照摊 (0.095ms)
+  ✔ 有 id ⇒ 两颗按钮就位，且 raw 不再需要 (0.037458ms)
+  ✔ ★ 已经裁决过 ⇒ 只显示结果，**不再给按钮** (0.032167ms)
+  ✔ ★★ 按钮只在**通道探测到接通**时才可点（没接通一律置灰 + 说清理由） (0.047458ms)
+  ✔ 坏输入不抛（null / 没 data / 没 requestId） (0.025792ms)
+✔ 审批：★★ 会改变电脑上正在发生的事，所以比"发送"更保守 (0.434042ms)
+▶ ★ 自动跟随：该跟的跟、不该跟的别拽人
+  ✔ 本来就在底部 ⇒ 跟 (0.044417ms)
+  ✔ ★ 用户手动往上翻了 ⇒ **不跟**（不许把他一把拽回底部） (0.0175ms)
+  ✔ 阈值附近：80px 以内算"还在跟" (0.018709ms)
+  ✔ 量不出来（高度 0 / 坏输入）⇒ 当作在跟（宁可跟到底） (0.018ms)
+✔ ★ 自动跟随：该跟的跟、不该跟的别拽人 (0.507375ms)
+▶ ★ 状态行优先级：错误 > 一次性提示 > 正常读数
+  ✔ ★★ 有错误 ⇒ 错误说话（哪怕还挂着一条"已发出"的提示） (0.03675ms)
+  ✔ 没错误 ⇒ 提示说话（"没发出去"要留到用户下次动作） (0.016625ms)
+  ✔ 都没有 ⇒ 正常读数 (0.016208ms)
+  ✔ 坏输入不抛，且返回空串（不编） (0.01925ms)
+✔ ★ 状态行优先级：错误 > 一次性提示 > 正常读数 (0.115291ms)
+▶ production chat app wiring and native addressing
+  ✔ late creation keeps the session selected after the request and concurrent creations keep the latest intent (5.69025ms)
+  ✔ ordinary navigation stays ordinary in the URL, follow request and refreshed list (2.640958ms)
+  ✔ selected children survive a roots refresh and send using their captured native address (2.792125ms)
+  ✔ child projections and rename use the exact original RPC request and real confirmation (1.935375ms)
+  ✔ send and control callbacks propagate rejected receipts and keep their original request (2.427375ms)
+  ✔ files enter the original panel using the current workspace and report absent integration (1.603917ms)
+  ✔ 附件通道在宿主补注册后自动恢复：探测失败如实上报，恢复在线后重查，不再停在「未接通」 (3.433083ms)
+  ✔ 通道探测失败被如实标记为「没问成」，不再与「真没接通」混为一谈 (2.060916ms)
+  ✔ 迟到的初始探测失败不许覆盖更新的成功结果（请求序号） (1.592708ms)
+  ✔ 在线且附件未确认时按 1→2→4→8 秒有界重查，用尽即停不永久轮询 (2.516708ms)
+  ✔ 离线与页面销毁都会取消退避重查 (1.587291ms)
+  ✔ 瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查 (3.227834ms)
+✔ production chat app wiring and native addressing (32.744583ms)
+▶ production chat data delivery, isolation and history edge
+  ✔ polling delivers sorted events before opening projection values and history metadata (5.128417ms)
+  ✔ in-flight stream, projection, interaction and history from the old session cannot overwrite the new one (4.695791ms)
+  ✔ same-session projection reads reject an older completion even when its cursor is newer (1.780875ms)
+  ✔ a disposed old poll cannot deliver its values, history edge or errors into the new session (3.684875ms)
+  ✔ older history sorts and deduplicates without reopening its completed edge after reconnect (1.949292ms)
+  ✔ dense assistant streams settle after their real event and a revision gap reopens once (2.28175ms)
+✔ production chat data delivery, isolation and history edge (19.866875ms)
+▶ production chat resource closure and image policy
+  ✔ every HTML/module dependency is both shipped and served, with blob images permitted by the real page CSP (8.005333ms)
+✔ production chat resource closure and image policy (8.066667ms)
+▶ production chat native image lifetime
+  ✔ accepts restored native attachment bytes and copies the exact typed-array view (1.484459ms)
+  ✔ uses native attachment IDs, caches per session and revokes each blob on switch or disposal (2.487042ms)
+  ✔ an old attachment response cannot allocate an image after switching sessions (0.802042ms)
+  ✔ an old failure after A→B→A cannot evict the new image entry or leak its blob (1.034959ms)
+✔ production chat native image lifetime (6.004958ms)
+✔ 真实 Cordis waterfall：手机 prepend 回答后下游不会再被调用 (2.989292ms)
+✔ 不同 session 的同 callId 不能代答；错误题号/多选/未知选项都不能结清请求 (0.278458ms)
+✔ 多选加自定义文字可以完整回答；pending 快照改写不会影响真正待答题目 (0.109709ms)
+✔ 前台 TTL 与原始 signal 释放后交回官方下游，没有永远吞掉桌面卡 (5.372417ms)
+✔ legacy 没有官方 callId：只给可回指真实 pending 的临时标识；无会话/坏卡直接交回下游 (0.540375ms)
+✔ continued 回答使用装机 wire：agentId/callId/answer；false 与后端错误不会假报成功 (0.35475ms)
+✔ userQuestions 真投影保留两种状态/计划详情/选项；白名单丢掉内部字段 (0.242ms)
+✔ interactions 合并 legacy 前台卡与 continued 投影，按 session 隔离且不重复 (0.257792ms)
+✔ 前台即便 session head=-1，read 也返回真实待答卡 (0.292541ms)
+✔ 子智能体仍不进会话表；父 catalog 数与过滤前真实 running 对上，缺读数不编 0 (0.252709ms)
+✔ 附件 bytes 逐字进入官方 fileUploads/upload，返回真正 receipt 供 prompt 使用 (0.22525ms)
+✔ 仅附件消息可发送；空消息、重复/坏收据、字符串假bytes与缺收据结果都被拒绝 (0.202167ms)
+✔ capabilities 只报告已挂载通道；挂载 prepend/global 同实例，卸载释放真实请求和状态 (0.258417ms)
+✔ fileUploads 晚于插件注册时附件通道仍是活的：现取服务，不再冻结成 false (0.073875ms)
+▶ DSH 版本：报出的必须是磁盘上的真实版本（不许写死）
+  ✔ 报出的版本 == 本机 @deepseek-ai/dsh-app-boot/package.json 的 version (4.917667ms)
+  ✔ app-boot 与 CLI 包同时可得时，取 app-boot 的 version（本机是混版，顺序反了就会报错） (0.405125ms)
+  ✔ app-boot 缺失时退到 CLI 包 @deepseek-ai/dsh/package.json 的 version (0.185083ms)
+  ✔ 所有来源都拿不到时返回 unknown（绝不回退到某个具体版本） (0.095709ms)
+  ✔ 清单坏掉（不是 JSON / version 非法）时返回 undefined，而不是抛错 (0.240542ms)
+✔ DSH 版本：报出的必须是磁盘上的真实版本（不许写死） (6.940083ms)
+▶ DSH 版本：正在运行的那个 app 优先
+  ✔ 打包形态：能读到 `<resources>/app.asar/dsh/package.json` 的版本 (0.157541ms)
+  ✔ ★ 而它**优先于**别的来源（那些描述的是"某个安装副本"，不是"此刻在跑的那个"） (0.094541ms)
+  ✔ · 解包形态也能读（app.asar.unpacked） (0.9585ms)
+  ✔ ★ 没给 resourcesPath（非 Electron）⇒ 这条来源自动跳过，不抛 (0.325541ms)
+✔ DSH 版本：正在运行的那个 app 优先 (2.452625ms)
+▶ 隧道发"信封本身"的契约
+  ✔ ★ 真实产物满足三条判据（发信封、不双包、调用方解包） (0.593542ms)
+  ✔ ★★ 判据会响：把 result 包回一层 ⇒ 必须报"多包一层" (0.171209ms)
+  ✔ ★★ 跨端一致：宿主把附件放在**信封顶层**、客户端也从 `result.attachments` 读（两端必须对齐） (0.102ms)
+  ✔ ★★ 判据会响：调用方不解包 ⇒ 必须报出来 (0.920959ms)
+✔ 隧道发"信封本身"的契约 (2.233208ms)
+▶ 宿主侧 RPC 入口
+  ✔ ★ 有 dispatchRpc 时走它，并且信封里的 attachments 原样带回来 (0.346375ms)
+  ✔ ★★ {ok:false} 必须抛错（否则失败会被当成功） (0.0825ms)
+  ✔ ★★ dispatchRpc 返回**裸值**（没有 ok 字段）⇒ 宽容地当成值，而不是判成失败 (0.327625ms)
+  ✔ ★★★ 只有在 dispatchRpc 不存在时才回退（调用失败绝不回退 ⇒ 不重复调用） (0.1575ms)
+✔ 宿主侧 RPC 入口 (1.320583ms)
+▶ callOpenWireStream（跨 DSH 版本的签名分派）
+  ✔ ★★ 新版六参签名（0.1.7-rc.2）：signal 必须在第 5 位、第 6 位要给 AbortController (1.298625ms)
+  ✔ ★ 老三参签名（0.1.5-rc.1，本机）：signal 在第 3 位（不许把本机弄回归 ✗） (0.15825ms)
+  ✔ 网关没有这个方法 ⇒ 抛明确的 TypeError（别静默 ✗） (0.346292ms)
+✔ callOpenWireStream（跨 DSH 版本的签名分派） (2.611166ms)
+✔ ★ 端到端：经隧道提交的 session/prompt 被登记成「手机发来的」（client_source 的地基） (19.387375ms)
+✔ ★ 端到端：mobile/dsh/send 那条路也登记（它是插件自己的提交入口，不经隧道帧） (20.479ms)
+✔ ★ 短码配对入口：/mobile/p/<6 位码> 换成票据并 302 到应用外壳 (3.623375ms)
+✔ 配对流程：claim 需电脑端确认，指纹与公钥必须自洽 (7.09425ms)
+✔ ★★★ 假网关必须与真 DSH 同形：invoke 回裸值、dispatchRpc 回信封 (0.869042ms)
+✔ ★ 网关特判端点 $events/result 必须走 dispatchRpc（转发事件的选择靠它回传） (11.40475ms)
+✔ 端到端：配对后经加密隧道完成一元 RPC (9.596167ms)
+✔ 端到端：流式 RPC 经隧道按序送达并结束 (12.083958ms)
+✔ ★★ 本地流路由：mobile/dsh/follow 被转发到会话的 session/follow，且参数一个字段都不改 (12.658875ms)
+✔ 能力位门禁：未授予 fsWrite 时写操作被拒绝，且记录审计 (12.765375ms)
+✔ 管理目录与设置读写由设备能力分别授权，拒绝请求不进入任一后端 (29.632542ms)
+✔ 会话页的引用与原版附件先受设备 fsRead 门禁约束，再进入本地桥或网关 (14.845834ms)
+✔ 界面启动与发消息所需调用不得被门禁拦（真实故障的回归） (25.013334ms)
+✔ 能力位不得越过宿主上限 (4.439459ms)
+✔ 未配对设备无法建立隧道 (6.525375ms)
+✔ 等待电脑端确认时必须**立即**收到拒绝，而不是静默挂着 (9.798375ms)
+✔ 撤销设备后隧道立即断开，且无法重连 (20.288584ms)
+✔ 重放同一帧被拒绝并断开连接 (64.903625ms)
+✔ 管理端点仅限本机访问 (1.563666ms)
+✔ manifest 暴露协议版本与宿主指纹 (3.711291ms)
+✔ 重新配对同一 deviceId 时必须采用新公钥（旧登记不得遮蔽新票据） (20.655292ms)
+✔ 重新配对不得重置电脑端已授予的能力位 (29.293125ms)
+✔ Host 栅栏：拒绝未受信 authority，接受 loopback 与 trustedHosts (1.597625ms)
+✔ Host 栅栏：trustedHosts 里声明的 authority 放行 (0.808209ms)
+✔ 来源判定：信任代理注入的 x-forwarded-for，但只在本机直连时 (0.068708ms)
+✔ Origin 带 scheme 时也参与同源比较（曾因此拒绝所有浏览器请求） (1.139875ms)
+✔ 经代理转发时手机被识别为非本机：拿不到电脑版界面、也调不动管理端点 (3.119125ms)
+✔ 票据失效后：同一设备凭已配对记录仍能连上（回归：不再"必须重新配对"） (16.297792ms)
+✔ 票据失效后：换了密钥的同一 deviceId 不得借此连上（防冒充） (17.91075ms)
+✔ 端侧请求：默认全禁 → 手机授权 → 电脑发起 → 手机取走并回报 (23.245667ms)
+✔ 端侧能力授权：宿主重启后仍认这台设备（播种自 devices.json，手机在别的电脑上也收得到） (15.341333ms)
+▶ install-host-plugin：与地址无关的配置必须被保留
+  ✔ 带上中继参数安装后，四项中继配置都在 (191.980666ms)
+  ✔ ★ 再用「不带中继参数」的方式重装（restart-lan.sh 就是这样）→ 中继配置必须原样留住 (164.701875ms)
+  ✔ 与地址相关的配置必须**跟着变**（别把保留写成了"什么都不更新"） (169.653167ms)
+  ✔ 显式传 --relay-url 时可以更换中继（保留不等于不能改） (191.290709ms)
+✔ install-host-plugin：与地址无关的配置必须被保留 (718.257208ms)
+▶ install-host-plugin：被广告出去的 endpoint 必须同时在 trustedHosts 里
+  ✔ ★ --extra-endpoint https://100.64.1.2:3443 ⇒ trustedHosts 里必须有它的 authority (122.481ms)
+  ✔ ★ 派生的 authority 只能**追加在显式 --trusted-host 之后**，publicBaseUrl 仍按第一条推导 (106.207458ms)
+  ✔ --extra-endpoint wss://relay.example.com/attach ⇒ **不**产生新的 trustedHost (100.908625ms)
+  ✔ ★ 已存在的 extraEndpoint 再用「不带 --extra-endpoint」重装 ⇒ 端点仍在，且它的 trust 也在 (215.27ms)
+  ✔ ★ 为 Tailscale 传 --extra-endpoint 时，中继那条 https 端点不能被挤掉（纯追加合并） (236.803375ms)
+  ✔ ★ list 里已有 ≥2 条 extraEndpoints 时「不带 --extra-endpoint」重装 ⇒ 一条都不许丢 (210.889916ms)
+  ✔ ★★ 本轮真实顺序：Tailscale → 中继 → 学校+Tailscale（restart-lan 形态）⇒ 三条都在，中继不被挤掉 (325.453416ms)
+  ✔ ★ 带方括号的 IPv6 authority 在「沿用已有受信列表」这条路上原样保留（别把它读坏） (228.3135ms)
+✔ install-host-plugin：被广告出去的 endpoint 必须同时在 trustedHosts 里 (1546.639167ms)
+▶ install-host-plugin：listener（C1，进程内监听）配置
+  ✔ --listener 装上后，在 config: 下（8 空格缩进）写出 enabled/plain/tls (105.73725ms)
+  ✔ --listener 不给 plain/tls ⇒ 用默认 0.0.0.0:3081 / 0.0.0.0:3443 (98.63675ms)
+  ✔ ★★ 先 --listener 装、再「不带 listener 参数」重装（restart-lan.sh 就是这样）⇒ listener 配置必须原样留住 (251.060084ms)
+  ✔ ★ 重装只给 --listener（不给端口）⇒ 现有配置读回的端口留住，不被默认值顶掉 (204.948583ms)
+  ✔ --no-listener 能覆盖掉现有的 enabled: true（关掉要真的生效） (207.321041ms)
+  ✔ ★★ 老部署（从不带 listener 参数）的 patch 逐字节不变：一个 listener: 块都不发 (194.926917ms)
+✔ install-host-plugin：listener（C1，进程内监听）配置 (1062.802041ms)
+▶ install-host-plugin：换新机器（profile 目录 + 手机入口地址自动推导）
+  ✔ ★ 全新 HOME（连 profiles/web 都没有）⇒ 安装成功，并替你建出 profile 目录 (96.460666ms)
+  ✔ ★★ 全新 HOME + --listener --lan-ip ⇒ trustedHosts 含明文/TLS 两条，phoneBaseUrl 是 https://<lan>:<TLS端口> (97.260375ms)
+  ✔ ★ 端口取自**本次解析出的** listener 端口（命令行 > 读回 > 默认）——不给端口时用默认 3081/3443 (98.213709ms)
+  ✔ ★ --no-lan-autodetect ⇒ 退回旧行为：trustedHosts / phoneBaseUrl 都不写 (98.312334ms)
+  ✔ ★ 给了 --trusted-host ⇒ 不做自动推导（不会多出探测地址那两条） (112.982458ms)
+  ✔ ★★ 已有 trustedHosts 时不传 --trusted-host ⇒ 仍然沿用（自动推导/--lan-ip 都不许顶掉它） (204.887458ms)
+  ✔ ★ 探测失败（拿不到地址）⇒ 打警告但**不失败**，退回旧行为 (99.019125ms)
+  ✔ ★ 日志要说清"替你决定了什么"（写了哪个地址、为什么） (97.939208ms)
+✔ install-host-plugin：换新机器（profile 目录 + 手机入口地址自动推导） (905.426416ms)
+▶ parseEndpoint：host:port 的解析（失败给原因，不退出进程）
+  ✔ IPv4 与带方括号的 IPv6 都认（方括号必须去掉，否则 listen 解析失败） (0.547041ms)
+  ✔ 非法形态返回原因（插件里只降级这一条监听，绝不 process.exit） (0.097334ms)
+✔ parseEndpoint：host:port 的解析（失败给原因，不退出进程） (0.998625ms)
+▶ injectForwardedFor：把真实来源注入请求头（★ 权限提升的那一处）
+  ✔ 注入到请求头末尾，原始字节一字不改 (0.1435ms)
+  ✔ 已有 x-forwarded-for（任意大小写）⇒ 原样返回，不重复注入、不覆盖 (0.071292ms)
+  ✔ 请求头不完整 / 没有来源地址 ⇒ 原样返回（这就是"静默放弃注入"，必须由调用方攒齐） (0.046166ms)
+✔ injectForwardedFor：把真实来源注入请求头（★ 权限提升的那一处） (0.330042ms)
+▶ 转发器：每个请求头收齐就注入一次（两次真 bug 的记录）
+  ✔ 分片到达的请求头：攒齐后才注入（块内没有 \r\n\r\n 时不许静默放弃） (0.315ms)
+  ✔ keep-alive：同一条连接上的第二个请求同样注入（曾经只有第一个带来源） (0.124833ms)
+  ✔ 正文按原样透传：POST body 逐字节不变，也不会被重复注入 (0.075125ms)
+  ✔ 上游未就绪时到达的数据先入队（不丢包），就绪后按原顺序发出 (0.071958ms)
+  ✔ 上游连接失败 ⇒ 两端都销毁、原因上报、不抛错 (0.103958ms)
+  ✔ 客户端断开 ⇒ 上游一起收（不留半条连接） (0.04575ms)
+✔ 转发器：每个请求头收齐就注入一次（两次真 bug 的记录） (0.846334ms)
+▶ ★★ x-forwarded-for 与 LOCAL_ONLY：去掉注入 ⇒ 本组必红
+  ✔ 局域网来源经本插件监听后仍被判成"手机"（对照：没有注入就会被判成"人在电脑前"） (0.15275ms)
+  ✔ 本机回环来源注入 127.0.0.1 后仍是"人在电脑前"（注入不误伤电脑本机） (0.093708ms)
+  ✔ 客户端自带 x-forwarded-for ⇒ 不覆盖（只保证"本插件不注入"这件事有据可依） (0.069708ms)
+✔ ★★ x-forwarded-for 与 LOCAL_ONLY：去掉注入 ⇒ 本组必红 (0.354958ms)
+▶ createLanListener：默认关闭、IPv6 伴随、端口冲突不换端口、失败不抛错
+  ✔ 默认关闭（enabled:false）⇒ 一个监听都不建：老部署行为一字不变 (0.194167ms)
+  ✔ enabled:true + 0.0.0.0 ⇒ IPv4 与 IPv6 伴随都在听（漏了 IPv6 = 蜂窝网直连失效且无症状） (4.261584ms)
+  ✔ 端口冲突（EADDRINUSE）⇒ 只警告、**不换端口**，并点明"可能上次的 lan-proxy 还活着" (0.576416ms)
+  ✔ 缺少 TLS 证书 ⇒ HTTPS 不起但明文照起（降级且说得清，不抛错） (0.934542ms)
+  ✔ IPv6 伴随监听失败只降级：IPv4（局域网）照常 ok，不把手机入口判死 (0.646542ms)
+  ✔ dispose() 关掉全部监听（含 IPv6 伴随）：不再留占端口的孤儿 (1.520875ms)
+✔ createLanListener：默认关闭、IPv6 伴随、端口冲突不换端口、失败不抛错 (8.415834ms)
+▶ 证书热更新：重签叶子后不必重启 DSH
+  ✔ 叶子文件变了（mtime/size）⇒ 对已建立的 TLS 监听 setSecureContext 新证书 (3.00075ms)
+  ✔ 文件没变 ⇒ 不重载（避免每次 ensure 都无谓地换上下文） (1.074958ms)
+  ✔ 没启用监听 / 没配 TLS ⇒ refreshTls 是空操作（不报错、不改状态） (0.08775ms)
+✔ 证书热更新：重签叶子后不必重启 DSH (4.254542ms)
+▶ 自检的 listener 段：三层问题分得开（没开 / 就绪 / 坏了）
+  ✔ 未注入监听器 ⇒ available:false 且不算失败（老部署的手机入口在外置代理里） (5.960417ms)
+  ✔ 启用且就绪 ⇒ 自检报出绑定与 x-forwarded-for 注入状态 (5.846959ms)
+  ✔ ★ 端口被占 ⇒ 自检 ok=false 且 warnings 点明"可能上次的 lan-proxy 还活着" (3.932833ms)
+✔ 自检的 listener 段：三层问题分得开（没开 / 就绪 / 坏了） (15.857542ms)
+▶ isIpLiteralHostname：只有 IP 字面量才与本机 IP 集合比
+  ✔ IPv4 点分四段与 IPv6（URL 归一化后带方括号）都认 (0.405709ms)
+  ✔ 名字一律不认——尤其是"名字里含 IP"这种最容易被误判的写法 (0.063458ms)
+✔ isIpLiteralHostname：只有 IP 字面量才与本机 IP 集合比 (0.913416ms)
+▶ localHostNames：本机名字的两种写法（与证书 SAN 共用同一套算法）
+  ✔ macOS 的 hostname 自带 .local ⇒ 不能拼成 .local.local (0.37975ms)
+  ✔ 裸名输入也补出 .local 写法；空串什么都不给 (0.074ms)
+  ✔ ★ Windows 形态（`DESKTOP-ABC1234`，大写、无点）仍**同时**给出裸名与 .local（判据集合多一条无害） (0.043958ms)
+✔ localHostNames：本机名字的两种写法（与证书 SAN 共用同一套算法） (0.57875ms)
+▶ localMachineName：面板行名用哪一个机器名（Windows 形态不许补 .local）
+  ✔ ① Windows 形态（`DESKTOP-ABC1234`）⇒ 原样返回，不补 .local (0.084833ms)
+  ✔ ② Linux 形态（`my-box`）同样原样返回（裸名不是 mDNS 名字） (0.059333ms)
+  ✔ ③ macOS 形态：`Mac-mini-2024.local` 原样返回（不许变成 .local.local） (0.043791ms)
+  ✔ ④ macOS 上的**裸名**才补 .local（Bonjour 广播的就是它；证书 SAN 同一约定） (0.218292ms)
+  ✔ ⑤ 完整域名原样返回（不硬拼成 foo.example.com.local） (0.159791ms)
+  ✔ ⑥ 拿不到（空串 / 只有点）⇒ 空串（调用方据此**省略这个键**，不写空值） (0.106167ms)
+✔ localMachineName：面板行名用哪一个机器名（Windows 形态不许补 .local） (1.123ms)
+▶ deriveLanTrust：本机地址集合的推导
+  ✔ 只收非内部 IPv4（回环与 IPv6 都不进这个集合） (0.313333ms)
+  ✔ `family: 4`（老式数字形态）同样认 (0.114292ms)
+✔ deriveLanTrust：本机地址集合的推导 (0.522167ms)
+▶ matchesDerivedTrust：放行与拒绝（宽了就是安全问题）
+  ✔ ① 本机非内部 IPv4（IP 字面量 Host）放行；外部 IP 拒绝 (0.199959ms)
+  ✔ ② 伪造域名一律拒绝（绝不把名字解析成地址后再比） (0.076167ms)
+  ✔ ③ 本机 hostname 只认精确匹配（裸名 / .local，大小写归一），子域与后缀不放行 (0.065958ms)
+  ✔ ④ 网卡变化后**立刻**生效（同一次会话里换网，不需要重启） (0.083208ms)
+  ✔ ⑤ 推导失败（拿不到网卡）⇒ 空集合 + derived:false，退回静态列表而不是放开闸门 (0.101ms)
+  ✔ 网卡表为空（没有非内部 IPv4）时 derived 仍为 true，但集合为空 (0.037917ms)
+✔ matchesDerivedTrust：放行与拒绝（宽了就是安全问题） (0.639667ms)
+✔ 包内探测与脚本探测给出一致结论（防止两处规则漂移） (2.607375ms)
+✔ 不得选中自分配地址（169.254/16）或虚拟接口 (0.190791ms)
+✔ isAddressPresent 只认当前真实存在的地址 (0.242459ms)
+✔ 探测实现不依赖网络可用性（纯本地读取，不会抛出） (0.174ms)
+✔ 脚本实现里没有硬编码本机地址（防止把开发机地址带进仓库） (0.176625ms)
+▶ 机器配置推导
+  ✔ 用户配过的一律不动（只补缺 ✗） (0.736042ms)
+  ✔ ★ 空字符串也算"没配"（别把空当配置 ✓） (0.064209ms)
+  ✔ ★ 没配 ⇒ 按本机地址补（每个地址 × 两个端口 ✓） (0.080416ms)
+  ✔ ★★★ 没配 extraEndpoints ⇒ 补上 https 那条（手机只走 https ✗） (0.51325ms)
+  ✔ ★ 用户写了 extraEndpoints 就一个字不动（只补缺 ✗） (0.062625ms)
+  ✔ ★ 没有地址 ⇒ extraEndpoints 也不编（不猜 ✗） (0.054833ms)
+  ✔ ★★ 探测不到地址 ⇒ 地址类什么都不补，也不编（不猜 ✗） (0.052459ms)
+  ✔ ★★ 显式 enabled: false 一律尊重（默认翻转不许盖掉用户 ✗） (0.064041ms)
+  ✔ ★ 端口跟着用户配的 listener 走（不另立一套 ✗） (0.064ms)
+  ✔ ★ 每一处推导都说得出人话（含地址与端口 ✓） (0.090792ms)
+  ✔ 监听串读不出端口 ⇒ trustedHosts 不补（并说明原因 ✓） (0.057917ms)
+  ✔ portOfListen：正常 / 没有冒号 / 冒号后不是数字 ✓ (0.039167ms)
+✔ 机器配置推导 (2.37725ms)
+▶ 移动管理：端点和后端隔离
+  ✔ 未知端点继续分发；管理端点要求明确后端 (0.571792ms)
+  ✔ 取消在原生调用前生效，不继续读取或持久写入 (0.117875ms)
+  ✔ 原生读取期间取消后，不继续发出持久写入 (0.434042ms)
+  ✔ 不支持的作用范围在读取和写入前拒绝，不暗中改写其他层 (0.103291ms)
+  ✔ 能力目录来自真实读取；缺失服务不伪装为可写 (1.376917ms)
+✔ 移动管理：端点和后端隔离 (3.006917ms)
+▶ DSH 常用设置
+  ✔ 读取真实模型/推理/新会话权限；不转发其他配置和秘密 (0.485416ms)
+  ✔ 换模型原子写 provider/model 并清除旧推理等级；使用修订号并真实回读 (0.324416ms)
+  ✔ 未知字段、过期或缺失修订号、非目录模型、无效权限在写前拒绝 (0.425959ms)
+  ✔ 只读和目录失败不执行写；空推理值仅清除覆盖 (0.235125ms)
+  ✔ 写后被覆盖显示 overridden，不声称已应用 (0.167375ms)
+✔ DSH 常用设置 (1.756458ms)
+▶ DSH 插件配置和启停
+  ✔ 目录保持插件和组合包身份；原生受保护项不可停用 (0.2415ms)
+  ✔ 只输出公开 schema 叶子；秘密、未知字段、秘密 union/容器永不返回 (0.264083ms)
+  ✔ 插件写入只更新指定公开路径，保留未展示的凭据和其他配置 (0.52325ms)
+  ✔ 伪造 fieldId、原型路径、越界数字、错误类型及内嵌凭据不写入 (0.724333ms)
+  ✔ 用户配置只读不会变成可配置；无设置提供者仍能读插件并启停 (0.393375ms)
+  ✔ 过期插件状态/原生保护不调用启停；bundle 使用真实 name 参数 (0.4545ms)
+  ✔ restart-required 和 failed 使用原生回执，不能冒充热生效 (1.270833ms)
+  ✔ 原生回执缺失不能冒充成功；applied 仍以真实回读状态确认 (0.346291ms)
+✔ DSH 插件配置和启停 (5.350583ms)
+▶ Codex 配置和插件原生版本契约
+  ✔ 只输出常用字段和受策略限制的选项，不输出路径/凭据/完整 config (0.415625ms)
+  ✔ 模型写使用原生 expectedVersion，清除旧推理覆盖并回读；拒绝自选文件地址 (0.23725ms)
+  ✔ 未知键、过期/缺失版本、管理策略禁用的选项不执行写 (0.279208ms)
+  ✔ 原生策略指定模型/推理及 granular 审批时，控件不能伪装为可写 (0.073458ms)
+  ✔ 命名权限方案显示真实方案，不能声称修改旧 sandbox_mode 会生效 (0.108583ms)
+  ✔ 原生拒绝和 okOverridden 不伪装成功应用 (0.184375ms)
+  ✔ 本地插件真实启停通过带引号的原生 keyPath，不混淆点号或覆盖其他配置 (0.384584ms)
+  ✔ 工作区管理的 remote 插件和伪造身份不能走用户配置启停 (0.119042ms)
+  ✔ MCP 公共 enable/approval 字段来自插件详情；未公开通用表时说明限制 (0.096792ms)
+  ✔ MCP 配置写只命中详情公开服务器和字段，并保留 bearer token (0.253709ms)
+✔ Codex 配置和插件原生版本契约 (2.22975ms)
+▶ 端侧通知：触发规则
+  ✔ 明写清单里只有审批 (0.492125ms)
+  ✔ ★ 结构规律：*/asked 都算"agent 在问你"（★ 但这两个类型今天的 DSH 里**不存在**） (0.079291ms)
+  ✔ ★ 但不是"什么都推"：不合规律的、空的、非字符串的一律不推 (0.049416ms)
+✔ 端侧通知：触发规则 (1.005167ms)
+▶ 端侧通知：文案
+  ✔ 审批：正文只有一句"要做什么"，工具名与原因落进 `detail`（★ 口径变化：原文不再进通知） (0.273958ms)
+  ✔ 审批：字段缺失时**不编通用话**（★ 口径变化：正文为空，只剩标题里的"需要确认"） (0.272917ms)
+  ✔ ★ 原因过长要截断：正文与 `detail` 都不许超 60 字 (0.083875ms)
+  ✔ ★ 按规律认出来的类型（如选择卡）：中性文案，绝不编造"需要你确认" (0.045541ms)
+  ✔ ★ 按规律认出来但没带任何字段：也要有一句能看的话 (0.052833ms)
+✔ 端侧通知：文案 (0.83875ms)
+▶ 端侧通知：提权/审批的新形状（2026-10-05）
+  ✔ ★★ 正文里没有任何"提权级别 / 沙箱模式"字样（第四轮的机械判据） (0.153292ms)
+  ✔ ★★ 原因里**只有级别词**（拿不到动作的极端样本）⇒ 正文也不许把级别词推回去 (0.271834ms)
+  ✔ ★★ 正文说明的是"要做什么"（提权样本 ⇒ 写入工作区外），且仍不含级别词 (0.074125ms)
+  ✔ ★ 标题 = <电脑名> 需要你确认，且 `.local` 不进标题（与手机上那个行名同一个名字） (0.047583ms)
+  ✔ ★ 正文 = 那句"要做什么"（**唯一一行**），且 ≤ 40 字 (0.056375ms)
+  ✔ ★ 正文里一条通用话都不许有（套壳 ✗ / 兜底话术 ✗ / 再说一遍"需要确认" ✗） (0.040291ms)
+  ✔ ★ 原始细节**不进通知**，改由 `detail` 带出（截断到 60 字，前 59 字原样保留 ⇒ 可追溯） (0.056875ms)
+  ✔ ★ 标题 + 正文 ≤ 120 字（系统通知要能显示完，不被截掉尾巴） (0.027041ms)
+  ✔ ★ 拿不到电脑名 ⇒ 标题退回原来那三个字（**绝不编**一个名字） (0.027292ms)
+  ✔ ★ 非提权样本**不许**套那句提权的话（按关键词映射，不是硬编码一种） (0.065458ms)
+  ✔ ★ 会话号不再进正文（正文恒为一行 ✓）—— sessionId 仍由调用方交给端侧通道 (0.056667ms)
+  ✔ ★ 映射表本身的不变量：每条都 ≤ 40 字、各条互不相同（不许两条挤成一句），且**都不带级别词** (0.049208ms)
+  ✔ ★ 拿不到电脑名时的显示名处理：去 `.local`、保留域名与 Windows 裸名 (0.047208ms)
+  ✔ ★ 极长的电脑名 + 极长的工具名也不许把总长撑过上限 (0.039167ms)
+  ✔ ★ 一个关键词都没命中 + 极长电脑名 ⇒ 正文只剩原始细节那一行（绝不补通用话） (0.0515ms)
+  ✔ ★ 正文恒为一行、且 ≤ 60 字 ⇒ 标题 + 正文结构上就 ≤ 120（原先那道总长闸门已随细节一起消失） (0.096583ms)
+  ✔ ★ 一个关键词都没命中 ⇒ **不给通用话**（返回空串），正文只剩原因原文那一行 (0.048916ms)
+  ✔ ★ 截断的边界：正好 60 字不截，多一个字才截 (0.026209ms)
+✔ 端侧通知：提权/审批的新形状（2026-10-05） (1.397583ms)
+▶ 通知规则的接线
+  ✔ ★ 规则只有一个入口（多了就说明有人从别处也放它进来） (0.302875ms)
+  ✔ ★ 那唯一一次是"按会话事件类型过滤"，不是别的东西 (0.092792ms)
+  ✔ ★ 两个兼容订阅**显式传类型**（不继承结构规律，免得范围被放大） (0.05875ms)
+  ✔ ★ 订阅的是 session/event（本仓踩过的坑：Cordis 对未知事件名静默接受） (0.047917ms)
+✔ 通知规则的接线 (0.9125ms)
+▶ 通知文案的接线：电脑名必须由宿主接上（2026-10-05）
+  ✔ ★ 机器名的取值口与 manifest.machineName 是同一个（`localMachineName`） (0.08125ms)
+  ✔ ★ 拼好的标题真的交给了端侧通道（不是拼完就扔） (0.088375ms)
+  ✔ ★ 机器名是**现算**的（改名不必重启 DSH）——不许挪到安装时算一次 (0.069792ms)
+✔ 通知文案的接线：电脑名必须由宿主接上（2026-10-05） (0.805667ms)
+▶ 通知文案的接线：原始细节只进审计、不进通知（2026-10-05 第三轮）
+  ✔ ★ 交给端侧通道的就是那一句（不许把 `detail` 拼回正文） (0.103166ms)
+  ✔ ★ 原始细节落进 approval-push 审计（手机自检页照样能查 ⇒ 可追溯） (0.100625ms)
+✔ 通知文案的接线：原始细节只进审计、不进通知（2026-10-05 第三轮） (0.281ms)
+▶ resolveOnPath（PATH 查找的平台形态）
+  ✔ ★ Windows：PATH 用 `;` 分隔 + 可执行文件带 `.CMD` ⇒ 必须找得到（修之前这里是找不到 ✗） (1.999542ms)
+  ✔ ★★ 变异把守：分隔符若还是 `:`（老写法）⇒ 同一个现场**必须找不到** ✗ (0.586917ms)
+  ✔ 命令**已经带扩展名**时先按原样试（不许去找 `code.exe.EXE` ✗） (0.49775ms)
+  ✔ unix 形态：无后缀的可执行文件 + `:` 分隔照旧找得到（不许把 macOS/Linux 弄回归 ✗） (0.167375ms)
+  ✔ PATH 里的空条目被跳过（连续两个分隔符之间那种空串 ⇒ 不许去查空目录 ✗） (0.153583ms)
+  ✔ 找不到就返回 undefined（不许抛 ✗ —— 找不到只意味着"这个应用不在这台电脑上" ✓） (0.140834ms)
+  ✔ ★★★ 接线也要对：`win32` 必须走 `;` + `PATHEXT` 后缀（把这两处改坏 ⇒ 这条红 ✓） (1.385708ms)
+  ✔ ★ `PATHEXT` 缺失时给默认后缀（不许因为环境变量没有就整条功能消失 ✗） (0.642833ms)
+  ✔ `extraDirs` 是 PATH 之外的补查目录（macOS 的 Homebrew 那套走它 ✓） (0.191292ms)
+✔ resolveOnPath（PATH 查找的平台形态） (6.9915ms)
+[dsh-mobile] 短码配对猜码过多：来源 10.0.0.9 已冷却 300 秒
+✔ T2 配对码来自密码学随机源（源码里不再有 Math.random，区间恰好 90 万） (121.911166ms)
+✔ T2 短码换票据：窗口内失败 10 次后进入冷却（429 + Retry-After），且按来源分桶不连坐 (7.2345ms)
+✔ T2 短码换票据：成功即清零；码被 claim 之后不再换出票据（用过即废） (7.179291ms)
+[dsh-mobile] 中继外拨已启动：ws://127.0.0.1:49620/attach（房间 abfcfe4eb1f27c2b831e52709659bca3，空闲池 1）
+[dsh-mobile] 中继回源通道已启动：ws://127.0.0.1:49620/attach-http（房间 abfcfe4eb1f27c2b831e52709659bca3）
+✔ T2 配对票据不能被第二个设备重复 claim（claim 层的一次性语义） (5.711666ms)
+✔ T3 回源拒绝名单覆盖整个 /mobile/device/*，且不误伤手机要用的路径 (0.156667ms)
+[dsh-mobile] 中继连接已建立（房间 abfcfe4eb1f27c2b831e52709659bca3）
+[dsh-mobile] 拒绝 WebSocket 升级：Host evil.example.com 不在回环或受信集合内（Host=evil.example.com Origin=http://evil.example.com）
+[dsh-mobile] 拒绝 WebSocket 升级：Origin https://evil.example.com 与 Host 不同源、也不在受信集合内（Host=10.34.255.229:3443 Origin=https://evil.example.com）
+[dsh-mobile] 拒绝 WebSocket 升级：Origin https://10.34.255.229:9999 与 Host 不同源、也不在受信集合内（Host=10.34.255.229:3443 Origin=https://10.34.255.229:9999）
+[dsh-mobile] 拒绝 WebSocket 升级：Host 头缺失或无法解析（Host=not a host Origin=http://not a host）
+[dsh-mobile] 中继外拨已启动：ws://127.0.0.1:49623/attach（房间 5b17a69b0917a6f7f67d4389b133cbd2，空闲池 1）
+[dsh-mobile] 中继回源通道已启动：ws://127.0.0.1:49623/attach-http（房间 5b17a69b0917a6f7f67d4389b133cbd2）
+[dsh-mobile] 拒绝 WebSocket 升级：Origin https://evil.example.com 与 Host 不同源、也不在受信集合内（Host=10.34.255.229:3651 Origin=https://evil.example.com）
+[dsh-mobile] 拒绝 WebSocket 升级：Host evil.example.com 不在回环或受信集合内（Host=evil.example.com Origin=http://127.0.0.1:49623/attach-http）
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 回源通道出错，将重试
+✔ T3 经中继回源的 /mobile/device/call 与 /mobile/device/status 被拒（不落到环回 fetch） (23.936292ms)
+✔ T6 WS 升级：伪造 Origin 被拒（403、不建会话），合法/无 Origin 照旧放行 (1.484417ms)
+✔ T6 WS 升级：Origin 是部署方声明的 phoneBaseUrl 时放行（反代/中继场景） (0.614875ms)
+✔ T6 WS 升级：中继下发的页面回退连局域网端点必须放行，但任意 Origin 仍被拒 (3.2855ms)
+[dsh-mobile] 中继连接出错，将重试
+[dsh-mobile] 回源通道出错，将重试
+[dsh-mobile] 回源通道出错，将重试
+[dsh-mobile] 中继连接出错，将重试
+✔ 注入了证书管理器：票据 / 二维码 / 短码载荷 / manifest 四条路上的 CA 指纹是同一个值 (6.822542ms)
+✔ 没有注入证书管理器（或证书坏了）：票据里**没有**这个键 —— 形状与加字段之前逐字段相同 (1.34ms)
+✔ 证书坏了（status().caFingerprint === undefined）：同样不写这个键 (0.806208ms)
+✔ 旧形状的票据（不带 caFingerprint）仍然合法：可选字段的两种形状都能原样往返 (0.087417ms)
+▶ 端侧回执闭环：ok 的语义是"端侧回报执行成功"
+  ✔ ★ 等到回执：ok/detail 来自端侧原话，且 timedOut 不为真 (0.447583ms)
+  ✔ ★ 降级也是回执：detail=banner-manual 如实带回（不许说成"已放进剪贴板"） (0.069291ms)
+  ✔ ★ 端侧说失败 ⇒ 工具回 ok:false + reason + detail（绝不当成功） (0.10975ms)
+  ✔ ★ 端侧晚几轮才回报 ⇒ 等到它为止（不是拿到第一条 null 就放弃） (0.339292ms)
+  ✔ ★ 端侧始终不回报 ⇒ 如实说"已投递，但 N 秒内没有端侧回报"（不许说成功） (0.131209ms)
+  ✔ ★ 等待预算是**有界**的：超时那一刻不再继续睡（少一次都不行） (0.074084ms)
+  ✔ ★ 入队就失败（能力没启用 / 未知能力）⇒ 直接回原因，**不等**端侧 (0.057667ms)
+  ✔ ★ 两条工具都走这条链（不是只修了其中一个） (0.209625ms)
+  ✔ ★ 工具描述/输出 schema 必须写明新语义（agent 只读得到这些） (0.0895ms)
+  ✔ ★ 审计留痕：入队与结局各一行（不查结果就查不出问题，查了就得留证） (0.170333ms)
+✔ 端侧回执闭环：ok 的语义是"端侧回报执行成功" (2.227583ms)
+▶ 结局的写法（formatDeviceOutcome）
+  ✔ ★ 端侧报成功 ⇒ ok:true + detail（不是"已入队"） (0.06275ms)
+  ✔ ★ 端侧报失败 ⇒ ok:false + reason（带端侧原话） (0.045959ms)
+  ✔ ★ 超时 ⇒ ok:false + timedOut + 如实文案（与"端侧报失败"可区分） (0.037ms)
+✔ 结局的写法（formatDeviceOutcome） (0.202542ms)
+▶ 发布核对：好样本必须全过
+  ✔ 一份正常的产物 ⇒ 没有问题 (0.544417ms)
+✔ 发布核对：好样本必须全过 (0.87475ms)
+▶ 发布核对：每条闸都要会响（坏样本必须报出问题）
+  ✔ ① 裸引用 (0.190167ms)
+  ✔ ② 缺 __dshmSetHosts (0.073167ms)
+  ✔ ③ 宿主只有 import 没有调用（就是今天栽过的那处） (0.065292ms)
+  ✔ ③ 客户端解码点缺失 (0.259167ms)
+  ✔ ④ 壁纸路由缺失 (0.100416ms)
+  ✔ ⑤ notify 分支缺失（通知会被静默丢掉） (0.070375ms)
+  ✔ ⑥ ★ 探针"定义了但没被挂上"（上一版那道假闸就是漏在这里） (0.071584ms)
+  ✔ ⑥ 读数标记缺失 (0.060875ms)
+  ✔ ⑦ APK 是旧的（用户会下到旧包） (0.078ms)
+✔ 发布核对：每条闸都要会响（坏样本必须报出问题） (1.741167ms)
+▶ 选择卡通知：接线（源码层）
+  ✔ ★ 文案入口被真的 import 进来（不是只写在 notify-text.ts 里 ✗） (0.7355ms)
+  ✔ ★ 判据按**工具名** ask_user_question，且只在 tool/call 上（事件类型 vs 工具名不混） (0.256042ms)
+  ✔ ★★ 那条分支真的会走到 deviceCall(notify)（"拼对了但没接线"必须被钉住） (0.237125ms)
+  ✔ ★ 去重是 callId 主键 + 有滚动上限（断线重连 / 会话重放会再送同一条 ⇒ 必须有） (0.118292ms)
+  ✔ ★ 解析不出来就不推（`questionTextFor` 返回 undefined ⇒ 分支必须 return） (0.105417ms)
+✔ 选择卡通知：接线（源码层） (2.175833ms)
+▶ 选择卡通知：文案（纯函数）
+  ✔ ★ 标题是中性那句（带电脑名），正文是「<header>」<question> (0.47225ms)
+  ✔ ★ 只报**第一条**问题（不加"等 N 个"，那是通用描述 ✗） (0.108375ms)
+  ✔ ★ 正文 ≤ NOTIFY_DETAIL_MAX（60 字），且标题 + 正文 ≤ NOTIFY_TOTAL_MAX (0.302833ms)
+  ✔ ★ header 缺失 ⇒ 正文就只有那个问题（不留空「」） (0.14125ms)
+  ✔ ★ 机器名拿不到 ⇒ 标题退回中性那句（**绝不编**一个名字） (0.826291ms)
+  ✔ ★ 解析不出来 ⇒ 返回 undefined（调用方据此不推 ✗） (0.161ms)
+  ✔ ★ 与审批文案**共用同一条截断**（选择卡不许被套上审批话术） (0.161875ms)
+✔ 选择卡通知：文案（纯函数） (2.741334ms)
+▶ 运行时 assets：解析（**与 cwd 无关** ✓）
+  ✔ ★★ 会话页 HTML 在任意 cwd 下都定位得到（cwd 换到临时目录也一样） (1.879375ms)
+  ✔ ★ 仿造「装到 profile 之后」的布局（assets 与 lib 平级 ✓）也定位得到 —— 这就是坏掉的那种布局 ✓ (1.165083ms)
+  ✔ ★ 构建产物布局（`lib/assets/` ✓）优先于「与 lib 平级」那条候选（顺序是契约 ✓） (2.022917ms)
+  ✔ 两条候选都**只**相对模块自身（没有一条沾 cwd ✓），找不到就老实地返回 undefined (0.578625ms)
+✔ 运行时 assets：解析（**与 cwd 无关** ✓） (6.325542ms)
+▶ 运行时 assets：清单（**唯一一份** ✓）
+  ✔ ★ 清单覆盖 index.ts 真正读盘的那些名字（漏一个 ⇒ 手机上就是 404 ✗） (0.901292ms)
+  ✔ ★ 清单里的每个文件在 packages/host/assets 下都真的存在（拼错了要当场红 ✗） (0.138125ms)
+  ✔ ★ 不该把「构建时已内联」的那几个也拖进 profile（白占地方 ✗） (0.048041ms)
+✔ 运行时 assets：清单（**唯一一份** ✓） (1.171167ms)
+▶ 运行时 assets：拷贝（唯一实现 ✓）
+  ✔ ★ 拷过去的内容必须**逐字节**相同，且一个都不少 (8.832625ms)
+  ✔ ★ 源缺一个 ⇒ **抛** ✗（宁可失败，也不留「装了但打不开」的半成品 ✓） (0.85275ms)
+✔ 运行时 assets：拷贝（唯一实现 ✓） (9.772666ms)
+▶ 运行时 assets：装出去（**用户那条 bug 的直接断言** ✓）
+  ✔ ★★ 安装器跑完 ⇒ profile 的 `lib/assets/` 里真有会话页 HTML，且能按插件自身的位置解析出来 (172.802458ms)
+  ✔ ★ 构建与安装**两边**都必须调用同一份拷贝实现（只补一处 ⇒ 另一条上线路径上照样丢 ✗） (1.421375ms)
+✔ 运行时 assets：装出去（**用户那条 bug 的直接断言** ✓） (174.311208ms)
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=27:DE:B2:4C:67:36:0B:99:5E:C7:D0:AB:F9:08:8A:E7:F5:91:8E:9F:80:20:F7:E2:56:82:DA:1F:53:18:2F:13（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-setup-apply-W5GiPR/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 读不到 DSH 的监听端口 ⇒ 在你打开 DSH 页面的地址后面加上 /mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[mobile-host] 接入配置已写入 /var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-setup-apply-W5GiPR/profiles/web/cordis.patch.yml（phoneBaseUrl、listener）
+[dsh-mobile] 明文监听：0.0.0.0:3081 → 127.0.0.1:3080
+[dsh-mobile] 明文 IPv6监听：:::3081 → 127.0.0.1:3080
+[dsh-mobile] HTTPS监听：0.0.0.0:3443 → 127.0.0.1:3080
+[dsh-mobile] HTTPS IPv6监听：:::3443 → 127.0.0.1:3080
+▶ setup-config：推导（局域网 IP + 端口 ⇒ 手机入口）
+  ✔ ★ 显式给地址 ⇒ trustedHosts 两条（明文+TLS），phoneBaseUrl 是 https，HTTPS 那条同时进 extraEndpoints (0.734166ms)
+  ✔ ★ 端口没给 ⇒ 用默认 3081/3443（不另算一遍） (0.07025ms)
+  ✔ ★★ 探测不到局域网地址 ⇒ **不抛**，lanIp: null，且"该开监听 + 默认端口"照样给出来 (0.1275ms)
+  ✔ ★ 探测函数**抛错**也当成"探测不到"（没网/多网卡不许把宿主路由弄成 500） (0.0635ms)
+  ✔ ★ 探测得到地址 ⇒ 建议值就是这台机器该写的那一份（含 publicBaseUrl） (0.795083ms)
+  ✔ ★ 建议值**强制**开监听（本次意图是关也不许关掉：一个关着监听的"建议值"没有意义） (0.11425ms)
+  ✔ ★ resolveListener 的优先级：输入 > 现有配置 > 默认 (0.078834ms)
+  ✔ ★ 被广告出去的端点必须同时在 trustedHosts 里（追加、去重、wss 不派生） (0.071916ms)
+✔ setup-config：推导（局域网 IP + 端口 ⇒ 手机入口） (2.545833ms)
+▶ setup-config：把配置写进 profile 的 cordis.patch.yml
+  ✔ ★ 空 profile（文件都不存在）⇒ 写入后能原样读回 (2.333125ms)
+  ✔ ★★ 写两次仍是 1 条（幂等：先删本块再追加） (2.640208ms)
+  ✔ ★ 形状：不带 name、不是 insert（行由 bundle 自带，我们只覆盖 config） (1.013334ms)
+  ✔ ★★★ profile 里**别人的**条目一条都不许丢（覆盖式重写最容易吃掉它们） (0.785333ms)
+  ✔ ★ 只写来的那几个：请求里没有的键，一个都不许冒出来（整块替换 config） (0.412708ms)
+  ✔ ★★ 与安装器的 insert 块并存时：插件行不许被删，覆盖块也不许越写越多 (1.741583ms)
+  ✔ ★ 安装器写的 insert 形态也能被读成 current（脚本装机的机器，页面要看得见现状） (1.576958ms)
+  ✔ ★ 没有我们的配置 ⇒ current 就是 null（契约：没有就是 null） (0.671292ms)
+✔ setup-config：把配置写进 profile 的 cordis.patch.yml (11.408209ms)
+▶ setup-config：GET/POST /mobile/setup 的 HTTP 契约
+  ✔ ★★ 非本机一律 403（GET 与 POST 都拒），而且 POST **一个字节都不写** (1.188167ms)
+  ✔ ★ 本机 ⇒ GET 200，六个字段齐全（没有配置时 current 为 null、configured 为 false） (0.631292ms)
+  ✔ ★ 探测不到 ⇒ GET 仍是 200、lanIp 为 null、不抛（没网/多网卡都要能打开这个页面） (0.906542ms)
+  ✔ ★ 本机 ⇒ POST 200，返回 {ok, restartRequired, wrote}，且文件里确实写进去了 (1.504208ms)
+  ✔ ★ 本机 POST 两次（含前面已有安装器的块）⇒ 文件里我们的覆盖块始终只有一块 (1.028791ms)
+  ✔ ★ POST 认不出的字段 ⇒ 400 且**不写文件**（写错一个字母必须响亮地失败） (0.706959ms)
+  ✔ ★ POST 空对象 / 非法 body ⇒ 400（不许写出一个空 config 把生效配置清掉） (0.541458ms)
+  ✔ ★ 方法不对 ⇒ 405（并带上 allow），路径不对 ⇒ 404 (0.8745ms)
+  ✔ ★ configFromRequestBody 的校验：类型不对就 400（不猜、不吞） (0.109375ms)
+  ✔ ★ GET 的 current 会把现有配置整份给出来（含中继键 —— 页面回写时不许把它们弄丢） (1.597709ms)
+  ✔ ★ profilePath：从插件自身位置推断 profile（正常形态），显式名字优先 (0.949917ms)
+✔ setup-config：GET/POST /mobile/setup 的 HTTP 契约 (10.260541ms)
+▶ setup-config：profile 名解析（软链安装 + 显式 desktop）
+  ✔ ★★ 软链形态（模块在仓库里、路径没有 profiles/）+ 显式 desktop ⇒ 必须解析成 desktop (0.475917ms)
+  ✔ ★★ 没给 profile 名、路径也推不出 ⇒ **必须失败**（绝不返回 web 这条生产 profile ✗） (0.925875ms)
+  ✔ ★ 正常形态（profiles/web/node_modules/…）⇒ 仍解析成 web（防回归：老布局不许被这次修复改坏） (0.604458ms)
+  ✔ ★ 恶意/畸形 profile 名仍被拒（`../../etc`、`a/b`、`.`、`..`、非字符串 ⇒ 明确失败） (0.618125ms)
+✔ setup-config：profile 名解析（软链安装 + 显式 desktop） (2.767ms)
+▶ setup-config：脚本与页面写出的 config 必须逐字节相同
+  ✔ ★★ install-host-plugin.mjs --config-only 的输出 == 共用模块 writeConfigOnlyPatch 的输出 (83.289166ms)
+✔ setup-config：脚本与页面写出的 config 必须逐字节相同 (83.356542ms)
+▶ setup-config：install-host-plugin.mjs 的 --profile 落到文件路径上
+  ✔ ★★ `--profile desktop --config-only` ⇒ 写的是 profiles/desktop/…（不是 web ✗） (76.716833ms)
+  ✔ ★ profile 名不合法 ⇒ 明确报错退出（绝不"当没看见"接着写 web ✗） (66.969583ms)
+✔ setup-config：install-host-plugin.mjs 的 --profile 落到文件路径上 (143.760834ms)
+▶ setup-config：cordis.ts 里的注册与两道防护
+  ✔ ★★ 注册在 /mobile/setup 上，且两道防护都在：跨源/DNS rebinding 被**栅栏**拦、非回环被**闸门**拦 (19.54075ms)
+✔ setup-config：cordis.ts 里的注册与两道防护 (19.585667ms)
+▶ setup-config：本机配置页 GET /mobile/setup/page
+  ✔ ★★ /mobile/setup/page 返回 HTML（content-type 含 text/html）且带表单元素 (0.723792ms)
+  ✔ ★★ GET /mobile/setup 仍是 JSON、字段一个不多一个不少（防回归：那是既有契约） (0.406334ms)
+  ✔ ★ 页面**自包含**：整页不含任何绝对 URL，也没有 src / link / @import（本机小页不该依赖网络） (0.133542ms)
+  ✔ ★ 保留键（relay* / publicBaseUrl）在页面上有落点：隐藏字段带着它们 (0.036916ms)
+  ✔ ★★ 有 current ⇒ 用它预填（含 relay*），提交时**整份**回写 (22.736667ms)
+  ✔ ★★ 只有 current 为 null 时才用 suggested 预填（已有配置的机器不许被 suggested 覆盖） (22.775417ms)
+  ✔ ★ current.listener.plain/tls 是 null（= 没写、用插件默认）⇒ 表单留空、提交时**不发**这个键 (21.083208ms)
+  ✔ ★ 保存成功 ⇒ 显示"已保存：写了 N 项 ✓ 已即时生效（不用重启 DSH），手机现在可以连了" (22.692791ms)
+  ✔ ★ 保存失败（400/403）⇒ **原样**显示服务端那句 message（别自己编） (45.617375ms)
+  ✔ ★ 读状态失败（页面自己打不开接口）⇒ 也把原因说出来，不许停在"正在读取…" (11.641167ms)
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=E7:DE:17:71:C1:95:0F:1D:E6:98:67:F6:7B:A0:C5:CC:CA:C6:AF:3A:6E:F2:65:30:01:D5:5F:1E:7C:FF:6A:2D（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-setup-page-route-cJdNdZ/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[mobile-host] 手机入口地址：自动探测到本机局域网地址 10.34.128.67（scripts/detect-lan-ip.mjs；要换用 --lan-ip，要关掉自动推导用 --no-lan-autodetect）
+[mobile-host] ★★ 已替你把手机入口地址写进配置：trustedHosts += 10.34.128.67:3081、10.34.128.67:3443；phoneBaseUrl = https://10.34.128.67:3443；extraEndpoints += https://10.34.128.67:3443（配对票据的 endpoints 就取自这里 + publicBaseUrl）
+[mobile-host]     依据：手机只能走局域网，而 DSH 自己只绑回环（127.0.0.1）；上面这些是本次解析出的监听端口。
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=B5:0E:48:05:06:A2:D9:4B:B0:08:14:23:71:79:EE:B0:A8:CC:4D:A4:CE:87:B4:71:D0:3A:30:FB:8A:A1:15:A2（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-profile-wire-zwr3vj/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[mobile-host] 手机入口地址：自动探测到本机局域网地址 10.34.128.67（scripts/detect-lan-ip.mjs；要换用 --lan-ip，要关掉自动推导用 --no-lan-autodetect）
+[mobile-host] ★★ 已替你把手机入口地址写进配置：trustedHosts += 10.34.128.67:3081、10.34.128.67:3443；phoneBaseUrl = https://10.34.128.67:3443；extraEndpoints += https://10.34.128.67:3443（配对票据的 endpoints 就取自这里 + publicBaseUrl）
+[mobile-host]     依据：手机只能走局域网，而 DSH 自己只绑回环（127.0.0.1）；上面这些是本次解析出的监听端口。
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[mobile-host] 接入配置已写入 /var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-profile-wire-zwr3vj/profiles/desktop/cordis.patch.yml（phoneBaseUrl）
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=29:D3:AB:0F:A5:FD:87:9B:CA:0F:A1:FB:B7:92:70:E2:A8:78:C5:14:88:08:EB:2D:CA:95:26:41:18:42:E6:6C（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-profile-wire-none-KhBNmC/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=F0:73:50:D3:23:CA:A2:01:A4:D4:D9:72:34:B3:E4:57:53:55:1C:97:96:CE:D1:CB:2A:18:98:DF:04:7B:B5:33（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-profile-wire-mismatch-J3E3iL/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[mobile-host] 手机入口地址：自动探测到本机局域网地址 10.34.128.67（scripts/detect-lan-ip.mjs；要换用 --lan-ip，要关掉自动推导用 --no-lan-autodetect）
+[mobile-host] ★★ 已替你把手机入口地址写进配置：trustedHosts += 10.34.128.67:3081、10.34.128.67:3443；phoneBaseUrl = https://10.34.128.67:3443；extraEndpoints += https://10.34.128.67:3443（配对票据的 endpoints 就取自这里 + publicBaseUrl）
+[mobile-host]     依据：手机只能走局域网，而 DSH 自己只绑回环（127.0.0.1）；上面这些是本次解析出的监听端口。
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=57:FA:82:73:FE:77:B5:4B:8A:FA:24:97:26:C6:DF:66:8E:7B:97:0A:49:17:A1:A0:CA:CD:EA:CB:F1:58:A7:A9（**新建**，手机需重装一次根证书） 目录=/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-profile-wire-config-3TllhB/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[mobile-host] 手机入口地址：自动探测到本机局域网地址 10.34.128.67（scripts/detect-lan-ip.mjs；要换用 --lan-ip，要关掉自动推导用 --no-lan-autodetect）
+[mobile-host] ★★ 已替你把手机入口地址写进配置：trustedHosts += 10.34.128.67:3081、10.34.128.67:3443；phoneBaseUrl = https://10.34.128.67:3443；extraEndpoints += https://10.34.128.67:3443（配对票据的 endpoints 就取自这里 + publicBaseUrl）
+[mobile-host]     依据：手机只能走局域网，而 DSH 自己只绑回环（127.0.0.1）；上面这些是本次解析出的监听端口。
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] DSH 前端 dist/index.html = /private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-copy-h03Eh8/install/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html（锚：file:///private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-copy-h03Eh8/profiles/web/node_modules/@dsh-mobile/host/lib/cordis.js）
+[dsh-mobile] DSH 前端 dist/index.html = /private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-fallback-H1AqSN/install/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html（锚：/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-fallback-H1AqSN/install/lib/bin.js）
+[dsh-mobile] ★ 定位 DSH 前端失败（手机端拿不到应用外壳 dist/index.html；插件其余功能照常）：试了 3 条路都没解析到 @deepseek-ai/dsh-web-frontend：1) 运行中 DSH 的安装锚（ctx.get('profileContext').installAnchor）（锚：/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-nodist-lwHbm8/install/package.json）⇒ 解析到了前端包（/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-nodist-lwHbm8/install/node_modules/@deepseek-ai/dsh-web-frontend/package.json）但它旁边没有 /private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-nodist-lwHbm8/install/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html；2) 正在运行的进程入口（process.argv[1]）（锚：(没有这个锚)）⇒ 本次运行拿不到这个锚（老版本 DSH 不提供 profileContext，或进程没有脚本入口）；3) 插件自身位置（import.meta.url；**拷贝安装**下这条路是对的）（锚：(没有这个锚)）⇒ 本次运行拿不到这个锚（老版本 DSH 不提供 profileContext，或进程没有脚本入口）
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=4E:BF:A4:6D:F4:63:82:AC:91:E4:A6:0E:43:F0:9F:E7:75:A2:DA:5D:98:89:D3:21:FF:5B:A6:37:1F:3A:29:13（**新建**，手机需重装一次根证书） 目录=/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-apply-fg9kOO/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[dsh-mobile] DSH 前端 dist/index.html = /private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-apply-fg9kOO/install/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html（锚：/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-apply-fg9kOO/install/package.json）
+[dsh-mobile] 没配 listener.enabled ⇒ **默认开启局域网监听**（0.0.0.0:3081 与 0.0.0.0:3443）；不想要就在你的 config 里写 listener: { enabled: false }（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 trustedHosts ⇒ 按本机地址用 10.34.128.67（端口 3081 与 3443）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 publicBaseUrl ⇒ 用 http://10.34.128.67:3081（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 phoneBaseUrl ⇒ 用 https://10.34.128.67:3443（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 没配 extraEndpoints ⇒ 按 https 那条补上 https://10.34.128.67:3443（手机只走 https ✓，'
+        + '只广告明文会让它连不上 ✓）（如果这不是你要的，就在插件 config 里显式写好它）
+[dsh-mobile] 自签 TLS 就绪：CA=C4:DF:B9:EF:8D:2C:D1:DF:88:A8:28:01:A6:76:A7:53:63:1A:EE:FF:BA:00:05:2B:25:F0:B1:DF:A1:73:40:81（**新建**，手机需重装一次根证书） 目录=/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-dist-apply-bad-iXKdNP/storages/dsh-mobile/tls
+[dsh-mobile] HTTPS 监听就绪（自签证书，手机需接受一次警告）：手机请访问 https://<电脑局域网IP>:3443/mobile
+[dsh-mobile] 为什么必须 HTTPS：普通 HTTP 下页面不是安全上下文，crypto.subtle 不存在。
+[dsh-mobile] 手机选择应答未挂载（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 审批推送已挂载（通道：ctx.on(session/event)）
+[dsh-mobile] 手机裁决已挂载（approval/request, prepend；60 秒无人应答 ⇒ 交回桌面卡）
+[dsh-mobile] 还没配置手机接入 ⇒ 在本机浏览器打开 http://127.0.0.1:3711/mobile/setup/page 配一次（即时生效，不用重启 DSH）
+[dsh-mobile] 注册 agent 工具失败（其余功能不受影响）： Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-tools' imported from /Volumes/Data/workspace/工程设计/dsh-mobile/packages/host/src/cordis.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:316:9)
+    at packageResolve (node:internal/modules/esm/resolve:768:81)
+    at moduleResolve (node:internal/modules/esm/resolve:858:18)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at #cachedDefaultResolve (node:internal/modules/esm/loader:757:20)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:734:38)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:317:38)
+    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:685:36)
+    at TracingChannel.tracePromise (node:diagnostics_channel:350:14)
+    at ModuleLoader.import (node:internal/modules/esm/loader:684:21) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3081（明文）失败：listen EADDRINUSE: address already in use 0.0.0.0:3081
+[dsh-mobile] 0.0.0.0:3081 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3081 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+[dsh-mobile] 监听 0.0.0.0:3443（HTTPS）失败：listen EADDRINUSE: address already in use 0.0.0.0:3443
+[dsh-mobile] 0.0.0.0:3443 被占用（EADDRINUSE）——可能上一次的 lan-proxy 或旧插件实例还活着。本插件**不会自动换端口**（换了手机上的地址就变了）：请先结束占用者，或用 lsof -iTCP:3443 -sTCP:LISTEN 查看是谁。
+[dsh-mobile] IPv6 监听未启用（EADDRINUSE）——局域网不受影响
+  ✔ ★★ 读状态被**明确拒绝**（500 + 服务端那句 message，例如"认不出这是哪个 profile"）⇒ 原样显示 (12.34825ms)
+  ✔ ★ 页面里的「端点 ⇒ 受信列表」与宿主 withEndpointAuthorities **结论相同**（防两份实现漂移） (0.589667ms)
+  ✔ ★ 非本机 ⇒ 页面也 403（闸门在**分派之前**：新路径不能开后门） (0.447792ms)
+  ✔ ★★ 走**真插件**那条路：注册的 prefix 路由接得住 /mobile/setup/page，且栅栏与闸门都还在 (4.124541ms)
+✔ setup-config：本机配置页 GET /mobile/setup/page (165.632875ms)
+▶ setup-config：启动时那行"还没配置"提示
+  ✔ ★★ 没配置 ⇒ 打一行带**完整 URL** 的提示；端口取自 ctx.webServer.port（不许硬编码 3080） (2.561292ms)
+  ✔ ★★ 已配置 ⇒ 不打那一行（别每次启动都刷屏） (2.426333ms)
+  ✔ ★ 读不到端口 ⇒ 退化成**只打路径**并如实说明（不猜端口、也给不出打不开的链接） (2.392167ms)
+✔ setup-config：启动时那行"还没配置"提示 (7.42825ms)
+▶ setup-config：profile 名从 ctx.get('profileContext') 来（真机事故的端到端守门人）
+  ✔ ★★ 软链安装 + profileContext.name=desktop ⇒ profilePath **就是 desktop 那份**（老实现给的是 web ✗） (2.876208ms)
+  ✔ ★★ 认不出 profile ⇒ 500 + 一句人话；**绝不**拿 web 顶上，也不写盘；页面照样打得开 (2.527709ms)
+  ✔ ★ 配置里的 profile 与运行中的**不一致** ⇒ 以运行中的为准，并打一行警告（不静默 ✗） (2.497708ms)
+  ✔ ★ 老 DSH 没有 profileContext ⇒ 仍认 `config.profile`（老布局那条路不许被弄坏 ✓） (2.969708ms)
+✔ setup-config：profile 名从 ctx.get('profileContext') 来（真机事故的端到端守门人） (10.935667ms)
+▶ cordis：DSH 前端定位（软链安装 + 运行中 DSH 的安装锚）
+  ✔ ★ readProfileContextInstallAnchor：按**类型里那个字段名**取，畸形值一律当作"没有"（不猜 ✗） (0.102708ms)
+  ✔ ★★ 软链形态（模块 URL 在仓库里）+ 安装锚 ⇒ **解析到前端**（老实现返回裸 undefined ✗） (1.169417ms)
+  ✔ ★ 拷贝形态（模块 URL 在 profile 里）⇒ 与原行为**同一条路径**（老布局不许被这次修复改坏 ✓） (1.313083ms)
+  ✔ ★ 第 ① 条锚指到没有前端的目录 ⇒ 记下失败、**退到第 ② 条**（进程入口）并成功 (1.161416ms)
+  ✔ ★★ 三条路全失败 ⇒ undefined **且**原因里含"试了哪几条、各自栽在哪"；日志只打一行（不静默、也不刷屏） (0.5065ms)
+  ✔ ★ 解析到前端包但 `dist/index.html` 不在 ⇒ 也算失败（并说清缺的是哪个文件 ✓） (0.6265ms)
+  ✔ ★ 503 文案：解析失败时**带上原因**（形状就是验收里那句 ✓） (0.029459ms)
+  ✔ ★★ 端到端（真 apply()）：软链形态 + profileContext.installAnchor ⇒ 外壳可用；坏锚 ⇒ 503 **带原因**且日志有声 (5.125625ms)
+✔ cordis：DSH 前端定位（软链安装 + 运行中 DSH 的安装锚） (10.100166ms)
+✖ packages/host/test/setup-config.test.ts (14875479.854416ms)
+▶ ensureTlsMaterial：首启生成、再次复用
+  ✔ 缺就生成：10 年 CA（CA:TRUE）+ 由它签发的服务器证书 + SAN 覆盖当前地址 (8.420625ms)
+  ✔ 已有就复用：第二次调用不新建 CA、不重签叶子、指纹一个字节都不变 (2.183167ms)
+  ✔ 地址变了 ⇒ 用**同一张 CA** 重签叶子（手机信任不受影响） (6.662083ms)
+  ✔ 叶子与当前 CA 不是一对（手工换过 CA）⇒ 即使 SAN 覆盖也要重签 (2.738917ms)
+  ✔ 失败**不抛错**：目录位置被一个文件占住 ⇒ ok:false 且带原因（不许静默） (4.452375ms)
+  ✔ CA 文件被写坏（半截内容）⇒ 不当成"有证书"，而是重生成 (5.40575ms)
+✔ ensureTlsMaterial：首启生成、再次复用 (30.600125ms)
+▶ createTlsManager：宿主侧的注入面
+  ✔ status() 首次调用会自动 ensure；readCaPem 读得到同一份 CA (2.017542ms)
+  ✔ addresses 是函数 ⇒ **每次 ensure 按当时网卡现算**（换网后 SAN 跟着变） (1.97425ms)
+  ✔ onResult 回调拿到与返回值一致的状态（cordis 用它打日志） (1.390708ms)
+✔ createTlsManager：宿主侧的注入面 (5.498708ms)
+▶ 壁纸解析
+  ✔ Windows 注册表输出（含带空格的路径） (1.773041ms)
+  ✔ Windows 输出里没有 WallPaper ⇒ 认不出（不猜） (0.063583ms)
+  ✔ macOS defaults 输出（带引号与不带引号都认） (0.111167ms)
+  ✔ ★ Windows 全链路：解析到、文件在、格式认识 ⇒ 成功 (0.16175ms)
+  ✔ ★ 读注册表失败 ⇒ 说人话（不编路径） (0.089792ms)
+  ✔ ★★ 中文 Windows：先走 PowerShell（UTF-8），拿到的非 ASCII 路径要原样可用 (0.3545ms)
+  ✔ ★ PowerShell 不可用 ⇒ 回退 reg query（纯 ASCII 路径仍能work） (0.057916ms)
+  ✔ ★ 文件不在了 / 不是图片 ⇒ 都如实说，且**不退回截屏** (0.067625ms)
+  ✔ ★ macOS：旧接口读不到就退 osascript；都失败时说清原因 (0.185792ms)
+  ✔ 不支持的平台如实说，不猜 (0.0835ms)
+  ✔ 后缀 ⇒ MIME（认识的才给） (0.046625ms)
+  ✔ ★ 现代位置：plist 里有 Files ⇒ 取该路径（优先 AllSpacesAndDisplays） (0.135834ms)
+  ✔ ★★ Files 里有 <string>/Users/me/a.png</string> ⇒ 返回该路径 (0.049125ms)
+  ✔ ★ 优先段里没有路径 ⇒ 退回全文扫（SystemDefault 里的也能找到） (0.039583ms)
+  ✔ ★ 现代位置：Files 为空（动态/航拍壁纸，`<array/>`）⇒ 没有路径，返回 undefined (0.054625ms)
+  ✔ ★ 路径里的 XML 转义 ⇒ 做最小反转义（&amp; &lt; &gt; &quot; &apos;） (0.049792ms)
+  ✔ ★ 现代位置：不是 XML / 截断了 ⇒ undefined，且**不抛错** (0.035416ms)
+  ✔ ★★ macOS 全链路：现代位置给路径且文件在 ⇒ 成功，且只问 plutil (0.06825ms)
+  ✔ ★★ 动态（航拍）壁纸：没有文件路径 ⇒ 人话失败，且**不提截屏** (0.070666ms)
+  ✔ ★★★ 本机真实结构（Files 空 + NeptuneOne）⇒ undefined（不是解析失败，是真没有路径） (0.111792ms)
+✔ 壁纸解析 (4.640208ms)
+▶ websocket：单帧声明长度预检（先比上限，再等数据）
+  ✔ ★ 声明超大长度的帧在只有帧头时就被拒绝（不去等载荷、不拖大缓冲） (0.640959ms)
+  ✔ 边界：恰好等于上限的声明不被误伤（数据不足时仍是"等更多字节"） (0.437834ms)
+  ✔ 边界：比上限多 1 字节就拒绝 (0.078458ms)
+  ✔ 控制帧的 125 字节限制优先于消息上限（Ping 早有约束，不受影响） (0.059583ms)
+  ✔ 不传上限时保持旧行为（向后兼容直接调用解码器的调用方） (0.058083ms)
+✔ websocket：单帧声明长度预检（先比上限，再等数据） (2.660458ms)
+▶ websocket：连接层只喂帧头即关闭（证明"不缓冲"）
+  ✔ ★ 声明的帧长超过 maxMessageBytes 时立即按协议错误关连接，且无需发送载荷 (0.551208ms)
+✔ websocket：连接层只喂帧头即关闭（证明"不缓冲"） (0.601667ms)
+▶ workspace-files：分块写入（上传的宿主侧）
+  ✔ 单块写入：字节逐一一致 (11.800917ms)
+  ✔ 多块续写：拼起来与源一致（含最后一块不是整块的边界） (6.886291ms)
+  ✔ 首块 truncate=true 会清掉旧文件的长尾（否则会留上一版的尾巴） (1.479833ms)
+  ✔ 空文件也能被创建（上传空文件不该什么都不做） (1.144708ms)
+  ✔ 拒绝工作区外的路径（上传不能成为往任意位置写的后门） (0.968542ms)
+  ✔ 拒绝用写入覆盖一个目录 (0.680042ms)
+  ✔ 写入后再读回：往返一致（下载走的就是 readChunk） (1.505875ms)
+[mobile-host] 拒绝写入指向工作区外的符号链接：/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-files-root-FHYgYj/out-link.bin → /private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-files-out-w5MWAX/escaped.bin
+  ✔ ★ 拒绝写入指向工作区外的符号链接（终段不能跟随链接写穿工作区根） (1.234542ms)
+[mobile-host] 拒绝写入断链符号链接：/private/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-files-root-FHYgYj/dangling-link.bin
+  ✔ ★ 断链的符号链接也拒绝（realpath 失败不等于可以放行——open 会替它创建目标） (0.923917ms)
+  ✔ 指向工作区内的符号链接仍可写（pnpm 工作区里合法链接很多，不能一刀切拒绝） (2.064291ms)
+✔ workspace-files：分块写入（上传的宿主侧） (29.523333ms)
+▶ workspace-files：目录列举的 payload（手机打开大目录要等几秒的就是它）
+  ✔ 列举条目只回 name/type/size（路径由客户端用目录 + 名字拼） (18.736584ms)
+  ✔ 单个条目的接口仍回完整字段（mkdir / rename 的返回值不受影响） (0.4815ms)
+✔ workspace-files：目录列举的 payload（手机打开大目录要等几秒的就是它） (19.331084ms)
+▶ 二进制值编码
+  ✔ 字节数组往返无损（类型也要回来） (0.869084ms)
+  ✔ ArrayBuffer 也认；空数组不炸 (0.239042ms)
+  ✔ ★ 嵌套也要认（对象里、数组里、再深一层） (0.21925ms)
+  ✔ ★ 非二进制一个字节都不许动（含 null / 布尔 / 数字 / 字符串） (0.089791ms)
+  ✔ ★ 不猜：多一个键就不当标记 (0.058666ms)
+  ✔ ★ 真实数据里同名的普通对象会被当标记（已知取舍，写清楚） (0.047041ms)
+✔ 二进制值编码 (2.947375ms)
+▶ 按 DSH 附件表还原字节（applyAttachments）
+  ✔ 把 result 里的 null 占位换成真 Uint8Array（路径照 DSH，相对 result） (0.106583ms)
+  ✔ 多个附件、不同路径都认得 (0.056375ms)
+  ✔ ★ 占位不是 null ⇒ 抛错（跟着 DSH 的硬校验走，别悄悄覆盖真值） (0.176041ms)
+  ✔ ★ 路径走不通 ⇒ 抛错（不猜它该放哪） (0.090459ms)
+  ✔ 没有附件 ⇒ 原样返回（不动任何东西） (0.042ms)
+✔ 按 DSH 附件表还原字节（applyAttachments） (0.569625ms)
+▶ 附件还原：占位判据实测修正（2026-10-04）
+  ✔ ★★ undefined 也算占位（真机日志证明实际就是它 —— JSON 会丢掉 undefined 键） (0.925291ms)
+  ✔ ★ 真正的值仍拒绝替换（不覆盖上游真值） (0.191625ms)
+✔ 附件还原：占位判据实测修正（2026-10-04） (1.20825ms)
+✔ 完整握手：双方派生出一致的会话密钥与会话标识 (10.80975ms)
+✔ 会话密钥可双向往返加解密业务帧 (1.340917ms)
+✔ 重放同一帧必须被拒绝 (1.809417ms)
+✔ 重放窗口允许窗口内重排，拒绝窗口外与超前 (0.100667ms)
+✔ 篡改后的密文无法通过认证 (0.90675ms)
+✔ 伪造宿主签名会被客户端拒绝（防中间人） (0.500792ms)
+✔ 宿主身份密钥变化会被已固定指纹的客户端拒绝（TOFU） (0.974167ms)
+✔ 未知设备与未配对票据被拒绝 (0.351833ms)
+✔ 协议版本不匹配时双方都明确拒绝 (0.2ms)
+✔ 篡改客户端确认 MAC 会被宿主拒绝 (0.8385ms)
+✔ 请求的能力位不会超过宿主策略（能力下调） (1.927459ms)
+✔ 指纹格式化稳定（人工比对用） (0.336417ms)
+✔ 签名输出为 raw 64 字节，且能被自身验签 (0.323584ms)
+✔ DER ↔ raw 签名互转可往返 (2.693875ms)
+✔ 公钥是 65 字节未压缩点，指纹稳定 (0.119334ms)
+✔ 拒绝长度错误的签名（防止 DER/raw 混用被静默接受） (0.098208ms)
+✔ 流式产出按顺序完整送达并以 end 结束 (2.199875ms)
+✔ 宿主侧异常变成流错误并携带稳定错误码 (2.134417ms)
+✔ 客户端取消会中止宿主侧上游迭代（不泄漏） (1.730584ms)
+✔ AbortSignal 触发取消，且迭代器提前退出也会取消 (4.310083ms)
+✔ 多个流互不干扰，编号独立 (2.036667ms)
+✔ 并发流超过上限时返回背压错误而不是无限排队 (1.632ms)
+✔ 通道关闭时所有活动流以错误结束，且后续 open 抛错 (0.408375ms)
+✔ 重复使用同一流编号被拒绝（协议误用防护） (1.400042ms)
+✔ toWireError 保留 code/details 且对非对象异常也安全 (0.172125ms)
+✔ endpoint.send 返回 Promise 时，宿主会等待背压而不是丢弃产出项 (1.655625ms)
+ℹ tests 1069
+ℹ suites 163
+ℹ pass 1067
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14877162.618958
+
+✖ failing tests:
+
+test at packages/host/test/codex/codex-bridge.test.ts:66:3
+✖ 增量进事件流；审批挂起等手机裁决，裁决后 turn 才收尾 (34.02125ms)
+  AssertionError [ERR_ASSERTION]: 至少两段增量
+      at TestContext.<anonymous> (file:///Volumes/Data/workspace/%E5%B7%A5%E7%A8%8B%E8%AE%BE%E8%AE%A1/dsh-mobile/packages/host/test/codex/codex-bridge.test.ts:75:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async Test.run (node:internal/test_runner/test:1113:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1516:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at packages/host/test/setup-config.test.ts:1:1
+✖ packages/host/test/setup-config.test.ts (14875479.854416ms)
+  'test failed'

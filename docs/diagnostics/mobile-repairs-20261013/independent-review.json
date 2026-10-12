@@ -1,0 +1,12 @@
+{
+  "status": "provider_failed",
+  "provider": "MiMo-V2.6-Pro",
+  "error": "exceeded retry limit, last status: 429 Too Many Requests",
+  "reviewedSnapshot": "56937e65f7ceed2363e2ac393a02b58d91f56fb7",
+  "completedReviewReport": false,
+  "snapshotFiles": 628,
+  "snapshotBytesUnchanged": true,
+  "parentGitDiffEmpty": true,
+  "primaryOwnsFinalReview": true,
+  "differentModelProviderRetried": false
+}

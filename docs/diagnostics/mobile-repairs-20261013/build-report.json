@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "bf1ce7e9e4f6bbe225361f95f41176110e66d594",
+  "stage": "/private/tmp/dshm-repairs-final-build-20261013-2q02_rs2",
+  "exitCode": 0,
+  "durationSeconds": 1.285,
+  "log": "/private/tmp/dshm-repairs-build-20261013.log",
+  "untrackedUserWipIncluded": false,
+  "codexAssetFallback": "same commit packages/host/lib/assets/codex/ui.js"
+}

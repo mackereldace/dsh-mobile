@@ -1,0 +1,951 @@
+{
+  "sourceCommit": "bf1ce7e9e4f6bbe225361f95f41176110e66d594",
+  "owned": [
+    "packages/host/lib/dsh-question.js",
+    "packages/host/lib/dsh-question.js.map",
+    "packages/host/lib/dsh-question.d.ts",
+    "packages/host/lib/dsh-question.d.ts.map",
+    "packages/host/lib/boot.js",
+    "packages/host/lib/assets/dsh-chat/app.js",
+    "packages/host/lib/assets/dsh-chat/ui.js",
+    "packages/host/lib/assets/dsh-chat/native-tokens.css",
+    "packages/host/lib/assets/dsh-chat/native.css",
+    "packages/host/lib/assets/dsh-chat/shell.js",
+    "packages/host/lib/assets/dsh-chat/stats.js"
+  ],
+  "generatedDifferences": [
+    {
+      "path": "packages/host/lib/app-icons-asset.d.ts.map",
+      "owned": false,
+      "sha256": "44b4c28ecc52a601c923646a09d379dd2c4db2075aa7a43dcfcef5a274a2a730"
+    },
+    {
+      "path": "packages/host/lib/app-icons-asset.js.map",
+      "owned": false,
+      "sha256": "f9c789c6f9a003db16c45f5396574f31c649a51a10c2b22280fa9d23a46ed51f"
+    },
+    {
+      "path": "packages/host/lib/app-icons.d.ts.map",
+      "owned": false,
+      "sha256": "afc162fbb5b177e38b0c641205499ba1349b75a582ae80cc14f2262d918e00ec"
+    },
+    {
+      "path": "packages/host/lib/app-icons.js.map",
+      "owned": false,
+      "sha256": "5fdc01f05f7a98432c5cd41ae23f160871c77e47c0a9f69465d238fc94292b0c"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/app.js",
+      "owned": true,
+      "sha256": "53cd4534146ce7e82ea7cd8705a17d83c96d7a41632ae8d670aed11b428e3427"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/native-tokens.css",
+      "owned": true,
+      "sha256": "c67a35f10110ca476cd746b211459021e68cbd40b1a2ea2267a7bcffd79ccc59"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/native.css",
+      "owned": true,
+      "sha256": "3b7f763ce3fbb519c3fe2ff45a728fef76f5e6afd5d3ef2f6f22a57c2238fb6c"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/shell.js",
+      "owned": true,
+      "sha256": "6db96d28f4592a9234f43f55cacdcd12e0e5a2e282ef8632193b523eeb6fac52"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/stats.js",
+      "owned": true,
+      "sha256": "0fcfaf09b64ea67878cc6e4425570603a298ae8304e3b5b8fb880c0f4937ae48"
+    },
+    {
+      "path": "packages/host/lib/assets/dsh-chat/ui.js",
+      "owned": true,
+      "sha256": "6ffa2cfed6dacf265fa812ce3449e833a87cf60bec78049032cea1a7ab42f5b0"
+    },
+    {
+      "path": "packages/host/lib/boot.js",
+      "owned": true,
+      "sha256": "a8a276eda2672c495e7c5ef0c67ee5ae87a7f122ccaa9f83e4b2372044a4ec0f"
+    },
+    {
+      "path": "packages/host/lib/client-source.d.ts.map",
+      "owned": false,
+      "sha256": "2626768bf443e349024329c4b628f62a1a26fc3624a648d5bdb01ad4153a8ed5"
+    },
+    {
+      "path": "packages/host/lib/client-source.js.map",
+      "owned": false,
+      "sha256": "09ec8d1ffb144023605307754bafa7af85c7c4c28aa776088aa40a9d0f0485eb"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-bridge.d.ts.map",
+      "owned": false,
+      "sha256": "e94987484f02526b9720dbea657cc100d2a961dd83101cc71d795f0ff9f8dfc3"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-bridge.js.map",
+      "owned": false,
+      "sha256": "e24c241fef654299bd590df3c5302e67aae8d48116e3cd7240afddecd608e6e4"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-page.d.ts.map",
+      "owned": false,
+      "sha256": "9322405d5ba8a52c1b3ad838e689536566e088695bd67ddc792afbef66d97260"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-page.js.map",
+      "owned": false,
+      "sha256": "ca9cee21c484fbb44fb8f9a6c03de424fbdb4dfdd9de9e08b07c240b350ac5f1"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone-cli.d.ts.map",
+      "owned": false,
+      "sha256": "3f7eaf737a8e1cc489741f65dbc807dc3895b83b989ed5288d869ea32f286646"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone-cli.js.map",
+      "owned": false,
+      "sha256": "366f125f4558f8069540313724258d0b576af6cca48a3ece412d553211c0648a"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone.d.ts.map",
+      "owned": false,
+      "sha256": "fcdb23b3f20bf7b3f6cbd35ba3e83f54f8955c12d86325f6f3a05489fff514ef"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone.js.map",
+      "owned": false,
+      "sha256": "6279bcb278024190b20959f981d6431cb29ab0feebfe8e440ca7d7147f9b5fc2"
+    },
+    {
+      "path": "packages/host/lib/cordis.d.ts.map",
+      "owned": false,
+      "sha256": "022a369e345186cbbec57be534920a69fa3a3c5be46723e71395946407ad913c"
+    },
+    {
+      "path": "packages/host/lib/cordis.js.map",
+      "owned": false,
+      "sha256": "4076c3257e9125364407327d306232f56979d86343daa361e22f20c13cfa0f4f"
+    },
+    {
+      "path": "packages/host/lib/desktop-shot.d.ts.map",
+      "owned": false,
+      "sha256": "1cd8f68757ae62c54d22df4380c9627899e81510ec858cae1239d15a6800db3b"
+    },
+    {
+      "path": "packages/host/lib/desktop-shot.js.map",
+      "owned": false,
+      "sha256": "4b8cdef1270999a50b127f7f367dbd6c6d09fe8c77ad5f96ca0a0b3332f8e401"
+    },
+    {
+      "path": "packages/host/lib/device-calls.d.ts.map",
+      "owned": false,
+      "sha256": "577e537ed2e084c8e2de5141d7f677e613c0e6ff68fa1bf6538e8bd6c628499b"
+    },
+    {
+      "path": "packages/host/lib/device-calls.js.map",
+      "owned": false,
+      "sha256": "a1a896992b7038a691669e48e57b35f2e5fa70c4a6e8b69addb9a0aa68bf9209"
+    },
+    {
+      "path": "packages/host/lib/devices.d.ts.map",
+      "owned": false,
+      "sha256": "7952be5179dd1fb9154ec7149ed75fc8cd7f5874ab9c64e1237f024106f2e6a6"
+    },
+    {
+      "path": "packages/host/lib/devices.js.map",
+      "owned": false,
+      "sha256": "e17b49e1ab5fc05c09003975a365652120b975b70d669d3529db3c66a0d9c5a4"
+    },
+    {
+      "path": "packages/host/lib/dsh-approval.d.ts.map",
+      "owned": false,
+      "sha256": "229dc449d0b34345384ac94532d79d61fdd1376c2d736eedf19f45eb70b7b593"
+    },
+    {
+      "path": "packages/host/lib/dsh-approval.js.map",
+      "owned": false,
+      "sha256": "6c1b1845522741fbb2a196bfdd1a5cbd9e1fe4beb12de6f82d0551819b91645c"
+    },
+    {
+      "path": "packages/host/lib/dsh-chat-bridge.d.ts.map",
+      "owned": false,
+      "sha256": "5b3de4fb1944352c05cc73991edc5995799374bb17c3aed84d17ea736d12ac6e"
+    },
+    {
+      "path": "packages/host/lib/dsh-chat-bridge.js.map",
+      "owned": false,
+      "sha256": "964109bc74d90c7eb18d3e78c53e3cd7dde69febeab160646137bd90ba28a065"
+    },
+    {
+      "path": "packages/host/lib/dsh-probe.d.ts.map",
+      "owned": false,
+      "sha256": "57da2acb8db46a0051cb753767451c14a770a88b15305d66a8eb7c670a86d746"
+    },
+    {
+      "path": "packages/host/lib/dsh-probe.js.map",
+      "owned": false,
+      "sha256": "b1bdd6924ea62c3115bc3002721dc2a5ec3ea55aefb97525bd6d7215d6c7e604"
+    },
+    {
+      "path": "packages/host/lib/dsh-question.d.ts.map",
+      "owned": true,
+      "sha256": "7150eed6bf09469d395ad27968676d58fd98dadbe82b017dd4fa51bb756d7331"
+    },
+    {
+      "path": "packages/host/lib/dsh-question.js",
+      "owned": true,
+      "sha256": "c265cda3a47bff58cdb396d8c1613a3af470d31eb9f6a5927454cced92196a76"
+    },
+    {
+      "path": "packages/host/lib/dsh-question.js.map",
+      "owned": true,
+      "sha256": "cb2c3c4a752fd721f7027de7b65023dff71a35073780c7c824c4055e20d270b6"
+    },
+    {
+      "path": "packages/host/lib/dsh-version.d.ts.map",
+      "owned": false,
+      "sha256": "08df50180ec83ad5925dd03ec2aac01cbb9c4e77d71f3f0cae078569e4f25e13"
+    },
+    {
+      "path": "packages/host/lib/dsh-version.js.map",
+      "owned": false,
+      "sha256": "5f5fe549e9cb247a420b861e3ba1c1cad156a9a3b62f7fbb90cf121264d79b43"
+    },
+    {
+      "path": "packages/host/lib/gateway-rpc.d.ts.map",
+      "owned": false,
+      "sha256": "0152e3f7f42ae858f860edf9cb476f1f2937f1fedb127112ae09fb77239dc9e3"
+    },
+    {
+      "path": "packages/host/lib/gateway-rpc.js.map",
+      "owned": false,
+      "sha256": "236c93184998aa9c7207d93e205ffcbf50c627ef915374ea47b781952bddc2cd"
+    },
+    {
+      "path": "packages/host/lib/host-assets.d.ts.map",
+      "owned": false,
+      "sha256": "e0d747768b856cbfaa03483cc1bd5d1a66844ec6a95380afc4277b35c79568a7"
+    },
+    {
+      "path": "packages/host/lib/host-assets.js.map",
+      "owned": false,
+      "sha256": "8ed133d228b65c527588e9d2ed4ccf6fb285ac11127b64ae672ef4f9804b78f7"
+    },
+    {
+      "path": "packages/host/lib/index.d.ts.map",
+      "owned": false,
+      "sha256": "9d58256d07499d4935ab050cf79b9af6111f327106790f4e232d3bf59c9a091a"
+    },
+    {
+      "path": "packages/host/lib/index.js.map",
+      "owned": false,
+      "sha256": "76b42172e032393d0c36a92113530b269488eae78b5d82e366d7a58b24bd063d"
+    },
+    {
+      "path": "packages/host/lib/lan-listener.d.ts.map",
+      "owned": false,
+      "sha256": "9be00a87f443d081ee52e8741108eaf3eb584a24679cd525f86ae9ae4aae478c"
+    },
+    {
+      "path": "packages/host/lib/lan-listener.js.map",
+      "owned": false,
+      "sha256": "b7a14d19e0055a15f0ed8d1e5bb3911bffbc66a97256478e70006097eb95995e"
+    },
+    {
+      "path": "packages/host/lib/lan-trust.d.ts.map",
+      "owned": false,
+      "sha256": "4d557c3889984ffcf1f207a18e529bf7fe717725087cdbf31be8720bf495155a"
+    },
+    {
+      "path": "packages/host/lib/lan-trust.js.map",
+      "owned": false,
+      "sha256": "2027d7cbc6984830f91b2ac2be0cc5da4c00895f701b877186a0959c207144f2"
+    },
+    {
+      "path": "packages/host/lib/lan.d.ts.map",
+      "owned": false,
+      "sha256": "36f20b3bacadd5a989137c1eee3571480643870a2df4288d5c2c2f7ecfa7696d"
+    },
+    {
+      "path": "packages/host/lib/lan.js.map",
+      "owned": false,
+      "sha256": "a90f07d6146a8bc22353b412907498a2e224cd956853ed23a337026e77478371"
+    },
+    {
+      "path": "packages/host/lib/machine-config.d.ts.map",
+      "owned": false,
+      "sha256": "e38c0c02cd3c01322b0a333f0fb934c7b64be4f0525d0d5c2f81acddbd34d13a"
+    },
+    {
+      "path": "packages/host/lib/machine-config.js.map",
+      "owned": false,
+      "sha256": "3ac2006a46728cbac7ed160c7e27f2435cb190e8b9575ddb6cad98663212715d"
+    },
+    {
+      "path": "packages/host/lib/mobile-management.d.ts.map",
+      "owned": false,
+      "sha256": "14223673d6529cfc77b413c59e7334f172a61a642f7fc91e7924a84fadf3cf68"
+    },
+    {
+      "path": "packages/host/lib/mobile-management.js.map",
+      "owned": false,
+      "sha256": "19dddc5261bc604a6767e7310c35be443e71ce90e65ab4f98c7d3b5c1db3603d"
+    },
+    {
+      "path": "packages/host/lib/notify-text.d.ts.map",
+      "owned": false,
+      "sha256": "fa8147eda3223268181c386b4ffd02fcb9d6170b6a932d8a99876986293c1d68"
+    },
+    {
+      "path": "packages/host/lib/notify-text.js.map",
+      "owned": false,
+      "sha256": "fc8b2e2565efa07922db19fded22983fa7da1f0b75b02dddd4f53f55b8dfb3de"
+    },
+    {
+      "path": "packages/host/lib/open-in-app.d.ts.map",
+      "owned": false,
+      "sha256": "ab213b970a285362d76bb02b03bf6b9c8f46d4dac701f0441d0b2b4cb218d4a7"
+    },
+    {
+      "path": "packages/host/lib/open-in-app.js.map",
+      "owned": false,
+      "sha256": "01fe5c202ac74ba29c7dae23dfec2611f943ced4d93bcb126b65754db2b60763"
+    },
+    {
+      "path": "packages/host/lib/pairing-page.d.ts.map",
+      "owned": false,
+      "sha256": "01ce3d48e38a8a19c060ccd133a03650376f667417f63793e52013c667f1e62a"
+    },
+    {
+      "path": "packages/host/lib/pairing-page.js.map",
+      "owned": false,
+      "sha256": "d71edacc6c199df3d4018516fc87927e196d24967a03a2fa45e372b5c9f4f0f0"
+    },
+    {
+      "path": "packages/host/lib/protocol/binvalue.d.ts.map",
+      "owned": false,
+      "sha256": "b5011ba7f78ab901ff78daf5743d4b08dd441e30d37e2e2f9facfdfa5c4bbb15"
+    },
+    {
+      "path": "packages/host/lib/protocol/binvalue.js.map",
+      "owned": false,
+      "sha256": "97b6cdd9a94a3439b0d9ed132d7935a87b6c646439cc69a1406a53bc50615ab5"
+    },
+    {
+      "path": "packages/host/lib/protocol/crypto.d.ts.map",
+      "owned": false,
+      "sha256": "6ed49cc76b11928928729964250f524babd1ded21db372cbd0d9e2ded5d07ca1"
+    },
+    {
+      "path": "packages/host/lib/protocol/crypto.js.map",
+      "owned": false,
+      "sha256": "3b443ed6e3d431ada84702d2ef918295f6f58a9b363e8700d264abffd59b1898"
+    },
+    {
+      "path": "packages/host/lib/protocol/handshake.d.ts.map",
+      "owned": false,
+      "sha256": "6e0082b0061bcd3ace9b869a0a00c0c3ad86e4602eb7f28f51dc471aea136d9d"
+    },
+    {
+      "path": "packages/host/lib/protocol/handshake.js.map",
+      "owned": false,
+      "sha256": "93b7ae00e435313e0454ae48b0d8910d21de980bdd0b2248eb26e45490adb9fb"
+    },
+    {
+      "path": "packages/host/lib/protocol/index.d.ts.map",
+      "owned": false,
+      "sha256": "e1c05eb62cd3d73277134135c3534f66f9d13ce103ef864989b81e100b3ee264"
+    },
+    {
+      "path": "packages/host/lib/protocol/index.js.map",
+      "owned": false,
+      "sha256": "93c7de9d985cb621450ba97b1db67d394d351ee388b2315008ebd601f3101b72"
+    },
+    {
+      "path": "packages/host/lib/protocol/mux.d.ts.map",
+      "owned": false,
+      "sha256": "6107a0202ce48e4a861a2cea47d6af817405b9727203e5851465bd94c9fb9942"
+    },
+    {
+      "path": "packages/host/lib/protocol/mux.js.map",
+      "owned": false,
+      "sha256": "6bd90349c3e0faf407065afaccffcce4b175c9460b1814c40f6ad5ac3ad9be95"
+    },
+    {
+      "path": "packages/host/lib/protocol/wire.d.ts.map",
+      "owned": false,
+      "sha256": "c8f63375837c2a107ade3118491c798e4515611cf426be624d0446255923d49e"
+    },
+    {
+      "path": "packages/host/lib/protocol/wire.js.map",
+      "owned": false,
+      "sha256": "be69c19bb897a8fcdad3c6c2eeb8f971066df5a89ccfe12c8f077267befb3f5d"
+    },
+    {
+      "path": "packages/host/lib/setup-config.d.ts.map",
+      "owned": false,
+      "sha256": "00a3c4478142a4d8d4650629ab5e2f3356a8bb00e21f498f6432f9ab70bb24f6"
+    },
+    {
+      "path": "packages/host/lib/setup-config.js.map",
+      "owned": false,
+      "sha256": "3395824ee9db2e8889ed568404c3bef2dd8aecbdeecfcb50d1fbb6f7558baa38"
+    },
+    {
+      "path": "packages/host/lib/tls-cert.d.ts.map",
+      "owned": false,
+      "sha256": "eaa34f0bab595cca6805eed5569429bad9978a35646261221baad3159be329c6"
+    },
+    {
+      "path": "packages/host/lib/tls-cert.js.map",
+      "owned": false,
+      "sha256": "8448b577ec622faed6db79e7ca00114f7e80058d4ce836d11338236b2e471581"
+    },
+    {
+      "path": "packages/host/lib/tunnel.d.ts.map",
+      "owned": false,
+      "sha256": "bc21d7627e2866fa9292dd2c76295d0ac7d78ef4d8a64b47bc3225105ec9fe2b"
+    },
+    {
+      "path": "packages/host/lib/tunnel.js.map",
+      "owned": false,
+      "sha256": "2c6278cd5a735aaee3ab5b02ebcb28012ee9fa33ae401b50a8ac5733f260d781"
+    },
+    {
+      "path": "packages/host/lib/wallpaper.d.ts.map",
+      "owned": false,
+      "sha256": "d1cf38642437b705c82a2f174414e54d72b67dc7cfd73a6b11e777e9fcc3caad"
+    },
+    {
+      "path": "packages/host/lib/wallpaper.js.map",
+      "owned": false,
+      "sha256": "93c0551457b78c486d6a54194da7c877b91c0e982491f1f3640c8c431a6c0356"
+    },
+    {
+      "path": "packages/host/lib/websocket.d.ts.map",
+      "owned": false,
+      "sha256": "51453f57972cbe5c2241765fba59df4f7f878f982bbbd078d0259cc219a66cb0"
+    },
+    {
+      "path": "packages/host/lib/websocket.js.map",
+      "owned": false,
+      "sha256": "d204c1a4dab642c91f37d53997efed31a90d2cf11f94f174a8ca4f5266662736"
+    },
+    {
+      "path": "packages/host/lib/workspace-files.d.ts.map",
+      "owned": false,
+      "sha256": "46fb6925c774dc616e74bb275ee87692548ef3f02510054db233cd1e69e61c94"
+    },
+    {
+      "path": "packages/host/lib/workspace-files.js.map",
+      "owned": false,
+      "sha256": "f2abf74bbb09a7358d21947c182e91e092e76bb5ab82a80bc7d9f9390be32381"
+    },
+    {
+      "path": "packages/protocol/lib/binvalue.d.ts.map",
+      "owned": false,
+      "sha256": "b5011ba7f78ab901ff78daf5743d4b08dd441e30d37e2e2f9facfdfa5c4bbb15"
+    },
+    {
+      "path": "packages/protocol/lib/binvalue.js.map",
+      "owned": false,
+      "sha256": "97b6cdd9a94a3439b0d9ed132d7935a87b6c646439cc69a1406a53bc50615ab5"
+    },
+    {
+      "path": "packages/protocol/lib/crypto.d.ts.map",
+      "owned": false,
+      "sha256": "6ed49cc76b11928928729964250f524babd1ded21db372cbd0d9e2ded5d07ca1"
+    },
+    {
+      "path": "packages/protocol/lib/crypto.js.map",
+      "owned": false,
+      "sha256": "3b443ed6e3d431ada84702d2ef918295f6f58a9b363e8700d264abffd59b1898"
+    },
+    {
+      "path": "packages/protocol/lib/handshake.d.ts.map",
+      "owned": false,
+      "sha256": "6e0082b0061bcd3ace9b869a0a00c0c3ad86e4602eb7f28f51dc471aea136d9d"
+    },
+    {
+      "path": "packages/protocol/lib/handshake.js.map",
+      "owned": false,
+      "sha256": "93b7ae00e435313e0454ae48b0d8910d21de980bdd0b2248eb26e45490adb9fb"
+    },
+    {
+      "path": "packages/protocol/lib/index.d.ts.map",
+      "owned": false,
+      "sha256": "e1c05eb62cd3d73277134135c3534f66f9d13ce103ef864989b81e100b3ee264"
+    },
+    {
+      "path": "packages/protocol/lib/index.js.map",
+      "owned": false,
+      "sha256": "93c7de9d985cb621450ba97b1db67d394d351ee388b2315008ebd601f3101b72"
+    },
+    {
+      "path": "packages/protocol/lib/mux.d.ts.map",
+      "owned": false,
+      "sha256": "6107a0202ce48e4a861a2cea47d6af817405b9727203e5851465bd94c9fb9942"
+    },
+    {
+      "path": "packages/protocol/lib/mux.js.map",
+      "owned": false,
+      "sha256": "6bd90349c3e0faf407065afaccffcce4b175c9460b1814c40f6ad5ac3ad9be95"
+    },
+    {
+      "path": "packages/protocol/lib/wire.d.ts.map",
+      "owned": false,
+      "sha256": "c8f63375837c2a107ade3118491c798e4515611cf426be624d0446255923d49e"
+    },
+    {
+      "path": "packages/protocol/lib/wire.js.map",
+      "owned": false,
+      "sha256": "be69c19bb897a8fcdad3c6c2eeb8f971066df5a89ccfe12c8f077267befb3f5d"
+    }
+  ],
+  "unownedMapsExcluded": [
+    {
+      "path": "packages/host/lib/app-icons-asset.d.ts.map",
+      "owned": false,
+      "sha256": "44b4c28ecc52a601c923646a09d379dd2c4db2075aa7a43dcfcef5a274a2a730"
+    },
+    {
+      "path": "packages/host/lib/app-icons-asset.js.map",
+      "owned": false,
+      "sha256": "f9c789c6f9a003db16c45f5396574f31c649a51a10c2b22280fa9d23a46ed51f"
+    },
+    {
+      "path": "packages/host/lib/app-icons.d.ts.map",
+      "owned": false,
+      "sha256": "afc162fbb5b177e38b0c641205499ba1349b75a582ae80cc14f2262d918e00ec"
+    },
+    {
+      "path": "packages/host/lib/app-icons.js.map",
+      "owned": false,
+      "sha256": "5fdc01f05f7a98432c5cd41ae23f160871c77e47c0a9f69465d238fc94292b0c"
+    },
+    {
+      "path": "packages/host/lib/client-source.d.ts.map",
+      "owned": false,
+      "sha256": "2626768bf443e349024329c4b628f62a1a26fc3624a648d5bdb01ad4153a8ed5"
+    },
+    {
+      "path": "packages/host/lib/client-source.js.map",
+      "owned": false,
+      "sha256": "09ec8d1ffb144023605307754bafa7af85c7c4c28aa776088aa40a9d0f0485eb"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-bridge.d.ts.map",
+      "owned": false,
+      "sha256": "e94987484f02526b9720dbea657cc100d2a961dd83101cc71d795f0ff9f8dfc3"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-bridge.js.map",
+      "owned": false,
+      "sha256": "e24c241fef654299bd590df3c5302e67aae8d48116e3cd7240afddecd608e6e4"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-page.d.ts.map",
+      "owned": false,
+      "sha256": "9322405d5ba8a52c1b3ad838e689536566e088695bd67ddc792afbef66d97260"
+    },
+    {
+      "path": "packages/host/lib/codex/codex-page.js.map",
+      "owned": false,
+      "sha256": "ca9cee21c484fbb44fb8f9a6c03de424fbdb4dfdd9de9e08b07c240b350ac5f1"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone-cli.d.ts.map",
+      "owned": false,
+      "sha256": "3f7eaf737a8e1cc489741f65dbc807dc3895b83b989ed5288d869ea32f286646"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone-cli.js.map",
+      "owned": false,
+      "sha256": "366f125f4558f8069540313724258d0b576af6cca48a3ece412d553211c0648a"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone.d.ts.map",
+      "owned": false,
+      "sha256": "fcdb23b3f20bf7b3f6cbd35ba3e83f54f8955c12d86325f6f3a05489fff514ef"
+    },
+    {
+      "path": "packages/host/lib/codex/standalone.js.map",
+      "owned": false,
+      "sha256": "6279bcb278024190b20959f981d6431cb29ab0feebfe8e440ca7d7147f9b5fc2"
+    },
+    {
+      "path": "packages/host/lib/cordis.d.ts.map",
+      "owned": false,
+      "sha256": "022a369e345186cbbec57be534920a69fa3a3c5be46723e71395946407ad913c"
+    },
+    {
+      "path": "packages/host/lib/cordis.js.map",
+      "owned": false,
+      "sha256": "4076c3257e9125364407327d306232f56979d86343daa361e22f20c13cfa0f4f"
+    },
+    {
+      "path": "packages/host/lib/desktop-shot.d.ts.map",
+      "owned": false,
+      "sha256": "1cd8f68757ae62c54d22df4380c9627899e81510ec858cae1239d15a6800db3b"
+    },
+    {
+      "path": "packages/host/lib/desktop-shot.js.map",
+      "owned": false,
+      "sha256": "4b8cdef1270999a50b127f7f367dbd6c6d09fe8c77ad5f96ca0a0b3332f8e401"
+    },
+    {
+      "path": "packages/host/lib/device-calls.d.ts.map",
+      "owned": false,
+      "sha256": "577e537ed2e084c8e2de5141d7f677e613c0e6ff68fa1bf6538e8bd6c628499b"
+    },
+    {
+      "path": "packages/host/lib/device-calls.js.map",
+      "owned": false,
+      "sha256": "a1a896992b7038a691669e48e57b35f2e5fa70c4a6e8b69addb9a0aa68bf9209"
+    },
+    {
+      "path": "packages/host/lib/devices.d.ts.map",
+      "owned": false,
+      "sha256": "7952be5179dd1fb9154ec7149ed75fc8cd7f5874ab9c64e1237f024106f2e6a6"
+    },
+    {
+      "path": "packages/host/lib/devices.js.map",
+      "owned": false,
+      "sha256": "e17b49e1ab5fc05c09003975a365652120b975b70d669d3529db3c66a0d9c5a4"
+    },
+    {
+      "path": "packages/host/lib/dsh-approval.d.ts.map",
+      "owned": false,
+      "sha256": "229dc449d0b34345384ac94532d79d61fdd1376c2d736eedf19f45eb70b7b593"
+    },
+    {
+      "path": "packages/host/lib/dsh-approval.js.map",
+      "owned": false,
+      "sha256": "6c1b1845522741fbb2a196bfdd1a5cbd9e1fe4beb12de6f82d0551819b91645c"
+    },
+    {
+      "path": "packages/host/lib/dsh-chat-bridge.d.ts.map",
+      "owned": false,
+      "sha256": "5b3de4fb1944352c05cc73991edc5995799374bb17c3aed84d17ea736d12ac6e"
+    },
+    {
+      "path": "packages/host/lib/dsh-chat-bridge.js.map",
+      "owned": false,
+      "sha256": "964109bc74d90c7eb18d3e78c53e3cd7dde69febeab160646137bd90ba28a065"
+    },
+    {
+      "path": "packages/host/lib/dsh-probe.d.ts.map",
+      "owned": false,
+      "sha256": "57da2acb8db46a0051cb753767451c14a770a88b15305d66a8eb7c670a86d746"
+    },
+    {
+      "path": "packages/host/lib/dsh-probe.js.map",
+      "owned": false,
+      "sha256": "b1bdd6924ea62c3115bc3002721dc2a5ec3ea55aefb97525bd6d7215d6c7e604"
+    },
+    {
+      "path": "packages/host/lib/dsh-version.d.ts.map",
+      "owned": false,
+      "sha256": "08df50180ec83ad5925dd03ec2aac01cbb9c4e77d71f3f0cae078569e4f25e13"
+    },
+    {
+      "path": "packages/host/lib/dsh-version.js.map",
+      "owned": false,
+      "sha256": "5f5fe549e9cb247a420b861e3ba1c1cad156a9a3b62f7fbb90cf121264d79b43"
+    },
+    {
+      "path": "packages/host/lib/gateway-rpc.d.ts.map",
+      "owned": false,
+      "sha256": "0152e3f7f42ae858f860edf9cb476f1f2937f1fedb127112ae09fb77239dc9e3"
+    },
+    {
+      "path": "packages/host/lib/gateway-rpc.js.map",
+      "owned": false,
+      "sha256": "236c93184998aa9c7207d93e205ffcbf50c627ef915374ea47b781952bddc2cd"
+    },
+    {
+      "path": "packages/host/lib/host-assets.d.ts.map",
+      "owned": false,
+      "sha256": "e0d747768b856cbfaa03483cc1bd5d1a66844ec6a95380afc4277b35c79568a7"
+    },
+    {
+      "path": "packages/host/lib/host-assets.js.map",
+      "owned": false,
+      "sha256": "8ed133d228b65c527588e9d2ed4ccf6fb285ac11127b64ae672ef4f9804b78f7"
+    },
+    {
+      "path": "packages/host/lib/index.d.ts.map",
+      "owned": false,
+      "sha256": "9d58256d07499d4935ab050cf79b9af6111f327106790f4e232d3bf59c9a091a"
+    },
+    {
+      "path": "packages/host/lib/index.js.map",
+      "owned": false,
+      "sha256": "76b42172e032393d0c36a92113530b269488eae78b5d82e366d7a58b24bd063d"
+    },
+    {
+      "path": "packages/host/lib/lan-listener.d.ts.map",
+      "owned": false,
+      "sha256": "9be00a87f443d081ee52e8741108eaf3eb584a24679cd525f86ae9ae4aae478c"
+    },
+    {
+      "path": "packages/host/lib/lan-listener.js.map",
+      "owned": false,
+      "sha256": "b7a14d19e0055a15f0ed8d1e5bb3911bffbc66a97256478e70006097eb95995e"
+    },
+    {
+      "path": "packages/host/lib/lan-trust.d.ts.map",
+      "owned": false,
+      "sha256": "4d557c3889984ffcf1f207a18e529bf7fe717725087cdbf31be8720bf495155a"
+    },
+    {
+      "path": "packages/host/lib/lan-trust.js.map",
+      "owned": false,
+      "sha256": "2027d7cbc6984830f91b2ac2be0cc5da4c00895f701b877186a0959c207144f2"
+    },
+    {
+      "path": "packages/host/lib/lan.d.ts.map",
+      "owned": false,
+      "sha256": "36f20b3bacadd5a989137c1eee3571480643870a2df4288d5c2c2f7ecfa7696d"
+    },
+    {
+      "path": "packages/host/lib/lan.js.map",
+      "owned": false,
+      "sha256": "a90f07d6146a8bc22353b412907498a2e224cd956853ed23a337026e77478371"
+    },
+    {
+      "path": "packages/host/lib/machine-config.d.ts.map",
+      "owned": false,
+      "sha256": "e38c0c02cd3c01322b0a333f0fb934c7b64be4f0525d0d5c2f81acddbd34d13a"
+    },
+    {
+      "path": "packages/host/lib/machine-config.js.map",
+      "owned": false,
+      "sha256": "3ac2006a46728cbac7ed160c7e27f2435cb190e8b9575ddb6cad98663212715d"
+    },
+    {
+      "path": "packages/host/lib/mobile-management.d.ts.map",
+      "owned": false,
+      "sha256": "14223673d6529cfc77b413c59e7334f172a61a642f7fc91e7924a84fadf3cf68"
+    },
+    {
+      "path": "packages/host/lib/mobile-management.js.map",
+      "owned": false,
+      "sha256": "19dddc5261bc604a6767e7310c35be443e71ce90e65ab4f98c7d3b5c1db3603d"
+    },
+    {
+      "path": "packages/host/lib/notify-text.d.ts.map",
+      "owned": false,
+      "sha256": "fa8147eda3223268181c386b4ffd02fcb9d6170b6a932d8a99876986293c1d68"
+    },
+    {
+      "path": "packages/host/lib/notify-text.js.map",
+      "owned": false,
+      "sha256": "fc8b2e2565efa07922db19fded22983fa7da1f0b75b02dddd4f53f55b8dfb3de"
+    },
+    {
+      "path": "packages/host/lib/open-in-app.d.ts.map",
+      "owned": false,
+      "sha256": "ab213b970a285362d76bb02b03bf6b9c8f46d4dac701f0441d0b2b4cb218d4a7"
+    },
+    {
+      "path": "packages/host/lib/open-in-app.js.map",
+      "owned": false,
+      "sha256": "01fe5c202ac74ba29c7dae23dfec2611f943ced4d93bcb126b65754db2b60763"
+    },
+    {
+      "path": "packages/host/lib/pairing-page.d.ts.map",
+      "owned": false,
+      "sha256": "01ce3d48e38a8a19c060ccd133a03650376f667417f63793e52013c667f1e62a"
+    },
+    {
+      "path": "packages/host/lib/pairing-page.js.map",
+      "owned": false,
+      "sha256": "d71edacc6c199df3d4018516fc87927e196d24967a03a2fa45e372b5c9f4f0f0"
+    },
+    {
+      "path": "packages/host/lib/protocol/binvalue.d.ts.map",
+      "owned": false,
+      "sha256": "b5011ba7f78ab901ff78daf5743d4b08dd441e30d37e2e2f9facfdfa5c4bbb15"
+    },
+    {
+      "path": "packages/host/lib/protocol/binvalue.js.map",
+      "owned": false,
+      "sha256": "97b6cdd9a94a3439b0d9ed132d7935a87b6c646439cc69a1406a53bc50615ab5"
+    },
+    {
+      "path": "packages/host/lib/protocol/crypto.d.ts.map",
+      "owned": false,
+      "sha256": "6ed49cc76b11928928729964250f524babd1ded21db372cbd0d9e2ded5d07ca1"
+    },
+    {
+      "path": "packages/host/lib/protocol/crypto.js.map",
+      "owned": false,
+      "sha256": "3b443ed6e3d431ada84702d2ef918295f6f58a9b363e8700d264abffd59b1898"
+    },
+    {
+      "path": "packages/host/lib/protocol/handshake.d.ts.map",
+      "owned": false,
+      "sha256": "6e0082b0061bcd3ace9b869a0a00c0c3ad86e4602eb7f28f51dc471aea136d9d"
+    },
+    {
+      "path": "packages/host/lib/protocol/handshake.js.map",
+      "owned": false,
+      "sha256": "93b7ae00e435313e0454ae48b0d8910d21de980bdd0b2248eb26e45490adb9fb"
+    },
+    {
+      "path": "packages/host/lib/protocol/index.d.ts.map",
+      "owned": false,
+      "sha256": "e1c05eb62cd3d73277134135c3534f66f9d13ce103ef864989b81e100b3ee264"
+    },
+    {
+      "path": "packages/host/lib/protocol/index.js.map",
+      "owned": false,
+      "sha256": "93c7de9d985cb621450ba97b1db67d394d351ee388b2315008ebd601f3101b72"
+    },
+    {
+      "path": "packages/host/lib/protocol/mux.d.ts.map",
+      "owned": false,
+      "sha256": "6107a0202ce48e4a861a2cea47d6af817405b9727203e5851465bd94c9fb9942"
+    },
+    {
+      "path": "packages/host/lib/protocol/mux.js.map",
+      "owned": false,
+      "sha256": "6bd90349c3e0faf407065afaccffcce4b175c9460b1814c40f6ad5ac3ad9be95"
+    },
+    {
+      "path": "packages/host/lib/protocol/wire.d.ts.map",
+      "owned": false,
+      "sha256": "c8f63375837c2a107ade3118491c798e4515611cf426be624d0446255923d49e"
+    },
+    {
+      "path": "packages/host/lib/protocol/wire.js.map",
+      "owned": false,
+      "sha256": "be69c19bb897a8fcdad3c6c2eeb8f971066df5a89ccfe12c8f077267befb3f5d"
+    },
+    {
+      "path": "packages/host/lib/setup-config.d.ts.map",
+      "owned": false,
+      "sha256": "00a3c4478142a4d8d4650629ab5e2f3356a8bb00e21f498f6432f9ab70bb24f6"
+    },
+    {
+      "path": "packages/host/lib/setup-config.js.map",
+      "owned": false,
+      "sha256": "3395824ee9db2e8889ed568404c3bef2dd8aecbdeecfcb50d1fbb6f7558baa38"
+    },
+    {
+      "path": "packages/host/lib/tls-cert.d.ts.map",
+      "owned": false,
+      "sha256": "eaa34f0bab595cca6805eed5569429bad9978a35646261221baad3159be329c6"
+    },
+    {
+      "path": "packages/host/lib/tls-cert.js.map",
+      "owned": false,
+      "sha256": "8448b577ec622faed6db79e7ca00114f7e80058d4ce836d11338236b2e471581"
+    },
+    {
+      "path": "packages/host/lib/tunnel.d.ts.map",
+      "owned": false,
+      "sha256": "bc21d7627e2866fa9292dd2c76295d0ac7d78ef4d8a64b47bc3225105ec9fe2b"
+    },
+    {
+      "path": "packages/host/lib/tunnel.js.map",
+      "owned": false,
+      "sha256": "2c6278cd5a735aaee3ab5b02ebcb28012ee9fa33ae401b50a8ac5733f260d781"
+    },
+    {
+      "path": "packages/host/lib/wallpaper.d.ts.map",
+      "owned": false,
+      "sha256": "d1cf38642437b705c82a2f174414e54d72b67dc7cfd73a6b11e777e9fcc3caad"
+    },
+    {
+      "path": "packages/host/lib/wallpaper.js.map",
+      "owned": false,
+      "sha256": "93c0551457b78c486d6a54194da7c877b91c0e982491f1f3640c8c431a6c0356"
+    },
+    {
+      "path": "packages/host/lib/websocket.d.ts.map",
+      "owned": false,
+      "sha256": "51453f57972cbe5c2241765fba59df4f7f878f982bbbd078d0259cc219a66cb0"
+    },
+    {
+      "path": "packages/host/lib/websocket.js.map",
+      "owned": false,
+      "sha256": "d204c1a4dab642c91f37d53997efed31a90d2cf11f94f174a8ca4f5266662736"
+    },
+    {
+      "path": "packages/host/lib/workspace-files.d.ts.map",
+      "owned": false,
+      "sha256": "46fb6925c774dc616e74bb275ee87692548ef3f02510054db233cd1e69e61c94"
+    },
+    {
+      "path": "packages/host/lib/workspace-files.js.map",
+      "owned": false,
+      "sha256": "f2abf74bbb09a7358d21947c182e91e092e76bb5ab82a80bc7d9f9390be32381"
+    },
+    {
+      "path": "packages/protocol/lib/binvalue.d.ts.map",
+      "owned": false,
+      "sha256": "b5011ba7f78ab901ff78daf5743d4b08dd441e30d37e2e2f9facfdfa5c4bbb15"
+    },
+    {
+      "path": "packages/protocol/lib/binvalue.js.map",
+      "owned": false,
+      "sha256": "97b6cdd9a94a3439b0d9ed132d7935a87b6c646439cc69a1406a53bc50615ab5"
+    },
+    {
+      "path": "packages/protocol/lib/crypto.d.ts.map",
+      "owned": false,
+      "sha256": "6ed49cc76b11928928729964250f524babd1ded21db372cbd0d9e2ded5d07ca1"
+    },
+    {
+      "path": "packages/protocol/lib/crypto.js.map",
+      "owned": false,
+      "sha256": "3b443ed6e3d431ada84702d2ef918295f6f58a9b363e8700d264abffd59b1898"
+    },
+    {
+      "path": "packages/protocol/lib/handshake.d.ts.map",
+      "owned": false,
+      "sha256": "6e0082b0061bcd3ace9b869a0a00c0c3ad86e4602eb7f28f51dc471aea136d9d"
+    },
+    {
+      "path": "packages/protocol/lib/handshake.js.map",
+      "owned": false,
+      "sha256": "93b7ae00e435313e0454ae48b0d8910d21de980bdd0b2248eb26e45490adb9fb"
+    },
+    {
+      "path": "packages/protocol/lib/index.d.ts.map",
+      "owned": false,
+      "sha256": "e1c05eb62cd3d73277134135c3534f66f9d13ce103ef864989b81e100b3ee264"
+    },
+    {
+      "path": "packages/protocol/lib/index.js.map",
+      "owned": false,
+      "sha256": "93c7de9d985cb621450ba97b1db67d394d351ee388b2315008ebd601f3101b72"
+    },
+    {
+      "path": "packages/protocol/lib/mux.d.ts.map",
+      "owned": false,
+      "sha256": "6107a0202ce48e4a861a2cea47d6af817405b9727203e5851465bd94c9fb9942"
+    },
+    {
+      "path": "packages/protocol/lib/mux.js.map",
+      "owned": false,
+      "sha256": "6bd90349c3e0faf407065afaccffcce4b175c9460b1814c40f6ad5ac3ad9be95"
+    },
+    {
+      "path": "packages/protocol/lib/wire.d.ts.map",
+      "owned": false,
+      "sha256": "c8f63375837c2a107ade3118491c798e4515611cf426be624d0446255923d49e"
+    },
+    {
+      "path": "packages/protocol/lib/wire.js.map",
+      "owned": false,
+      "sha256": "be69c19bb897a8fcdad3c6c2eeb8f971066df5a89ccfe12c8f077267befb3f5d"
+    }
+  ],
+  "bootStamp": "BUILD-1012173137"
+}

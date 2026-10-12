@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "name": "m1-race",
+      "tests": 23,
+      "pass": 22,
+      "fail": 1,
+      "failures": [
+        "✖ 迟到的初始探测失败不许覆盖更新的成功结果（请求序号） (1.862709ms)"
+      ]
+    },
+    {
+      "name": "m2-backoff",
+      "tests": 23,
+      "pass": 21,
+      "fail": 2,
+      "failures": [
+        "✖ 在线且附件未确认时按 1→2→4→8 秒有界重查，用尽即停不永久轮询 (1.135875ms)",
+        "✖ 离线与页面销毁都会取消退避重查 (0.982292ms)"
+      ]
+    },
+    {
+      "name": "m3-offline",
+      "tests": 23,
+      "pass": 22,
+      "fail": 1,
+      "failures": [
+        "✖ 离线与页面销毁都会取消退避重查 (1.483166ms)"
+      ]
+    },
+    {
+      "name": "m4-preserve",
+      "tests": 23,
+      "pass": 22,
+      "fail": 1,
+      "failures": [
+        "✖ 瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查 (1.322916ms)"
+      ]
+    },
+    {
+      "name": "m5-readreceipt",
+      "tests": 23,
+      "pass": 22,
+      "fail": 1,
+      "failures": [
+        "✖ 瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查 (1.572667ms)"
+      ]
+    }
+  ],
+  "baselineTests": 23,
+  "allKilled": true
+}

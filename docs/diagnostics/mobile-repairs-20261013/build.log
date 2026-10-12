@@ -1,0 +1,11 @@
+
+> dsh-mobile@0.1.0 build
+> node scripts/build-lib.mjs
+
+[build-lib] host: 已写入 132 个文件 → packages/host/lib/
+[build-lib] protocol: 已写入 24 个文件 → packages/protocol/lib/
+[build-lib] 已内联 protocol → packages/host/lib/protocol/（24 个文件 ✓，改写 9 个文件的引用 ✓）
+[build-lib] 已拷入运行时 assets → packages/host/lib/assets/（19 个文件 ✓ —— 会话页与 codex 页的磁盘资源 ✓）
+[build-lib] 加载校验通过：packages/host/lib/index.js
+[build-lib] 加载校验通过：packages/protocol/lib/index.js
+[build-lib] 已同步 boot.js → packages/host/lib/boot.js（戳 BUILD-1012173137）

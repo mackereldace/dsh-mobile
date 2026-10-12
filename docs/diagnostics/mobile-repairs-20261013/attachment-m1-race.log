@@ -1,0 +1,58 @@
+▶ production chat app wiring and native addressing
+  ✔ late creation keeps the session selected after the request and concurrent creations keep the latest intent (4.8575ms)
+  ✔ ordinary navigation stays ordinary in the URL, follow request and refreshed list (1.449333ms)
+  ✔ selected children survive a roots refresh and send using their captured native address (5.63225ms)
+  ✔ child projections and rename use the exact original RPC request and real confirmation (3.698625ms)
+  ✔ send and control callbacks propagate rejected receipts and keep their original request (2.520167ms)
+  ✔ files enter the original panel using the current workspace and report absent integration (2.21725ms)
+  ✔ 附件通道在宿主补注册后自动恢复：探测失败如实上报，恢复在线后重查，不再停在「未接通」 (5.722042ms)
+  ✔ 通道探测失败被如实标记为「没问成」，不再与「真没接通」混为一谈 (1.511167ms)
+  ✖ 迟到的初始探测失败不许覆盖更新的成功结果（请求序号） (1.862709ms)
+  ✔ 在线且附件未确认时按 1→2→4→8 秒有界重查，用尽即停不永久轮询 (1.428959ms)
+  ✔ 离线与页面销毁都会取消退避重查 (1.19275ms)
+  ✔ 瞬时探测失败保留上一份已确认能力；成功的 read 能力回执可清理退避重查 (1.364ms)
+✖ production chat app wiring and native addressing (34.444334ms)
+▶ production chat data delivery, isolation and history edge
+  ✔ polling delivers sorted events before opening projection values and history metadata (1.169875ms)
+  ✔ in-flight stream, projection, interaction and history from the old session cannot overwrite the new one (1.058541ms)
+  ✔ same-session projection reads reject an older completion even when its cursor is newer (0.601625ms)
+  ✔ a disposed old poll cannot deliver its values, history edge or errors into the new session (2.305834ms)
+  ✔ older history sorts and deduplicates without reopening its completed edge after reconnect (2.350875ms)
+  ✔ dense assistant streams settle after their real event and a revision gap reopens once (1.328792ms)
+✔ production chat data delivery, isolation and history edge (8.986666ms)
+▶ production chat resource closure and image policy
+  ✔ every HTML/module dependency is both shipped and served, with blob images permitted by the real page CSP (3.475417ms)
+✔ production chat resource closure and image policy (3.510792ms)
+▶ production chat native image lifetime
+  ✔ accepts restored native attachment bytes and copies the exact typed-array view (0.976875ms)
+  ✔ uses native attachment IDs, caches per session and revokes each blob on switch or disposal (0.659459ms)
+  ✔ an old attachment response cannot allocate an image after switching sessions (0.47825ms)
+  ✔ an old failure after A→B→A cannot evict the new image entry or leak its blob (0.676875ms)
+✔ production chat native image lifetime (2.876ms)
+ℹ tests 23
+ℹ suites 4
+ℹ pass 22
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 133.244875
+
+✖ failing tests:
+
+test at packages/host/test/dsh-chat-wiring.test.ts:299:3
+✖ 迟到的初始探测失败不许覆盖更新的成功结果（请求序号） (1.862709ms)
+  AssertionError [ERR_ASSERTION]: 被丢弃的结果也不该污染探测状态
+
+  '迟到的初始失败' !== ''
+
+      at TestContext.<anonymous> (file:///Volumes/Data/workspace/%E5%B7%A5%E7%A8%8B%E8%AE%BE%E8%AE%A1/.c4c/worktrees/native-3d91cbbe-ffbd-44a5-8491-e134c663787e/dsh-mobile/packages/host/test/dsh-chat-wiring.test.ts:316:14)
+      at async Test.run (node:internal/test_runner/test:1113:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: '迟到的初始失败',
+    expected: '',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

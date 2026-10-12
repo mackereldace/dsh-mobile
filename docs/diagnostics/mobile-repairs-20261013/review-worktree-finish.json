@@ -1,0 +1,35 @@
+{
+  "id": "native-4d823af8-7e18-49a6-81a6-dce76e059d76",
+  "status": "SUCCESS",
+  "summary": "MiMo provider failed with 429 and exceeded retry limit; no completed independent review. Task closed without edits. Primary audit verified all 628 snapshot files unchanged and parent Git diff empty; specified automated verification applies only to archived source 56937e65, not final bf1ce7e source.",
+  "model": null,
+  "effort": null,
+  "root": "/Volumes/Data/workspace/工程设计",
+  "workingDir": "/Volumes/Data/workspace/工程设计/.c4c/worktrees/native-4d823af8-7e18-49a6-81a6-dce76e059d76",
+  "role": "review",
+  "baseCommit": "c1ea52ff4aa00d25ee974b9633fe37602f60f559",
+  "branch": null,
+  "exclude": "/Volumes/Data/workspace/工程设计/.c4c/jobs/native-4d823af8-7e18-49a6-81a6-dce76e059d76/git-exclude",
+  "createdAt": "2026-10-12T17:10:31.889Z",
+  "changes": [],
+  "validation": [
+    {
+      "argv": [
+        "node",
+        "--experimental-strip-types",
+        "--test",
+        "dsh-mobile/packages/host/test/dsh-question.test.ts",
+        "dsh-mobile/packages/host/test/dsh-chat-wiring.test.ts",
+        "dsh-mobile/packages/host/test/dsh-chat-attachment-channel.test.ts",
+        "dsh-mobile/packages/host/test/dsh-chat-dock.test.ts",
+        "dsh-mobile/packages/host/test/dsh-chat-statistics.test.ts"
+      ],
+      "passed": true,
+      "exitCode": 0,
+      "timedOut": false,
+      "canceled": false,
+      "log": "/Volumes/Data/workspace/工程设计/.c4c/jobs/native-4d823af8-7e18-49a6-81a6-dce76e059d76/validation-0.log"
+    }
+  ],
+  "usage": null
+}
