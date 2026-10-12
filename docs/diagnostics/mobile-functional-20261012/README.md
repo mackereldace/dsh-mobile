@@ -11,6 +11,8 @@
 
 未验：OS 文件选择器、实际手机键盘与安全区、生产隧道上传到电脑同一会话、真实目录与管理写入回执，以及原版同数据/同展开状态的视觉对照。合成回执和浏览器几何不能替代这些验收。
 
-源码、产物、安装坐标及回退记录会写入 build.json / install.json，固定验收卡位于文档仓 53 号。
+已安装到本机 desktop profile：源码 b9c9d7b，产物 53ca5c1，构建戳 BUILD-1012092901。205个运行文件与提交版逐字相同，原配置逐字与语义均保留；未重启 DSH，需要用户退出并重开后刷新手机页面。构建与安装记录见 [build.json](build.json) / [install.json](install.json)，固定验收卡位于文档仓 53 号。
 
-独立 MiMo 审查的三项边界问题已修复，新增 6 条行为测试及 4 组定向变异。最终相关回归 67 文件、1052/1052；旧 boot-surface 通知 WIP 明确排除，完整套件未称为全绿。异步 runner 为 scripts/check-mobile-async-mutations.mjs。
+三包及完整配置回退备份位于 `/Users/mackerel/.dsh/backups/dsh-mobile-functional-20261012-VtOPHR`。该备份留在本机，配置内容不进入 Git。
+
+独立 MiMo 审查的三项边界问题已修复，新增 6 条行为测试及 4 组定向变异。最终复审26/26通过，原三项问题均解决；624个精确快照文件无改动，worktree_finish 的真实 diff 和定向验证通过，见 [review.json](review.json)。最终相关回归 67 文件、1052/1052；旧 boot-surface 通知 WIP 明确排除，完整套件未称为全绿。异步 runner 为 scripts/check-mobile-async-mutations.mjs。

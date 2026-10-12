@@ -17,7 +17,7 @@
     "excluded": [
       "packages/client/test/boot-surface.test.ts"
     ],
-    "exclusionReason": "Prior notification-phase WIP remains red. The unsandboxed full retry stalled and its boot-surface process was stopped after eight minutes. Do not count it as complete."
+    "exclusionReason": "Prior notification-phase WIP remains red. The unsandboxed full retry stalled and its boot-surface process was stopped after more than eight minutes. Do not count it as complete."
   },
   "initialCompleteSandboxRun": {
     "tests": 1125,
@@ -85,6 +85,12 @@
     ],
     "fixes": "new creation generation; per-session pending send set; backend write lock until actual settlement and authoritative readback; late success clears the submitted draft before readback",
     "newDirectedTests": 6,
-    "newMutationCases": 4
+    "newMutationCases": 4,
+    "finalReviewedCommit": "b9c9d7b5cc3b4dcdd5261fb5508b8450b43961cc",
+    "finalTests": 26,
+    "finalReadonlySnapshotFilesChecked": 624,
+    "allOriginalFindingsResolved": true,
+    "newFixDefectsFound": false,
+    "finalWorktreeFinish": "SUCCESS"
   }
 }
