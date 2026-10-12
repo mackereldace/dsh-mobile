@@ -13,6 +13,22 @@ let creationEpoch = 0
 let interactionEpoch = 0, interactionInFlight = 0, projectionRead = 0, received = 0
 let streamToken = 0, streamIterator = null, streamLatchFire = null, reopenTimer = null, reopenAttempt = 0, poller = null
 let connectionMode = 'unknown', destroyed = false
+/**
+ * ★ 通道探测的三件套（2026-10-12 补边界）：
+ *   ① **请求序号** probeSeq/probeApplied —— 探测、历史和交互回执共用请求顺序，
+ *      迟到的旧结果（初始那次 false 或错误）**不许覆盖**更新的成功结果 ✓；
+ *   ② **有界退避重查** —— 在线且附件能力未确认时按 1→2→4→8 秒重问，用尽即停 ✓
+ *      （fileUploads 晚注册但连接一直 online 时，这才真的会自动恢复，之前不会 ✓）；
+ *   ③ **保留已确认能力** confirmedChannels —— 瞬时读失败只是「没问成」，
+ *      不该把上一次已确认的回执抹成全 false ✓。
+ */
+const PROBE_RETRY_DELAYS = [1000, 2000, 4000, 8000]
+/** 上一次**已确认**（成功读到宿主）的通道能力；瞬时读失败时保留它，不抹成 false。 */
+let confirmedChannels = null
+let channelProbeError = ''
+/** 退避重查是否已用尽 ⇒ 不再自动轮询，改为提示「可重新检测」。 */
+let probeRetryExhausted = false
+let probeRetryTimer = null, probeRetryStep = 0, probeSeq = 0, probeApplied = 0
 const imageURLs = new Map(), questionCallIds = new Set()
 if (params.get('parent') && currentId) currentAddress = { kind: 'subagent', parentSessionId: params.get('parent'), childSessionId: currentId, mode: params.get('mode') || 'unknown' }
 
@@ -28,7 +44,15 @@ const requestFor = (id = currentId, address = currentAddress) => ({ sessionId: i
 const valid = (id, epoch) => !destroyed && id === currentId && epoch === sessionEpoch
 function setConnection(next) {
   if (connectionMode === next) return
+  const previous = connectionMode
   connectionMode = next; page.setConnection(next)
+  // ★ 恢复在线后**重查通道**（2026-10-12 修 ✓）：装机的 fileUploads 是宿主作用域服务，
+  //   注册晚于页面首次探测时，初次那份 upload:false 会一直留着 ⇒ 用户只能反复重启 ✗。
+  //   这里在**每次**回到在线时重问一次，通道一就绪立刻恢复，不必刷新页面 ✗。
+  if (next === 'online' && previous !== 'online') void probeChannels()
+  // ★ 离线就停掉退避重查（2026-10-12 补边界 ✓）：断线时轮询毫无意义，
+ //   必须取消，否则会变成永不停止的后台请求 ✗。回到 online 时由上面那次重查重新起阶梯 ✓。
+  else if (next !== 'online') cancelProbeRetry()
 }
 function clearImages() {
   for (const entry of imageURLs.values()) if (entry.url) URL.revokeObjectURL(entry.url)
@@ -70,11 +94,13 @@ function scheduleInteractions() {
 async function refreshInteractions() {
   const id = currentId, epoch = sessionEpoch, read = ++interactionEpoch
   if (!id) return
+  const channelRead = ++probeSeq
   interactionInFlight++
   try {
     const value = await rpc('mobile/dsh/interactions', requestFor(id))
     if (!valid(id, epoch) || read !== interactionEpoch) return
-    if (value?.channels) page.setChannels(value.channels)
+    // ★ 成功的 read 回执若带通道能力，也算一次已确认 ⇒ 走 applyProbe 顺带清掉退避重查 ✓。
+    if (value?.channels) applyProbe(value.channels, '', channelRead)
     page.setInteractions(value)
     chatLog('[dsh-chat] 交互待办：选择=' + (value?.values?.userQuestions?.active || []).length)
   } catch (reason) { if (valid(id, epoch)) chatLog('[dsh-chat] 交互读取：' + reason.message) }
@@ -175,7 +201,9 @@ const page = mountChat({
     if (typeof value?.sessionId !== 'string' || !value.sessionId) throw new Error('DSH 没给出新会话的 id')
     return changeSession(value.sessionId)
   },
-  onRefresh: async () => { void loadSessions(); return refreshFetch() },
+  // ★ 手动刷新也重问一次通道（2026-10-12 修 ✓）：已经在线时 setConnection 不会触发迁移，
+  //   没有这一句，用户「刷新了还是未接通」就只能去重启电脑 ✗。
+  onRefresh: async () => { void loadSessions(); void probeChannels(); return refreshFetch() },
   refreshProjections,
   onOlder: historyPage,
   loadAttachment,
@@ -215,17 +243,19 @@ function refreshFetch() {
   if (destroyed || !currentId) return Promise.resolve()
   stopFetch(); const token = streamToken, id = currentId, epoch = sessionEpoch
   if (!streaming) {
-    let pollPage = null
+    let pollPage = null, pollChannelRead = 0
     poller = new ChatPoller({ intervalMs: 900, read: async () => {
+      const channelRead = ++probeSeq
       const value = await rpc('mobile/dsh/read', { ...requestFor(id), maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } })
       if (!valid(id, epoch) || token !== streamToken) return []
-      pollPage = value
+      pollPage = value; pollChannelRead = channelRead
       return value?.events || []
     }, onEvents: events => {
       if (!valid(id, epoch) || token !== streamToken) return
       setConnection('online'); receiveEvents(events)
       applyProjections(pollPage?.values, pollPage?.valuesAsOfSeq, historyMetadata(pollPage?.events, pollPage?.hasMore))
-      if (pollPage?.channels) page.setChannels(pollPage.channels)
+      // ★ 同上：poll 的 channels 回执是已确认能力，可清理重试。
+      if (pollPage?.channels) applyProbe(pollPage.channels, '', pollChannelRead)
     }, onError: message => { if (valid(id, epoch) && token === streamToken) failStream(token, new Error(message)) } })
     poller.start(); return Promise.resolve()
   }
@@ -270,13 +300,55 @@ function failStream(token, reason) {
   const delay = reopenDelayMs(reopenAttempt++)
   reopenTimer = setTimeout(() => { reopenTimer = null; void refreshFetch() }, delay)
 }
+/** 停掉退避重查并复位阶梯（离线、已确认接通、或页面收尾时都走这里）。 */
+function cancelProbeRetry() {
+  if (probeRetryTimer !== null) { clearTimeout(probeRetryTimer); probeRetryTimer = null }
+  probeRetryStep = 0
+  probeRetryExhausted = false
+}
+/**
+ * 在线且附件能力**未确认**时，按 1→2→4→8 秒有界重查（2026-10-12 补边界 ✓）。
+ * 用尽即停并置 exhausted ⇒ UI 改成提示「可重新检测」，**不永久轮询** ✓。
+ * 离线 / 已销毁 / 已在排队 ⇒ 都不排（离线由 setConnection 取消，销毁由 pagehide 取消）✓。
+ */
+function scheduleProbeRetry() {
+  if (destroyed || connectionMode !== 'online' || probeRetryTimer !== null) return
+  if (probeRetryStep >= PROBE_RETRY_DELAYS.length) { probeRetryExhausted = true; return }
+  const delay = PROBE_RETRY_DELAYS[probeRetryStep++]
+  probeRetryTimer = setTimeout(() => { probeRetryTimer = null; void probeChannels() }, delay)
+}
+/**
+ * 落一次探测结果。confirmed 表示这是**成功读到宿主**的回执；
+ * 瞬时失败（confirmed=false）尽量**保留上一份已确认能力**，而不是抹成全 false ✓。
+ */
+function applyProbe(nextChannels, probeError, sequence) {
+  if (destroyed || sequence < probeApplied) return
+  probeApplied = sequence
+  const confirmed = probeError === ''
+  if (confirmed) confirmedChannels = nextChannels
+  else if (confirmedChannels !== null) nextChannels = confirmedChannels
+  channelProbeError = probeError
+  if (connectionMode === 'online' && nextChannels.upload !== true) scheduleProbeRetry()
+  else cancelProbeRetry()
+  page.setChannels(nextChannels, { confirmed, probeError, retrying: probeRetryTimer !== null, exhausted: probeRetryExhausted })
+}
 async function probeChannels() {
+  if (destroyed) return
+  const seq = ++probeSeq
   try {
     const value = await rpc('mobile/dsh/capabilities')
+    // ★ 迟到的旧探测（初始那次）不许覆盖更新的成功结果；销毁后不落任何状态。
+    if (destroyed || seq < probeApplied) return
     if (!value?.channels) throw new Error('宿主没有返回通道能力')
-    page.setChannels(value.channels)
-    chatLog('[dsh-chat] 控件通道：' + (value.channels.controls ? '已接通' : '尚未安装，请重开 DSH'))
-  } catch { page.setChannels({ approval: false, question: false, upload: false, controls: false }) }
+    applyProbe(value.channels, '', seq)
+    chatLog('[dsh-chat] 控件通道：' + (value.channels.controls ? '已接通' : '尚未安装，请重开 DSH') + ' · 附件=' + (value.channels.upload ? '已接通' : '未就绪'))
+  } catch (reason) {
+    if (destroyed || seq < probeApplied) return
+    // ★ 探测失败**不再**直接全 false（2026-10-12 ✓）：断网/宿主尚未初始化完只是「没问成」，
+    //   不是「附件服务不存在」✗。applyProbe 会保留上一份已确认能力，并把失败原因如实交给 UI。
+    applyProbe({ approval: false, question: false, upload: false, controls: false }, reason?.message || String(reason), seq)
+    chatLog('[dsh-chat] 控件通道：探测未完成（' + channelProbeError + '），保留上次已确认能力并自动重查')
+  }
 }
 function syncTheme() {
   const explicit = document.documentElement.getAttribute('data-theme')
@@ -294,4 +366,5 @@ if (boot) {
 chatLog('[dsh-chat] 取数方式：' + (streaming ? '流 mobile/dsh/follow' : '轮询 mobile/dsh/read'))
 void probeChannels()
 void loadSessions().then(() => { if (!currentId) { setConnection('online'); page.handlers.onEvents([]) }; return refreshFetch() })
-addEventListener('pagehide', () => { destroyed = true; stopFetch(); clearImages(); themeObserver.disconnect(); if (interactionTimer !== null) clearTimeout(interactionTimer); if (projectionTimer !== null) clearTimeout(projectionTimer); page.dispose() }, { once: true })
+// ★ 页面销毁必须停掉退避重查（2026-10-12 ✓）：否则定时器会在页面没了之后继续发请求 ✗。
+addEventListener('pagehide', () => { destroyed = true; cancelProbeRetry(); stopFetch(); clearImages(); themeObserver.disconnect(); if (interactionTimer !== null) clearTimeout(interactionTimer); if (projectionTimer !== null) clearTimeout(projectionTimer); page.dispose() }, { once: true })

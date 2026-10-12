@@ -148,8 +148,23 @@ export function createQuestionBroker(options = {}) {
 const broker = createQuestionBroker();
 export function sharedQuestionBroker() { return broker; }
 const channels = { approval: false, question: false, upload: false };
+/**
+ * 附件能力的**活探针**（2026-10-12 修真实缺陷）。
+ *
+ * 原版 `fileUploads` 是**宿主作用域**服务（参考源码 `FileUploads extends TypertRemoteService`，
+ * `super(ctx, "fileUploads")`），它与我们插件的注册/挂载**先后不确定**。旧实现在
+ * `mountQuestionChannel` 里只读一次就冻结 `channels.upload` ⇒ 那一刻若 `ctx.get('fileUploads')`
+ * 还没注册，值永远是 false；而手机端上传走**网关 RPC `fileUploads/upload`**，其可用性正是
+ * 由这个服务决定 ⇒ 重启复现同一竞态 ⇒ 用户「重启→仍未接通→再重启」的死循环。
+ *
+ * ⇒ 每次读能力时**现取**（`ctx.get` 是活的服务查找，晚注册也能看到），不再冻结；
+ *   既不硬写 `upload:true`，也不拿上传当读探针。
+ */
+let uploadProbe;
 export function setDshChatChannels(patch) { Object.assign(channels, patch); }
-export function readDshChatChannels() { return { ...channels }; }
+export function readDshChatChannels() {
+    return { ...channels, upload: uploadProbe === undefined ? channels.upload : uploadProbe() };
+}
 export const QUESTION_ANSWERER_OPTIONS = Object.freeze({ prepend: true, global: true });
 /** 无 agent 会话或不合法形状交回下游；只回真实完整答案。 */
 export function createQuestionAnswerer(options) {
@@ -175,14 +190,26 @@ export function createQuestionAnswerer(options) {
 }
 /** 精确挂到官方 waterfall；通道状态随插件卸载清除。 */
 export function mountQuestionChannel(ctx, onError) {
-    const service = record(ctx.get('fileUploads'));
-    // Cordis Service 实例有原型方法；record 只判 object，不会丢掉原型。
-    setDshChatChannels({ upload: typeof service?.['upload'] === 'function' });
+    /** 现取装机侧的 fileUploads：服务晚于本插件注册也照样看得见（不再冻结）。 */
+    const probeUpload = () => {
+        try {
+            const service = record(ctx.get('fileUploads'));
+            // Cordis Service 实例有原型方法；record 只判 object，不会丢掉原型。
+            return typeof service?.['upload'] === 'function';
+        }
+        catch {
+            return false;
+        }
+    };
+    uploadProbe = probeUpload;
+    setDshChatChannels({ upload: probeUpload() });
     const dispose = ctx.on('user-questions/request', createQuestionAnswerer({ broker, ...(onError === undefined ? {} : { onError }) }), QUESTION_ANSWERER_OPTIONS);
     const mounted = typeof dispose === 'function';
     setDshChatChannels({ question: mounted });
     ctx.effect(() => () => {
         broker.abortAll();
+        if (uploadProbe === probeUpload)
+            uploadProbe = undefined;
         setDshChatChannels({ question: false, upload: false, approval: false });
     }, 'mobile-host: question answerer lifetime');
     return mounted;

@@ -1533,6 +1533,12 @@ export function mountChat(options) {
    */
   let approvalChannelConnected = false
   let questionChannelConnected = false, uploadChannelConnected = false
+  /** 上一次通道探测的失败原因（'' = 探测成功）。空 ⇒ 是真没接通，非空 ⇒ 只是没问成。 */
+  let channelProbeError = ''
+  /** 最近一次落下的通道能力是不是**成功读到宿主**的回执（false = 还没确认过/读失败）。 */
+  let channelConfirmed = false
+  /** 退避重查已用尽 ⇒ 自动重查停了，提示用户可重新检测。 */
+  let channelRetryExhausted = false
   let interactionValues = { active: [], settled: [] }
   const answeredQuestions = new Set()
   const questionCards = new Map()
@@ -1748,13 +1754,16 @@ export function mountChat(options) {
     for (const entry of questions.active) if (!answeredQuestions.has(entry.callId)) renderQuestion(entry)
     dockChanged()
   }
-  const setChannels = channels => {
+  const setChannels = (channels, probe) => {
     if (!channels || typeof channels !== 'object') return
     nativeControls.setCapabilities(channels)
     setApprovalChannel(channels.approval === true)
     const changed = questionChannelConnected !== (channels.question === true)
     questionChannelConnected = channels.question === true && typeof options.answerQuestion === 'function'
     uploadChannelConnected = channels.upload === true && typeof options.upload === 'function'
+    channelProbeError = typeof probe?.probeError === 'string' ? probe.probeError : ''
+    channelConfirmed = probe?.confirmed === true
+    channelRetryExhausted = probe?.exhausted === true
     if (changed) {
       for (const card of questionCards.values()) card.node.remove()
       questionCards.clear()
@@ -1762,7 +1771,7 @@ export function mountChat(options) {
     }
     dockChanged()
     paintComposer()
-    chatLog('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected)
+    chatLog('[dsh-chat] 交互通道：审批=' + approvalChannelConnected + ' 选择=' + questionChannelConnected + ' 附件=' + uploadChannelConnected + ' 确认=' + channelConfirmed + (channelProbeError ? ' 探测=' + channelProbeError : ''))
   }
   /** ★ 草稿柜：**按会话存** ✓（切走再切回来，字还在 ✓）。 */
   let drafts = {}
@@ -2136,7 +2145,17 @@ export function mountChat(options) {
     if (address?.kind === 'subagent' && address.mode !== 'continuable') return '此子智能体仅支持查看'
     if (!currentSessionId) return '请先选择或新建会话'
     if (connection !== 'online') return '电脑尚未连接，请连接后添加附件'
-    if (!uploadChannelConnected) return '附件通道未接通，请退出并重开电脑上的 DeepSeek Harness'
+    if (!uploadChannelConnected) {
+      // ★ 2026-10-12 修：按真实状态分层，**不猜也不劝重装** ✗ ——
+      //   · 没问成（探测失败）      ⇒ 暂时联系不上，会自动重查；
+      //   · 还没确认过 / 初始化中   ⇒ 正在确认，页面会自动重查；
+      //   · 已确认仍未就绪且重试用尽 ⇒ 如实说仍未就绪，并给出「可重新检测」的出路；
+      //   · 已确认宿主没有该服务    ⇒ 如实说没有，**不给泛化的重装建议**（重装未必解决注册时序）。
+      if (channelProbeError) return '附件通道暂时联系不上电脑（' + channelProbeError + '），恢复连接后会自动重试'
+      if (!channelConfirmed) return '正在确认电脑的附件通道（宿主可能仍在初始化），页面会自动重查'
+      if (channelRetryExhausted) return '电脑上的附件通道仍未就绪，可刷新页面重新检测'
+      return '电脑上的 DeepSeek Harness 此刻没有提供附件服务（fileUploads 未注册）'
+    }
     return ''
   }
   const uploadAttachment = async (session, file) => {
@@ -2176,6 +2195,9 @@ export function mountChat(options) {
     if (blocked) { setNotice(blocked); chatLog('[dsh-chat] 附件入口：' + blocked); return }
     if (!attachmentInput) { setNotice('附件选择器未加载，请刷新页面'); return }
     // 保持在点击调用栈中，Android WebView 与浏览器都要求真实用户激活。
+    // ★ 绝不能改成「先 await 通道探测 / 退避重查，再点选择器」（2026-10-12 ✗）：
+    //   任何 await 都会把 click 推出用户手势栈，选择器直接打不开 ✓。
+    //   通道未就绪由上面的 attachmentBlocked 当场挡住，而不是靠等探测 ✓。
     attachmentInput.click(); chatLog('[dsh-chat] 附件入口：已打开系统选择器')
   })
   if (attachmentInput) attachmentInput.addEventListener('change', () => { const files = Array.from(attachmentInput.files || []); attachmentInput.value = ''; void addAttachments(files) })
