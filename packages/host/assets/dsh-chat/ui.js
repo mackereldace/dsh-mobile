@@ -26,6 +26,9 @@ import { mountConversation, icon } from './conversation.js'
 import { mountTrace } from './trace.js'
 import { mountComposerControls } from './composer.js'
 import { mountNavigation } from './navigation.js'
+import { mountStatistics } from './stats.js'
+import { mountMobileShell } from './shell.js'
+import { mountManagement, navigateMobileBackend } from './management.js'
 
 export function chatLog(text) {
   try { console.log(text) } catch (error) { void error }
@@ -1466,14 +1469,11 @@ export function mountChat(options) {
    *     没有投影的那一档量的是"塌陷"（`display:none` + 高 0 ✓），不是"这条有多高" ✓
    *     （本仓原话：空串会让这一条塌成 0 高 ⇒ 几何就量不到了 ✗ —— 现在这一条**是**要量的那条 ✓）。
    *
-   * ## 纯展示（★ 本仓规矩：不假装能用 ✗）
-   *
-   * 四格**不是按钮** ✓（`<span>` ✓，没有 `click`、没有 `cursor:pointer` ✓）——
-   * DSH 自己那三格点开是三个宿主面板 ✓，而它们**只存在于 DSH 自己的 React 页**上 ✓
-   * （我们这一页没有可转发的锚点 ✗）⇒ 按照"要提供交互就该像审批卡那样有真实通道"✓，
-   * 没有通道就**不做**交互 ✗。
+   * 点击详情使用同一份完整会话投影；不从已挂载的消息节点统计。
    */
   const statsStrip = root.querySelector('#stats-strip')
+  const nativeStatistics = mountStatistics({ root, getValues: () => projection.snapshot().values })
+  const nativeManagement = typeof options.manage === 'function' ? mountManagement({ root, backend: 'dsh', call: options.manage, boot: globalThis.__DSH_MOBILE_BOOT__ }) : null
   /**
    * ★ 上一次画进 DOM 的那四格（`null` = 还没画过 ✓）。
    *
@@ -1817,6 +1817,7 @@ export function mountChat(options) {
   const renderStatsStrip = () => {
     if (statsStrip === null || statsStrip === undefined) return
     const values = projection.snapshot().values
+    nativeStatistics.update()
     const cells = statsCells(values)
     const key = cells.map((cell) => cell.key + '=' + cell.text).join('|')
     // ★ 内容没变 ⇒ 一个字节都不动 ✓（`paint()` 每批事件都会跑 ✓）
@@ -1854,10 +1855,13 @@ export function mountChat(options) {
         sep.textContent = '·'
         statsStrip.appendChild(sep)
       }
-      const cell = document.createElement('span')
+      const cell = document.createElement('button')
+      cell.type = 'button'
       cell.className = 'stats-cell'
       // ★ 纯 ASCII 的钩子 ✓（验收按它找那一格 ✓，DOM 上看不出区别 ✓）
       cell.setAttribute('data-cell', cells[index].key)
+      cell.setAttribute('aria-haspopup', 'dialog'); cell.setAttribute('aria-controls', 'statistics-details'); cell.setAttribute('aria-expanded', 'false')
+      cell.addEventListener('click', () => nativeStatistics.toggle(cells[index].key, cell))
       if (cells[index].key === 'context') cell.appendChild(contextProgress(cells[index].percent))
       const text = document.createElement('span')
       text.className = 'stats-text'
@@ -1925,7 +1929,15 @@ export function mountChat(options) {
     root,
     onSwitch: (id, metadata) => { prepareSwitch(); return options.onSwitch?.(id, metadata) },
     onCreate: request => { prepareSwitch(); return options.onCreate?.(request) },
-    onRename: options.rename, onFiles: options.onFiles,
+    onRename: options.rename, onFiles: typeof options.onFiles === 'function' ? () => { nativeStatistics.close(); nativeControls.back?.(); return options.onFiles() } : undefined,
+    onManage: nativeManagement ? kind => { nativeStatistics.close(); nativeControls.back?.(); nativeManagement.open(kind) } : undefined,
+    onBackendChange: typeof options.manage === 'function' ? backend => {
+      if (backend === 'dsh') return
+      if (sending || activeAttachments().some(file => file.uploading)) throw new Error('请等当前发送或上传结束后再切换来源')
+      const ready = activeAttachments().filter(file => file.receiptId).map(({ name, size, receiptId }) => ({ name, size, receiptId, uploading: false, error: '' }))
+      try { globalThis.sessionStorage?.setItem('dshm-attachments:' + currentSessionId, JSON.stringify(ready)) } catch { /* In-page drafts still remain valid. */ }
+      navigateMobileBackend(backend, root)
+    } : undefined,
     onRefresh: () => { loading = true; error = ''; notice = ''; paint(); return options.onRefresh?.() },
     onError: text => setNotice(text), onNotice: text => setNotice(text), onLog: chatLog,
   })
@@ -1948,6 +1960,7 @@ export function mountChat(options) {
     onRefresh: request => options.refreshProjections?.(request),
     onSubmit: () => form?.requestSubmit(), onError: text => setNotice(text),
   })
+  const mobileShell = mountMobileShell({ root, navigation: nativeNavigation, statistics: nativeStatistics, management: nativeManagement, controls: nativeControls, boot: globalThis.__DSH_MOBILE_BOOT__ })
   const drawTrace = () => { nativeTrace.show(); traceSteps = nativeTrace.count() }
   const appendTrace = () => { nativeTrace.update(projection.snapshot()); traceSteps = nativeTrace.count() }
   const applyValues = (values, metadata = {}) => {
@@ -1993,9 +2006,17 @@ export function mountChat(options) {
   const setSessions = (next, currentId, titleText) => {
     sessions = nativeNavigation.setSessions(Array.isArray(next) ? next : [], currentId, titleText)
     if (typeof currentId === 'string' && currentId !== currentSessionId) {
+      nativeStatistics.close(); globalThis.__DSH_MOBILE_BOOT__?.closeFiles?.()
       if (input) {
         drafts = putDraft(drafts, currentSessionId, String(input.value || ''))
         input.value = getDraft(drafts, currentId)
+        try {
+          if (!input.value) input.value = globalThis.sessionStorage?.getItem('dshm-route-draft:/mobile/chat:' + currentId) || ''
+          if (!attachmentDrafts.has(currentId)) {
+            const files = JSON.parse(globalThis.sessionStorage?.getItem('dshm-attachments:' + currentId) || '[]')
+            if (Array.isArray(files)) attachmentDrafts.set(currentId, files.filter(file => typeof file?.receiptId === 'string' && file.receiptId && typeof file.name === 'string' && Number.isFinite(file.size)))
+          }
+        } catch { /* Session storage is optional. */ }
       }
       currentSessionId = currentId
       pendingSwitch = true; sawResponseSinceSwitch = false
@@ -2091,6 +2112,11 @@ export function mountChat(options) {
       const text = document.createElement('span')
       text.textContent = file.name + (file.uploading ? ' · 上传中…' : file.error ? ' · ' + file.error : ' · ' + file.size + ' 字节')
       chip.appendChild(text)
+      if (file.error && file.source) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试'; retry.disabled = sending || connection !== 'online'
+        retry.setAttribute('aria-label', '重试上传 ' + file.name)
+        retry.addEventListener('click', () => { void uploadAttachment(currentSessionId, file) }); chip.appendChild(retry)
+      }
       const remove = document.createElement('button')
       remove.type = 'button'
       remove.textContent = '×'
@@ -2104,15 +2130,18 @@ export function mountChat(options) {
       attachmentsBox.appendChild(chip)
     }
   }
-  const addAttachments = async files => {
-    if (!uploadChannelConnected || connection !== 'online' || !currentSessionId) return
-    const session = currentSessionId
-    for (const source of Array.from(files || [])) {
-      const file = { name: source.name, size: source.size, uploading: true, receiptId: '', error: '' }
-      const pending = attachmentDrafts.get(session) || []
-      pending.push(file)
-      attachmentDrafts.set(session, pending)
-      paintComposer()
+  const attachmentBlocked = () => {
+    const address = nativeNavigation.session(currentSessionId)?.address
+    if (address?.kind === 'subagent' && address.mode !== 'continuable') return '此子智能体仅支持查看'
+    if (!currentSessionId) return '请先选择或新建会话'
+    if (connection !== 'online') return '电脑尚未连接，请连接后添加附件'
+    if (!uploadChannelConnected) return '附件通道未接通，请退出并重开电脑上的 DeepSeek Harness'
+    return ''
+  }
+  const uploadAttachment = async (session, file) => {
+      if (file.uploading || !file.source) return
+      file.uploading = true; file.error = ''; paintComposer()
+      const source = file.source
       try {
         // 单帧协议32MiB，base64展开后仍须留足JSON和加密帧空间。
         if (source.size > 20 * 1024 * 1024) throw new Error('附件超过20MiB单次上传上限')
@@ -2120,6 +2149,7 @@ export function mountChat(options) {
         const value = await options.upload(session, source.name, bytes)
         if (!value || value.ok !== true || typeof value.receiptId !== 'string' || !value.receiptId) throw new Error('宿主没有返回附件收据')
         file.receiptId = value.receiptId
+        file.source = null
         chatLog('[dsh-chat] 附件上传：' + source.name + ' ' + bytes.length + ' 字节，收据已取得')
       } catch (error) {
         file.error = error instanceof Error ? error.message : String(error)
@@ -2127,9 +2157,26 @@ export function mountChat(options) {
       }
       file.uploading = false
       if (session === currentSessionId) paintComposer()
+  }
+  const addAttachments = async files => {
+    const blocked = attachmentBlocked()
+    if (blocked) { setNotice(blocked); chatLog('[dsh-chat] 附件入口：' + blocked); return }
+    const session = currentSessionId
+    for (const source of Array.from(files || [])) {
+      const file = { name: source.name, size: source.size, source, uploading: false, receiptId: '', error: '' }
+      const pending = attachmentDrafts.get(session) || []
+      pending.push(file); attachmentDrafts.set(session, pending)
+      await uploadAttachment(session, file)
     }
   }
-  if (attachButton) attachButton.addEventListener('click', () => { if (!attachButton.disabled && attachmentInput) attachmentInput.click() })
+  if (attachButton) attachButton.addEventListener('click', () => {
+    if (attachButton.disabled) return
+    const blocked = attachmentBlocked()
+    if (blocked) { setNotice(blocked); chatLog('[dsh-chat] 附件入口：' + blocked); return }
+    if (!attachmentInput) { setNotice('附件选择器未加载，请刷新页面'); return }
+    // 保持在点击调用栈中，Android WebView 与浏览器都要求真实用户激活。
+    attachmentInput.click(); chatLog('[dsh-chat] 附件入口：已打开系统选择器')
+  })
   if (attachmentInput) attachmentInput.addEventListener('change', () => { const files = Array.from(attachmentInput.files || []); attachmentInput.value = ''; void addAttachments(files) })
 
   paintComposer = () => {
@@ -2138,9 +2185,9 @@ export function mountChat(options) {
     const uploadPending = files.some(file => file.uploading || file.error)
     paintAttachments()
     if (attachButton) {
-      attachButton.disabled = sending || !uploadChannelConnected || connection !== 'online' || !currentSessionId
+      attachButton.disabled = sending
       attachButton.setAttribute('aria-disabled', String(attachButton.disabled))
-      attachButton.title = uploadChannelConnected ? '添加附件（单个≤20MiB）' : '附件通道未接通（请重开 DeepSeek Harness）'
+      attachButton.title = attachmentBlocked() || '添加附件（单个≤20MiB）'
     }
     const address = nativeNavigation.session(currentSessionId)?.address
     const readOnlyChild = address?.kind === 'subagent' && address.mode !== 'continuable'
@@ -2236,7 +2283,9 @@ export function mountChat(options) {
     },
     controls: nativeControls,
     navigation: nativeNavigation,
-    dispose: () => { nativeConversation.dispose(); nativeTrace.dispose(); nativeControls.dispose(); nativeNavigation.dispose() },
+    statistics: nativeStatistics, management: nativeManagement, shell: mobileShell,
+    closePopups: () => { nativeStatistics.close(); nativeControls.back?.() },
+    dispose: () => { mobileShell.dispose(); nativeStatistics.dispose(); nativeManagement?.dispose(); nativeConversation.dispose(); nativeTrace.dispose(); nativeControls.dispose(); nativeNavigation.dispose() },
     /** 当前会话 id ✓。 */
     current: () => currentSessionId,
     /** 草稿柜读数 ✓（开发壳与测试用 ✓）。 */

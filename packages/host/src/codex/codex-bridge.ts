@@ -47,6 +47,13 @@ const DEFAULT_APPROVAL_TTL_MS = 120_000
 /** 单次事件批量上限：避免手机一次拉爆（隧道有单帧上限）。 */
 const MAX_EVENT_BATCH = 200
 
+/** Codex CLI 0.161.0 的原生管理 RPC；不提供任意方法透传。 */
+export const CODEX_MANAGEMENT_METHODS = [
+  'config/read', 'config/batchWrite', 'configRequirements/read', 'model/list',
+  'plugin/installed', 'plugin/read',
+] as const
+export type CodexManagementMethod = typeof CODEX_MANAGEMENT_METHODS[number]
+
 export interface CodexBridgeOptions {
   /** CLI 可执行文件；缺省见 `detectCodexCli()`。 */
   readonly cliPath?: string
@@ -162,6 +169,7 @@ interface PendingRpc {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
+  cleanup?: () => void
 }
 
 /**
@@ -211,6 +219,7 @@ export class CodexAppServerProcess {
       this.child = undefined
       for (const [, pending] of this.pending) {
         clearTimeout(pending.timer)
+        pending.cleanup?.()
         pending.reject(new Error(`codex app-server exited (code=${String(code)})`))
       }
       this.pending.clear()
@@ -251,6 +260,7 @@ export class CodexAppServerProcess {
       if (pending === undefined) return
       this.pending.delete(id)
       clearTimeout(pending.timer)
+      pending.cleanup?.()
       if (message.error !== undefined) pending.reject(new Error(message.error.message ?? 'codex rpc error'))
       else pending.resolve(message.result)
       return
@@ -274,20 +284,31 @@ export class CodexAppServerProcess {
     stdin.write(`${JSON.stringify(payload)}\n`)
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted()
     const id = this.nextId++
     const timeoutMs = this.options.requestTimeoutMs ?? 30_000
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
+        this.pending.get(id)?.cleanup?.()
         this.pending.delete(id)
         reject(new Error(`codex rpc timeout: ${method}`))
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
+      const abort = () => {
+        this.pending.delete(id)
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        reject(signal?.reason instanceof Error ? signal.reason : new Error('Codex 请求已取消'))
+      }
+      this.pending.set(id, { resolve, reject, timer, cleanup: () => signal?.removeEventListener('abort', abort) })
+      signal?.addEventListener('abort', abort, { once: true })
       try {
+        signal?.throwIfAborted()
         this.write({ jsonrpc: '2.0', id, method, params })
       } catch (error) {
         this.pending.delete(id)
         clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
         reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
@@ -345,7 +366,7 @@ export class CodexBridge {
 
   /** 懒启动 + initialize（幂等；同一时刻只有一个启动过程 ✓）。 */
   async ensureStarted(): Promise<void> {
-    if (this.process.running) return
+    if (this.process.running) return this.started
     this.started ??= (async () => {
       this.process.start()
       await this.process.request('initialize', {
@@ -537,6 +558,15 @@ export class CodexBridge {
     }
   }
 
+  /** 仅宿主管理适配器使用；参数和返回值由适配器白名单裁剪。 */
+  async managementRequest(method: CodexManagementMethod, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    if (!(CODEX_MANAGEMENT_METHODS as readonly string[]).includes(method)) throw new Error('不支持的 Codex 管理接口')
+    signal?.throwIfAborted()
+    await this.ensureStarted()
+    signal?.throwIfAborted()
+    return this.process.request(method, params, signal)
+  }
+
   async listThreads(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     await this.ensureStarted()
     const raw = (await this.process.request('thread/list', {
@@ -583,17 +613,35 @@ export class CodexBridge {
   }
 
   async startThread(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (typeof args['permissions'] === 'string' && typeof args['sandbox'] === 'string') {
+      throw new Error('原生 Codex 权限方案不能与 sandbox 同时指定')
+    }
     await this.ensureStarted()
+    const cwd = typeof args['cwd'] === 'string' ? args['cwd'] : this.defaultCwd
+    // 原生服务每次读配置；没有提供这条 RPC 的旧服务器保持原有安全默认。
+    // 不缓存用户配置，避免手机保存后下一条会话仍使用旧模型/权限。
+    let defaults: Record<string, unknown> = {}
+    try {
+      const read = await this.process.request('config/read', { includeLayers: false, ...(cwd === undefined ? {} : { cwd }) }) as { config?: unknown }
+      if (read.config !== null && typeof read.config === 'object') defaults = read.config as Record<string, unknown>
+    } catch {
+      // 获取默认失败时不能扩大权限；明确参数仍优先，缺省退回旧安全策略。
+    }
+    const model = typeof args['model'] === 'string' ? args['model'] : typeof defaults['model'] === 'string' ? defaults['model'] : undefined
+    const provider = typeof args['modelProvider'] === 'string' ? args['modelProvider'] : typeof defaults['model_provider'] === 'string' ? defaults['model_provider'] : undefined
+    const effort = typeof args['reasoningEffort'] === 'string' ? args['reasoningEffort'] : typeof defaults['model_reasoning_effort'] === 'string' ? defaults['model_reasoning_effort'] : undefined
+    const approval = validApprovalPolicy(args['approvalPolicy']) ? args['approvalPolicy']
+      : validApprovalPolicy(defaults['approval_policy']) ? defaults['approval_policy'] : 'untrusted'
+    const permissions = typeof args['permissions'] === 'string' && args['permissions'].length > 0 ? args['permissions']
+      : args['sandbox'] === undefined && typeof defaults['default_permissions'] === 'string' && defaults['default_permissions'].length > 0 ? defaults['default_permissions'] : undefined
+    const sandbox = typeof args['sandbox'] === 'string' ? args['sandbox']
+      : ['read-only', 'workspace-write', 'danger-full-access'].includes(String(defaults['sandbox_mode'])) ? defaults['sandbox_mode'] : 'workspace-write'
     const result = (await this.process.request('thread/start', {
-      approvalPolicy: typeof args['approvalPolicy'] === 'string' ? args['approvalPolicy'] : 'untrusted',
-      sandbox: typeof args['sandbox'] === 'string' ? args['sandbox'] : 'workspace-write',
-      ...(typeof args['cwd'] === 'string'
-        ? { cwd: args['cwd'] }
-        : this.defaultCwd === undefined
-          ? {}
-          : { cwd: this.defaultCwd }),
-      ...(typeof args['model'] === 'string' ? { model: args['model'] } : {}),
-      ...(typeof args['modelProvider'] === 'string' ? { modelProvider: args['modelProvider'] } : {}),
+      approvalPolicy: approval, ...(permissions === undefined ? { sandbox } : { permissions }),
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(model === undefined ? {} : { model }),
+      ...(provider === undefined ? {} : { modelProvider: provider }),
+      ...(effort === undefined ? {} : { config: { model_reasoning_effort: effort } }),
     })) as { thread?: { id?: unknown } }
     const threadId = String(result.thread?.id ?? '')
     if (threadId.length > 0) this.loadedThreads.add(threadId)
@@ -793,6 +841,15 @@ function requireString(args: Record<string, unknown>, key: string): string {
     throw Object.assign(new Error(`参数缺失：${key}`), { code: ErrorCode.Internal })
   }
   return value
+}
+
+function validApprovalPolicy(value: unknown): boolean {
+  if (value === 'untrusted' || value === 'on-request' || value === 'never') return true
+  if (value === null || typeof value !== 'object') return false
+  const granular = (value as Record<string, unknown>)['granular']
+  if (granular === null || typeof granular !== 'object') return false
+  const record = granular as Record<string, unknown>
+  return ['sandbox_approval', 'rules', 'skill_approval', 'request_permissions', 'mcp_elicitations'].every(key => typeof record[key] === 'boolean')
 }
 
 /** 归一化一条 thread：手机端只关心这几个字段，别把服务端的大对象整个抛过去 ✓。 */

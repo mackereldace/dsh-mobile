@@ -3,6 +3,10 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { describe, it } from 'node:test'
 import { createProjection } from '../assets/dsh-chat/projection.js'
+// @ts-expect-error Browser JavaScript import; unrelated surface modules keep their real no-DOM guards.
+import { mountStatistics } from '../assets/dsh-chat/stats.js'
+// @ts-expect-error Browser JavaScript import.
+import { mountMobileShell } from '../assets/dsh-chat/shell.js'
 
 /** Exercise the real UI entry and approval bookkeeping; unrelated native views
  * are replaced at their import boundaries, each with its own behavior suite. */
@@ -39,7 +43,7 @@ function mounted(answerApproval: (id: string, decision: string) => Promise<Data>
   const root = { querySelector: (selector: string) => ids.get(selector) ?? null }
   let sessions: Data[] = []
   const context: Data = {
-    createProjection, document: { createElement: (tag: string) => new Element(tag) }, console: { log: idle },
+    createProjection, mountStatistics, mountMobileShell, document: { createElement: (tag: string) => new Element(tag) }, console: { log: idle },
     mountNavigation: () => ({ setSessions: (next: Data[]) => (sessions = next), sessions: () => sessions, session: (id: string) => sessions.find(item => item.id === id), setValues: idle, dispose: idle }),
     mountConversation: () => ({ update: idle, limits: () => ({ drawn: 0 }), dispose: idle }),
     mountTrace: () => ({ show: idle, update: idle, count: () => 0, dispose: idle }),

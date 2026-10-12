@@ -1,0 +1,165 @@
+[
+  {
+    "name": "bar-origin-drag-rejected",
+    "killed": true,
+    "failedTests": [
+      "a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click",
+      "bar taps select a record; drags from children and range handles adjust the selection",
+      "the final pointer position commits a short drag even when move events are coalesced",
+      "mobile scrollbar handles resize a window, its thumb pans, and reset restores the full domain",
+      "secondary-button plot panning works from a bar and cancellation restores the viewport",
+      "a secondary-button tap clears selection and slider keyboard limits do not move the opposite edge",
+      "pointer cancellation and lost capture discard only the draft, and unrelated pointers cannot finish it",
+      "live updates wait until pointer commit so the active drag has a stable coordinate mapping",
+      "sequence selection includes untimed records, duration skips them, and Escape clears focus",
+      "switching to duration clears an untimed selection instead of inventing a timing range"
+    ],
+    "passing": 21,
+    "failing": 10
+  },
+  {
+    "name": "search-compresses-axis",
+    "killed": true,
+    "failedTests": [
+      "AND search filters table and dims graph matches without changing the complete domain",
+      "search, collapse, and table paging do not change the viewport or full timeline"
+    ],
+    "passing": 29,
+    "failing": 2
+  },
+  {
+    "name": "selection-deletes-ledger-rows",
+    "killed": true,
+    "failedTests": [
+      "range highlights matching rows and keeps the whole table and graph, including empty focus",
+      "range inputs and graph pointer dragging share recorded-time selection",
+      "a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click",
+      "bar taps select a record; drags from children and range handles adjust the selection",
+      "selection retains all logical records and focuses earlier rows under the hard 200-node cap",
+      "sequence selection includes untimed records, duration skips them, and Escape clears focus"
+    ],
+    "passing": 25,
+    "failing": 6
+  },
+  {
+    "name": "pointermove-rebuilds-record-nodes",
+    "killed": true,
+    "failedTests": [
+      "a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "missing-pointer-capture",
+    "killed": true,
+    "failedTests": [
+      "a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "lost-capture-keeps-draft",
+    "killed": true,
+    "failedTests": [
+      "pointer cancellation and lost capture discard only the draft, and unrelated pointers cannot finish it"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "cancel-commits-draft",
+    "killed": true,
+    "failedTests": [
+      "secondary-button plot panning works from a bar and cancellation restores the viewport",
+      "pointer cancellation and lost capture discard only the draft, and unrelated pointers cannot finish it"
+    ],
+    "passing": 29,
+    "failing": 2
+  },
+  {
+    "name": "foreign-pointer-moves-draft",
+    "killed": true,
+    "failedTests": [
+      "pointer cancellation and lost capture discard only the draft, and unrelated pointers cannot finish it"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "drag-click-clears-range",
+    "killed": true,
+    "failedTests": [
+      "a real bar starts range dragging, keeps nodes stable, and suppresses the subsequent click"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "missing-final-pointer-position",
+    "killed": true,
+    "failedTests": [
+      "the final pointer position commits a short drag even when move events are coalesced"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "live-update-changes-active-axis",
+    "killed": true,
+    "failedTests": [
+      "live updates wait until pointer commit so the active drag has a stable coordinate mapping"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "history-viewport-loses-anchor",
+    "killed": true,
+    "failedTests": [
+      "history prepending preserves viewport and selection by record anchors; live appends preserve window width"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "node-cap-caller-overrides-200",
+    "killed": true,
+    "failedTests": [
+      "selection retains all logical records and focuses earlier rows under the hard 200-node cap"
+    ],
+    "passing": 30,
+    "failing": 1
+  },
+  {
+    "name": "untimed-record-lost-in-sequence-range",
+    "killed": true,
+    "failedTests": [
+      "sequence selection includes untimed records, duration skips them, and Escape clears focus",
+      "switching to duration clears an untimed selection instead of inventing a timing range"
+    ],
+    "passing": 29,
+    "failing": 2
+  },
+  {
+    "name": "untimed-record-invents-time",
+    "killed": true,
+    "failedTests": [
+      "sequence selection includes untimed records, duration skips them, and Escape clears focus",
+      "switching to duration clears an untimed selection instead of inventing a timing range"
+    ],
+    "passing": 29,
+    "failing": 2
+  },
+  {
+    "name": "search-match-indicator-always-true",
+    "killed": true,
+    "failedTests": [
+      "AND search filters table and dims graph matches without changing the complete domain",
+      "search, collapse, and table paging do not change the viewport or full timeline"
+    ],
+    "passing": 29,
+    "failing": 2
+  }
+]

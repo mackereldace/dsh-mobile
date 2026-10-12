@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "name": "left-push",
+      "checks": 28,
+      "failed": [
+        "汉堡展开主页面push侧栏"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-28DhQq"
+    },
+    {
+      "name": "right-push",
+      "checks": 28,
+      "failed": [
+        "文件与主侧栏互斥且只有一个位移"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-KA7F9P"
+    },
+    {
+      "name": "floating",
+      "checks": 28,
+      "failed": [
+        "输入栏外层透明浮动"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-LDBKyi"
+    },
+    {
+      "name": "tab-height",
+      "checks": 28,
+      "failed": [
+        "顶栏52px与二级栏44px"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-1IhAoU"
+    },
+    {
+      "name": "picker-activation",
+      "checks": 28,
+      "failed": [
+        "附件按钮同步触发系统选择器"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-36g6ev"
+    },
+    {
+      "name": "management-readback",
+      "checks": 28,
+      "failed": [
+        "设置用版本保存并以回读确认"
+      ],
+      "evidence": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dsh-mobile-browser-4F7ZJT"
+    }
+  ]
+}

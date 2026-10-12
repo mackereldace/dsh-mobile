@@ -1,5 +1,5 @@
 /* Existing boot mobile surface styles, shared file-panel entry; native.css calibrates the chat page. */
-:root { --dshm-top-h: 52px; --dshm-bar-btn: 44px; --dshm-bar-gap: 2px; --dshm-back-left: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap)); --dshm-back-slot: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap) * 2); --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: var(--dshm-drawer-w); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }
+:root { --dshm-top-h: 52px; --dshm-bar-btn: 44px; --dshm-bar-gap: 2px; --dshm-back-left: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap)); --dshm-back-slot: calc(var(--dshm-bar-btn) + var(--dshm-bar-gap) * 2); --dshm-drawer-w: min(64vw, 264px); --dshm-files-w: min(80vw, 330px); --dshm-push: 0px; --dshm-slide: .24s cubic-bezier(.2,.8,.2,1); }
   html, html body * { -webkit-tap-highlight-color: transparent; }
   html body *:focus { outline: none !important; }
 #dsh-mobile-top {

@@ -15,6 +15,7 @@ import {
   handleDshChatEndpoint,
   normalizeSessions,
   normalizePage,
+  normalizeValues,
   pageRequest,
   type GatewayCaller,
 } from '../src/dsh-chat-bridge.ts'
@@ -216,8 +217,9 @@ describe('★★ 会话页状态条：三个投影的真值（session/projection
       },
       tokenUsage: { uncachedInputTokens: 4215496, outputTokens: 2706002, cacheReadTokens: 1123595776, cacheWriteTokens: 0 },
       contextPressure: { pressureTokens: 259578, projectedTokens: 260433, contextWindow: 1000000 },
-      /** ★ 同层还有它 ✓ —— 它**不该**出现在我们的输出里 ✗（白名单见模块注释第 2 条 ✓）。 */
+      /** Native heuristic composition, used by the click-open context details. */
       contextBreakdown: { systemTokens: 1452, toolsTokens: 5839, messageTokens: 142213 },
+      internalOnlyProjection: { secret: 'not a page value' },
     },
   }
   /** `session/page` 的真形状 ✓（实测只有这两个字段 ✓）。 */
@@ -234,6 +236,7 @@ describe('★★ 会话页状态条：三个投影的真值（session/projection
     assert.deepEqual(values['sessionStats'], realProjections.values.sessionStats)
     assert.deepEqual(values['tokenUsage'], realProjections.values.tokenUsage)
     assert.deepEqual(values['contextPressure'], realProjections.values.contextPressure)
+    assert.deepEqual(values['contextBreakdown'], realProjections.values.contextBreakdown)
     // ★ 状态条的四个格子分别读哪儿（页面侧照这个填 ✓）
     const stats = values['sessionStats'] as Record<string, number>
     const usage = values['tokenUsage'] as Record<string, number>
@@ -260,14 +263,27 @@ describe('★★ 会话页状态条：三个投影的真值（session/projection
     assert.deepEqual(calls[0], { endpoint: 'session/projections', payload: { args: { request: { sessionId: SESSION_ID } } } })
   })
 
-  it('★★ 白名单：不在名单上的投影（`contextBreakdown`）一个都不许转出去', async () => {
+  it('context composition is explicitly whitelisted, while other internal projections stay private', async () => {
     const { call } = fakeGateway({
       'session/projections': { ok: true, value: realProjections },
       'session/page': { ok: true, value: realPage },
     })
     const page = (await handleDshChatEndpoint({ call }, DSH_CHAT_PATHS.read, args({ sessionId: SESSION_ID }))) as Record<string, unknown>
     const values = page['values'] as Record<string, unknown>
-    assert.equal('contextBreakdown' in values, false)
+    assert.deepEqual(values['contextBreakdown'], realProjections.values.contextBreakdown)
+    assert.equal('internalOnlyProjection' in values, false)
+  })
+
+  it('contextBreakdown preserves valid zeroes without inventing absent counts or leaking extra fields', () => {
+    assert.deepEqual(normalizeValues({ contextBreakdown: { systemTokens: 0, toolsTokens: 12, internal: 9 } }), {
+      contextBreakdown: { systemTokens: 0, toolsTokens: 12 },
+    })
+    for (const contextBreakdown of [undefined, null, [], 'unknown', {}, { messageTokens: -1 }, { systemTokens: 1.5 }, { toolsTokens: '0' }, { toolsTokens: Infinity }, { systemTokens: Number.MAX_SAFE_INTEGER + 1 }]) {
+      assert.equal('contextBreakdown' in normalizeValues({ contextBreakdown }), false)
+    }
+    assert.deepEqual(normalizePage({ records: [], values: { contextBreakdown: { messageTokens: 142213 } } }).values, {
+      contextBreakdown: { messageTokens: 142213 },
+    })
   })
 
   it('★★ 取不到投影 ⇒ 输出里**没有**那三个键（**不是 0** ✗ —— 不编 ✓）', async () => {

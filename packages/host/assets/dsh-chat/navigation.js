@@ -185,7 +185,7 @@ export function mountNavigation(options) {
     titleButton.setAttribute('aria-haspopup', 'menu'); titleButton.setAttribute('aria-controls', 'session-actions')
   }
   const head = node('div', 'session-drawer-head')
-  append(head, node('span', 'session-drawer-title', '会话'))
+  append(head, node('span', 'session-drawer-title', 'DeepSeek Harness'))
   const closeDrawer = append(head, button('session-drawer-close', '', 'close'))
   closeDrawer.setAttribute('aria-label', '关闭会话列表'); closeDrawer.appendChild(glyph(doc, 'close'))
   const searchWrap = node('label', 'session-search-wrap'); searchWrap.appendChild(glyph(doc, 'search'))
@@ -195,9 +195,19 @@ export function mountNavigation(options) {
   create.appendChild(glyph(doc, 'plus')); create.appendChild(node('span', 'session-title', '新会话'))
   create.disabled = typeof options.onCreate !== 'function'
   const groups = node('div', 'session-groups')
+  const footer = node('div', 'session-drawer-footer')
+  const source = append(footer, node('label', 'session-backend-row', '会话来源'))
+  const backend = append(source, node('select', 'session-backend-select')); backend.setAttribute('aria-label', '会话来源')
+  for (const [value, label] of [['dsh', 'DSH'], ['codex', 'Codex']]) {
+    const option = node('option', '', label); option.value = value; backend.appendChild(option)
+  }
+  backend.value = options.backend || 'dsh'; backend.disabled = typeof options.onBackendChange !== 'function'
+  const plugins = append(footer, button('session-row session-management-link', '插件', 'plugins'))
+  const settings = append(footer, button('session-row session-management-link', '设置', 'settings'))
+  for (const item of [plugins, settings]) item.disabled = typeof options.onManage !== 'function'
   if (drawer) {
-    drawer.replaceChildren(head, searchWrap, create, groups)
-    drawer.setAttribute('role', 'dialog'); drawer.setAttribute('aria-label', '会话列表'); drawer.setAttribute('aria-modal', 'true')
+    drawer.replaceChildren(head, searchWrap, create, groups, footer)
+    drawer.setAttribute('role', 'navigation'); drawer.setAttribute('aria-label', '主页面侧栏')
   }
   if (hamburger) { hamburger.setAttribute('aria-controls', 'sessions'); hamburger.setAttribute('aria-label', '打开会话列表') }
   if (backdrop) backdrop.setAttribute('aria-label', '关闭会话列表')
@@ -221,19 +231,29 @@ export function mountNavigation(options) {
   }
   const catalogPanel = node('div', 'subagent-menu'); catalogPanel.id = 'subagent-catalog'
   catalogPanel.setAttribute('role', 'menu'); catalogPanel.setAttribute('aria-label', '子智能体目录'); catalogPanel.hidden = true
-  append(actions?.parentElement || drawer?.parentElement || root.body || root, catalogPanel)
+  const portal = doc.body || actions?.parentElement || drawer?.parentElement || root
+  for (const panel of [drawer, backdrop, actions, catalogPanel]) if (panel) append(portal, panel)
   if (badge) { badge.setAttribute('aria-haspopup', 'menu'); badge.setAttribute('aria-controls', 'subagent-catalog') }
   const clipboard = () => doc.defaultView?.navigator?.clipboard || globalThis.navigator?.clipboard
   const setFeedback = value => { feedback.textContent = value; feedback.hidden = !value }
   const hide = (focus = false) => {
     const opened = drawer?.hidden === false ? hamburger : actions?.hidden === false ? titleButton : catalogPanel.hidden === false ? badge : null
     if (drawer) drawer.hidden = true
+    doc.body?.setAttribute('data-dsh-mobile-drawer', 'closed')
     if (backdrop) backdrop.hidden = true
     if (actions) actions.hidden = true
     catalogPanel.hidden = true
     for (const trigger of [hamburger, titleButton, badge]) trigger?.setAttribute('aria-expanded', 'false')
     if (!renameBusy) renameForm.hidden = true
     if (focus) opened?.focus()
+    globalThis.__DSH_MOBILE_BOOT__?.reportBackAvailable?.()
+  }
+  const openDrawer = () => {
+    if (disposed || !drawer) return false
+    hide(); globalThis.__DSH_MOBILE_BOOT__?.closeFiles?.(); paintGroups()
+    drawer.hidden = false; if (backdrop) backdrop.hidden = false
+    doc.body?.setAttribute('data-dsh-mobile-drawer', 'open'); hamburger?.setAttribute('aria-expanded', 'true')
+    globalThis.__DSH_MOBILE_BOOT__?.reportBackAvailable?.(); return true
   }
   const switchSession = item => {
     hide()
@@ -306,7 +326,10 @@ export function mountNavigation(options) {
       const isChild = item?.address?.kind === 'subagent'
       badge.hidden = !isChild && (stats.total === null || stats.total === 0)
       badge.disabled = false
-      badge.textContent = isChild && !stats.total ? '子智能体' : stats.total === null ? '' : String(stats.total) + ' 个子智能体'
+      const lamp = node('span', 'subagent-running-dot'); lamp.setAttribute('aria-hidden', 'true')
+      const label = node('span', 'subagent-count-label', isChild && !stats.total ? '子智能体' : stats.total === null ? '' : String(stats.total) + ' 个子智能体')
+      badge.replaceChildren(lamp, label)
+      badge.setAttribute('data-running', stats.running === null ? 'unknown' : stats.running > 0 ? 'running' : 'idle')
       badge.classList.toggle('is-running', stats.running !== null && stats.running > 0)
       badge.title = stats.total === null ? '子智能体目录' : '子智能体 ' + stats.total + ' 个，运行中 ' + (stats.running === null ? '未知' : stats.running + ' 个')
       badge.setAttribute('aria-label', badge.title)
@@ -368,12 +391,16 @@ export function mountNavigation(options) {
     return true
   }
   listen(hamburger, 'click', () => {
-    if (openMenu(drawer, hamburger, paintGroups)) { if (backdrop) backdrop.hidden = false; closeDrawer.focus() }
+    if (drawer?.hidden === false) hide(true)
+    else if (openDrawer()) closeDrawer.focus()
   })
   listen(closeDrawer, 'click', () => hide(true)); listen(backdrop, 'click', () => hide(true))
   listen(titleButton, 'click', () => { if (openMenu(actions, titleButton, paintHeader)) { setFeedback(''); rename.focus() } })
   listen(badge, 'click', () => { openMenu(catalogPanel, badge, paintCatalog) })
   listen(search, 'input', paintGroups)
+  listen(backend, 'change', () => { hide(); void dispatch(options.onBackendChange, [backend.value], '切换来源失败') })
+  listen(plugins, 'click', () => { hide(); void dispatch(options.onManage, ['plugins'], '打开插件失败') })
+  listen(settings, 'click', () => { hide(); void dispatch(options.onManage, ['settings'], '打开设置失败') })
   listen(create, 'click', () => { const cwd = text(session(currentId)?.cwd); hide(); void dispatch(options.onCreate, [cwd ? { cwd } : {}], '新建会话失败') })
   listen(files, 'click', () => { hide(); void dispatch(options.onFiles, [], '打开文件失败') })
   listen(refresh, 'click', () => { hide(); void dispatch(options.onRefresh, [], '刷新失败') })
@@ -423,7 +450,7 @@ export function mountNavigation(options) {
   listen(doc, 'keydown', event => {
     if (event.key === 'Escape' && [drawer, actions, catalogPanel].some(panel => panel?.hidden === false)) { event.preventDefault(); hide(true) }
     if (event.key !== 'Tab' || drawer?.hidden !== false) return
-    const focusable = [closeDrawer, search, create, ...groups.querySelectorAll('button')].filter(el => !el.disabled && !el.hidden)
+    const focusable = [closeDrawer, search, create, ...groups.querySelectorAll('button'), backend, plugins, settings].filter(el => !el.disabled && !el.hidden)
     const first = focusable[0], last = focusable.at(-1), active = doc.activeElement
     if ((event.shiftKey && (active === first || !drawer.contains(active))) || (!event.shiftKey && (active === last || !drawer.contains(active)))) {
       event.preventDefault(); (event.shiftKey ? last : first)?.focus()
@@ -431,7 +458,9 @@ export function mountNavigation(options) {
   })
   hide(); setFeedback(''); paintHeader(); paintGroups()
   return {
-    setSessions, setValues, session, sessions: mergedSessions, hide,
+    setSessions, setValues, session, sessions: mergedSessions, hide, openDrawer,
+    available: () => [drawer, actions, catalogPanel].some(panel => panel?.hidden === false),
+    back() { if (![drawer, actions, catalogPanel].some(panel => panel?.hidden === false)) return false; hide(true); return true },
     dispose() { if (disposed) return; hide(); disposed = true; epoch += 1; for (const remove of listeners) remove(); catalogPanel.remove(); },
   }
 }

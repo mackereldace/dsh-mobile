@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/mobile/chat/theme.css">
 <link rel="stylesheet" href="/mobile/chat/file-panel.css">
 <link rel="stylesheet" href="/mobile/chat/native.css">
+<link rel="stylesheet" href="/mobile/chat/management.css">
 </head>
 <body>
 <div class="app">
@@ -37,6 +38,7 @@
     <div id="trace" data-view="trace" hidden></div>
   </main>
   <!-- 审批和用户问题是 composer 的独立交互区，永不混进消息窗口。 -->
+  <div id="floating-dock">
   <section id="interactions" aria-label="等待你处理" hidden></section>
   <div id="goal-dock" hidden></div>
   <form class="composer" id="composer">
@@ -64,6 +66,7 @@
     </div>
     <div class="stats-strip" id="stats-strip" aria-live="polite"></div>
   </form>
+  </div>
   <div class="homebar"></div>
 </div>
 <div id="input-menu" hidden></div>

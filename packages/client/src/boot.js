@@ -1969,6 +1969,14 @@
 
   /** 现在有没有"可返回的东西" ✓（只读那几个已经存在的标记 ✓）。 */
   function backAvailableNow() {
+    if (globalThis.__DSH_MOBILE_NO_SHELL__ === true) {
+      try {
+        if (standaloneNavigationHandlers !== null && typeof standaloneNavigationHandlers.available === 'function') {
+          return standaloneNavigationHandlers.available() === true || standaloneFilesOpen()
+        }
+      } catch (error) { debugBoxLine('[back] 读取会话页返回状态失败：' + String(error && error.message ? error.message : error)) }
+      return standaloneFilesOpen()
+    }
     var body = document.body
     if (body === null || body === undefined || body.dataset === undefined) return false
     return (
@@ -2165,6 +2173,14 @@
    */
   function dshmBack() {
     try {
+      if (globalThis.__DSH_MOBILE_NO_SHELL__ === true) {
+        if (standaloneNavigationHandlers !== null && typeof standaloneNavigationHandlers.back === 'function') {
+          var handled = standaloneNavigationHandlers.back() === true
+          reportBackAvailable()
+          if (handled) return true
+        }
+        return backStandaloneFiles()
+      }
       var runtime = dshmBackRuntime
       if (runtime === null || runtime === undefined) return false
       var body = document.body
@@ -14907,6 +14923,120 @@
   }
 
   var standaloneChatFiles
+  var standaloneNavigationHandlers = null
+  var FILES_READ_TIMEOUT_MS = 10000
+
+  function fileReadCancelledError() {
+    var error = new Error('文件面板已关闭或读取目标已改变')
+    error.code = 'dshm/files-read-cancelled'
+    return error
+  }
+
+  function filesReadCurrent(sheet, generation) {
+    return (sheet.readGeneration || 0) === generation &&
+      (sheet.root === undefined || sheet.root.dataset.open === '1')
+  }
+
+  function cancelFilesReads(sheet) {
+    sheet.readGeneration = (sheet.readGeneration || 0) + 1
+    var pending = (sheet.pendingReads || []).slice()
+    for (var i = 0; i < pending.length; i++) pending[i]()
+  }
+
+  /** Read-only RPCs are discarded on close; streams additionally send their existing cancel frame. */
+  function waitFilesRead(sheet, generation, pending, cancel, label) {
+    return new Promise(function (resolve, reject) {
+      var settled = false
+      var timer
+      var stop = function () { finish(fileReadCancelledError()) }
+      var finish = function (error, value) {
+        if (settled) return
+        settled = true
+        if (timer !== undefined) clearTimeout(timer)
+        var index = sheet.pendingReads.indexOf(stop)
+        if (index !== -1) sheet.pendingReads.splice(index, 1)
+        if (error !== undefined && typeof cancel === 'function') cancel()
+        if (error !== undefined) reject(error)
+        else resolve(value)
+      }
+      if (!Array.isArray(sheet.pendingReads)) sheet.pendingReads = []
+      sheet.pendingReads.push(stop)
+      timer = setTimeout(function () {
+        var error = new Error(label + '超过 10 秒，请重试')
+        error.code = 'dshm/files-read-timeout'
+        finish(error)
+      }, FILES_READ_TIMEOUT_MS)
+      if (!filesReadCurrent(sheet, generation)) stop()
+      Promise.resolve(pending).then(function (value) {
+        if (!filesReadCurrent(sheet, generation)) stop()
+        else finish(undefined, value)
+      }, function (error) { finish(error) })
+    })
+  }
+
+  function readFilesWorkspaceBaseline(sheet, generation, tunnel) {
+    var iterator
+    var cancelled = false
+    var cancel = function () {
+      if (cancelled || iterator === undefined) return
+      cancelled = true
+      try {
+        if (typeof iterator.return === 'function') Promise.resolve(iterator.return()).catch(function () {})
+      } catch (error) { void error }
+    }
+    var pending = (async function () {
+      var stream = tunnel.openStream('workspace/follow', { args: {} })
+      iterator = stream[Symbol.asyncIterator]()
+      for (;;) {
+        var next = await iterator.next()
+        if (next.done) throw new Error('工作区流结束，但电脑没有返回工作区列表')
+        var frame = next.value
+        if (frame !== null && frame !== undefined && frame.type === 'baseline') {
+          return frame.value && Array.isArray(frame.value.items) ? frame.value.items : []
+        }
+      }
+    })()
+    return waitFilesRead(sheet, generation, pending, cancel, '读取工作区').finally(cancel)
+  }
+
+  function filesReadFailure(sheet, generation, text, retry) {
+    if (!filesReadCurrent(sheet, generation) || sheet.currentView !== 'files') return
+    sheetMessage(sheet.body, text)
+    var button = toolButton('重试', retry)
+    button.setAttribute('data-dshm-files-retry', '1')
+    sheet.body.appendChild(button)
+    debugBoxLine('[files] ' + text)
+  }
+
+  function standaloneFilesTunnel() {
+    var api = globalThis.__DSH_MOBILE_BOOT__
+    return api === undefined ? undefined : api.tunnel
+  }
+
+  function standaloneFilesOpen() {
+    return standaloneChatFiles !== undefined && standaloneChatFiles.root.dataset.open === '1'
+  }
+
+  function closeStandaloneFiles() {
+    if (!standaloneFilesOpen()) return false
+    standaloneChatFiles.setOpen(false)
+    return true
+  }
+
+  function backStandaloneFiles() {
+    if (!standaloneFilesOpen()) return false
+    if (standaloneChatFiles.backOutOfView() !== true) standaloneChatFiles.setOpen(false)
+    reportBackAvailable()
+    return true
+  }
+
+  function notifyStandaloneFilesState(open) {
+    if (globalThis.__DSH_MOBILE_NO_SHELL__ !== true) return
+    if (typeof globalThis.CustomEvent === 'function' && typeof document.dispatchEvent === 'function') {
+      document.dispatchEvent(new CustomEvent('dshm:files-state', { detail: { open: open } }))
+    }
+  }
+
   function buildFilesSheet() {
     var root = document.createElement('div')
     root.id = 'dsh-mobile-sheet'
@@ -15062,6 +15192,8 @@
     var closeTimer = undefined
 
     var setOpen = function (open) {
+      var wasOpen = root.dataset.open === '1'
+      if (!open && api !== undefined) cancelFilesReads(api)
       if (open) {
         /**
          * ★★ round 156（C ✓）：**重开 = 把上一次关闭的收尾当场做完** ✓（`finishClose` 幂等 ✓）——
@@ -15118,6 +15250,7 @@
        *   放在最后：`body.dataset.dshmFiles` 已经写完了 ✓，读到的一定是新状态 ✓。
        */
       reportBackAvailable()
+      if (wasOpen !== open) notifyStandaloneFilesState(open)
     }
     /**
      * 只改副标题（不动主标题）。
@@ -19005,7 +19138,9 @@
    * @param focusName - 进去之后要滚到可见并高亮的**文件名** ✓（可省略 ✓）。
    */
   async function openFilesSheet(sheet, getTunnel, targetDir, focusName) {
-
+    cancelFilesReads(sheet)
+    var generation = sheet.readGeneration
+    var retry = function () { void openFilesSheet(sheet, getTunnel, targetDir, focusName) }
     sheet.setOpen(true)
     // ★ 先给一个**兜底的**"返回文件视图"，再由具体的渲染函数覆盖成更精确的那个
     //   （工作区列表 / 某个工作区的文件浏览器）。
@@ -19034,28 +19169,20 @@
     sheet.setTitle('电脑文件目录')
     var tunnel = getTunnel()
     if (tunnel === undefined || tunnel === null) {
-      sheetMessage(sheet.body, '尚未连接到电脑。')
+      filesReadFailure(sheet, generation, '尚未连接到电脑。', retry)
       return
     }
     sheetMessage(sheet.body, '读取工作区…')
 
     var workspaces = []
     try {
-      // `workspace/follow` 是流：第一帧固定是 baseline，之后是增量。
-      // 这里只取 baseline 就够——面板是一次性读取，不做实时跟随。
-      var stream = tunnel.openStream('workspace/follow', { args: {} })
-      for await (var frame of stream) {
-        if (frame !== null && frame !== undefined && frame.type === 'baseline') {
-          workspaces = (frame.value && frame.value.items) || []
-          break
-        }
-      }
-      // `for await` 里的 break 会自动关闭迭代器（发送 StreamCancel），
-      // 因此这里不需要再手动 return()——重复关闭会多发一条取消帧。
+      workspaces = await readFilesWorkspaceBaseline(sheet, generation, tunnel)
     } catch (error) {
-      sheetMessage(sheet.body, '读取工作区失败：' + String(error && error.message ? error.message : error))
+      if (error && error.code === 'dshm/files-read-cancelled') return
+      filesReadFailure(sheet, generation, '读取工作区失败：' + String(error && error.message ? error.message : error), retry)
       return
     }
+    if (!filesReadCurrent(sheet, generation) || sheet.currentView !== 'files') return
 
     if (workspaces.length === 0) {
       sheetMessage(sheet.body, '电脑上还没有工作区。')
@@ -19066,10 +19193,12 @@
     // 这样**面板永远可用**，不会因为宿主版本旧而变成一块空白。
     var targets = undefined
     try {
-      targets = await callLocalEndpoint(getTunnel, 'mobile/openInApp/apps', {})
+      targets = await waitFilesRead(sheet, generation, callLocalEndpoint(getTunnel, 'mobile/openInApp/apps', {}), undefined, '读取打开方式')
     } catch (error) {
       console.info('[dsh-mobile] 电脑端尚未提供「打开方式」列表（可能需要重启 DSH），退回基础动作：', error && error.message)
     }
+
+    if (!filesReadCurrent(sheet, generation) || sheet.currentView !== 'files') return
 
     // 当前会话所属的工作区排到最前（DSH 侧栏用 folder_active 标记激活的工作区）。
     var activeTitle = activeWorkspaceTitle()
@@ -19093,6 +19222,7 @@
      * （`renderWorkspaceList` 根本没跑过 ✓）⇒ 从那个根往后退同样回得到工作区列表 ✓。
      */
     sheet.restoreWorkspaceList = function () {
+      if (!filesReadCurrent(sheet, generation)) return
       renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel)
     }
 
@@ -19177,6 +19307,9 @@
      */
     var state = {
       workspace: workspace,
+      fileSheet: sheet,
+      fileGeneration: sheet.readGeneration || 0,
+      directoryReadId: 0,
       root: root,
       path: typeof startPath === 'string' && startPath !== '' ? startPath : root,
       /** 到位后要高亮的那一行（`loadDirectory` 渲染完会消费掉它 ✓ —— 只高亮一次 ✓）。 */
@@ -19203,6 +19336,7 @@
       listHost: undefined,
       pasteButton: undefined,
     }
+    sheet.fileBrowserState = state
     // 上一次的底栏可能还开着（换工作区时 state 是新的，DOM 却是旧的）
     exitSelectMode(sheet)
     if (typeof sheet.setFull === 'function') sheet.setFull(false)
@@ -19210,7 +19344,8 @@
     // 回到"这个工作区"（而不是回到工作区列表）：设置页里点齿轮返回时，
     // 用户期望回到自己刚才在看的那个目录上下文 ✓
     sheet.restoreFiles = function () {
-      renderFileBrowser(sheet, workspace, targets, getTunnel)
+      if (!filesReadCurrent(sheet, state.fileGeneration)) return
+      renderFileBrowser(sheet, workspace, targets, getTunnel, state.path)
     }
     /**
      * ★★ round 148（用户："给文件面板加安卓返回键逻辑（返回回到上一页，而不是回主页面）"✓）：
@@ -19310,11 +19445,14 @@
     var total = 0
     var size = 0
     var step = function () {
-      return callLocalEndpoint(state.getTunnel, 'mobile/files/read', {
+      if (state.fileSheet !== undefined && !filesReadCurrent(state.fileSheet, state.fileGeneration)) return Promise.reject(fileReadCancelledError())
+      var pending = callLocalEndpoint(state.getTunnel, 'mobile/files/read', {
         path: path,
         offset: total,
         length: Math.max(1, Math.min(PREVIEW_CHUNK, cap - total)),
-      }).then(function (chunk) {
+      })
+      if (state.fileSheet !== undefined) pending = waitFilesRead(state.fileSheet, state.fileGeneration, pending, undefined, '读取文件')
+      return pending.then(function (chunk) {
         var bytes = base64ToBytes(chunk.data)
         chunks.push(bytes)
         total += bytes.length
@@ -21434,14 +21572,21 @@
     body.appendChild(bar)
     body.appendChild(meta)
     body.appendChild(host)
+    sheet.previewHost = host
+    var previewCurrent = function () {
+      return sheet.previewHost === host && sheet.currentView === 'preview' &&
+        (state.fileSheet === undefined || filesReadCurrent(sheet, state.fileGeneration))
+    }
 
     var fail = function (text) {
+      if (!previewCurrent()) return
       host.replaceChildren()
       var line = document.createElement('div')
       line.className = 'dshm-preview-fallback'
       line.textContent = text
       host.appendChild(line)
       meta.textContent = formatSize(entry.size) + ' · 预览失败'
+      host.appendChild(toolButton('重试', function () { renderFilePreview(sheet, state, entry) }))
     }
 
     /**
@@ -21538,6 +21683,7 @@
     }
 
     var showText = function (result, notePrefix) {
+      if (!previewCurrent()) return
       var text = new TextDecoder('utf-8', { fatal: false }).decode(result.bytes)
       loaded = text
       var lines = text === '' ? 0 : text.split('\n').length
@@ -21561,6 +21707,7 @@
     }
 
     var showImage = function (result) {
+      if (!previewCurrent()) return
       var blob = new Blob([result.bytes], { type: 'image/' + (ext === 'svg' ? 'svg+xml' : ext) })
       var url = URL.createObjectURL(blob)
       sheet.previewObjectUrl = url
@@ -21582,6 +21729,7 @@
     }
 
     var progress = function (read, total) {
+      if (!previewCurrent()) return
       // 大文件要能看出"在传"（秒表 + 字节数），否则和第 74 轮那个白屏是同一类观感问题 ✓
       if (total > 0) meta.textContent = formatSize(total) + ' · 读取中 ' + formatSize(read) + '（' + String(Math.round((read / total) * 100)) + '%）'
       else meta.textContent = '读取中 ' + formatSize(read)
@@ -21609,6 +21757,7 @@
     // 没见过的类型：先读 4 KB 判断是不是文本（二进制不硬塞 ✓）
     readFileBytes(state, entry.path, 4096, undefined).then(
       function (probe) {
+        if (!previewCurrent()) return
         if (looksLikeText(probe.bytes)) {
           read(PREVIEW_TEXT_BYTES, false)
           return
@@ -21687,6 +21836,13 @@
 
   /** 拉取并渲染一个目录。 */
   function loadDirectory(sheet, state, path) {
+    var generation = state.fileGeneration === undefined ? (sheet.readGeneration || 0) : state.fileGeneration
+    if (!filesReadCurrent(sheet, generation)) return
+    var readId = state.directoryReadId = (state.directoryReadId || 0) + 1
+    var current = function () {
+      return filesReadCurrent(sheet, generation) && readId === state.directoryReadId && sheet.currentView === 'files' &&
+        (sheet.fileBrowserState === undefined || sheet.fileBrowserState === state)
+    }
     // 切目录 = 换了一批条目：把选中集合清掉。
     // 不清的后果是"已选 3 项"底下**没有任何一行打勾** —— 那三项属于上一个目录，
     // 而用户看到的只有当前这一屏，会以为勾选丢了、甚至以为删除点坏了。
@@ -21702,9 +21858,10 @@
     }
     var stopLoading = renderLoading(sheet, state, path)
 
-    callLocalEndpoint(state.getTunnel, 'mobile/files/list', { path: path }).then(
+    waitFilesRead(sheet, generation, callLocalEndpoint(state.getTunnel, 'mobile/files/list', { path: path }), undefined, '读取目录').then(
       function (listing) {
         stopLoading()
+        if (!current()) return
         var resolved = String(listing.path || path)
         // ★ 第一次读取（或回到根）时，用宿主返回的**真实路径**校准根。
         //   为什么必须校准：macOS 的 /tmp 是 /private/tmp 的符号链接，宿主返回的是
@@ -21740,6 +21897,8 @@
       },
       function (error) {
         stopLoading()
+        if (!current()) return
+        debugBoxLine('[files] 读取目录失败：' + describeError(error))
         /**
          * ★★ round 156（A ✓）：失败态也把**错误行渲染在列表区域内** ✓ ——
          *   工具栏与面包屑**照旧留着** ✓（用户仍然能点"刷新 / 新建 / 上传"✓），
@@ -21751,6 +21910,9 @@
         syncToolbar(sheet, state)
         host.replaceChildren()
         host.appendChild(messageRow('读取失败：' + describeError(error)))
+        var retry = toolButton('重试', function () { loadDirectory(sheet, state, path) })
+        retry.setAttribute('data-dshm-files-retry', '1')
+        host.appendChild(retry)
         // 列表没渲染出来 → 底栏的「已选 N 项」没有对应的行可看，收掉它（工具栏里的
         // 「完成」还在，用户想重进多选态仍然可以）
         if (state.selecting === true) setSelecting(sheet, state, false)
@@ -23514,14 +23676,36 @@
       debugLine: debugBoxLine,
       // 会话页复用现有文件面板；不安装依赖原版 React 布局的整套外壳。
       openFiles: function (targetDir) {
+        if (document.body === null || document.body === undefined) return Promise.reject(new Error('页面尚未完成加载'))
         if (standaloneChatFiles === undefined) {
           standaloneChatFiles = buildFilesSheet()
-          ensureDomRoot().appendChild(standaloneChatFiles.root)
+          document.body.appendChild(standaloneChatFiles.root)
+          standaloneChatFiles.connEntry.addEventListener('click', function (event) {
+            if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+            if (standaloneChatFiles.currentView === 'capabilities' && standaloneChatFiles.backOutOfView() === true) return
+            openCapabilitiesView(standaloneChatFiles, standaloneFilesTunnel)
+          })
         }
-        return openFilesSheet(standaloneChatFiles, function () {
-          return globalThis.__DSH_MOBILE_BOOT__.tunnel
-        }, targetDir)
+        return openFilesSheet(standaloneChatFiles, standaloneFilesTunnel, targetDir)
       },
+      closeFiles: closeStandaloneFiles,
+      filesBack: backStandaloneFiles,
+      filesOpen: standaloneFilesOpen,
+      mountConnectionSettings: function (container) {
+        if (container === null || container === undefined || typeof container.replaceChildren !== 'function') throw new Error('连接设置缺少页面容器')
+        container.replaceChildren()
+        container.setAttribute('data-dshm-conn', '1')
+        if (container.classList !== undefined) container.classList.add('dshm-conn-body')
+        fillConnSettings(container, standaloneFilesTunnel)
+        return function () { container.replaceChildren() }
+      },
+      setNavigationHandlers: function (handlers) {
+        standaloneNavigationHandlers = handlers !== null && handlers !== undefined
+          ? { back: handlers.back, available: handlers.available } : null
+        if (globalThis.__DSH_MOBILE_NO_SHELL__ === true) installBackHook()
+        reportBackAvailable(true)
+      },
+      reportBackAvailable: reportBackAvailable,
       splitInlineMath: splitInlineMath,
       version: PROTOCOL_VERSION,
       formatFingerprint: formatFingerprint,

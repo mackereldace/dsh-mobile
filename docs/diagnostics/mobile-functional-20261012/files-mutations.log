@@ -1,0 +1,15 @@
+✓ visible portal regresses to head
+✓ close fails to cancel baseline
+✓ close reports stale panel state
+✓ new target keeps stale generation
+✓ read deadline regresses to indefinite delay
+✓ preview back loses the current directory
+✓ connection settings no longer render
+✓ native back no longer delegates
+✓ optional catalog bypasses deadline
+✓ context composition omitted
+✓ context composition leaks extra fields
+✓ context composition fabricates missing zeroes
+✓ context token counts accept fractional values
+✓ context composition drops real zeroes
+✓ restored production baseline: 68 tests; 14 targeted mutations detected

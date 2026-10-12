@@ -1264,6 +1264,29 @@ test('能力位门禁：未授予 fsWrite 时写操作被拒绝，且记录审�
   }
 })
 
+test('管理目录与设置读写由设备能力分别授权，拒绝请求不进入任一后端', async () => {
+  const env = await setup()
+  try {
+    await env.pair()
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: false, fsWrite: false } })
+    const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
+    const reads = ['capabilities', 'settings/read', 'plugins/list', 'plugins/read']
+    const writes = ['settings/write', 'plugins/configure', 'plugins/set-enabled']
+    for (const backend of ['dsh', 'codex']) for (const path of [...reads, ...writes]) {
+      const count = env.calls.length
+      const response = await mobile.call('mobile/manage/' + path, { backend, id: 'fixture', value: true, enabled: false, revision: 1 })
+      assert.equal(response.ok, false, path)
+      assert.equal(response.error?.code, ErrorCode.CapabilityDenied, path)
+      assert.match(response.error?.message ?? '', new RegExp(reads.includes(path) ? 'fsRead' : 'fsWrite'))
+      assert.equal(env.calls.length, count, '被拒绝的管理操作不得转发到 Gateway')
+    }
+    env.host.updateDevice(env.deviceId, { capabilities: { fsRead: true } })
+    const before = env.calls.length
+    const unknown = await mobile.call('mobile/manage/unknown-write', { backend: 'dsh' })
+    assert.equal(unknown.ok, false); assert.equal(env.calls.length, before, '未知管理接口不能回退到网关')
+  } finally { env.cleanup() }
+})
+
 test('会话页的引用与原版附件先受设备 fsRead 门禁约束，再进入本地桥或网关', async () => {
   const env = await setup()
   try {

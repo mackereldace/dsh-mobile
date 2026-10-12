@@ -6,6 +6,7 @@ const boot = globalThis.__DSH_MOBILE_BOOT__
 const tunnel = boot && typeof boot === 'object' ? boot.tunnel : null
 const streaming = typeof tunnel?.openStream === 'function'
 const params = new URLSearchParams(location.search)
+try { const theme = localStorage.getItem('dsh-mobile.theme'); if (['system', 'dark', 'light'].includes(theme)) document.documentElement.setAttribute('data-theme', theme) } catch { /* Storage may be unavailable. */ }
 let currentId = params.get('session') || '', currentAddress = null, currentTitle = ''
 let sessionEpoch = 0, sessions = [], latestProjections = null, projectionTimer = null, interactionTimer = null
 let interactionEpoch = 0, interactionInFlight = 0, projectionRead = 0, received = 0
@@ -105,6 +106,7 @@ function stopFetch() {
   poller?.dispose(); poller = null
 }
 function changeSession(id, metadata = {}) {
+  boot?.closeFiles?.(); page.closePopups?.()
   stopFetch(); sessionEpoch++; interactionEpoch++; projectionRead++
   currentId = id; currentAddress = metadata.address?.kind === 'subagent' ? metadata.address : null; currentTitle = metadata.title || ''
   latestProjections = null; received = 0; questionCallIds.clear(); clearImages()
@@ -189,6 +191,7 @@ const page = mountChat({
   references: request => rpc('mobile/dsh/references', request),
   cancel: request => rpc('mobile/dsh/cancel', request),
   goal: request => rpc('mobile/dsh/goal', request),
+  manage: rpc,
   send: async (text, receiptIds, target) => {
     const id = target?.sessionId || currentId, epoch = sessionEpoch
     const value = await rpc('mobile/dsh/send', { ...requestFor(id, target?.address || null), text, ...(receiptIds?.length ? { receiptIds } : {}) })

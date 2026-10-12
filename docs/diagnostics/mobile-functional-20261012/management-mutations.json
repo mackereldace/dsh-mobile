@@ -1,0 +1,248 @@
+{
+  "temporaryDirectory": "/var/folders/tc/hfng0gfd7dvdbtzstn5m0w6c0000gn/T/dshm-management-mutation-CpTEzV",
+  "baselinePass": true,
+  "restoredBaselinePass": true,
+  "originalFilesUnchanged": true,
+  "tested": 28,
+  "killed": 28,
+  "survived": [],
+  "results": [
+    {
+      "name": "explicit-backend",
+      "killed": true,
+      "failedAssertions": [
+        "未知端点继续分发；管理端点要求明确后端"
+      ]
+    },
+    {
+      "name": "supported-scope",
+      "killed": true,
+      "failedAssertions": [
+        "不支持的作用范围在读取和写入前拒绝，不暗中改写其他层"
+      ]
+    },
+    {
+      "name": "abort-before-write",
+      "killed": true,
+      "failedAssertions": [
+        "取消在原生调用前生效，不继续读取或持久写入",
+        "原生读取期间取消后，不继续发出持久写入"
+      ]
+    },
+    {
+      "name": "settings-revision-check",
+      "killed": true,
+      "failedAssertions": [
+        "未知字段、过期或缺失修订号、非目录模型、无效权限在写前拒绝",
+        "DSH 常用设置",
+        "未知键、过期/缺失版本、管理策略禁用的选项不执行写",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "readonly-setting",
+      "killed": true,
+      "failedAssertions": [
+        "只读和目录失败不执行写；空推理值仅清除覆盖",
+        "DSH 常用设置",
+        "命名权限方案显示真实方案，不能声称修改旧 sandbox_mode 会生效",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "native-choice-only",
+      "killed": true,
+      "failedAssertions": [
+        "未知字段、过期或缺失修订号、非目录模型、无效权限在写前拒绝",
+        "DSH 常用设置",
+        "未知键、过期/缺失版本、管理策略禁用的选项不执行写",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "dsh-native-revision",
+      "killed": true,
+      "failedAssertions": [
+        "换模型原子写 provider/model 并清除旧推理等级；使用修订号并真实回读",
+        "只读和目录失败不执行写；空推理值仅清除覆盖",
+        "写后被覆盖显示 overridden，不声称已应用",
+        "DSH 常用设置"
+      ]
+    },
+    {
+      "name": "dsh-save-readback",
+      "killed": true,
+      "failedAssertions": [
+        "换模型原子写 provider/model 并清除旧推理等级；使用修订号并真实回读",
+        "DSH 常用设置"
+      ]
+    },
+    {
+      "name": "clear-old-reasoning",
+      "killed": true,
+      "failedAssertions": [
+        "换模型原子写 provider/model 并清除旧推理等级；使用修订号并真实回读",
+        "DSH 常用设置"
+      ]
+    },
+    {
+      "name": "schema-secret-role",
+      "killed": true,
+      "failedAssertions": [
+        "只输出公开 schema 叶子；秘密、未知字段、秘密 union/容器永不返回",
+        "DSH 插件配置和启停"
+      ]
+    },
+    {
+      "name": "secret-sidecar",
+      "killed": true,
+      "failedAssertions": [
+        "只输出公开 schema 叶子；秘密、未知字段、秘密 union/容器永不返回",
+        "DSH 插件配置和启停"
+      ]
+    },
+    {
+      "name": "secret-key-names",
+      "killed": true,
+      "failedAssertions": [
+        "只输出公开 schema 叶子；秘密、未知字段、秘密 union/容器永不返回",
+        "DSH 插件配置和启停"
+      ]
+    },
+    {
+      "name": "embedded-credentials",
+      "killed": true,
+      "failedAssertions": [
+        "伪造 fieldId、原型路径、越界数字、错误类型及内嵌凭据不写入",
+        "DSH 插件配置和启停"
+      ]
+    },
+    {
+      "name": "public-config-only",
+      "killed": true,
+      "failedAssertions": [
+        "只输出常用字段和受策略限制的选项，不输出路径/凭据/完整 config",
+        "模型写使用原生 expectedVersion，清除旧推理覆盖并回读；拒绝自选文件地址",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "remote-plugin-owner",
+      "killed": true,
+      "failedAssertions": [
+        "工作区管理的 remote 插件和伪造身份不能走用户配置启停",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "quoted-plugin-keys",
+      "killed": true,
+      "failedAssertions": [
+        "本地插件真实启停通过带引号的原生 keyPath，不混淆点号或覆盖其他配置",
+        "MCP 配置写只命中详情公开服务器和字段，并保留 bearer token",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "native-config-ack",
+      "killed": true,
+      "failedAssertions": [
+        "原生拒绝和 okOverridden 不伪装成功应用",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "dsh-toggle-readback",
+      "killed": true,
+      "failedAssertions": [
+        "原生回执缺失不能冒充成功；applied 仍以真实回读状态确认",
+        "DSH 插件配置和启停"
+      ]
+    },
+    {
+      "name": "native-protected-plugins",
+      "killed": true,
+      "failedAssertions": [
+        "过期插件状态/原生保护不调用启停；bundle 使用真实 name 参数",
+        "DSH 插件配置和启停",
+        "工作区管理的 remote 插件和伪造身份不能走用户配置启停",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "named-policy-takeover",
+      "killed": true,
+      "failedAssertions": [
+        "命名权限方案显示真实方案，不能声称修改旧 sandbox_mode 会生效",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "codex-native-version",
+      "killed": true,
+      "failedAssertions": [
+        "模型写使用原生 expectedVersion，清除旧推理覆盖并回读；拒绝自选文件地址",
+        "原生拒绝和 okOverridden 不伪装成功应用",
+        "Codex 配置和插件原生版本契约"
+      ]
+    },
+    {
+      "name": "management-rpc-whitelist",
+      "killed": true,
+      "failedAssertions": [
+        "白名单管理 RPC 正常调用，未知 RPC 即使来自 JavaScript 也不透传"
+      ]
+    },
+    {
+      "name": "wait-for-initialize",
+      "killed": true,
+      "failedAssertions": [
+        "并发管理读取必须等同一初始化完成"
+      ]
+    },
+    {
+      "name": "native-request-cancel",
+      "killed": true,
+      "failedAssertions": [
+        "取消后的迟到响应不会串到下一次请求；已取消写在发出前拒绝"
+      ]
+    },
+    {
+      "name": "new-thread-model-default",
+      "killed": true,
+      "failedAssertions": [
+        "新会话读取真实最新默认，保存后不被旧模型/审批/沙箱硬编码覆盖"
+      ]
+    },
+    {
+      "name": "safe-read-fallback",
+      "killed": true,
+      "failedAssertions": [
+        "默认读取失败保持已有安全策略，不能扩大审批或文件权限"
+      ]
+    },
+    {
+      "name": "named-profile-default",
+      "killed": true,
+      "failedAssertions": [
+        "新会话沿用原生命名权限方案，明确 sandbox 优先且不能双重指定"
+      ]
+    },
+    {
+      "name": "new-thread-hardcoded-permissions",
+      "killed": true,
+      "failedAssertions": [
+        "新会话读取真实最新默认，保存后不被旧模型/审批/沙箱硬编码覆盖",
+        "明确细粒度审批参数优先于原生默认"
+      ]
+    }
+  ],
+  "originalSha256": {
+    "packages/host/src/mobile-management.ts": "79c9f8534698bddfb30bd02e455f134a095ac7dfd6be292f5bb2839800ec7d47",
+    "packages/host/src/codex/codex-bridge.ts": "74bf57b3f8e66840a080af0fdc7dcdde3e1bf8f027dfd3dad4455e833aacfdf0",
+    "packages/host/src/gateway-rpc.ts": "e1eb51b0a2ea0af51b3ecab8ff31c69075d8b0558e1ff884f6cea93448aba505",
+    "packages/host/test/mobile-management.test.ts": "ad3c4023551ea5acb1d4e26459cda8c52f5439545538c48fc9a78bdd2e63723a",
+    "packages/host/test/codex/codex-management.test.ts": "3d4897afed839b4fefb9ccb2b3fa75a9bdb2041b33c49423b1b3e26b4c3886a7",
+    "packages/host/test/codex/fixtures/fake-codex-management-app-server.mjs": "6e0a1bd0a6f2fa17df23fe6b1055f379dcd825d1fcdb6f5b0ffaded3bcbf767c"
+  }
+}

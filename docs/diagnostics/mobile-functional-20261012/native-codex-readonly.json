@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-12",
+  "cliVersion": "0.161.0",
+  "modelChoices": 11,
+  "reasoningChoices": 7,
+  "plugins": 23,
+  "pluginsEnabled": 23,
+  "pluginsToggleable": 12,
+  "listErrors": 0,
+  "configVersionPresent": true,
+  "userConfigurationWritten": false,
+  "sessionsCreated": false,
+  "pluginsModified": false,
+  "failures": []
+}

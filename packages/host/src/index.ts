@@ -1056,6 +1056,13 @@ export function createMobileHost(options: {
       'phone/control': 'phoneControl',
       'mobile/dsh/references': 'fsRead',
       'session/attachment': 'fsRead',
+      'mobile/manage/capabilities': 'fsRead',
+      'mobile/manage/settings/read': 'fsRead',
+      'mobile/manage/plugins/list': 'fsRead',
+      'mobile/manage/plugins/read': 'fsRead',
+      'mobile/manage/settings/write': 'fsWrite',
+      'mobile/manage/plugins/configure': 'fsWrite',
+      'mobile/manage/plugins/set-enabled': 'fsWrite',
     }
 
     let need = required[endpoint]
@@ -2516,6 +2523,16 @@ export function createMobileHost(options: {
     device: DeviceRecord,
   ): Promise<unknown | undefined> {
     if (!endpoint.startsWith('mobile/')) return undefined
+    if (endpoint.startsWith('mobile/manage/')) {
+      const gate = capabilityCheck(device, endpoint)
+      if (!gate.ok) throw Object.assign(new Error(gate.message), { code: gate.code })
+      const { handleManagementEndpoint, MOBILE_MANAGEMENT_PATHS } = await import('./mobile-management.ts')
+      if (!(Object.values(MOBILE_MANAGEMENT_PATHS) as readonly string[]).includes(endpoint)) throw new Error('未知管理接口')
+      return handleManagementEndpoint({
+        call: (target, args, innerSignal) => invokeGatewayEndpoint(options.gateway, target, args, innerSignal ?? signal),
+        codex: { managementRequest: (method, args, innerSignal) => getCodexBridge().managementRequest(method, args, innerSignal) },
+      }, endpoint, payload, signal)
+    }
 
     // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
     // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
@@ -3632,6 +3649,10 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         'trace.js': 'trace.js',
         'composer.js': 'composer.js',
         'navigation.js': 'navigation.js',
+        'stats.js': 'stats.js',
+        'shell.js': 'shell.js',
+        'management.js': 'management.js',
+        'management.css': 'management.css',
         'native-tokens.css': 'native-tokens.css',
         'native.css': 'native.css',
         'file-panel.css': 'file-panel.css',
