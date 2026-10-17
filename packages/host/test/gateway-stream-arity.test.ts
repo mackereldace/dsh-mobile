@@ -46,19 +46,33 @@ function fakeGateway(arity: number): {
 }
 
 describe('callOpenWireStream（跨 DSH 版本的签名分派）', () => {
-  it('★★ 新版六参签名（0.1.7-rc.2）：signal 必须在第 5 位、第 6 位要给 AbortController', async () => {
+  it('★★ 新版六参签名（0.1.7+ / 0.2.1）：peer 在第 4 位、signal 在第 5 位、第 6 位要给 AbortController', async () => {
     const { gateway, calls } = fakeGateway(6)
     const signal = new AbortController().signal
-    await callOpenWireStream(gateway, '$events', { a: 1 }, signal)
+    /**
+     * ★★ DSH 0.2.1 起 peer **必需** ✗（`assertPeerLive(peer)` 第一句就读 `peer.signal`）⇒
+     * 这条把"第 4 位必须是它"钉住 ✓（漏了就是手机端 44 次 `$events` 全红 ✓）。
+     */
+    const peer = { signal: new AbortController().signal, principal: { kind: 'owner' } }
+    await callOpenWireStream(gateway, '$events', { a: 1 }, signal, peer)
     assert.equal(calls.length, 1, '必须只调一次 ✓')
     const args = calls[0] as unknown[]
     assert.equal(args.length, 6, '六参签名就要给 6 个实参 ✓')
     assert.equal(args[0], '$events', '第 1 位是端点 ✓')
     assert.deepEqual(args[1], { a: 1 }, '第 2 位是载荷 ✓')
     assert.equal(args[2], undefined, '第 3 位 uplink 传 undefined（与网关进程内载体一致 ✓）')
-    assert.equal(args[3], undefined, '第 4 位 peer 传 undefined ✓')
+    assert.equal(args[3], peer, '★ 第 4 位是 peer —— DSH 0.2.1 起漏了它整条流当场抛 ✗')
     assert.equal(args[4], signal, '★ 第 5 位才是 signal —— 写死 3 个参数就会错在这里 ✗')
     assert.ok(args[5] instanceof AbortController, '第 6 位必须是 AbortController ✓')
+  })
+
+  it('没有 peer 时第 4 位仍是 undefined（≤0.2.0 / 测试替身不回归 ✓）', async () => {
+    const { gateway, calls } = fakeGateway(6)
+    const signal = new AbortController().signal
+    await callOpenWireStream(gateway, '$events', { a: 1 }, signal)
+    const args = calls[0] as unknown[]
+    assert.equal(args[3], undefined, '没有 peer 就不硬塞 ✓')
+    assert.equal(args[4], signal, 'signal 位置不因 peer 而漂移 ✓')
   })
 
   it('★ 老三参签名（0.1.5-rc.1，本机）：signal 在第 3 位（不许把本机弄回归 ✗）', async () => {

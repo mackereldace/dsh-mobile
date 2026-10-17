@@ -79,4 +79,24 @@ describe('宿主侧 RPC 入口', () => {
     assert.equal(failedCalls, 1)
     assert.equal(fallbackCount, 1) // 仍是第一次回退那一下，没有新增
   })
+
+  it('★★ 第 4 位必须把调用方 peer 传下去（DSH 0.2.1 起必需，漏了就是 reading \'signal\'）', async () => {
+    /**
+     * 2026-10-18 真机：DSH 0.2.1 的 `prepareInvocation` 第一句改成 `assertPeerLive(peer)`，
+     * 而 `dispatchRpc(endpoint, payload, signal)` 只给 3 个实参 ⇒ peer 是 undefined
+     * ⇒ `peer.signal` 抛 TypeError ⇒ 手机端**全部** RPC 失败（审计 115 条同一句）。
+     * 这条钉住"peer 从第 4 位进网关"✓ —— 变异（删掉第 4 个实参）应恰好只红这一条。
+     */
+    const peer = { signal: new AbortController().signal, principal: { kind: 'owner' } }
+    let received: unknown[] = []
+    const gateway = {
+      dispatchRpc: async (...args: unknown[]) => {
+        received = args
+        return { ok: true, value: null }
+      },
+    }
+    await callHostRpc(gateway, 'session/list', { args: {} }, signal, async () => undefined, peer)
+    assert.equal(received.length, 4, 'dispatchRpc 必须是 4 个实参 ✓')
+    assert.equal(received[3], peer, '★ 第 4 位就是 peer ✓')
+  })
 })

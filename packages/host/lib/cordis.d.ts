@@ -12,7 +12,7 @@
  * 私钥**只存本机**；换机或删文件会导致已配对手机的指纹校验失败（这是刻意的安全性质）。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { type HostIdentity, type MobileHostConfig } from './index.ts';
+import { type GatewayPeer, type HostIdentity, type MobileHostConfig } from './index.ts';
 /** Cordis 插件名（与包名一致，便于排障）。 */
 export declare const name = "mobile-host";
 /** 依赖的宿主服务。缺失时 Cordis 不会激活本插件，而不是让它在半可用状态下报错。 */
@@ -226,6 +226,31 @@ export declare function appShellUnavailableBody(problem: string | undefined): st
  * 猜错的代价是"启动日志给了一条打不开的链接"✗ ⇒ 宁可退化成只打路径 ✓。
  */
 export declare function readWebServerPort(webServer: unknown): number | undefined;
+/**
+ * ★★★ 造一个「取调用方 Peer」的函数 —— **DSH 0.2.1 把手机端弄挂的那个参数的来源** ✓。
+ *
+ * ## 为什么必须有它（2026-10-18 真机审计定因 ✓）
+ *
+ * 0.2.1 的 `dsh-api-gateway` 在 `prepareInvocation` / `openWireStream` 的**第一句**就
+ * `assertPeerLive(peer)` ⇒ `peer.signal` ⇒ 我们不带 peer 时抛
+ * `Cannot read properties of undefined (reading 'signal')` ✓（详见 `index.ts` 的 `GatewayPeer`）。
+ * 而 0.2.0 的 `request.peer ?? this.operatorPeer()` 兜底在 0.2.1 里**被删掉了** ✗
+ * （`operatorPeer()` 方法本身也不存在了 ✓）。
+ *
+ * ## 按版本取（顺序就是优先级 ✓）
+ *
+ * 1. `connection.browserPeer`（**0.2.1+**）—— "The Peer every authenticated browser
+ *    connection shares" ✓，principal = `{kind:'owner'}` ✓、interactions 默认 `'answer'` ✓。
+ * 2. `connection.operator`（**≤0.2.0**）—— 当年 `gateway.operatorPeer()` 返回的就是它 ✓
+ *    ⇒ 行为与升级前完全一致 ✓。
+ * 3. `connection.createPeer({ principal: { kind: 'owner' } })` —— 两个字段都没有时的兜底 ✓
+ *    （peer 的寿命挂在 connection 上，本插件只建一次 ✓）。
+ *
+ * ★ 用 `ctx.get('connection')` 而**不往 `inject` 里加**它（与 `ctx.get('tools')` 同一个理由 ✓）：
+ *   独立服务 / 测试环境里可能没有 connection —— 那种环境**不该因为少一个服务就加载失败** ✗。
+ *   取不到 ⇒ 返回 undefined ⇒ 退回旧行为，并**只警告一次**（不刷屏 ✓）。
+ */
+export declare function createGatewayPeerResolver(ctx: unknown): () => GatewayPeer | undefined;
 /**
  * "还没配置手机接入"那行启动提示（★ 只在真的没配置时才打，别刷屏 ✗）。
  *

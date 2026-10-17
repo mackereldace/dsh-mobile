@@ -87,6 +87,8 @@ export declare function readHostRpcResult(raw: unknown): HostRpcShape;
  * @param invokeFallback 旧入口（`gateway.invoke(toGatewayArgs(...))` ✓）—— 只在
  *   `dispatchRpc` **不存在**时用 ✓。★ 绝不在"调用本身失败"时回退 ✗：
  *   那会把同一次业务调用**发两遍** ✗（本仓最忌这种"看起来重试、其实重复"的写法 ✓）。
+ * @param peer 调用方 Peer（DSH **0.2.1 起必需** ✗）—— 由调用方从 `connection` 取
+ *   （见 `index.ts` 的 `GatewayPeer`）。省略只在 ≤0.2.0 / 测试替身上成立。
  */
-export declare function callHostRpc(gateway: HostRpcGateway, endpoint: string, payload: unknown, signal: AbortSignal, invokeFallback: () => Promise<unknown>): Promise<HostRpcOutcome>;
+export declare function callHostRpc(gateway: HostRpcGateway, endpoint: string, payload: unknown, signal: AbortSignal, invokeFallback: () => Promise<unknown>, peer?: unknown): Promise<HostRpcOutcome>;
 //# sourceMappingURL=gateway-rpc.d.ts.map

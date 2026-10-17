@@ -58,7 +58,13 @@ import { TunnelSession } from './tunnel.ts';
  */
 export declare function callOpenWireStream(gateway: {
     readonly openWireStream?: (endpoint: string, payload: unknown, ...rest: unknown[]) => Promise<AsyncIterable<unknown>>;
-}, endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>;
+}, endpoint: string, payload: unknown, signal: AbortSignal, 
+/**
+ * ★ 调用方 Peer（DSH 0.2.1 起必需 ✓）。第 4 位就是 `peer` ——
+ * 原先这里传的是 `undefined` ✓，在 0.2.1 上 `$events` 会在
+ * `assertPeerLive(peer)` 那一句当场抛 `reading 'signal'` ✗（审计里 44 条全这个 ✓）。
+ */
+peer?: GatewayPeer): Promise<AsyncIterable<unknown>>;
 export interface MobileHostConfig {
     enabled: boolean;
     /** 配对码有效期（毫秒）。 */
@@ -114,6 +120,55 @@ export interface HostIdentity {
     readonly signingKey: SigningKeyLike;
 }
 /**
+ * ★★ 「调用方 Peer」—— DSH **0.2.1 起，网关的每一次调用都必须带它** ✗（2026-10-18 定位 ✓）。
+ *
+ * ## 为什么需要这个类型（这一行是 0.2.1 把手机端弄挂的根因 ✓）
+ *
+ * DSH **0.2.0-rc.2** 的 `dsh-api-gateway` 里，`prepareInvocation` 最后是：
+ *
+ * ```js
+ * new GatewayInvocation({ … }, descriptor.service, request.peer ?? this.operatorPeer(), signal, …)
+ * ```
+ *
+ * ⇒ `invoke()` / `stream()` **不带 peer 也能跑** ✓（DSH 自己补一个 operator Peer ✓）。
+ * 插件正是靠这个"可省"活了很久 ✓。
+ *
+ * DSH **0.2.1-rc.2** 把这条兜底**删掉了** ✗：
+ *
+ * ```js
+ * async prepareInvocation(request, control) {
+ *   const endpoint = endpointOf(request.namespace, request.method);
+ *   assertPeerLive(request.peer, endpoint);          // ← 第一句就读 peer.signal
+ *   …
+ * }
+ * function assertPeerLive(peer, endpoint) {
+ *   if (peer.signal.aborted) …   // ← peer 是 undefined ⇒ TypeError
+ * }
+ * ```
+ *
+ * 并且 `operatorPeer()` **整个方法都不存在了** ✗（`0.2.0` 有、`0.2.1` grep 命中 0 次 ✓）。
+ * ⇒ 调用不带 peer 时的报错是 **`Cannot read properties of undefined (reading 'signal')`** ✓ ——
+ * 从字面上完全看不出"少了个 peer" ✗（真机审计里 115 条 RPC 全是这一句 ✓）。
+ *
+ * ## peer 从哪来（DSH 自己的两个来源，按版本不同）
+ *
+ * · **0.2.1+**：`connection.browserPeer` —— "The Peer every authenticated browser
+ *   connection shares" ✓，principal 就是 `{ kind: 'owner' }` ✓，`interactions` 默认 `'answer'` ✓
+ *   （网关转发 `$events` 要求 `interactions === 'answer'` ✓）。
+ * · **≤0.2.0**：`connection.operator`（`OperatorPeer`）✓ —— 也就是当年 `operatorPeer()`
+ *   返回的那个对象 ✓ ⇒ 行为与升级前**完全一致** ✓。
+ * · 两者都没有时，才用 `connection.createPeer({ principal: { kind: 'owner' } })` 兜底 ✓。
+ *
+ * 只声明本插件会用到的字段（`signal` 是网关 `assertPeerLive` 唯一读的东西 ✓）。
+ */
+export interface GatewayPeer {
+    readonly signal: AbortSignal;
+    readonly principal?: {
+        readonly kind?: string;
+    };
+    readonly interactions?: string;
+}
+/**
  * DSH Typert Gateway 的最小接口。
  *
  * 刻意只声明本插件用到的两个方法：
@@ -127,12 +182,19 @@ export interface RemoteGateway {
         readonly method: string;
         readonly args: Readonly<Record<string, unknown>>;
         readonly signal?: AbortSignal;
+        /**
+         * ★ 调用方 Peer —— DSH **0.2.1 起是必需参数** ✗（见下方 `GatewayPeer`）。
+         * 省略时只有 ≤0.2.0 还能靠 DSH 自己兜底。
+         */
+        readonly peer?: GatewayPeer;
     }): Promise<unknown>;
     stream(request: {
         readonly namespace: string;
         readonly method: string;
         readonly args: Readonly<Record<string, unknown>>;
         readonly signal?: AbortSignal;
+        /** 同 `invoke`：0.2.1 起必需。 */
+        readonly peer?: GatewayPeer;
     }): Promise<AsyncIterable<unknown>>;
     /**
      * 流式调用的**传输层入口**（DSH 自己的 HTTP mux 与 WebSocket mux 都用它）。
@@ -420,6 +482,15 @@ export declare function createMobileHost(options: {
     readonly store: DeviceStore;
     readonly identity: HostIdentity;
     readonly gateway: RemoteGateway;
+    /**
+     * ★ 取「调用方 Peer」的函数 —— DSH **0.2.1 起网关必需**（见 `GatewayPeer` 的长注释 ✓）。
+     *
+     * 传**函数**而不是对象：`connection` 服务可能比本插件晚就绪 ✓，而且每台机器
+     * 只在第一次真调网关时才有必要去解析 ✓（解析结果由 `cordis.ts` 缓存 ✓）。
+     * 省略 ⇒ 沿用旧行为（不带 peer）—— 那在 0.2.1 上会让**所有**手机 RPC 失败 ✗，
+     * 所以只有独立服务 / 测试替身才该省略 ✓。
+     */
+    readonly gatewayPeer?: () => GatewayPeer | undefined;
     /** 可用连接地址（用于二维码 payload 与 manifest）。 */
     readonly endpoints: () => string[];
     /** 本机 DSH 的监听端口（回源通道要用它做环回请求）。 */

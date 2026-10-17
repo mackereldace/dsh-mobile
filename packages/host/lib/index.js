@@ -113,7 +113,13 @@ const HOST_FEATURES = [
  *   `uplink` / `peer` 传 `undefined` 与网关**自己的进程内载体**完全一致 ✓
  *   （它就这么转：`(e, p, u, pe, s) => this.openWireStream(e, p, u, pe, s, new AbortController())` ✓）。
  */
-export function callOpenWireStream(gateway, endpoint, payload, signal) {
+export function callOpenWireStream(gateway, endpoint, payload, signal, 
+/**
+ * ★ 调用方 Peer（DSH 0.2.1 起必需 ✓）。第 4 位就是 `peer` ——
+ * 原先这里传的是 `undefined` ✓，在 0.2.1 上 `$events` 会在
+ * `assertPeerLive(peer)` 那一句当场抛 `reading 'signal'` ✗（审计里 44 条全这个 ✓）。
+ */
+peer) {
     const open = gateway.openWireStream;
     if (typeof open !== 'function')
         throw new TypeError('gateway.openWireStream 不存在');
@@ -125,9 +131,9 @@ export function callOpenWireStream(gateway, endpoint, payload, signal) {
      *   ★ 原来的代码是对的（`options.gateway.openWireStream(...)` **方法调用** ✓）——
      *   是我为了抽函数把它改坏的 ✓。所以这里统一用 `.call(gateway, …)` ✓。
      */
-    // ≥5 个形参 ⇒ 新版六参签名（signal 在第 5 位、第 6 位要一个 AbortController ✓）
+    // ≥5 个形参 ⇒ 新版六参签名（第 4 位 peer、第 5 位 signal、第 6 位 AbortController ✓）
     if (open.length >= 5)
-        return open.call(gateway, endpoint, payload, undefined, undefined, signal, new AbortController());
+        return open.call(gateway, endpoint, payload, undefined, peer, signal, new AbortController());
     // 否则按老三参（signal 在第 3 位 ✓）
     return open.call(gateway, endpoint, payload, signal);
 }
@@ -390,7 +396,12 @@ export function createMobileHost(options) {
         }
         return out;
     }
-    /** 把隧道内的 RPC 载荷转成 Gateway 调用参数（与 DSH 的 remoteRequest 语义一致）。 */
+    /**
+     * 把隧道内的 RPC 载荷转成 Gateway 调用参数（与 DSH 的 remoteRequest 语义一致）。
+     *
+     * ★ 0.2.1 起**必须**带 `peer` ✗（见 `GatewayPeer` 的长注释）：这里统一取一次，
+     * 于是 `invoke()` / `stream()` 两条路都不会漏 ✓。
+     */
     function toGatewayArgs(endpoint, payload, signal) {
         const { namespace, method } = parseEndpoint(endpoint);
         if (typeof payload !== 'object' || payload === null) {
@@ -406,7 +417,15 @@ export function createMobileHost(options) {
         if (typeof args !== 'object' || args === null || Array.isArray(args)) {
             throw Object.assign(new Error('Remote args must be a plain object'), { code: ErrorCode.HandshakeMalformed });
         }
-        return { namespace, method, args: args, signal };
+        const peer = options.gatewayPeer?.();
+        return {
+            namespace,
+            method,
+            args: args,
+            signal,
+            // ★ exactOptionalPropertyTypes：没有 peer 时**不放这个键** ✓（放 `undefined` 通不过类型检查 ✓）
+            ...(peer === undefined ? {} : { peer }),
+        };
     }
     /**
      * 能力位 → 命名空间门禁。
@@ -476,7 +495,8 @@ export function createMobileHost(options) {
                     code: ErrorCode.CapabilityDenied,
                 });
             }
-            const envelope = await dispatch.dispatchRpc(endpoint, payload, signal);
+            // ★ 第 4 位 peer：0.2.1 起必需（`$events/result` 还要 principal.kind === 'owner' ✓）
+            const envelope = await dispatch.dispatchRpc(endpoint, payload, signal, options.gatewayPeer?.());
             if (envelope.ok === true)
                 return envelope.value;
             const failure = envelope.error ?? {};
@@ -502,8 +522,9 @@ export function createMobileHost(options) {
              * ★ 宿主侧 RPC 入口（`connection.rpc.intercept('/api', …)` 用的就是它 ✓）：
              *   它返回的才是**带附件表的信封** ✓（`encodeRpcResult` 在那里把字节换成 null 占位 + 收进 attachments ✓）。
              * ★ `dispatchRpc` **失败不抛**、返回 `{ok:false,error}` ✗ ⇒ 这里转成 throw ✓。
+             * ★ 第 4 位 peer：0.2.1 起必需（漏了就是 `reading 'signal'` ✓ —— 手机端**全部** RPC 会挂 ✗）。
              */
-            const raw = await dispatch.dispatchRpc(endpoint, payload, signal);
+            const raw = await dispatch.dispatchRpc(endpoint, payload, signal, options.gatewayPeer?.());
             if (raw !== null && typeof raw === 'object' && raw.ok === false) {
                 const failure = raw.error ?? {};
                 throw Object.assign(new Error(String(failure.message ?? '网关拒绝了这次调用')), {
@@ -1842,8 +1863,10 @@ export function createMobileHost(options) {
      */
     async function openGatewayStream(endpoint, payload, signal) {
         if (typeof options.gateway.openWireStream === 'function') {
-            return callOpenWireStream(options.gateway, endpoint, payload, signal);
+            // ★ peer 在第 4 位：0.2.1 起 `openWireStream` 第一句就是 `assertPeerLive(peer)` ✗
+            return callOpenWireStream(options.gateway, endpoint, payload, signal, options.gatewayPeer?.());
         }
+        // `stream()` 走 `toGatewayArgs` ⇒ peer 已在里面带上 ✓
         return options.gateway.stream(toGatewayArgs(endpoint, payload, signal));
     }
     /**

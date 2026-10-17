@@ -363,6 +363,54 @@ export function readWebServerPort(webServer) {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 /**
+ * ★★★ 造一个「取调用方 Peer」的函数 —— **DSH 0.2.1 把手机端弄挂的那个参数的来源** ✓。
+ *
+ * ## 为什么必须有它（2026-10-18 真机审计定因 ✓）
+ *
+ * 0.2.1 的 `dsh-api-gateway` 在 `prepareInvocation` / `openWireStream` 的**第一句**就
+ * `assertPeerLive(peer)` ⇒ `peer.signal` ⇒ 我们不带 peer 时抛
+ * `Cannot read properties of undefined (reading 'signal')` ✓（详见 `index.ts` 的 `GatewayPeer`）。
+ * 而 0.2.0 的 `request.peer ?? this.operatorPeer()` 兜底在 0.2.1 里**被删掉了** ✗
+ * （`operatorPeer()` 方法本身也不存在了 ✓）。
+ *
+ * ## 按版本取（顺序就是优先级 ✓）
+ *
+ * 1. `connection.browserPeer`（**0.2.1+**）—— "The Peer every authenticated browser
+ *    connection shares" ✓，principal = `{kind:'owner'}` ✓、interactions 默认 `'answer'` ✓。
+ * 2. `connection.operator`（**≤0.2.0**）—— 当年 `gateway.operatorPeer()` 返回的就是它 ✓
+ *    ⇒ 行为与升级前完全一致 ✓。
+ * 3. `connection.createPeer({ principal: { kind: 'owner' } })` —— 两个字段都没有时的兜底 ✓
+ *    （peer 的寿命挂在 connection 上，本插件只建一次 ✓）。
+ *
+ * ★ 用 `ctx.get('connection')` 而**不往 `inject` 里加**它（与 `ctx.get('tools')` 同一个理由 ✓）：
+ *   独立服务 / 测试环境里可能没有 connection —— 那种环境**不该因为少一个服务就加载失败** ✗。
+ *   取不到 ⇒ 返回 undefined ⇒ 退回旧行为，并**只警告一次**（不刷屏 ✓）。
+ */
+export function createGatewayPeerResolver(ctx) {
+    let cached;
+    let warned = false;
+    return () => {
+        if (cached !== undefined)
+            return cached;
+        const connection = ctx?.get?.('connection');
+        const direct = connection?.browserPeer ?? connection?.operator;
+        if (direct !== undefined) {
+            cached = direct;
+            return cached;
+        }
+        if (typeof connection?.createPeer === 'function') {
+            cached = connection.createPeer({ principal: { kind: 'owner' } });
+            return cached;
+        }
+        if (!warned) {
+            warned = true;
+            console.warn('[dsh-mobile] 取不到 DSH 的「调用方 Peer」（connection 服务不可用）⇒ 在 DSH ≥0.2.1 上手机端全部 RPC 会失败' +
+                '（报错是 Cannot read properties of undefined (reading \'signal\')）。其余功能不受影响。');
+        }
+        return undefined;
+    };
+}
+/**
  * "还没配置手机接入"那行启动提示（★ 只在真的没配置时才打，别刷屏 ✗）。
  *
  * 两副面孔：
@@ -535,6 +583,11 @@ export function apply(ctx, config = {}) {
     const endpoints = createEndpointResolver(ctx.logger, port, machine.publicBaseUrl, machine.extraEndpoints.filter((url) => typeof url === 'string' && url.length > 0));
     const gateway = ctx.typertGateway;
     /**
+     * ★ DSH 0.2.1 起网关的每次调用都要带「调用方 Peer」（见 `createGatewayPeerResolver`）——
+     * 传**函数**：connection 服务可能比本插件晚就绪，而真正需要它是在手机发第一条 RPC 时。
+     */
+    const gatewayPeer = createGatewayPeerResolver(ctx);
+    /**
      * ── 局域网监听（C1）：按配置起明文 / TLS 监听 ──────────────────────────
      *
      * ★ **默认关闭**：`config.listener?.enabled !== true` 时一行都不做 ⇒ 老部署行为不变。
@@ -588,6 +641,8 @@ export function apply(ctx, config = {}) {
         store,
         identity,
         gateway,
+        // ★ DSH 0.2.1 起：每次网关调用都要带它（取不到时退回旧行为，见上面那个 resolver）
+        gatewayPeer,
         endpoints,
         // 回源通道要用端口做环回请求（复用插件自己的 HTTP 路由，不另写一套）
         selfPort: port,
