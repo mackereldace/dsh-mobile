@@ -48,6 +48,86 @@
    */
   var DSH_SESSION_SELECTION_KEY = 'dsh.sessions.current'
 
+  /**
+   * ★★ 深链落点（2026-10-20）：「`/mobile/app?session=<id>` ⇒ 直接停在那一条会话」。
+   *
+   * ## 为什么它值得单独一条
+   *
+   * 这是**复刻页独有、DSH 自己的页面不认**的能力 ✗ —— `MainActivity.openSession()` 的
+   * `preferAppSurface` 就是为它分叉的 ✓（首页点会话走复刻页、只因为它认 `?session=` ✓）。
+   * 复刻页冻结之后，这条能力要搬到这里 ✓；否则「首页点会话 / 点通知」就**落不到那一条** ✗。
+   *
+   * ## 为什么只能写 localStorage（不是「读参数再点一下侧栏」）
+   *
+   * DSH 客户端**不读** `?session=` ✓ —— 会话打开之后地址栏仍是 `/mobile/app` ✓；
+   * 它恢复「上次看的那条」靠的是 `createSnapshotStore({}, { persist: { name: 'dsh.sessions.current' } })`
+   * ✓（0.2.1 装机客户端 `@deepseek-ai/dsh-client-ui-workspace` 的 `restoreSelection()` ✓：
+   * 取 `{ sessionId }` ⇒ 在 `sessions.byId` 里找回那条 ⇒ 再按它所在工作区打开 ✓）。
+   * 而本脚本**先于 DSH 的 bundle 执行** ✓ ⇒ 在这里写好，DSH 一起来就停在那一会话 ✓。
+   *
+   * ## 三条保守约束（最坏只失效、不损坏）
+   *
+   *   · 只在 `/mobile/app` 这一张面上做 ✓ —— 别的页面（复刻页 / 电脑端）**不替 DSH 改状态** ✗；
+   *   · 参数认不出 / 写失败 ⇒ **原样放行、绝不抛** ✓（深链坏了不该连带启动失败 ✗）；
+   *   · 写完**立刻把参数从地址栏摘掉** ✓：壳会把「当前 URL」落盘（`KEY_URL`）✓，
+   *     带着 `?session=` 落盘 ⇒ 下次冷启动又被拽回这条会话 ✓（用户切走了也回不去 ✗）。
+   *     ★ 摘之前先记进 `deepLinkSessionId` ✓ —— 模型菜单要靠它认「现在是哪条会话」✓
+   *     （它原来只从 URL 读 ✓，参数一摘就没了 ✗ ⇒ 会去改**别的**会话的模型 ✗）。
+   *     这条记忆在「DSH 自己写了一次别的会话」时清掉 ✓（写路径钩子就在下面 ✓）。
+   */
+  var deepLinkSessionId = ''
+
+  /**
+   * 把 `?session=` 变成「下次恢复点」✓，并摘掉地址栏里的参数 ✓。
+   * ★ 调用点只有**一处**（启动块 ✓）—— 别在别处再补一遍判断 ✗（两处语义早晚会分叉）。
+   */
+  function applySessionDeepLink() {
+    try {
+      if (location.pathname !== '/mobile/app' && location.pathname !== '/mobile/app/') return
+      var id = ''
+      try {
+        id = new URLSearchParams(location.search).get('session') || ''
+      } catch (error) {
+        void error
+        return
+      }
+      /**
+       * ★ 只认「看起来像会话 id」的值 ✓：去空白后非空、长度有界、**不含控制字符** ✓。
+       *   它会原样进 JSON、再当 `sessions.byId[...]` 的键 ✓ —— 宁可拒绝，也不往里塞怪东西 ✗。
+       */
+      id = String(id).replace(/^\s+|\s+$/g, '')
+      if (id === '' || id.length > 200 || /[\u0000-\u001f]/.test(id)) return
+      deepLinkSessionId = id
+      var wrote = false
+      try {
+        localStorage.setItem(DSH_SESSION_SELECTION_KEY, JSON.stringify({ sessionId: id }))
+        wrote = true
+      } catch (error) {
+        void error
+      }
+      debugBoxLine('[deep-link] ?session=' + id + (wrote ? ' ⇒ 已写恢复点' : ' ⇒ 写恢复点失败（原样放行）'))
+      /**
+       * ★★ 只有**写成功**才摘参数 ✗：写失败时留着它 ✓ —— 下次刷新还能再试一次 ✓；
+       *   摘掉就等于把这条深链**彻底丢掉** ✗（而地址栏是它唯一的来源 ✓）。
+       */
+      if (wrote) {
+        try {
+          var next = new URL(location.href)
+          next.searchParams.delete('session')
+          history.replaceState(null, '', next.pathname + next.search + next.hash)
+        } catch (error) {
+          void error
+        }
+      }
+    } catch (error) {
+      try {
+        console.warn('[dsh-mobile] 深链处理失败（不影响页面）：', error)
+      } catch (ignored) {
+        void ignored
+      }
+    }
+  }
+
   try {
     var dshmRawSetItem = localStorage.setItem
     if (typeof dshmRawSetItem === 'function') {
@@ -56,6 +136,15 @@
           var dshmNext = value
           try {
             var dshmParsed = JSON.parse(String(value))
+            /**
+             * ★ 深链那条记忆的**失效点** ✓：DSH 自己写了一次**别的**会话 ⇒ 用户已经换了会话 ✓
+             *   ⇒ 模型菜单不许再拿「深链那条」当答案 ✗（否则它会去改别的会话的模型 ✗）。
+             *   ★ 只作废、**不改写** ✓：这一笔照原样落盘 ✓（本钩子对非子单值仍然逐字节放行）。
+             */
+            if (dshmParsed !== null && typeof dshmParsed === 'object'
+                && typeof dshmParsed.sessionId === 'string' && dshmParsed.sessionId !== deepLinkSessionId) {
+              deepLinkSessionId = ''
+            }
             if (dshmParsed !== null && typeof dshmParsed === 'object' && Object.prototype.toString.call(dshmParsed) === '[object Object]'
                 && Object.prototype.hasOwnProperty.call(dshmParsed, 'subagentAddress')) {
               var dshmAddress = dshmParsed.subagentAddress
@@ -16161,6 +16250,12 @@
     } catch (error) {
       void error
     }
+    /**
+     * ★ 深链那次加载的会话 id ✓（地址栏参数已被 `applySessionDeepLink` 摘掉 ✓）——
+     *   没有这一句，这里会退回「清单里第一条 / running 的那条」✗ ⇒ 改的是**别的**会话的模型 ✗。
+     *   它只在「用户还没换过会话」期间有效 ✓（换过 ⇒ 写路径钩子已经清掉 ✓）。
+     */
+    if (deepLinkSessionId !== '') return deepLinkSessionId
     for (var i = 0; i < homeState.sessions.length; i++) {
       var item = homeState.sessions[i]
       if (item === null || typeof item !== 'object') continue
@@ -24925,7 +25020,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1017175200'
+    var BOOT_STAMP = 'BUILD-1019170045'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
@@ -26616,6 +26711,12 @@
   debugBoxLine('[boot] 装载点：isMobileSurface=' + String(isMobileSurface()))
   try {
   if (isMobileSurface()) {
+    /**
+     * ★★ 深链**必须最早**：它写的是 DSH 恢复会话要读的那个键 ✓ ——
+     *   DSH 的 bundle 在我们之后才执行 ✓，所以此刻写还来得及 ✓（晚了就白写 ✗）。
+     *   它自己只认 `/mobile/app` 并自带 try/catch ✓ ⇒ 放这里对其它面是纯 no-op ✓。
+     */
+    applySessionDeepLink()
     installPlaceholderTransport()
     // 必须**同步**安装：DSH 的附件运行时在插件启动时只读一次这个全局
     installFileUploadHook()

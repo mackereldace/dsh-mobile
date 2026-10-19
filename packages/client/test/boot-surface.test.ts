@@ -152,6 +152,11 @@ interface Surface {
   /** ★ round 185 追加：沙箱里那个 localStorage 的底表 ✓ —— 用来证明"读数与落盘同源"✓。 */
   storage: Map<string, string>
   /**
+   * ★★ 深链（2026-10-20）追加：沙箱里 `history.replaceState` 收到的目标地址 ✓（按调用顺序 ✓）。
+   *   深链契约的第三条就是「写完把 `?session=` 从地址栏摘掉」✓ —— 它要有**真的**证据 ✓。
+   */
+  urlRewrites: string[]
+  /**
    * ★★ 剪贴板原生桥追加：当前**提醒横幅**（`[data-dshm-banner=info]`）的**子元素快照** ✓。
    *
    * 为什么要这么一个口子 ✗：假 DOM 没有选择器引擎 ✓（`document.querySelector` 恒为 null ✓），
@@ -541,6 +546,11 @@ function bootOnSurface(options: {
   shell?: Record<string, unknown>
   /** ★ 追加：让 localStorage 对**取证那个键**读写都抛错 ✓（验"落盘坏了也不许炸"✓）。 */
   storageThrowsForLog?: boolean
+  /**
+   * ★★ 深链（2026-10-20）追加：让 `dsh.sessions.current` **写**抛错 ✓。
+   *   验的是「恢复点写不进去 ⇒ 页面照常起来、**参数不摘**（下次刷新还能再试）」✓。
+   */
+  storageThrowsForSelection?: boolean
   /** ★ 追加：沙箱里的定时器 unref ✓ —— 免得 drawBar 那个 15 秒清理定时器把测试进程挂住 ✓。 */
   unrefTimers?: boolean
   /**
@@ -600,6 +610,12 @@ function bootOnSurface(options: {
   const boxText: string[] = []
   const intervals: Array<() => void> = []
   const thrown: unknown[] = []
+  /**
+   * ★★ 深链（2026-10-20）：`history.replaceState` 真的被调过几次、目标是什么 ✓。
+   *   深链的契约之一就是「写完把参数从地址栏摘掉」✓ —— 没有这个口子，
+   *   「摘没摘」只能靠读源码猜 ✗（那是**结构断言**，不是行为断言 ✗）。
+   */
+  const urlRewrites: string[] = []
   /** ★★ 本轮追加：假观察器 / 假帧队列 / 全文档扫描计数 / 逐层量样式计数 ✓。 */
   const observers: ObservedWatcher[] = []
   const frames: Array<() => void> = []
@@ -840,12 +856,24 @@ function bootOnSurface(options: {
         if (options.storageThrowsForLog === true && key === 'dsh-mobile.deviceCallLog') {
           throw new Error('打桩：localStorage 写失败')
         }
+        /**
+         * ★★ 深链（2026-10-20）：只让**会话恢复点**这一个键写失败 ✓ ——
+         *   验的是「写不进去 ⇒ 不崩、**也不摘参数**（下次刷新还能再试）」✓。
+         */
+        if (options.storageThrowsForSelection === true && key === 'dsh.sessions.current') {
+          throw new Error('打桩：会话恢复点写失败')
+        }
         store.set(key, String(value))
       },
       removeItem: (key: string) => void store.delete(key),
       clear: () => store.clear(),
     },
-    history: { replaceState: () => {}, pushState: () => {} },
+    history: {
+      replaceState: (_state: unknown, _title: unknown, url?: unknown) => {
+        urlRewrites.push(String(url ?? ''))
+      },
+      pushState: () => {},
+    },
     /**
      * ★★ 本轮追加：`webClipboard` 打开时给一条**能写进去**的网页剪贴板路 ✓
      *   （`navigator.clipboard.writeText` ✓ —— 生产代码判的就是这个属性 ✓，见 `copyText` ✓）。
@@ -958,6 +986,7 @@ function bootOnSurface(options: {
     internals: sandbox['__DSH_MOBILE_INTERNALS__'] as Surface['internals'],
     boot: sandbox['__DSH_MOBILE_BOOT__'] as Surface['boot'],
     storage: store,
+    urlRewrites,
     infoBanner: () =>
       (body['children'] as Array<Record<string, unknown>>)
         .filter((bar) => (bar['attrs'] as Record<string, string>)['data-dshm-banner'] === 'info')
@@ -6042,3 +6071,109 @@ for (const viewportWidth of [412, 360]) {
     }
   })
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ★★ 深链（2026-10-20）：`/mobile/app?session=<id>` ⇒ 直接停在那一条会话
+ *
+ * 背景：这条能力原先**只有复刻页有** ✓（`/mobile/chat?session=` ✓），而 DSH 客户端
+ *   **不认** `?session=` ✗ —— 它按 `dsh.sessions.current` 恢复「上次看的那条」✓。
+ *   复刻页冻结之后这条能力要搬到网络页 ✓，否则「首页点会话 / 点通知」就落不到那一条 ✗。
+ *
+ * 这一组钉三件事（每条都能被打红 ✓）：
+ *   ① **写**：`{sessionId}` 真的落进 `dsh.sessions.current` ✓（形状错、键错都会红 ✓）；
+ *   ② **摘**：写成功后参数从地址栏消失 ✓（壳会落盘当前 URL ⇒ 不摘就把人钉死在这条会话 ✗）；
+ *   ③ **守卫**：不是 `/mobile/app` / 参数为空 / 含控制字符 / 写失败 ⇒ **一个字节都不动** ✓。
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+test('★★ 深链：/mobile/app?session=<id> ⇒ 写进恢复点，并把参数从地址栏摘掉', () => {
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    search: '?debug=1&session=session-deep-1',
+  })
+  assert.equal(surface.thrown.length, 0, `顶层不应抛错：${String(surface.thrown[0])}`)
+  assert.equal(
+    surface.storage.get(DSH_SELECTION_KEY),
+    '{"sessionId":"session-deep-1"}',
+    '★★ 必须写成 DSH 的恢复点形状 `{ sessionId }`（换形状 ⇒ DSH 认不出来 ⇒ 深链静默失效 ✗）',
+  )
+  assert.equal(surface.urlRewrites.length, 1, `★ 必须恰好摘一次参数（实际：${JSON.stringify(surface.urlRewrites)}）`)
+  assert.equal(surface.urlRewrites[0], '/mobile/app?debug=1', '★ 只摘 session，别的参数原样留着 ✓')
+  assert.match(
+    surface.boxText(),
+    /\[deep-link\] \?session=session-deep-1 ⇒ 已写恢复点/,
+    '★ 真机只能靠这一行念回来 ✓（手机上只有调试框看得见）',
+  )
+})
+
+test('★ 深链守卫：不是 /mobile/app ⇒ 一个字节都不动', () => {
+  /**
+   * ★ 这一条刻意用**根页 + `?mobile=1`** ✗：那是"`isMobileSurface()` 为真、但路径不是
+   *   `/mobile/app`"的唯一现实形状 ✓ ⇒ 函数**真的被调到**了 ✓，拦住它的是**函数自己的
+   *   路径守卫** ✓（换成 `/mobile/chat` 就只是在测"启动块没进"✓，那条守卫等于没测 ✗）。
+   */
+  const root = bootOnSurface({
+    pathname: '/',
+    innerWidth: 412,
+    consent: [],
+    search: '?mobile=1&session=session-deep-2',
+  })
+  assert.equal(root.thrown.length, 0, `顶层不应抛错：${String(root.thrown[0])}`)
+  assert.equal(root.storage.get(DSH_SELECTION_KEY), undefined, '别的面**不替 DSH 改状态** ✓')
+  assert.deepEqual(root.urlRewrites, [], '别的面也不摘参数 ✓（它自己的参数不归我们管）')
+
+  // ★ 复刻页（`/mobile/chat`）：连启动块都不进 ✓ —— 两条路各自守一道 ✓。
+  const chat = bootOnSurface({
+    pathname: '/mobile/chat',
+    innerWidth: 412,
+    consent: [],
+    search: '?debug=1&session=session-deep-2',
+  })
+  assert.equal(chat.storage.get(DSH_SELECTION_KEY), undefined)
+  assert.deepEqual(chat.urlRewrites, [])
+})
+
+test('★ 深链守卫：空值 / 控制字符 ⇒ 不写、不摘、不抛', () => {
+  const empty = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    search: '?debug=1&session=',
+  })
+  assert.equal(empty.thrown.length, 0)
+  assert.equal(empty.storage.get(DSH_SELECTION_KEY), undefined, '空值不是会话 id ✓')
+  assert.deepEqual(empty.urlRewrites, [])
+
+  const control = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    search: '?debug=1&session=%00bad',
+  })
+  assert.equal(control.thrown.length, 0)
+  assert.equal(control.storage.get(DSH_SELECTION_KEY), undefined, '含控制字符的值一律拒绝 ✓')
+  assert.deepEqual(control.urlRewrites, [])
+})
+
+test('★ 深链守卫：恢复点写不进去 ⇒ 页面照常起来，参数也不摘（下次刷新还能再试）', () => {
+  const surface = bootOnSurface({
+    pathname: '/mobile/app',
+    innerWidth: 412,
+    consent: [],
+    search: '?debug=1&session=session-deep-3',
+    storageThrowsForSelection: true,
+  })
+  assert.equal(surface.thrown.length, 0, `写失败也不许抛：${String(surface.thrown[0])}`)
+  assert.match(surface.boxText(), /写恢复点失败（原样放行）/, '失败要能念出来 ✓（不许静默 ✗）')
+  assert.deepEqual(surface.urlRewrites, [], '★ 没写进去就不摘 ✓ —— 摘了这条深链就彻底丢了')
+})
+
+test('★ 深链：模型菜单认「摘参数前那条会话」（结构判据 —— 否则它会去改别的会话的模型）', () => {
+  const body = functionBodyAtColumn2(bootSource, 'modelMenuSessionId')
+  assert.ok(
+    body.includes('deepLinkSessionId'),
+    '★★ `modelMenuSessionId()` 必须把 `deepLinkSessionId` 当第二个来源 ✓ —— ' +
+      '参数被摘掉之后它只剩「清单第一条 / running」✗ ⇒ 改的是**别的**会话的模型 ✗',
+  )
+})
