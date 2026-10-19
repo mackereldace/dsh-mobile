@@ -152,6 +152,67 @@ final class MobileUrl {
     }
 
     /**
+     * 拼「直接落到某条会话」的地址：`<origin>/mobile/app?session=<id>`。
+     *
+     * ★ 这是**深链**的壳侧一半（2026-10-20）：网页侧 `boot.js` 的 `applySessionDeepLink()`
+     *   认 `?session=` 并把它写成 DSH 的恢复点；壳这边只负责把地址拼对 ——
+     *   会话语义**只在网页侧解释一次**，别在这里再解释一遍。
+     *
+     * @param origin    形如 `https://10.34.128.67:3453`（末尾斜杠会被吃掉）
+     * @param sessionId 会话 id；空 ⇒ **不拼空参数**（返回纯 `/mobile/app`）
+     * @return 拼不出（origin 空）⇒ `null`（**绝不抛**）
+     */
+    static String appSessionUrl(String origin, String sessionId) {
+        String base = origin == null ? "" : origin.trim();
+        while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (base.isEmpty()) return null;
+        String id = sessionId == null ? "" : sessionId.trim();
+        if (id.isEmpty()) return base + APP_PATH;
+        String encoded;
+        try {
+            encoded = java.net.URLEncoder.encode(id, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException error) {
+            encoded = id;
+        }
+        return base + APP_PATH + "?session=" + encoded;
+    }
+
+    /**
+     * 从一条地址里摘掉 `session` 这**一个**参数，别的一个字不动。
+     *
+     * ★ 为什么必须摘（2026-10-20）：深链只该管**这一次加载**；而壳会把「当前地址」落盘
+     *   （`KEY_URL`）⇒ 带着 `?session=` 落盘的话，下次冷启动又会被拽回同一条会话
+     *   （用户切走了也回不去）。网页那半也会摘地址栏 —— 两边都摘，是因为
+     *   壳落盘的是**它自己手里那条**、不是网页地址栏里那条。
+     *
+     * · 没有 `?` ⇒ 原样返回；摘完没剩下别的参数 ⇒ 连 `?` 一起去掉；
+     * · 锚点、路径、其它参数、大小写**原样保留**；认不出 ⇒ 原样返回（宁可留着，也不弄坏）。
+     */
+    static String withoutSession(String url) {
+        if (url == null) return null;
+        int hashAt = url.indexOf('#');
+        String head = hashAt < 0 ? url : url.substring(0, hashAt);
+        String hash = hashAt < 0 ? "" : url.substring(hashAt);
+        int q = head.indexOf('?');
+        if (q < 0) return url;
+        String base = head.substring(0, q);
+        String query = head.substring(q + 1);
+        if (query.isEmpty()) return url;
+        StringBuilder kept = new StringBuilder();
+        String[] parts = query.split("&", -1);
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            int eq = part.indexOf('=');
+            String name = eq < 0 ? part : part.substring(0, eq);
+            if (name.equals("session")) continue;
+            if (kept.length() > 0) kept.append('&');
+            kept.append(part);
+        }
+        if (kept.length() == 0) return base + hash;
+        return base + "?" + kept + hash;
+    }
+
+    /**
      * 这串文本是不是**另一个协议头**（`dshmobile:pair?d=…` ✓ / `mailto:…` ✓）？
      *
      * ★ 为什么不能只看"有没有 `:`" ✗：`Mac-mini-2024.local:3443` 是**我们的默认地址那一类主机名** ✓，

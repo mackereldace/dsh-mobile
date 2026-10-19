@@ -46,7 +46,7 @@ public final class MobileUrlTest {
      *   + 拒收（不崩）12 ✓ + 边界与一致性 3 ✓ + 深链没被碰坏 2 ✓
      *   —— 这个数**只在故意增删断言时**才改 ✓（它是防呆，不是目标 ✗）。
      */
-    private static final int EXPECTED_MIN_CHECKS = 39;
+    private static final int EXPECTED_MIN_CHECKS = 52;
 
     public static void main(String[] args) {
         // ── ① 用户真机报的那一类：**裸域名 / 空路径 / 单个 `/` ⇒ 补 `/mobile/app`** ✓
@@ -147,6 +147,37 @@ public final class MobileUrlTest {
         checkEq("https://10.34.255.229:3443/mobile/app?pair=" + token,
                 PairLink.appUrlOf("https://10.34.255.229:3443", token),
                 "★ 配对拼址的结果与归一化的落点**同一条路**（都是 /mobile/app）");
+
+        // ── ⑦ 深链落点（2026-10-20）：拼址与摘参 ✓
+        checkEq("https://10.34.128.67:3453/mobile/app?session=session-abc",
+                MobileUrl.appSessionUrl("https://10.34.128.67:3453", "session-abc"),
+                "★ 深链落点 = /mobile/app?session=<id>");
+        checkEq("https://10.34.128.67:3453/mobile/app?session=session-abc",
+                MobileUrl.appSessionUrl("https://10.34.128.67:3453/", "session-abc"),
+                "origin 末尾的斜杠被吃掉（不拼出 //mobile/app）");
+        checkEq("https://10.34.128.67:3453/mobile/app", MobileUrl.appSessionUrl("https://10.34.128.67:3453", ""),
+                "★ 空会话 ⇒ 不拼空参数（否则页面会认出一个空会话）");
+        checkEq("https://10.34.128.67:3453/mobile/app", MobileUrl.appSessionUrl("https://10.34.128.67:3453", "   "),
+                "空白会话 ⇒ 同上");
+        check(MobileUrl.appSessionUrl("", "x") == null, "origin 空 ⇒ null（不抛、不拼半截）", "null");
+        checkEq("https://10.34.128.67:3453/mobile/app?session=a%26b",
+                MobileUrl.appSessionUrl("https://10.34.128.67:3453", "a&b"),
+                "会话 id 里的 & 必须转义（否则会被页面拆成两个参数）");
+
+        checkEq("https://h/mobile/app", MobileUrl.withoutSession("https://h/mobile/app?session=x"),
+                "★ 落盘摘参：只剩 session ⇒ 连 ? 一起去掉");
+        checkEq("https://h/mobile/app?debug=1", MobileUrl.withoutSession("https://h/mobile/app?debug=1&session=x"),
+                "别的参数原样保留（debug 不能被顺手吃掉）");
+        checkEq("https://h/mobile/app?debug=1", MobileUrl.withoutSession("https://h/mobile/app?session=x&debug=1"),
+                "session 在第一个也一样");
+        checkEq("https://h/mobile/app#top", MobileUrl.withoutSession("https://h/mobile/app?session=x#top"),
+                "锚点原样保留");
+        checkEq("https://h/mobile/app", MobileUrl.withoutSession("https://h/mobile/app"),
+                "没有查询串 ⇒ 原样返回");
+        checkEq("https://h/mobile/app?a=1&b=2", MobileUrl.withoutSession("https://h/mobile/app?session=x&a=1&b=2"),
+                "多个参数顺序不变");
+        checkEq("https://h/mobile/app?sessions=x", MobileUrl.withoutSession("https://h/mobile/app?sessions=x"),
+                "★ 只认**完全同名**的参数（sessions 不许被误删）");
 
         System.out.println();
         System.out.println(failed == 0

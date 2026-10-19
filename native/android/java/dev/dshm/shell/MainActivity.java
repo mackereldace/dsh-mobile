@@ -2299,7 +2299,12 @@ public class MainActivity extends android.app.Activity {
             // 只有**真的加载成功**才记住地址 ✓ —— 否则会把一个坏地址记成默认值 ✗
             if (url != null && url.startsWith("http")) {
                 currentUrl = url;
-                prefs.edit().putString(KEY_URL, url).apply();
+                /**
+                 * ★★ 落盘摘掉 `session`（2026-10-20）：深链只该管**这一次**；
+                 *   否则下次冷启动又被拽回同一条会话。`currentUrl` 仍留**加载的那条**
+                 *   （它只用来比主机名/显示，见 `isOursUrl`）。
+                 */
+                prefs.edit().putString(KEY_URL, MobileUrl.withoutSession(url)).apply();
             }
         }
     }
@@ -3899,43 +3904,36 @@ public class MainActivity extends android.app.Activity {
     }
 
     /**
-     * 进某个会话的**唯一一份**实现 ✓ —— 首页点会话（回调 ✓）与通知点进来（{@link #handleNotifyIntent} ✓）
-     * 都走它 ✓（本仓规矩：同一件事别写两份 ✗，早晚只改一处 ✓）。
+     * 进某个会话的**唯一一份**实现 —— 首页点会话（{@link #onEnterSession}）与
+     * 通知点进来（{@link #handleNotifyIntent}）都走它（同一件事别写两份）。
      *
-     * ★★ 2026-10-04：它多了**一个落点参数** ✓ —— 起因是这两条入口的**能力不同** ✗，
-     *   而"顺手一起改掉"等于**悄悄丢掉一个能力** ✗（那是主线复核时点出来的一条 ✓）：
+     * ★★ 2026-10-20：落点从**两条**收成**一条**：`<电脑>/mobile/app?session=<id>`。
      *
-     *   · `preferAppSurface = true` ⇒ 落 {@link MobileUrl#APP_PATH}
-     *     （= DSH 的**正常表面** ✓）—— **点通知**走这条 ✓
-     *     （用户拍板原话：「点通知进 DSH 的页面」✓）。
-     *     ★ DSH 客户端**不认** `?session=` ✗ ⇒ 这条**不定位**到那一条会话 ✓
-     *     （用户已知并接受 ✓："定位"是"会话页复刻"那一轮的事 ✓）；
-     *   · `preferAppSurface = false` ⇒ 落**我们自己的会话页**
-     *     `${authority}/mobile/chat?session=<encode>` —— **首页点会话**走这条 ✓。
-     *     ★ 那张 HTML **认** `?session=` ✓ ⇒ **定位保留** ✓
-     *     （这是它**独有**的能力 ✗：别因为"通知那条改了"就顺手把它也换掉 ✗）。
+     * 为什么能收：原先首页会话行进 `/mobile/chat?session=`、通知进不带参数的 `/mobile/app`，
+     *   唯一的理由是**复刻页认 `?session=`、DSH 的页面不认**。现在 `boot.js` 的
+     *   `applySessionDeepLink()` 把 DSH 页也接上了（**真机已验**）⇒ 两条入口都走**主面**，
+     *   复刻页从**默认入口**撤下（那张 HTML 仍然可达，只是本仓不再有入口链过去）。
      *
-     * ★ 两条路都**落在同一次 `showWebView()` + `applyHostUrl()` 上** ✓
-     *   （"记成当前 / 落盘"那套一份都不少 ✓），日志里也**各自写清落点** ✓（真机核对靠它 ✓）。
-     * ★ 两个入口请走下面那两个**小包装** ✓（{@link #openSessionInApp} ✓ /
-     *   {@link #openSessionAtSessionPage} ✓）—— `true` / `false` 写在实参位置上
-     *   在调用处是**读不出**的 ✗（这正是它值得包一层的理由 ✓）。
+     * ★ 落点的两件事必须**分开**（最容易踩的一处）：
+     *   · **加载**的那条带着 `?session=`（网页靠它定位）；
+     *   · **落盘**（`KEY_URL`）的那条必须摘掉 `session` —— 否则下次冷启动又被拽回
+     *     同一条会话（用户切走了也回不去）。摘法见 {@link MobileUrl#withoutSession}。
+     *
+     * ★ 拼法与摘法都在 {@link MobileUrl}（**纯类** ⇒ 电脑上可跑断言）——
+     *   别在这里手写第二份拼接（真分叉时手机上只表现为「点了没定位」）。
      */
-    private boolean openSession(String sessionId, String why, boolean preferAppSurface) {
+    private boolean openSession(String sessionId, String why) {
         String authority = currentAuthority();
         if (authority == null || authority.isEmpty()) {
             /**
-             * ★★ 冷启动那一瞬 `currentUrl` **还没定** ✗（`startInitialLoad` 还没跑 ✓）
-             *   ⇒ 回落到"上次成功的地址"（`KEY_URL` ✓）——
-             *   与 `handlePairText` 里那条回落是**同一条**理由 ✓（那边也是
-             *   `currentUrl != null ? currentUrl : prefs.getString(KEY_URL, null)` ✓）。
-             *
-             * ★ 为什么这是对的（而不是"将就"✗）：这条通知**就是从这台电脑发出来的** ✓
-             *   ⇒ "上次打开成功的那台"正是点通知想回的那台 ✓。
-             * ★ 认不出（从没成功开过任何一台 ✓）⇒ 这里照样是 `null` ✓
-             *   ⇒ 下面第二道判断照旧报"没有地址"并返回 `false` ✓
-             *   ⇒ 调用方（冷启动 ✓）见 `false` 就照旧走 `startInitialLoad` ✓
-             *     （它会去问地址 / 按槽试 ✓）—— **绝不把一个冷启动撂在首页上** ✗。
+             * ★★ 冷启动那一瞬 `currentUrl` **还没定**（`startInitialLoad` 还没跑）
+             *   ⇒ 回落到「上次成功的地址」（`KEY_URL`）——
+             *   与 `handlePairText` 里那条回落是**同一条**理由。
+             * ★ 为什么这是对的（而不是「将就」）：这条通知**就是从这台电脑发出来的**
+             *   ⇒ 「上次打开成功的那台」正是想回的那台。
+             * ★ 认不出 ⇒ 这里照样是 `null` ⇒ 下面第二道判断照旧报「没有地址」并返回 false
+             *   ⇒ 调用方（冷启动）见 false 就照旧走 `startInitialLoad`
+             *     —— **绝不把一个冷启动撂在首页上**。
              */
             authority = PinStore.authorityOf(prefs.getString(KEY_URL, null));
         }
@@ -3943,70 +3941,29 @@ public class MainActivity extends android.app.Activity {
             Log.w(TAG, "还没有可用的电脑地址，进不了会话");
             return false;
         }
-        /**
-         * ★★ 两条落点的拼法（一处写清 ✓，对照见本方法注释里那张表 ✓）：
-         *
-         * · A（`preferAppSurface = true` ✓）：`https://<authority>` + {@link MobileUrl#APP_PATH} ✓
-         *   —— **复用**那个常量、绝不硬编码 ✗：这条路径与 `PairLink.APP_PATH` ✓、
-         *   `DEFAULT_URL` ✓ 本来就是**同一条** ✓（`MobileUrl` 的类注释里写着这条约定 ✓，
-         *   `MobileUrlTest` 里还断言着 `MobileUrl.APP_PATH.equals(PairLink.APP_PATH)` ✓，
-         *   本程实测 `check-mobile-url` 39/39 ✓）——
-         *   手写第二份的代价不是"难看"✗，而是**真分叉时手机上只表现为"某一页打不开"** ✓
-         *   （这也正是 `MobileUrl` 这个纯类当初被单拆出来的理由 ✓）。
-         *   ★ 这条 URL 还要被 `applyHostUrl` **落盘**（`KEY_URL` ✓）⇒ 下次冷启动直接读它 ✓
-         *   ⇒ 形状必须与 `MobileUrl.normalize` 补出来的那条**一模一样** ✓
-         *   （它补的正是 `APP_PATH` ✓，见 `applyHostUrl` 注释里那句 ✓）。
-         *
-         * · B（`preferAppSurface = false` ✓）：`https://<authority>/mobile/chat?session=<encode>` ✓
-         *   —— 就是 2026-10-04 之前那**唯一**一条 ✓，本次**原样**保留 ✓
-         *   （连 `android.net.Uri.encode` 一起 ✓：会话 id 得能安全进查询串 ✓）。
-         */
-        String url;
-        if (preferAppSurface) {
-            url = "https://" + authority + MobileUrl.APP_PATH;
-        } else {
-            url = "https://" + authority + "/mobile/chat?session="
-                    + android.net.Uri.encode(sessionId == null ? "" : sessionId);
+        String url = MobileUrl.appSessionUrl("https://" + authority, sessionId);
+        if (url == null) {
+            Log.w(TAG, "拼不出落点地址：" + authority);
+            return false;
         }
-        /**
-         * ★ 落点**写清楚** ✓（哪条路 ✓ / 去了哪 ✓ / `sessionId` 用没用上 ✓）——
-         *   真机上"点通知没进 DSH 页面"✗ 与"点了会话没定位"✗ 这两类问题
-         *   **只能靠这一行**念出来 ✓（本仓规矩：真机才现形的问题必须留可念的日志 ✓）。
-         */
-        String landing = preferAppSurface
-                ? "DSH 页面（默认面，不定位 ✓）"
-                : "会话页（定位到那一条 ✓）";
+        String landing = sessionId == null || sessionId.trim().isEmpty()
+                ? "DSH 页面（不带会话）"
+                : "DSH 页面（定位到那一条）";
         Log.i(TAG, why + "：落点 " + url + "（" + landing + "，sessionId=" + sessionId + "）");
         showWebView();
         applyHostUrl(url, why);
+        /**
+         * ★★ 紧跟一次覆盖：`applyHostUrl` 是「先落盘再加载」⇒ 这里把落盘那条换成
+         *   **摘掉 `session`** 的（`onPageFinished` 那条也一起摘，见那边的注释）。
+         *   ★ 只覆盖 `KEY_URL` —— `currentUrl` 仍是**真正加载的那条**
+         *   （它只用来比主机名/显示，见 `isOursUrl`）。
+         */
+        try {
+            prefs.edit().putString(KEY_URL, MobileUrl.withoutSession(url)).apply();
+        } catch (Throwable ignored) {
+            // 落盘失败不影响这次加载（下次冷启动最多再定位一次）
+        }
         return true;
-    }
-
-    /**
-     * ★ **通知**那条落点 ✓：进 DSH 的**正常表面**（{@link MobileUrl#APP_PATH} ✓）——
-     * 用户 2026-10-04 拍板的原话就是「点通知进 DSH 的页面」✓。
-     *
-     * ★ 这条**不定位**到那一条会话 ✗（DSH 客户端不认 `?session=` ✓）：
-     *   "会话页复刻"那一轮的事 ✓，见 {@link #openSession} 的注释 ✓。
-     *
-     * @return 同 {@link #openSession} ✓（冷启动那条要靠它决定要不要照旧走 `startInitialLoad` ✓）
-     */
-    private boolean openSessionInApp(String sessionId, String why) {
-        return openSession(sessionId, why, true);
-    }
-
-    /**
-     * ★ **首页点会话**那条落点 ✓：进**我们自己的会话页**
-     * （`/mobile/chat?session=<id>` ✓ —— 那张 HTML **认**这个参数 ⇒ **定位保留** ✓）。
-     *
-     * ★ 为什么它**不**跟着通知那条一起改成 `/mobile/app` ✗：两张面的**能力不同** ✗ ——
-     *   换掉等于**悄悄丢掉"定位到那一条"** ✓，而用户拍板只说"点通知" ✓
-     *   （2026-10-04 主线的复核结论 ✓：**默认只有通知改、会话行保持原样** ✓）。
-     *
-     * @return 同 {@link #openSession} ✓（本条调用处不看它 ✓，留着是为了两个包装形状一致 ✓）
-     */
-    private boolean openSessionAtSessionPage(String sessionId, String why) {
-        return openSession(sessionId, why, false);
     }
 
     /**
@@ -4028,7 +3985,7 @@ public class MainActivity extends android.app.Activity {
             Log.i(TAG, "从通知进入会话：" + sessionId);
             setIntent(new Intent());
             // ★ 通知那条 = A 落点（DSH 正常表面 ✓）—— 走**具名**包装，别写裸 boolean ✗
-            return openSessionInApp(sessionId, "从通知进入会话");
+            return openSession(sessionId, "从通知进入会话");
         } catch (Throwable t) {
             Log.w(TAG, "处理通知意图失败（不影响其余）", t);
             return false;
@@ -4771,20 +4728,16 @@ public class MainActivity extends android.app.Activity {
                 }
 
                 /**
-                 * ★★ 点某个会话 ⇒ 进**我们自己的会话页** ✓
-                 * （`/mobile/chat?session=<id>` ✓ —— 那张 HTML **认**它 ⇒ **定位保留** ✓）。
+                 * ★★ 点某个会话 ⇒ 进 DSH 的**主面**并定位到那一条
+                 * （`/mobile/app?session=<id>`）。
                  *
-                 * ★ 2026-10-04：这里**保持原样** ✗（**不**跟着通知那条改成 `/mobile/app` ✗）——
-                 *   用户拍板的原话只说「**点通知**进 DSH 的页面」✓；
-                 *   而两张面**能力不同** ✗：我们的会话页**能定位到那一条** ✓，
-                 *   `/mobile/app` **不能** ✓ ⇒ 顺手换掉就是**悄悄丢掉一个能力** ✗
-                 *   （主线复核结论 ✓：默认只有通知改 ✓）。
-                 * ★ 两个落点由 {@link #openSession} **一份**实现决定 ✓
-                 *   （本仓规矩：同一件事别写两份 ✗），这里只负责**选哪条** ✓
-                 *   —— 用具名包装选 ✓（{@link #openSessionAtSessionPage} ✓），不写裸 boolean ✗。
+                 * ★ 2026-10-20 改：这条原先落**复刻页**（`/mobile/chat?session=`），
+                 *   唯一理由是「复刻页认 `?session=`、DSH 页不认」。现在 `boot.js` 的
+                 *   `applySessionDeepLink()` 让 DSH 页也认了（**真机已验**）⇒
+                 *   两条入口统一走主面，复刻页从默认入口撤下。
                  */
                 public void onEnterSession(String sessionId) {
-                    openSessionAtSessionPage(sessionId, "进入会话");
+                    openSession(sessionId, "进入会话");
                 }
 
                 public void onAddComputer() {
