@@ -350,6 +350,16 @@
    *   而"当前源属于谁"不能靠旧目录猜 ✗（见 `currentHostFingerprint` ✓）。
    */
   var pageTicketFingerprint
+  /**
+   * ★★ 本页**已由宿主签名证明过**的指纹 ✓（换源认亲用 ✓，见 `adoptCurrentOriginByHostProbe`）。
+   *
+   * 它不是"从地址猜出来的" ✗ —— 只有当我们在**当前这个源**上真完成一次握手、
+   * 且 ServerHello 的签名/指纹与目录里那条记录**逐字相符**时才会被写上 ✓
+   * （判据在 `Tunnel.prototype.acceptServerHello` ✓：`pinnedHostFingerprint` 不符直接抛 ✓）。
+   * 所以它可以像"目录里那条槽"一样参与 `currentHostFingerprint()` ✓ ——
+   * 但**只在本页有效**（不落盘；落盘的是它证明完顺手补上的那条槽 ✓）。
+   */
+  var adoptedHostFingerprint
 
   /** 指纹（或键名后缀）长这样：十六进制 / 分组短横 / 测试用的注入串 ✓。 */
   function validHostFingerprint(value) {
@@ -520,6 +530,14 @@
     var records = hostsRead()
     var matched = hostFingerprintMatchingOrigin(records, location.host)
     if (matched !== undefined) return matched
+    /**
+     * ★★ c) 本页刚用**已存凭据真握手**证明过的宿主 ✓（见 `adoptCurrentOriginByHostProbe`）。
+     *
+     * 放在"目录槽"之后、旧键之前：槽是**带外**证据（配对票据 / 上次连上的源 ✓），
+     * 而这一条是**本页当场**的密码学证据（ServerHello 签名 + 指纹钉死 ✓）——
+     * 两者都强于"旧键自证" ✓。顺序不同只影响"同时存在时用哪个"，两者指纹本就该相同 ✓。
+     */
+    if (validHostFingerprint(adoptedHostFingerprint)) return adoptedHostFingerprint
     var fromLocalLegacy = fingerprintFromJson(localValue(STORAGE_KEY))
     if (fromLocalLegacy !== undefined) return fromLocalLegacy
     if (records.length === 0) {
@@ -6919,6 +6937,14 @@
    */
   /** manifest 里那条学校地址 ✓（`null` = 还没拿到 / 没拿到 ✓）。 */
   var manifestBaseUrl = null
+  /**
+   * ★ manifest 里的宿主指纹 ✓（`null` = 还没拿到 ✓）。
+   *
+   * 唯一用途：换源认亲时**排候选** ✓（见 `adoptCurrentOriginByHostProbe`）——
+   * 它只是"先去试哪台"的**提示** ✗，不是信任依据：真正认亲成功与否由握手签名决定 ✓
+   * （`pinnedHostFingerprint` 不符 ⇒ 当场抛 ✓）。所以这里拿错/被伪造都**不会**造成误认 ✓。
+   */
+  var manifestHostFingerprint = null
   /** 是否**成功**取到过 ✓（成功过就不再取 ✓；失败**不置位** ⇒ 下一次上报会重试 ✓ —— 自愈 ✓）。 */
   var manifestBaseUrlSettled = false
   /**
@@ -6968,6 +6994,13 @@
         if (typeof value === 'string' && value.length > 0) {
           manifestBaseUrl = value
           manifestBaseUrlSettled = true
+        }
+        /**
+         * ★ 宿主指纹（换源认亲的**排序提示** ✓，不是信任依据 ✗ —— 见 `manifestHostFingerprint`）。
+         * 旧宿主可能没有这个字段 ✓ ⇒ 保持 `null` ✓，认亲照旧按最近见过的那台先试 ✓。
+         */
+        if (body !== null && typeof body === 'object' && validHostFingerprint(body.hostFingerprint)) {
+          manifestHostFingerprint = body.hostFingerprint
         }
         /**
          * ★ 机器名（可选字段 ✓）：拿到就用 ✓，拿不到就是"这家宿主没报" ✓ ——
@@ -7246,6 +7279,21 @@
         [parsed.tunnelUrl].concat(Array.isArray(parsed.tunnelUrls) ? parsed.tunnelUrls : []),
         location.origin,
       )
+      /**
+       * ★★ 跨源恢复时上面**可能已经把 `tunnelUrl` 删了**（旧端点属于另一个源 ✓）——
+       * 删完只剩 `tunnelUrls` ✓，而 `boot()` 的"是否已配对"判据看的是 `config.tunnelUrl` ✗
+       * ⇒ 换源之后明明认出了宿主、也读到了配置，却仍然走"尚未配对"分支 ⇒ 又要重新配对 ✗✗
+       * （用户那句「每次切换都要重新配对」的**第二半**就是这里 ✓）。
+       * 候选列表的第一条就是"当前页面源"（`deriveTunnelUrls` 的既有顺序 ✓）⇒ 用它补回主端点 ✓。
+       * 隧道构造本来也会在 `tunnelUrl` 缺失时退回 `tunnelUrls[0]`（见 `Tunnel` 构造函数 ✓），
+       * 这里补的是**上面那道早退判据**要的那一个字段 ✓。
+       */
+      if (
+        (typeof parsed.tunnelUrl !== 'string' || parsed.tunnelUrl.length === 0) &&
+        parsed.tunnelUrls.length > 0
+      ) {
+        parsed.tunnelUrl = parsed.tunnelUrls[0]
+      }
       return parsed
     } catch (error) {
       void error
@@ -23748,6 +23796,193 @@
 
   // ───────────────────────────── 启动 ─────────────────────────────
 
+  /**
+   * ★★ 换源认亲（2026-10-24）：同一个源在目录里没有槽时，用**已存的设备凭据**
+   * 真握手一次，让宿主自己用签名证明"我是谁" ✓ —— 证明成功才把当前地址记进目录 ✓。
+   *
+   * ## 为什么必须补这一步（用户原话："每次切换同一电脑的 tail 和局域网都要重新配对"）
+   *
+   * `43fd8ea` 之后，目录里的槽已经是**按 host 合并、只增不减** ✓ ——
+   * 但它只能记住"**曾经连上过**的源" ✓；而换源的**第一次**（新 IP / 新 Tailscale 地址 /
+   * 新主机名）在这一页看来就是一个**全新的源** ✗：
+   *   · `localStorage` 按源隔离 ⇒ 没有配置、没有私钥 ✓；
+   *   · 目录里的 `slots[]` 没有这个 host ⇒ `currentHostFingerprint()` 返回 undefined ✗；
+   *   · 恢复被整段跳过 ⇒ 界面按"尚未配对"处理 ⇒ 用户被迫重新扫码 ✗✗。
+   * 而壳的库（`SharedPreferences`）里**明明有**这台电脑的凭据 ✓ —— 缺的只是
+   * "这个新地址属于哪台电脑"这一句 ✓。本函数就是去拿这一句 ✓，并且是**用密码学拿** ✗。
+   *
+   * ## 凭什么安全（这是全篇最重要的一段 ✗）
+   *
+   * 判据不是"manifest 说它是谁" ✗，也不是"地址看起来像" ✗，而是：
+   *   ① 用目录里那条记录的**设备私钥**发 ClientHello ✓（`config.hostFingerprint` ✓）；
+   *   ② 宿主回 ServerHello；客户端**先**验 `hostSigningKey` 的 SHA-256 == `pinnedHostFingerprint` ✓、
+   *      再验它对 transcript 的 ECDSA 签名 ✓（`acceptServerHello` ✓，不符直接抛 ✓）；
+   *   ③ 只有②通过之后，客户端才会签 ClientAuth ✓ ⇒ 伪造的宿主**拿不到设备签名** ✓，
+   *      它最多看到 deviceId 与一个一次性公钥（都不是秘密 ✓）。
+   * ⇒ 只有**真的持有那把宿主私钥**的对端才能让探针成功 ✓。成功之后再补槽，
+   *   与"配对票据带外给的指纹"同一个强度 ✓（都是"这台电脑已证明"✓）。
+   *
+   * ★ manifest 的 `hostFingerprint` 只用来**排先后** ✓（先试哪台）——
+   *   拿错、被伪造都**不会**造成误认 ✗：认亲失败 ⇔ 签名/指纹不符 ⇔ 直接换下一个候选 ✓。
+   *
+   * ## 失败时**绝不**做的事（每一条都是纪律 ✓）
+   *
+   *   · **不删任何身份** ✗（`handleDeviceRejection` 是主隧道那条路的事 ✓；探针只读 ✓）；
+   *   · **不生成新私钥** ✗（只挑 `hasStoredHostCredential` 为真的记录 ✓）；
+   *   · **不改配置** ✗（只补一条目录槽 ✓ —— 配置仍按指纹读 ✓，`readStoredHost` 会接受同指纹的另一个源 ✓）；
+   *   · **不装第二条主隧道** ✗（探针 `sideChannel` + `autoReconnect:false` ⇒ 不派发 DSH 联网状态 ✓，
+   *     连上就立刻关掉 ✓，随后正常启动那条才是主隧道 ✓）。
+   *
+   * @returns true = 已认亲并补好槽 ✓；false = 认不出（照旧按未配对处理 ✓）。
+   */
+  var HOST_PROBE_TIMEOUT_MS = 4000
+  /** 最多试几台 ✓ —— 常见就一台；多试一台只为了"上次连的是另一台"时也能认回来 ✓。 */
+  var HOST_PROBE_MAX_CANDIDATES = 2
+
+  /** 探针连上之后**收干净** ✓（keepalive / 重连定时器 / socket 一个都不留 ✗）。 */
+  function closeProbeTunnel(tunnel) {
+    try {
+      tunnel.stopKeepalive()
+    } catch (error) {
+      void error
+    }
+    try {
+      tunnel.clearReconnectTimer()
+    } catch (error) {
+      void error
+    }
+    var socket = tunnel.socket
+    tunnel.socket = undefined
+    if (socket !== undefined && socket !== null) {
+      try {
+        socket.close()
+      } catch (error) {
+        void error
+      }
+    }
+  }
+
+  /** 给探针的 `connect()` 套一个上限 ✓（正常连接那条路**不用**它 ✗ —— 那里等多久是设计过的 ✓）。 */
+  function probeWithTimeout(promise, ms) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error('认亲超时（' + ms + 'ms）'))
+      }, ms)
+      Promise.resolve(promise).then(
+        function (value) {
+          clearTimeout(timer)
+          resolve(value)
+        },
+        function (error) {
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+  }
+
+  /**
+   * 这个源在目录里没有槽 ⇒ 拿已存凭据挨个试，**握手成功**的那台就是它 ✓。
+   * 见上面那段长注释：信任来自宿主签名，不来自地址或 manifest ✓。
+   */
+  async function adoptCurrentOriginByHostProbe() {
+    // 没有壳 ⇒ 别的源的身份根本过不来（`localStorage` 按源隔离）⇒ 这一步没有意义 ✓
+    if (shellBridge() === undefined) return false
+    // 已经能定出指纹（槽 / 票据 / 本页已认亲）⇒ 什么都不用做 ✓
+    if (validHostFingerprint(currentHostFingerprint())) return true
+
+    var records = hostsRead()
+    var candidates = []
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i]
+      if (record === null || typeof record !== 'object') continue
+      if (!validHostFingerprint(record.fingerprint)) continue
+      // ★ 只挑**本机确实存着私钥**的那几台 ✓ —— 绝不为了认亲去生成一把新钥匙 ✗
+      if (!hasStoredHostCredential(record.fingerprint)) continue
+      candidates.push(record)
+    }
+    if (candidates.length === 0) return false
+
+    /**
+     * ★ 先取一次 manifest（同源 ✓、1.5 秒上限 ✓）—— 只为了知道**先试哪台** ✓。
+     * 拿不到就按"最近见过"排 ✓；无论哪种，最终都由握手说了算 ✓。
+     */
+    if (manifestHostFingerprint === null && typeof globalThis.fetch === 'function') {
+      try {
+        await probeWithTimeout(loadManifestBaseUrl(), 1500)
+      } catch (error) {
+        void error
+      }
+    }
+
+    candidates.sort(function (a, b) {
+      var at = typeof a.lastSeenAt === 'number' ? a.lastSeenAt : 0
+      var bt = typeof b.lastSeenAt === 'number' ? b.lastSeenAt : 0
+      return bt - at
+    })
+    if (validHostFingerprint(manifestHostFingerprint)) {
+      for (var h = 0; h < candidates.length; h++) {
+        if (candidates[h].fingerprint === manifestHostFingerprint) {
+          var hinted = candidates.splice(h, 1)[0]
+          candidates.unshift(hinted)
+          break
+        }
+      }
+    }
+
+    var wsUrl =
+      (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/mobile/ws'
+    var tried = Math.min(candidates.length, HOST_PROBE_MAX_CANDIDATES)
+    for (var c = 0; c < tried; c++) {
+      var fingerprint = candidates[c].fingerprint
+      var probe = new Tunnel({
+        tunnelUrl: wsUrl,
+        tunnelUrls: [wsUrl],
+        // ★ 用**那台**的凭据（`loadOrCreateDeviceKey` 按它取 ✓）
+        hostFingerprint: fingerprint,
+        // ★ 身份钉死：ServerHello 的指纹/签名不符 ⇒ 当场抛 ✓（安全属性的全部依据 ✓）
+        pinnedHostFingerprint: fingerprint,
+        // ★ 安静退化：失败不数轮次、不排重连、不弹横幅、不派发 DSH 联网状态 ✓
+        autoReconnect: false,
+        sideChannel: true,
+      })
+      var matched = false
+      try {
+        await probeWithTimeout(probe.connect(), HOST_PROBE_TIMEOUT_MS)
+        matched = probe.hostFingerprint === fingerprint
+      } catch (error) {
+        debugBoxLine(
+          '[host] 认亲未通过（' + formatFingerprint(fingerprint) + '）：' +
+            (error !== null && error !== undefined && error.message ? error.message : String(error)),
+        )
+      } finally {
+        closeProbeTunnel(probe)
+      }
+      if (!matched) continue
+      /**
+       * ★ 握手+设备认证都过了 ⇒ 这个源**确实**是这台电脑 ✓。
+       * 现在才补槽（顺序不可反 ✗：先补后用就等于"地址自称即信任"✗）。
+       */
+      adoptedHostFingerprint = fingerprint
+      try {
+        hostRecordUpsert({
+          fingerprint: fingerprint,
+          slots: [{ label: '', url: location.origin }],
+          lastState: 'connected',
+          lastSeenAt: Date.now(),
+        })
+      } catch (error) {
+        void error
+      }
+      debugBoxLine(
+        '[host] 换源认亲成功：' + formatFingerprint(fingerprint) +
+          ' ⇒ 已把 ' + location.host + ' 记进它的目录（不需要重新配对 ✓）',
+      )
+      return true
+    }
+    return false
+  }
+
   async function boot() {
     var native = globalThis.__DSH_MOBILE__
     /**
@@ -24314,6 +24549,35 @@
      * 再上报 ✓（学校槽的第四条来源 ✓，见那段长注释 ✓）。没有壳时它**同步返回 null** ✓，
      * 所以"纯浏览器里一个字都不做"这条一点没变 ✓（连 fetch 都不会发 ✓）。
      */
+    /**
+     * ★★ 换源认亲（2026-10-24，用户：「每次切换同一电脑的 tail 和局域网都要重新配对」）。
+     *
+     * 放在这里（**不是** boot 顶部）的理由 ✗：`__DSH_MOBILE_BOOT__` 必须**同步**装上 ✓ ——
+     * 验收夹具与壳的早期注入都依赖它立即存在 ✓；把 `await` 放到它前面，会让整整一段
+     * 启动在这 4 秒上限里被推迟 ✓（`multi-host` 那组用例当场就红 ✗）。
+     *
+     * 触发条件严格限定为"这个源读不出配置、而且不是配对页" ✓：
+     *   · 读得出配置 ⇒ 什么都不做 ✓（正常启动那一条路一个字节不变 ✓）；
+     *   · 带 `?pair=` ⇒ 那是配对，不是换源 ✓；
+     *   · 没有壳 / 目录里没有"本机存着私钥"的记录 ⇒ 一次网络请求都不发 ✓。
+     * 成功 ⇒ 当前地址补进那台的目录，并**当场**重读配置 ✓（不重载 ✓，下一句就用新值 ✓）；
+     * 失败/超时 ⇒ 无副作用 ✓（照旧按"尚未配对"处理 ✓，绝不删身份 ✓）。
+     */
+    if (stored === undefined && fromUrl === undefined) {
+      if (await adoptCurrentOriginByHostProbe()) {
+        /**
+         * ★ 认亲只是"知道了这个源是哪台" ✓ —— 配置/私钥仍在**壳的库**里（跨源 ✓），
+         * 本机这个源还是空的 ✗。而 `readStoredHost()` 判"这份配置是否按指纹取到"时
+         * 看的是**本机**那份（`rootedByFingerprint` ✓）⇒ 不先恢复，它会把刚认出来的
+         * 配置当成"来源不符"**当场删掉** ✗（真机表现：认亲成功、下一句又回到未配对 ✓）。
+         * 现在指纹定得出来了 ⇒ 再跑一次恢复（幂等 ✓，只补本机缺的那几条 ✓）。
+         */
+        restoreIdentityFromVault()
+        stored = readStoredHost()
+        config = fromUrl !== undefined ? Object.assign({}, stored, fromUrl) : stored
+      }
+    }
+
     void prepareEndpointSlots(config)
 
     if (config === undefined || config.tunnelUrl === undefined) {
@@ -25020,7 +25284,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1019170045'
+    var BOOT_STAMP = 'BUILD-1024135456'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
