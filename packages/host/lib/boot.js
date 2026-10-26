@@ -23299,6 +23299,158 @@
   }
 
   /**
+   * ★★ 聊天里的**工作区文件图片**：把 DSH 的 `/api/file?path=…` 换成隧道取的 blob ✓。
+   *
+   * ## 为什么必须有它（2026-10-26 真机定位 ✓）
+   *
+   * DSH 的聊天把「按工作区路径引用的图片」（`![图](research/.../preview.png)` ✓、
+   * 文档预览缩略图 ✓）渲染成 `<img src="/api/file?path=…">` ✗ ——
+   * 那是 `connection.fetch` 路由 ✓，要 **DSH 的 GUI cookie / token** ✓。
+   * 手机页面挂在插件前缀 `/mobile/app` 下 ✓，**从来没拿到过那枚 cookie** ✗
+   * （插件自己的注释也写着这一条 ✓：`open-in-app.ts` 的「手机页面拿不到 GUI cookie」✓）。
+   * 于是手机上这张图必然 401/403 ⇒ 聊天里只剩一个破图 ✓
+   * （用户报的「聊天中的图片无法预览」✓）。电脑上正常，正是因为电脑有 cookie ✓。
+   *
+   * ## 修法（只改客户端 ✓，不碰 DSH 鉴权 ✗）
+   *
+   * 插件**已经**有一条带设备能力门禁的取字节端点 `mobile/files/read` ✓
+   * （文件面板的预览/下载用的就是它 ✓，见 `readRemoteFileBytes` ✓）——
+   * 这里把同一张图用同一条路读成 blob ✓ 再写回 `<img>` ✓。
+   * ⇒ 不新增暴露面 ✓（门禁仍是设备的 `fsRead` + 工作区根目录限制 ✓）、
+   *   不需要 DSH 的 cookie ✓、也不改 DSH 的客户端代码 ✓。
+   *
+   * ## 边界（每一条都是刻意的 ✓）
+   *
+   *   · 只认**路径以 `/api/file` 结尾**、且 `path` 是**绝对路径**的 `<img>` ✓
+   *     （相对路径 DSH 自己就返回 `undefined`，不会生成这种 URL ✓）；
+   *   · 只改 `<img>` 的 `src` ✓，失败时**保留原值** ✓（让 DSH 画它自己的失败态 ✓，不伪造成功）；
+   *   · 同一张图按 path 缓存 ✓（历史里重复引用很常见 ✓）；多个 `<img>` 同时等同一张时一起补 ✓；
+   *   · 只在**手机表面**装 ✓（电脑端本来就能直接加载，不能多此一举 ✗）；
+   *   · 失败只记调试框 ✓（不抛、不打断聊天 ✓）。
+   */
+  var FILE_IMAGE_MIME = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    avif: 'image/avif',
+    bmp: 'image/bmp',
+    svg: 'image/svg+xml',
+  }
+  /** path → `{ url, waiters }` ✓（url 就绪后等着的 `<img>` 一起补 ✓）。 */
+  var fileImageCache = new Map()
+  var fileImageObserver
+
+  /** 这个 `<img>` 的 src 是不是 DSH 的 `/api/file?path=…` ✓（是 ⇒ 返回绝对 path ✓）。 */
+  function fileImagePathOf(element) {
+    var raw = element === null || element === undefined ? null : element.getAttribute('src')
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    if (raw.indexOf('blob:') === 0 || raw.indexOf('data:') === 0) return undefined
+    var url
+    try {
+      url = new URL(raw, location.href)
+    } catch (error) {
+      void error
+      return undefined
+    }
+    if (url.pathname !== '/api/file' && url.pathname.slice(-9) !== '/api/file') return undefined
+    var path = url.searchParams.get('path')
+    if (typeof path !== 'string' || path.length === 0) return undefined
+    if (path.charAt(0) !== '/') return undefined
+    return path
+  }
+
+  function fileImageMimeOf(path) {
+    var dot = path.lastIndexOf('.')
+    var extension = dot >= 0 ? path.slice(dot + 1).toLowerCase() : ''
+    return FILE_IMAGE_MIME[extension] === undefined ? 'application/octet-stream' : FILE_IMAGE_MIME[extension]
+  }
+
+  /**
+   * 把一张这种图片换掉 ✓。**同步返回**（缓存命中时当场换 ✓）；异步失败保留原 src ✓。
+   */
+  function adoptFileImage(element, getTunnel) {
+    if (element === null || element === undefined || element.tagName !== 'IMG') return
+    var path = fileImagePathOf(element)
+    if (path === undefined) return
+    var cached = fileImageCache.get(path)
+    if (cached !== undefined) {
+      if (cached.url !== undefined) {
+        if (element.getAttribute('src') !== cached.url) element.src = cached.url
+      } else {
+        cached.waiters.push(element)
+      }
+      return
+    }
+    if (
+      typeof URL === 'undefined' ||
+      typeof URL.createObjectURL !== 'function' ||
+      typeof Blob !== 'function'
+    ) {
+      debugBoxLine('[img] 本页没有 Blob / URL.createObjectURL ⇒ 工作区图片只能继续用 /api/file（会失败）')
+      return
+    }
+    var entry = { url: undefined, waiters: [element] }
+    fileImageCache.set(path, entry)
+    readRemoteFileBytes(getTunnel, path).then(
+      function (bytes) {
+        var url = URL.createObjectURL(new Blob([bytes], { type: fileImageMimeOf(path) }))
+        entry.url = url
+        for (var i = 0; i < entry.waiters.length; i++) {
+          var waiting = entry.waiters[i]
+          if (waiting !== null && waiting !== undefined) waiting.src = url
+        }
+        entry.waiters = []
+      },
+      function (error) {
+        fileImageCache.delete(path)
+        debugBoxLine('[img] 工作区图片读取失败（保留 DSH 原始失败态）：' + path + ' · ' + describeError(error))
+      },
+    )
+  }
+
+  /**
+   * 装上文件图片桥 ✓（幂等 ✓；只在手机表面 ✓）。
+   *
+   * 用 `MutationObserver` 而不是"启动时扫一遍"：DSH 的聊天是 React 渲染的 ✓，
+   * 图片节点会在滚动 / 切换会话 / 流式回复时**不断新建** ✗ —— 扫一遍只能修好第一屏 ✓。
+   * 观察范围只限 `src` 属性 ✓（其它属性变动不触发 ✓），开销可忽略 ✓。
+   */
+  function installFileImageBridge(getTunnel) {
+    if (fileImageObserver !== undefined) return false
+    if (!isMobileSurface()) return false
+    if (typeof MutationObserver !== 'function') return false
+    var scan = function (node) {
+      if (node === null || node === undefined) return
+      if (node.nodeType !== 1) return
+      if (node.tagName === 'IMG') adoptFileImage(node, getTunnel)
+      if (typeof node.querySelectorAll !== 'function') return
+      var images = node.querySelectorAll('img')
+      for (var i = 0; i < images.length; i++) adoptFileImage(images[i], getTunnel)
+    }
+    fileImageObserver = new MutationObserver(function (records) {
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i]
+        if (record.type === 'attributes') {
+          if (record.target !== null && record.target !== undefined) adoptFileImage(record.target, getTunnel)
+          continue
+        }
+        for (var j = 0; j < record.addedNodes.length; j++) scan(record.addedNodes[j])
+      }
+    })
+    fileImageObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['src'],
+    })
+    scan(document.documentElement)
+    debugBoxLine('[img] 工作区图片已改走隧道（/api/file → mobile/files/read）')
+    return true
+  }
+
+  /**
    * 下载一个文件到手机。
    *
    * 分块拉取（隧道单帧有上限 ✓），全部到齐后按**两条路**落地 ✓：
@@ -24056,6 +24208,16 @@
       },
       probeLayout: probeLayout,
       /**
+       * ★ 工作区文件图片桥（2026-10-26）的**验收入口** ✓ —— 直通生产函数 ✓，
+       * 测试里**不另写一份** matcher / 取字节逻辑 ✗（同一个概念两套实现零容忍 ✓）。
+       * `install` 只在手机表面生效 ✓；`adopt` 是它每次实际做的事 ✓（判据/缓存/失败都在里面 ✓）。
+       */
+      fileImage: {
+        install: installFileImageBridge,
+        adopt: adoptFileImage,
+        pathOf: fileImagePathOf,
+      },
+      /**
        * ★★ **原生时钟驱动网页的入口** ✓ —— 前台服务的 `Handler` 每 15s / 4s 注入一次 ✓。
        *
        * 契约（跨单约定 ✓，名字一个字母都不许改 ✗）：
@@ -24704,6 +24866,16 @@
       } catch (error) { void error }
     })
     globalThis.__DSH_MOBILE_BOOT__.tunnel = tunnel
+    /**
+     * ★ 聊天里的**工作区文件图片**（`<img src="/api/file?path=…">`）改走隧道取字节 ✓。
+     * 为什么必须换：DSH 的 `/api/file` 挂在 Connection 的鉴权栅栏后面（cookie / token），
+     * 手机页面（`/mobile/app`）从来拿不到那枚 cookie ✗ ⇒ 图片 401/403 ⇒ 聊天里只剩
+     * 一个破图（用户报的「图片无法预览」✓）。这里把同一张图用插件自己的隧道端点
+     * `mobile/files/read` 读成 blob ✓，不碰 DSH 的鉴权、也不新增暴露面 ✓。
+     */
+    installFileImageBridge(function () {
+      return tunnel
+    })
 
     /**
      * ★★ 方案 A：给**目录里其它那几台**各挂一条「只取待办」的轻量隧道 ✓。
@@ -25284,7 +25456,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1024135456'
+    var BOOT_STAMP = 'BUILD-1026155942'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
