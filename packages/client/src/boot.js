@@ -16707,6 +16707,23 @@
       for (var i = 0; i < popups.length; i++) {
         var el = popups[i]
         if (el.closest('#dshm-model-menu') !== null) continue
+        /**
+         * ★★ 2026-10-29（用户："保证打开输入法的时候权限菜单位置正确"）：
+         *   **权限菜单不参与"键盘抬升"** ✗ —— 它是 `side:"top"`、锚在 composer 里的盾牌上 ✓，
+         *   DSH 自己已经把它放到盾牌上方（而盾牌本来就在键盘上方 ✓）。
+         *   再套一条 `margin-top: -键盘高`（`[data-dshm-lift="1"]` ✓）＝**抬两次** ✗
+         *   ⇒ 真机上菜单直接飞到屏幕顶 ✓（诊断：无 IME 时位置正确 ✓、菜单带着
+         *   `data-dshm-lift` 属性 ✓ —— 根因就是这里 ✓）。
+         *   只对**这一块**豁免 ✓：大小 / 点击行为 / 焦点 / 其他菜单一律不动 ✗。
+         */
+        var menuText = el.textContent || ''
+        var isPermissionMenu =
+          (menuText.indexOf('完全权限') >= 0 && menuText.indexOf('仅可查看') >= 0) ||
+          (/full access/i.test(menuText) && /read only/i.test(menuText))
+        if (isPermissionMenu) {
+          if (el.getAttribute('data-dshm-lift') !== '0') el.setAttribute('data-dshm-lift', '0')
+          continue
+        }
         var want = lift === true ? '1' : '0'
         if (el.getAttribute('data-dshm-lift') !== want) el.setAttribute('data-dshm-lift', want)
       }
