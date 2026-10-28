@@ -17746,17 +17746,34 @@
    */
   function tagPermissionMenu(trigger) {
     if (typeof MutationObserver !== 'function' || document.body === null || document.body === undefined) return
-    var find = function () {
-      var menus = document.querySelectorAll('[role="menu"], [role="dialog"]')
+    /** 点之前就存在的菜单/对话框（新出现的那块才是这一次点出来的 ✓）。 */
+    var before = new Set(document.querySelectorAll('[role="menu"], [role="dialog"]'))
+    var tag = function (menu) {
       var box = trigger.getBoundingClientRect()
       var bottom = Math.round(window.innerHeight - box.top + 4)
       if (!(bottom > 0)) bottom = 120
+      menu.setAttribute('data-dshm-permission-menu', '1')
+      menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
+    }
+    var find = function () {
+      var menus = document.querySelectorAll('[role="menu"], [role="dialog"]')
+      var fallback = null
       for (var i = 0; i < menus.length; i++) {
         var menu = menus[i]
         var text = menu.textContent || ''
-        if (text.indexOf('完全权限') < 0 || text.indexOf('仅可查看') < 0) continue
-        menu.setAttribute('data-dshm-permission-menu', '1')
-        menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
+        var named = text.indexOf('完全权限') >= 0 && text.indexOf('仅可查看') >= 0
+        if (named) {
+          tag(menu)
+          return true
+        }
+        /**
+         * ★ 文案兜底（英文界面 / 上游改文案 ✓）：只认**这一下新出现**的菜单/对话框；
+         *   新块里如果同时有统计面板（极少见），优先带权限字样的那块 ✓。
+         */
+        if (!before.has(menu)) fallback = menu
+      }
+      if (fallback !== null) {
+        tag(fallback)
         return true
       }
       return false
@@ -25727,7 +25744,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1028141429'
+    var BOOT_STAMP = 'BUILD-1028141520'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
