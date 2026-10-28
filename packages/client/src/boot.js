@@ -10850,6 +10850,16 @@
          ⇒ 键盘展开时把 DSH 的浮层整体**抬到键盘上方** ✓（用 margin-top ✓，不动 transform ✗ ——
          那是 DSH 自己的进出场/居中在用 ✓）。 */
       '[data-dshm-lift="1"] { margin-top: calc(0px - var(--dshm-keyboard, 0px)) !important; }',
+      /**
+       * ★ 2026-10-29：`dsh-purge` 的回退菜单**只差一层背景模糊** ✓ —— 它自己用的是
+       *   `background: var(--dsw-specific-menu)`（与 DSH 菜单同一个 token ✓），但没写
+       *   `backdrop-filter` ⇒ 看起来比别人"透" ✗。补上同一个 token 的模糊 ✓，
+       *   背景色/大小/圆角/阴影一律不动 ✓。
+       */
+      '.dshp-rewind-menu {',
+      '  -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%)) !important;',
+      '  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%)) !important;',
+      '}',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -16720,7 +16730,17 @@
         var isPermissionMenu =
           (menuText.indexOf('完全权限') >= 0 && menuText.indexOf('仅可查看') >= 0) ||
           (/full access/i.test(menuText) && /read only/i.test(menuText))
-        if (isPermissionMenu) {
+        /**
+         * ★★ 2026-10-29：`dsh-purge` 的「回退」菜单**同一个病** ✓（它也是 `role=menu`、
+         *   portal 到 body、自己按按钮矩形 `translateY(-100%)` 摆在按钮上方 ✓）——
+         *   round 209 的 `margin-top: -键盘高` 会再抬一次 ✗。按插件自己的稳定类名
+         *   `.dshp-rewind-menu` 豁免 ✓（文案「回退上一步/回退上一轮」作兜底 ✓）。
+         */
+        var isRewindMenu =
+          (el.classList !== undefined && el.classList !== null && el.classList.contains('dshp-rewind-menu')) ||
+          (menuText.indexOf('回退上一步') >= 0 && menuText.indexOf('回退上一轮') >= 0) ||
+          (/undo last step/i.test(menuText) && /undo last turn/i.test(menuText))
+        if (isPermissionMenu || isRewindMenu) {
           if (el.getAttribute('data-dshm-lift') !== '0') el.setAttribute('data-dshm-lift', '0')
           continue
         }
