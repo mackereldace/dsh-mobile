@@ -10691,10 +10691,23 @@
        *   文字到顶在**框内**滚 ✓，外层随内容自然增高 ✓ —— 正是用户要的 ✓
        *   （"我想要的只是文本框内的滑动，文本框到上限了就不再增加即可" ✓）。
        */
-      '[data-composer-stats] {',
+      '[data-composer-stats], [data-dshm-stats-host="1"] {',
       '  height: 0 !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important;',
       '  overflow: hidden !important; visibility: hidden !important;',
       '}',
+      /**
+       * ★★ 2026-10-28（rc.3）：新宿主可能是 `display: contents` 的 slot 包装层 ✗ ——
+       *   对**它**写 height/visibility 不会收掉里面的胶囊 ✓（本项目 0.17 就踩过一次 ✓）。
+       *   ⇒ 两颗胶囊自己也直接 `display:none` ✓（不依赖宿主是不是 contents ✓）。
+       */
+      '[data-dshm-stats-host="1"] [data-composer-stat] { display: none !important; }',
+      /**
+       * ★★ 兜底（与上面那条**同一目的** ✓，但**不依赖**宿主找得准不准 ✓）：
+       *   紧凑条真的挂上（`data-on=1` ✓）时，两颗原始胶囊**一律** `display:none` ✓ ——
+       *   `HTMLElement.click()` 对 `display:none` 的元素照样触发 ✓（转发点击不受影响 ✓）。
+       *   反过来，紧凑条没挂上（还没同步 / 还没有数据 ✓）⇒ **不动**胶囊 ✗（用户至少还有 DSH 原样 ✓）。
+       */
+      'html[data-dshm-stats-compact="1"] [data-composer-stat] { display: none !important; }',
       /* 自绘的紧凑条：一条细进度条 + 一行小字；两段都可点，分别转发到 DSH 自己的对话框 */
       '#dshm-stats {',
       '  display: none; align-items: center; justify-content: center; gap: 6px;',
@@ -15599,6 +15612,84 @@
     return null
   }
 
+  /**
+   * ★★ 2026-10-28（DSH 0.2.1-rc.3）：统计胶囊的宿主标记改了 ✓。
+   *
+   * rc.2：两颗胶囊包在一个 `[data-composer-stats]` 容器里 ✓（本文件一直用它当锚 ✓）。
+   * rc.3：容器属性没了 ✗，改成**两颗胶囊各自**带 `[data-composer-stat="activity"|"usage"]` ✓
+   *（见 `dsh-client-ui-chat/StatsPills.js` 的 `data-composer-stat`）。
+   * ⇒ 统一用"装这两颗胶囊的那个共同父节点"当宿主 ✓ —— 旧版走旧属性 ✓（行为一字不变），
+   *   rc.3 走共同父节点 ✓。找不到就返回 null ✓（老行为：收起状态栏 ✓，绝不乱挂 ✗）。
+   */
+  function statsHostElement() {
+    var legacy = document.querySelector('[data-composer-stats]')
+    /**
+     * ★ 旧容器**要有胶囊**才算数 ✓ —— rc.3 可能留下一个空的同名容器（上游重构残留 ✓），
+     *   直接认它会让新胶囊永远解析不到 ✗（症状正是"状态栏只剩上下文"✗）。
+     */
+    if (legacy !== null && legacy !== undefined && (legacy.querySelector('button') !== null || legacy.querySelector('[data-composer-stat]') !== null)) return legacy
+    /**
+     * ★★ rc.3 的**稳定锚**：DSH 给 dock 插槽留了语义属性 ✓
+     *   `div[data-slot="conversation.composer.dock"]`（本文件 0.17 那轮已经在给它写样式 ✓）——
+     *   它装两颗胶囊、**不含** ContextMeter（meter 是它在 dock 里的兄弟 ✓）。
+     *   优先用它 ✓；找不到再退回"胶囊的共同祖先" ✓（只为兜底 `data-slot` 被改名 ✗）。
+     */
+    var slot = document.querySelector('div[data-slot="conversation.composer.dock"]')
+    if (slot !== null && slot !== undefined && slot.querySelector('[data-composer-stat]') !== null) return slot
+    var first = document.querySelector('[data-composer-stat]')
+    if (first === null || first === undefined) return null
+    var all = document.querySelectorAll('[data-composer-stat]').length
+    /**
+     * 往上找到"**包含全部**胶囊的最低祖先" ✓ —— 不假设两颗是同一个直接父节点 ✓
+     * （rc.3 的 slot 包装层可能一层套一层 ✓；`display: contents` 的那层也照找 ✓）。
+     */
+    var parent = first.parentElement
+    while (parent !== null && parent !== undefined && parent !== document.body) {
+      if (parent.querySelectorAll('[data-composer-stat]').length >= all) return parent
+      parent = parent.parentElement
+    }
+    return first.parentElement
+  }
+
+  /** 宿主里那两颗胶囊的**可点元素** ✓（rc.3 的 `DialogPill` 是 button、`PlainPill` 是 span ✓）。 */
+  function statsPillButtons() {
+    var host = statsHostElement()
+    if (host === null || host === undefined) return []
+    var anchors = host.querySelectorAll('[data-composer-stat]')
+    /**
+     * ★ rc.2 的旧胶囊**没有** `data-composer-stat` ✓（那是 rc.3 才加的 ✓）——
+     *   旧宿主 `[data-composer-stats]` 里直接就是两颗 button ✓ ⇒ 退回到 button ✓。
+     *   不这么做，rc.2 上紧凑条会只剩"上下文"一段 ✗（回归 ✓）。
+     */
+    if (anchors.length === 0) anchors = host.querySelectorAll('button')
+    var out = []
+    for (var i = 0; i < anchors.length; i++) {
+      var button = anchors[i].querySelector('button')
+      out.push(button === null || button === undefined ? anchors[i] : button)
+    }
+    return out
+  }
+
+  /**
+   * ★★ 紧凑条插在**哪** ✓（rc.3 与 rc.2 不同 ✓）。
+   *
+   * rc.2：宿主 `[data-composer-stats]` 自己就是输入框下方那一行 ⇒ 插它后面 ✓（老行为 ✓）。
+   * rc.3：宿主是 dock 里的**插槽**（横向 flex 的一员 ✓）⇒ 插在**整个 dock 后面** ✓，
+   *   否则会变成 dock 里的第三个横排项、和插槽并排溢出 ✗（用户："东西变多了" ✗）。
+   */
+  function statsBarAnchor() {
+    var host = statsHostElement()
+    if (host === null || host === undefined) return null
+    /**
+     * rc.2：宿主自己就是那一行 ⇒ **原样插它后面** ✓（老行为一个字不变 ✓）。
+     * 只有 rc.3 的插槽（不是 `[data-composer-stats]` ✓）才上提到 dock 后面 ✓。
+     */
+    var legacy = document.querySelector('[data-composer-stats]')
+    if (legacy !== null && legacy !== undefined && host === legacy) return host
+    var dock = host.closest('[data-composer-dock]')
+    return dock === null || dock === undefined ? host : dock
+  }
+
   /** 从任意文案里取第一个百分比（对中英文都成立，不依赖具体措辞）。 */
   function parsePercent(text) {
     var match = /(\d+(?:\.\d+)?)\s*%/.exec(String(text === null || text === undefined ? '' : text))
@@ -15716,7 +15807,7 @@
    *   ⇒ 套件实测（390×915）：**888 / 859-873.5** 三块各在不同高度 ✗（真机上差 21px ✗，
    *   round 125 就是为它写死了 53.8333px ✓ —— 但写死常数只在那一台机器上对 ✗）。
    * ⇒ 现在**三块用同一套算法**：`底边 = 视口高 − (最高的那颗锚 top − G)` ✓
-   *   · 锚用 DSH 自己的语义标记找 —— `[data-composer-stats] button` ✓（我们转发点击时用的就是它 ✓，
+   *   · 锚用 DSH 自己的语义标记找 —— `[data-composer-stat]`（rc.2 是 `[data-composer-stats]` ✓）✓（我们转发点击时用的就是它 ✓，
    *     不是哈希、不是中文文案 ✓）；
    *   · G 由**这一块自己**反推 —— `它自己的锚 top − 它自己的自然底边` ✓（DSH 的间距 ✓，不是常数 ✓）；
    *   ⇒ 三块算出来是**同一个数** ⇒ 底边天然齐 ✓（不管设备 / 字号 / 安全区 ✓）。
@@ -15759,8 +15850,8 @@
       observer.disconnect()
       var box = panel.getBoundingClientRect()
       var bottom = window.innerHeight - box.bottom
-      var statsRow = document.querySelector('[data-composer-stats]')
-      var pills = statsRow === null || statsRow === undefined ? [] : statsRow.querySelectorAll('button')
+      var statsRow = statsHostElement()
+      var pills = statsRow === null || statsRow === undefined ? [] : statsPillButtons()
       var pillTop = null
       for (var p = 0; p < pills.length; p++) {
         if (pills[p] === anchor) continue
@@ -15826,9 +15917,7 @@
       }
       return
     }
-    var root = document.querySelector('[data-composer-stats]')
-    if (root === null || root === undefined) return
-    var buttons = root.querySelectorAll('button')
+    var buttons = statsPillButtons()
     if (buttons.length === 0) return
     var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
     /**
@@ -15864,7 +15953,10 @@
    */
   function syncStatsBar(bar) {
     if (bar === undefined || bar === null) return
-    var root = document.querySelector('[data-composer-stats]')
+    var root = statsHostElement()
+    if (root !== null && root !== undefined && root.getAttribute('data-dshm-stats-host') !== '1') {
+      root.setAttribute('data-dshm-stats-host', '1')
+    }
     var meter = contextMeterButton()
     // 输入框里那个环：**隐身但保留盒子**（CSS 里 `[data-dshm-meter="hidden"]`）。
     // 底部那条已经显示上下文占用了，输入框那格没必要再占一个位置；
@@ -15884,14 +15976,16 @@
       if (bar.state.signature !== '') {
         bar.state.signature = ''
         bar.element.dataset.on = '0'
+        try { document.documentElement.removeAttribute('data-dshm-stats-compact') } catch (error) { void error }
       }
       return
     }
     // 挂在宿主那行的**后面**（原位置，只是宿主那行已经收成 0 高）。
     // 判据用"父节点相同 + 紧邻"，这样无论是被摘掉、还是宿主自己重建成新节点，都能补回去 ✓
     if (root !== null && root !== undefined) {
-      if (bar.element.parentNode !== root.parentNode || bar.element.previousElementSibling !== root) {
-        root.insertAdjacentElement('afterend', bar.element)
+      var barAnchor = statsBarAnchor()
+      if (barAnchor !== null && (bar.element.parentNode !== barAnchor.parentNode || bar.element.previousElementSibling !== barAnchor)) {
+        barAnchor.insertAdjacentElement('afterend', bar.element)
       }
     } else if (bar.element.parentNode === null || bar.element.parentNode === undefined) {
       // 没有 StatsPills 但有上下文环（例如刚开始的会话）：挂在 composer 区域里，位置仍对 ✓
@@ -15909,7 +16003,7 @@
     //   （实测：探针里 `innerText` 恒为空，害得脚本以为每个会话都没有状态栏）。
     var all = ''
     if (root !== null && root !== undefined) {
-      var buttons = root.querySelectorAll('button')
+      var buttons = statsPillButtons()
       var labels = []
       for (var i = 0; i < buttons.length; i++) {
         var aria = buttons[i].getAttribute('aria-label')
@@ -15957,6 +16051,16 @@
     bar.sepA.style.display = hasContext && (hasTime || hasUsage) ? '' : 'none'
     bar.sepB.style.display = hasTime && hasUsage ? '' : 'none'
     bar.element.dataset.on = hasContext || hasTime || hasUsage ? '1' : '0'
+    /**
+     * ★★ 2026-10-28：把"紧凑条已接管"落成根标记 ✓ —— CSS 用它隐藏 rc.3 那两颗原始胶囊 ✓
+     *   （不依赖 `data-dshm-stats-host` 找得准不准 ✓；见上面那条注释 ✓）。
+     */
+    try {
+      if (bar.element.dataset.on === '1') document.documentElement.setAttribute('data-dshm-stats-compact', '1')
+      else document.documentElement.removeAttribute('data-dshm-stats-compact')
+    } catch (error) {
+      void error
+    }
     bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
   }
 
@@ -16673,6 +16777,8 @@
       return (
         t.closest('[data-composer-card="true"]') !== null ||
         t.closest('[data-composer-stats]') !== null ||
+        t.closest('[data-dshm-stats-host="1"]') !== null ||
+        t.closest('#dshm-stats') !== null ||
         t.closest('#dshm-model-menu') !== null ||
         t.closest('#dshm-attach') !== null ||
         t.closest('#dshm-command-btn') !== null
@@ -17571,6 +17677,33 @@
     }
   }
 
+  /**
+   * ★★ 2026-10-28：权限预设那颗**盾牌**的开/关菜单 ✓（用户真机截图：
+   *   「打开输入法时，权限窗口会飘到最上面，关闭输入法没有这种问题」✗）。
+   *
+   * 根因：我们那条 focus guard **刻意保焦点** ✓（点 composer 里的控件不许收键盘 ✓），
+   * 于是盾牌被点时键盘还开着 ✓；而手机键盘把 composer 顶到视口最上面（adjustPan ✓），
+   * DSH 的 Menu 是 `side: "top"`（开在锚点上方 ✓）⇒ 它只能贴到屏幕顶 ✗。
+   *
+   * 修法：**点盾牌时主动 blur 收键盘** ✓（权限选择不需要打字 ✓）——
+   * composer 回到下方 ⇒ Menu 的 rAF 跟随循环会把菜单正常开在盾牌上方 ✓。
+   * 判据只能用 `aria-label` ✓（DSH 没给 data-* / 稳定类名 ✗）：
+   * 文案来自 `permission.access.mode`（中文「访问模式，当前：…」/ 英文「Access mode, current: …」✓）。
+   */
+  function permissionTriggerButton(node) {
+    try {
+      if (node === null || node === undefined || node.closest === undefined) return null
+      var button = node.closest('button')
+      if (button === null || button === undefined) return null
+      var label = button.getAttribute('aria-label') || ''
+      if (label.length === 0) return null
+      return label.indexOf('访问模式') >= 0 || /access mode/i.test(label) ? button : null
+    } catch (error) {
+      void error
+      return null
+    }
+  }
+
   function installComposerFocusProtection() {
     if (focusGuardStats.installed === true) return
     try {
@@ -17591,13 +17724,16 @@
           }
           focusGuardTyping = composerInputHasFocus()
           try {
-            if (composerInputHasFocus() !== true) return
             var target = event.target
             if (target === null || target === undefined || target.closest === undefined) return
             var control = target.closest('button, [role="button"]')
             if (control === null) return
+            if (composerInputHasFocus() !== true) return
             var inCard = control.closest('[data-composer-card="true"]') !== null
-            var inStatsRow = control.closest('[data-composer-stats]') !== null
+            var inStatsRow =
+              control.closest('[data-composer-stats]') !== null ||
+              control.closest('[data-dshm-stats-host="1"]') !== null ||
+              control.closest('#dshm-stats') !== null
             // ★ round 197c：我们自己那块菜单里的行也是控件 ✓ —— 点它们同样不许抢走输入框的焦点 ✗
             //   （用户："打开子菜单仍然会意外关闭输入法" ✓ ⇒ 就是这一档 ✗）。
             var inOurMenu = control.closest('#dshm-model-menu') !== null
@@ -17655,6 +17791,32 @@
              *   它的开关动作挂在 click 上 ✓ ⇒ 拦在这里就不会再有它的 blur/重渲染 ✓
              *   ⇒ "开/关菜单有概率收键盘"那条从根上消失 ✓。
              */
+            /**
+             * ★★ 2026-10-28：盾牌被点时**先让 DSH 把菜单打开、再用 setTimeout 收键盘** ✓。
+             *
+             * 为什么不在 pointerdown 里 blur ✗：键盘一收，composer 立刻下移 ⇒ 同一指的
+             * pointerup 可能已经不在盾牌上 ⇒ 菜单根本不开 ✗（真机上这会变成"点了没反应"✗）。
+             * 放在 click 的下一拍 ✓：菜单已开 ✓、锚点已定 ✓，键盘收起时 Menu 的 rAF
+             * 跟随循环会把菜单重新放到盾牌上方 ✓（不再贴到屏幕顶 ✗）。
+             */
+            var permissionTap = permissionTriggerButton(event.target)
+            if (permissionTap !== null) {
+              var focused = document.activeElement
+              if (
+                focused !== null &&
+                focused !== undefined &&
+                typeof focused.blur === 'function' &&
+                (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.isContentEditable === true)
+              ) {
+                setTimeout(function () {
+                  try {
+                    focused.blur()
+                  } catch (error) {
+                    void error
+                  }
+                }, 0)
+              }
+            }
             var clickTarget = event.target
             var modelTrigger = composerModelTrigger()
             if (modelTrigger !== null && clickTarget !== null && clickTarget.closest !== undefined && clickTarget.closest('button') === modelTrigger) {
