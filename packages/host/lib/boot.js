@@ -10871,6 +10871,16 @@
       '  -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%)) !important;',
       '  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%)) !important;',
       '}',
+      /**
+       * ★ 2026-10-29：原生命令菜单的**外部点击层** ✓ —— DSH 原生那张 listbox 的
+       *   toggle 是坏的（再点 ＋ 不关、还focus 输入框 ✓），但它**认可真实的外部点击** ✓
+       *   （实测：真实 pointer 在菜单外点一下 ⇒ listbox 立刻消失 ✓）。
+       *   所以垫一层透明的 overlay：点菜单外任何地方都命中它 ⇒ DSH 自己关菜单 ✓；
+       *   overlay 的 z-index 在原生菜单**之下** ✓（菜单照常可点 ✓）。
+       */
+      '#dshm-command-overlay {',
+      '  position: fixed; inset: 0; z-index: 99; background: transparent;',
+      '}',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -18094,6 +18104,56 @@
    * 而那颗 ＋ 的 toggle 是坏的 ✓（桌面端同样 ✓）⇒ 我们把 ＋ **隐身但保留盒子** ✓，
    * 「指令」键落在它原位上 ✓，点击**替它开关那张命令菜单** ✓（开着就收 ✓，关着就替它点开 ✓）。
    */
+  var nativeCommandOverlay = null
+  var nativeCommandOverlayObserver = null
+
+  function nativeCommandOverlayRemove() {
+    try { if (nativeCommandOverlayObserver !== null) nativeCommandOverlayObserver.disconnect() } catch (error) { void error }
+    nativeCommandOverlayObserver = null
+    if (nativeCommandOverlay !== null) {
+      try { nativeCommandOverlay.remove() } catch (error) { void error }
+      nativeCommandOverlay = null
+    }
+  }
+
+  /** 原生菜单关掉（listbox 从 DOM 消失）⇒ 把 overlay 一起撤掉 ✓。 */
+  function nativeCommandOverlayWatch() {
+    if (typeof MutationObserver !== 'function' || document.body === null) return
+    if (nativeCommandOverlayObserver !== null) return
+    nativeCommandOverlayObserver = new MutationObserver(function () {
+      if (document.querySelector('[role="listbox"]') === null) nativeCommandOverlayRemove()
+    })
+    nativeCommandOverlayObserver.observe(document.body, { childList: true, subtree: true })
+  }
+
+  function nativeCommandOverlayEnsure() {
+    if (nativeCommandOverlay !== null) return
+    if (document.body === null) return
+    nativeCommandOverlay = document.createElement('div')
+    nativeCommandOverlay.id = 'dshm-command-overlay'
+    nativeCommandOverlay.addEventListener('pointerdown', function () {
+      // 真实 tap 已经交给 DSH 的 outside 处理器 ✓；这里只兜底清掉 overlay ✓
+      setTimeout(function () {
+        if (document.querySelector('[role="listbox"]') === null) nativeCommandOverlayRemove()
+      }, 350)
+    })
+    document.body.appendChild(nativeCommandOverlay)
+    nativeCommandOverlayWatch()
+  }
+
+  function nativeCommandOverlaySchedule() {
+    var tries = 0
+    var timer = setInterval(function () {
+      tries += 1
+      if (document.querySelector('[role="listbox"]') !== null) {
+        clearInterval(timer)
+        nativeCommandOverlayEnsure()
+      } else if (tries >= 20) {
+        clearInterval(timer)
+      }
+    }, 50)
+  }
+
   function buildCommandButton() {
     var button = document.createElement('button')
     button.type = 'button'
@@ -18114,12 +18174,53 @@
        *   · 否则 ⇒ 撤标记 + 替它点开 ✓。
        *   ⇒ 与它那个坏掉的 toggle 无关 ✓（我们只翻自己的标记 ✓）。
        */
-      // ★ round 210：**开我们自己那块** ✓（DSH 那张只当"条目来源" ✓，藏着 ✓）。
-      if (commandMenuIsOpen() === true) {
-        commandMenuClose()
+      /**
+       * ★★ 2026-10-29（用户：原生优先 ✓）：**不再画自绘命令菜单** ✓ —— 直接开 DSH 原生那张 ✓。
+       *
+       * 用户原话：「目前点击只有自绘了貌似，但是自绘的功能繁杂很丑，原生的又有些奇怪的小bug」
+       * + 选「原生优先（推荐）」✓ + 原生的小 bug =「没有打开输入法时，点击会打开输入法」✓。
+       *
+       * 这里只做三件事：① 再点能关（原生 toggle 坏 ✓）；② 开的时候不要把输入法带出来 ✓；
+       * ③ 把自绘那块（若还开着）收掉 ✓。自绘代码保留（可回退 ✓），但不再走 ✓。
+       */
+      if (commandMenuIsOpen() === true) commandMenuClose()
+      document.documentElement.removeAttribute('data-dsh-command-menu')
+      var plus = attachAnchor()
+      if (plus === null || plus.anchor === null) {
+        debugBoxLine('[command] ✗ 认不出那颗合并 ＋ ⇒ 这一次点不了')
         return
       }
-      commandMenuOpen()
+      var alreadyOpen =
+        plus.anchor.getAttribute('aria-expanded') === 'true' ||
+        document.querySelector('[role="listbox"]') !== null
+      if (alreadyOpen === true) {
+        closeDshMenuNear(plus.anchor)
+        return
+      }
+      var rootStyle = globalThis.getComputedStyle(document.documentElement)
+      var keyboard = parseFloat(rootStyle.getPropertyValue('--dshm-keyboard'))
+      var wasIme = (isNaN(keyboard) === false && keyboard > 0) || document.documentElement.getAttribute('data-dshm-kb') === '1'
+      plus.anchor.click()
+      nativeCommandOverlaySchedule()
+      /**
+       * ★ 原生菜单打开时 DSH 的 `keepFocus`/搜索框会把焦点塞回输入框 ⇒ **输入法被弹出来** ✗
+       *   （用户："没有打开输入法时，点击会打开输入法"✓）。只在**开之前键盘是关的**时，
+       *   把这一次自动拿到的可编辑焦点 blur 掉 ✓；开之前键盘就开着 ⇒ 不动它 ✓。
+       */
+      if (wasIme !== true) {
+        var blurAutoFocus = function () {
+          try {
+            var active = document.activeElement
+            if (active === null || active === undefined) return
+            if (active.matches !== undefined && active.matches('input, textarea, [contenteditable]') === true) active.blur()
+          } catch (error) {
+            void error
+          }
+        }
+        setTimeout(blurAutoFocus, 0)
+        setTimeout(blurAutoFocus, 120)
+        setTimeout(blurAutoFocus, 320)
+      }
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -25508,7 +25609,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1028162722'
+    var BOOT_STAMP = 'BUILD-1028164024'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
