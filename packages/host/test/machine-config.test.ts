@@ -18,18 +18,18 @@ describe('机器配置推导', () => {
   it('用户配过的一律不动（只补缺 ✗）', () => {
     const result = resolveMachineConfig(
       {
-        trustedHosts: ['192.168.1.9:1234'],
-        publicBaseUrl: 'http://192.168.1.9:1234',
-        phoneBaseUrl: 'https://192.168.1.9:5678',
-        extraEndpoints: ['https://192.168.1.9:5678'],
+        trustedHosts: ['10.0.0.5:1234'],
+        publicBaseUrl: 'http://10.0.0.5:1234',
+        phoneBaseUrl: 'https://10.0.0.5:5678',
+        extraEndpoints: ['https://10.0.0.5:5678'],
         listener: { enabled: true, plain: '0.0.0.0:1234', tls: '0.0.0.0:5678' },
       },
       DEFAULTS,
     )
-    assert.deepEqual(result.trustedHosts, ['192.168.1.9:1234'])
-    assert.equal(result.publicBaseUrl, 'http://192.168.1.9:1234')
-    assert.equal(result.phoneBaseUrl, 'https://192.168.1.9:5678')
-    assert.deepEqual(result.extraEndpoints, ['https://192.168.1.9:5678'])
+    assert.deepEqual(result.trustedHosts, ['10.0.0.5:1234'])
+    assert.equal(result.publicBaseUrl, 'http://10.0.0.5:1234')
+    assert.equal(result.phoneBaseUrl, 'https://10.0.0.5:5678')
+    assert.deepEqual(result.extraEndpoints, ['https://10.0.0.5:5678'])
     assert.deepEqual(result.derived, [])
   })
 
@@ -115,6 +115,54 @@ describe('机器配置推导', () => {
     const result = resolveMachineConfig({}, { ...DEFAULTS, defaultPlain: '0.0.0.0' })
     assert.deepEqual(result.trustedHosts, [])
     assert.ok(result.derived.some((line) => line.includes('端口读不出来')))
+  })
+
+  it('★★★ 配置里是**过期 IP**（不在本机网卡上）⇒ 运行时改用当前地址（配置文件不动 ✓）', () => {
+    const result = resolveMachineConfig(
+      {
+        trustedHosts: ['10.34.255.229:3091', '10.34.255.229:3453'],
+        publicBaseUrl: 'http://10.34.255.229:3091',
+        phoneBaseUrl: 'https://10.34.255.229:3453',
+        extraEndpoints: ['https://10.34.255.229:3453'],
+        listener: { enabled: true, plain: '0.0.0.0:3091', tls: '0.0.0.0:3453' },
+      },
+      DEFAULTS,
+    )
+    // ★ 广告换成当前地址（端口保持 3091 / 3453 ✓）
+    assert.equal(result.publicBaseUrl, 'http://10.0.0.5:3091')
+    assert.equal(result.phoneBaseUrl, 'https://10.0.0.5:3453')
+    // ★ 旧信任条目**保留** ✓（不删用户配置 ✗），当前地址补在后面 ✓
+    assert.deepEqual(result.trustedHosts, [
+      '10.34.255.229:3091',
+      '10.34.255.229:3453',
+      '10.0.0.5:3091',
+      '10.0.0.5:3453',
+      '100.64.0.9:3091',
+      '100.64.0.9:3453',
+    ])
+    // ★ 旧端点保留 ✓，当前地址的 https 补进去 ✓
+    assert.deepEqual(result.extraEndpoints, [
+      'https://10.34.255.229:3453',
+      'https://10.0.0.5:3453',
+      'https://100.64.0.9:3453',
+    ])
+    assert.ok(result.derived.some((line) => line.includes('已不在本机网卡上')))
+    assert.ok(result.derived.some((line) => line.includes('运行时候选补上当前地址')))
+  })
+
+  it('★ 过期但探测不到本机地址 ⇒ 一个字都不改（不猜 ✗）', () => {
+    const result = resolveMachineConfig(
+      {
+        publicBaseUrl: 'http://10.34.255.229:3091',
+        phoneBaseUrl: 'https://10.34.255.229:3453',
+      },
+      { ...DEFAULTS, candidates: [] },
+    )
+    assert.equal(result.publicBaseUrl, 'http://10.34.255.229:3091')
+    assert.equal(result.phoneBaseUrl, 'https://10.34.255.229:3453')
+    assert.deepEqual(result.trustedHosts, [])
+    // extraEndpoints 仍按"已配的 phoneBaseUrl"补一条（这是既有行为，不是猜地址 ✓）
+    assert.deepEqual(result.extraEndpoints, ['https://10.34.255.229:3453'])
   })
 
   it('portOfListen：正常 / 没有冒号 / 冒号后不是数字 ✓', () => {

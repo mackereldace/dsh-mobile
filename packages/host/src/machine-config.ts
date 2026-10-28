@@ -70,6 +70,59 @@ function blank(value: string | undefined): boolean {
 }
 
 /**
+ * ★★ 配置里的地址**已经不在本机网卡上**了吗 ✓（2026-10-28 用户实测逼出来的）。
+ *
+ * 背景：校园网 DHCP 换地址（`10.34.255.229` → `10.34.128.67` ✓）之后，
+ * profile 里那四行还是旧 IP ✗ ⇒ 插件照旧**广告**旧地址 ✗ ⇒ 手机按旧地址连
+ * ⇒ `ERR_CONNECTION_REFUSED / TIMED_OUT` ⇒ 用户看到「局域网突然连不上、只能走 Tailscale」✗
+ * （本机 10-28 实测：旧 IP `curl` 超时、新 IP 200 ✓）。
+ *
+ * 判据只碰**IPv4 字面量** ✓：
+ *   · DNS 名（`xxx.local` / DDNS ✓）**不判** ✗ —— 它可能合法地解析到本机 ✓；
+ *   · IPv6 也不判 ✓（本机候选地址目前只有 IPv4 ✓，不扩大范围 ✗）；
+ *   · 探测不到任何本机地址 ⇒ **不判、不改** ✓（绝不猜 ✗）。
+ *
+ * ★ 只改**运行时**的广告/信任（`publicBaseUrl` / `phoneBaseUrl` / `extraEndpoints` /
+ *   `trustedHosts` 的返回值 ✓）—— **不写配置文件** ✗、不偷偷改用户的设置 ✓；
+ *   每一处替换都进 `derived`（启动日志能念出来 ✓）。
+ */
+function urlHostOf(value: string): string | undefined {
+  try {
+    const host = new URL(value).hostname
+    return host.length === 0 ? undefined : host.toLowerCase()
+  } catch (error) {
+    void error
+    return undefined
+  }
+}
+
+/** IPv4 字面量 ✓（其余一律 false ✓——见上面的判据 ✓）。 */
+function isIpv4Literal(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)
+}
+
+/** 这个 URL 的 host 是 IPv4、且不在 `addresses` 里 ⇒ 过期 ✓（其余情况一律"不判"✗）。 */
+function isStaleIpv4Url(value: string | undefined, addresses: readonly string[]): boolean {
+  if (value === undefined || blank(value) || addresses.length === 0) return false
+  const host = urlHostOf(value)
+  if (host === undefined || !isIpv4Literal(host)) return false
+  return !addresses.includes(host)
+}
+
+/** 把 URL 的 host 换成 `address` ✓（端口/协议原样 ✓；坏 URL ⇒ undefined ✓）。 */
+function withHost(value: string, address: string): string | undefined {
+  try {
+    const url = new URL(value)
+    url.hostname = address
+    const text = url.toString()
+    return text.endsWith('/') ? text.slice(0, -1) : text
+  } catch (error) {
+    void error
+    return undefined
+  }
+}
+
+/**
  * 推导一次 ✓。
  *
  * @param config 用户给的（可能只给了一部分 ✓）
@@ -130,6 +183,58 @@ export function resolveMachineConfig(
   }
 
   /**
+   * ★★ 过期地址自愈（2026-10-28，见 `isStaleIpv4Url` 的长注释 ✓）。
+   *
+   * 只在"配置里**有** IPv4 字面量、而它**不在**当前网卡上"时动手 ✓：
+   *   · `publicBaseUrl` / `phoneBaseUrl` ⇒ 换成**当前地址**（端口/协议不动 ✓）；
+   *   · `trustedHosts` ⇒ 追加当前地址的两条（旧条目保留 ✓，不删用户配置 ✗）；
+   *   · `extraEndpoints` ⇒ 追加当前地址的 https 那条（见下面 ✓）。
+   * 每条替换都进 `derived` ✓（启动日志里能念出来 ✓）。
+   */
+  const configPublic = blank(config.publicBaseUrl) ? undefined : config.publicBaseUrl
+  const configPhone = blank(config.phoneBaseUrl) ? undefined : config.phoneBaseUrl
+  const configExtra = Array.isArray(config.extraEndpoints) ? config.extraEndpoints : []
+  const stalePublic = isStaleIpv4Url(configPublic, addresses)
+  const stalePhone = isStaleIpv4Url(configPhone, addresses)
+  const staleExtra = configExtra.some((url) => isStaleIpv4Url(url, addresses))
+  const staleTrusted = trustedHosts.some((entry) => {
+    if (addresses.length === 0) return false
+    const at = entry.lastIndexOf(':')
+    const host = (at > 0 ? entry.slice(0, at) : entry).toLowerCase()
+    return isIpv4Literal(host) && !addresses.includes(host)
+  })
+  const staleConfigured = stalePublic || stalePhone || staleExtra || staleTrusted
+  if (staleConfigured && addresses.length > 0) {
+    if (stalePublic && publicBaseUrl !== undefined) {
+      const replaced = withHost(publicBaseUrl, addresses[0]!)
+      if (replaced !== undefined) {
+        derived.push(`配置的 publicBaseUrl ${publicBaseUrl} 已不在本机网卡上（现在 ${addresses.join(' / ')}）⇒ 本次广告改用 ${replaced}（配置文件未改）`)
+        publicBaseUrl = replaced
+      }
+    }
+    if (stalePhone && phoneBaseUrl !== undefined) {
+      const replaced = withHost(phoneBaseUrl, addresses[0]!)
+      if (replaced !== undefined) {
+        derived.push(`配置的 phoneBaseUrl ${phoneBaseUrl} 已不在本机网卡上 ⇒ 本次广告改用 ${replaced}（配置文件未改）`)
+        phoneBaseUrl = replaced
+      }
+    }
+    const addedTrusted: string[] = []
+    for (const address of addresses) {
+      for (const port of [plainPort, tlsPort]) {
+        if (port.length === 0) continue
+        const entry = `${address}:${port}`
+        if (trustedHosts.includes(entry)) continue
+        trustedHosts.push(entry)
+        addedTrusted.push(entry)
+      }
+    }
+    if (addedTrusted.length > 0) {
+      derived.push(`配置里有过期地址 ⇒ 运行时信任补上当前地址：${addedTrusted.join(' / ')}（配置文件未改）`)
+    }
+  }
+
+  /**
    * ★★★ 2026-10-04 **真机逼出来的**（用户在新电脑上扫码配对：不弹信任框、不出新卡片、提示"重连"✗）：
    *   票据里下发给手机的端点 = `publicBaseUrl`（**明文 http** ✗）+ `extraEndpoints` ✓。
    *   而**手机 App 是 https-only** ✓（禁明文 ✓）⇒ 只广告明文 ⇒ 手机拿到的第一条候选
@@ -150,6 +255,25 @@ export function resolveMachineConfig(
     if (extraEndpoints.length > 0) {
       derived.push(`没配 extraEndpoints ⇒ 按 https 那条补上 ${extraEndpoints.join(' / ')}（手机只走 https ✓，'
         + '只广告明文会让它连不上 ✓）`)
+    }
+  }
+
+  /**
+   * ★ 过期地址那一种：`extraEndpoints` 里全是旧 IP 时，**运行时候选**补上当前地址 ✓
+   * （配置文件不动 ✓）。不这么做，票据里第一条 https 仍是旧 IP ⇒ 手机先白等一轮 ✗。
+   */
+  if (staleConfigured && addresses.length > 0 && tlsPort.length > 0) {
+    const addedEndpoints: string[] = []
+    const wanted: string[] = []
+    if (phoneBaseUrl !== undefined) wanted.push(phoneBaseUrl)
+    for (const address of addresses) wanted.push(`https://${address}:${tlsPort}`)
+    for (const url of wanted) {
+      if (extraEndpoints.includes(url)) continue
+      extraEndpoints.push(url)
+      addedEndpoints.push(url)
+    }
+    if (addedEndpoints.length > 0) {
+      derived.push(`配置里有过期地址 ⇒ 运行时候选补上当前地址：${addedEndpoints.join(' / ')}（配置文件未改）`)
     }
   }
 
