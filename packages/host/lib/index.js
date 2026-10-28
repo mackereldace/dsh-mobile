@@ -2420,7 +2420,28 @@ export function createMobileHost(options) {
                  *   所以这里保留原来的 `matchesTrusted`：Host 腿放宽（干掉手传 IP），
                  *   Origin 腿不跟着放宽（安全不倒退）。
                  */
-                if (!sameAsHost && !(originUrl !== undefined && matchesTrusted(originUrl, trustedUpgradeHosts))) {
+                /**
+                 * ★ 2026-10-28 追加（真机「换源后局域网端点 403 / 只能走 tail」✓）：
+                 *   **Origin 与 Host 不同源、但 Origin 是"本机地址 + 与 Host 相同的端口"** ⇒ 放行 ✓。
+                 *
+                 * 场景：手机页面从 Tailscale 源加载（Origin = `100.x:3453` ✓），boot.js 的候选回退
+                 * 去连**局域网端点**（Host = `10.x:3453` ✓）—— 两个都是这台机器的地址 ✓、
+                 * 端口就是本插件的监听端口 ✓。原先 Origin 腿只认**静态**列表 ⇒ 403 ✗
+                 * ⇒ 用户看到「校园网局域网突然 refuse、只能走 tail」✗（本机 10-28 真机现场 ✓）。
+                 *
+                 * 为什么这样仍安全（两条都不能省 ✗）：
+                 *   · **端口必须与请求 Host 相同** ✓ —— "同主机不同端口"依旧是跨源
+                 *     （T6 ⑤ 钉着 `:9999` 必须拒 ✓；那条判据原样保留 ✓）；
+                 *   · **Origin 必须是自推导的本机地址/主机名** ✓ —— 任意恶意域名仍然拒 ✓
+                 *     （`matchesDerivedTrust` 不解析名字、只比本机地址与本机 hostname ✓）。
+                 * ⇒ 只有"同一台机器的另一个地址 + 同一个插件端口"这一种跨源被放行 ✓，
+                 *   而它恰好就是换源候选回退唯一合法的形态 ✓。
+                 */
+                const samePortAsHost = originUrl !== undefined && originUrl.port === authority.port;
+                const derivedLocalOrigin = originUrl !== undefined && matchesDerivedTrust(originUrl, upgradeTrust);
+                if (!sameAsHost &&
+                    !(originUrl !== undefined &&
+                        (matchesTrusted(originUrl, trustedUpgradeHosts) || (samePortAsHost && derivedLocalOrigin)))) {
                     refuse(`Origin ${originHeader} 与 Host 不同源、也不在受信集合内`);
                     return;
                 }

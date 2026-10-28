@@ -25,6 +25,7 @@ import { test } from 'node:test'
 import { fingerprint, generateP256KeyPair } from '@dsh-mobile/protocol'
 
 import { DeviceStore } from '../src/devices.ts'
+import type { NetworkInterfacesReader } from '../src/lan-trust.ts'
 import { createMobileHost, isRefusedRelayBackhaulPath, type MobileHost } from '../src/index.ts'
 import { acceptWebSocket, type WebSocketConnection } from '../src/websocket.ts'
 
@@ -43,6 +44,7 @@ function makeHost(
     phoneBaseUrl?: string
     selfPort?: number
     relay?: { attachUrl: string; attachHttpUrl: string; token: string }
+    networkInterfaces?: NetworkInterfacesReader
   } = {},
 ): HostEnv {
   const dir = mkdtempSync(join(tmpdir(), 'dshm-pairsec-'))
@@ -67,6 +69,7 @@ function makeHost(
     ...(options.selfPort === undefined ? {} : { selfPort: options.selfPort }),
     ...(options.trustedHosts === undefined ? {} : { trustedHosts: options.trustedHosts }),
     ...(options.phoneBaseUrl === undefined ? {} : { phoneBaseUrl: options.phoneBaseUrl }),
+    ...(options.networkInterfaces === undefined ? {} : { networkInterfaces: options.networkInterfaces }),
     ...(options.relay === undefined
       ? {}
       : {
@@ -541,6 +544,49 @@ test('T6 WS 升级：伪造 Origin 被拒（403、不建会话），合法/无 O
     // ⑥ Host 缺失或畸形 ⇒ 拒绝（与 handleHttp 的判据一致）
     const badHost = upgrade({ host: 'not a host', origin: 'http://not a host' })
     assert.equal(badHost.destroyed, true, 'Host 畸形时必须拒绝')
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('T6 WS 升级：同端口、另一个本机地址的 Origin（换源候选）⇒ 放行；不同端口/恶意源仍拒', () => {
+  /**
+   * 2026-10-28 真机：页面在 Tailscale 源（Origin=100.x:3453），候选回退去连
+   * 局域网端点（Host=10.x:3453）—— 两个都是本机地址、端口都是插件的 3453。
+   * 原先 Origin 腿只认静态列表 ⇒ 403 ⇒ 用户看到「局域网 refuse、只能走 tail」。
+   */
+  const env = makeHost({
+    trustedHosts: ['10.0.0.5:3443'],
+    phoneBaseUrl: 'https://10.0.0.5:3443',
+    networkInterfaces: () =>
+      ({
+        en0: [{ address: '10.0.0.5', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:01', internal: false, cidr: null }],
+        utun9: [{ address: '100.64.0.9', netmask: '255.255.255.255', family: 'IPv4', mac: '00:00:00:00:00:02', internal: false, cidr: null }],
+      }) as never,
+  })
+  try {
+    const upgrade = (headers: Record<string, string>): FakeSocket => {
+      const socket = new FakeSocket()
+      env.host.handleUpgrade(upgradeRequest(headers), socket as unknown as Duplex)
+      return socket
+    }
+
+    // ① Tailscale 页面 → 局域网候选：同端口、另一个本机地址 ⇒ 必须放行
+    const crossLocal = upgrade({ host: '10.0.0.5:3443', origin: 'https://100.64.0.9:3443' })
+    assert.equal(crossLocal.destroyed, false, '同端口的另一个本机地址 Origin 不得被拒（换源候选）')
+    assert.match(writtenText(crossLocal), /^HTTP\/1\.1 101/, '应当完成 101 升级')
+
+    // ② 同主机不同端口仍是跨源 ⇒ 拒绝（T6 ⑤ 的安全属性不倒退）
+    const wrongPort = upgrade({ host: '10.0.0.5:3443', origin: 'https://100.64.0.9:9999' })
+    assert.equal(wrongPort.destroyed, true, '不同端口必须继续拒绝')
+
+    // ③ 恶意域名 ⇒ 拒绝（不是"任意 Origin"）
+    const evil = upgrade({ host: '10.0.0.5:3443', origin: 'https://evil.example.com' })
+    assert.equal(evil.destroyed, true, '恶意 Origin 必须继续拒绝')
+
+    // ④ Host 不受信 ⇒ 即使 Origin 是本机地址也必须拒绝（DNS rebinding 靠 Host 栅栏）
+    const badHost = upgrade({ host: 'evil.example.com', origin: 'https://100.64.0.9:3443' })
+    assert.equal(badHost.destroyed, true, 'Host 不受信时必须拒绝')
   } finally {
     env.cleanup()
   }
