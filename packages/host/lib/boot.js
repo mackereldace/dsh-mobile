@@ -10707,7 +10707,15 @@
        *   `HTMLElement.click()` 对 `display:none` 的元素照样触发 ✓（转发点击不受影响 ✓）。
        *   反过来，紧凑条没挂上（还没同步 / 还没有数据 ✓）⇒ **不动**胶囊 ✗（用户至少还有 DSH 原样 ✓）。
        */
-      'html[data-dshm-stats-compact="1"] [data-composer-stat] { display: none !important; }',
+      /**
+       * ★★ 2026-10-28 修正：**不能用 `display:none`** ✗ —— 这两颗胶囊是 DSH 那三个
+       *   小窗的**定位锚点** ✓（`DialogPill` 用它的 `getBoundingClientRect()` 算 left/top ✓）。
+       *   `display:none` ⇒ 锚点矩形 0×0 ⇒ 小窗跑到屏幕左上角 ✗（用户："会话统计、
+       *   token 用量的小窗无论打不打开输入法都上天"✓）。
+       *   ⇒ 只**隐身**、保留盒子 ✓（`visibility:hidden` 不改变 layout ✓，rect 仍是真实位置 ✓；
+       *     `HTMLElement.click()` 也照样能触发 ✓）。
+       */
+      'html[data-dshm-stats-compact="1"] [data-composer-stat] { visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }',
       /* 自绘的紧凑条：一条细进度条 + 一行小字；两段都可点，分别转发到 DSH 自己的对话框 */
       '#dshm-stats {',
       '  display: none; align-items: center; justify-content: center; gap: 6px;',
@@ -11181,9 +11189,19 @@
       '  [data-dshm-context-panel] {',
       '    min-height: 158px !important;',
       '    width: min(300px, 100vw - 24px) !important;',
+      '    left: 32px !important;',
+      '  }',
+      /**
+       * ★★ 2026-10-28（rc.3）：**不要**再用 `top:auto + bottom:var(...)` 覆盖 DSH 的纵向位置 ✗。
+       *   真机：会话统计 / token 用量 / 上下文三个小窗**无论键盘开不开都贴屏幕顶** ✗ ——
+       *   根因是 `anchorStatsPanel` 抓到的是面板**测量前**的 `{left:0, top:0}`（rc.3 的 pos
+       *   是异步测出来的 ✓），`bottom = 视口高 - 0` ⇒ 把面板锁在顶部 ✗。
+       *   ⇒ rc.3 **让 DSH 自己按锚点摆** ✓（锚点已保留真实盒子 ✓，见胶囊的 `visibility:hidden` ✓）；
+       *   rc.2 保持旧行为 ✓（`html:not([data-dshm-rc3="1"])` 才启用旧覆盖 ✓）。
+       */
+      '  html:not([data-dshm-rc3="1"]) [data-dshm-context-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
-      '    left: 32px !important;',
       '  }',
       /**
        * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：轮次底边 **859**、
@@ -11192,7 +11210,7 @@
        *   ⇒ 只覆盖**底边与 `top`** ✓，宽度 / 左边 / 高度**一律留给 DSH** ✗
        *   （它们本来就摆得对 ✓，多写一条就是多一处误伤 ✓）。
        */
-      '  [data-dshm-stats-panel] {',
+      '  html:not([data-dshm-rc3="1"]) [data-dshm-stats-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
@@ -11204,6 +11222,21 @@
        */
       '  [data-dshm-stats-center] {',
       '    left: var(--dshm-stats-panel-left, 8px) !important;',
+      '  }',
+      /**
+       * ★★ 2026-10-28：权限预设菜单（盾牌）**自己定位置** ✓ —— 不管 DSH 的
+       *   `Menu` 把锚点矩形算成什么（rc.3 实测它一律贴屏幕顶 ✗），都按**盾牌的真实矩形**
+       *   放到它上方 ✓：`bottom = 视口高 − 盾牌 top + 4` ✓（`--dshm-permission-bottom` 由 JS 写 ✓）。
+       *   `!important` 覆盖 DSH 每帧写的内联 `top/left` ✓（它的 rAF 循环改不过我们 ✓）。
+       */
+      '  [data-dshm-permission-menu="1"] {',
+      '    position: fixed !important;',
+      '    top: auto !important;',
+      '    bottom: var(--dshm-permission-bottom, 120px) !important;',
+      '    left: 12px !important;',
+      '    right: 12px !important;',
+      '    max-height: min(60vh, 420px) !important;',
+      '    overflow-y: auto !important;',
       '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
              必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
@@ -15958,6 +15991,16 @@
       root.setAttribute('data-dshm-stats-host', '1')
     }
     var meter = contextMeterButton()
+    /**
+     * ★★ 2026-10-28：rc.3 的标记（两处 CSS 用它决定"要不要覆盖面板纵向位置" ✓）。
+     *   判据用**结构**（有没有 `[data-composer-stat]`）✓，不用版本号 ✗。
+     */
+    try {
+      if (document.querySelector('[data-composer-stat]') !== null) document.documentElement.setAttribute('data-dshm-rc3', '1')
+      else document.documentElement.removeAttribute('data-dshm-rc3')
+    } catch (error) {
+      void error
+    }
     // 输入框里那个环：**隐身但保留盒子**（CSS 里 `[data-dshm-meter="hidden"]`）。
     // 底部那条已经显示上下文占用了，输入框那格没必要再占一个位置；
     // 但它是那块面板的锚点、而且面板就渲染在它的父节点里 —— 只能藏、绝不能删 ✓。
@@ -17690,6 +17733,91 @@
    * 判据只能用 `aria-label` ✓（DSH 没给 data-* / 稳定类名 ✗）：
    * 文案来自 `permission.access.mode`（中文「访问模式，当前：…」/ 英文「Access mode, current: …」✓）。
    */
+  /**
+   * ★★ 2026-10-28：权限菜单**自己定位** ✓（不再依赖 DSH 的 Menu 把锚点算对 ✗）。
+   *
+   * 真机：rc.3 的权限菜单**无论键盘开不开**都贴屏幕顶 ✗（Menu 的锚点矩形算成了 0 /
+   * 或它的 rAF 位置被顶到 0 ✓ —— 用户两张截图 ✓）。这里在点击后盯 2 秒，
+   * 找到"含「仅可查看」+「完全权限」的那块 `role=menu|dialog`" ⇒ 打标 ✓，
+   * 用**盾牌自己的矩形**把菜单底边放到盾牌上方 ✓（CSS 见 `[data-dshm-permission-menu]` ✓）。
+   *
+   * 为什么用 `!important` 覆盖 DSH 的内联 top/left ✓：它的 Menu 有一个每帧重算的 rAF 循环 ✗
+   * （普通内联写不过它 ✓）；`!important` 的 CSS 能盖住内联普通值 ✓。
+   */
+  function tagPermissionMenu(trigger) {
+    if (typeof MutationObserver !== 'function' || document.body === null || document.body === undefined) return
+    var find = function () {
+      var menus = document.querySelectorAll('[role="menu"], [role="dialog"]')
+      var box = trigger.getBoundingClientRect()
+      var bottom = Math.round(window.innerHeight - box.top + 4)
+      if (!(bottom > 0)) bottom = 120
+      for (var i = 0; i < menus.length; i++) {
+        var menu = menus[i]
+        var text = menu.textContent || ''
+        if (text.indexOf('完全权限') < 0 || text.indexOf('仅可查看') < 0) continue
+        menu.setAttribute('data-dshm-permission-menu', '1')
+        menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
+        return true
+      }
+      return false
+    }
+    /**
+     * 菜单开着时**跟着盾牌重算** ✓ —— 键盘收起/旋转会让盾牌移动 ✓；
+     * 只在 `bottom` 还贴着"盾牌上方"时更新 ✓（用户手动滚动页面时也不跑偏 ✗）。
+     */
+    var reposition = function () {
+      var menu = document.querySelector('[data-dshm-permission-menu="1"]')
+      if (menu === null || menu === undefined) return false
+      var box = trigger.getBoundingClientRect()
+      var bottom = Math.round(window.innerHeight - box.top + 4)
+      if (bottom > 0) menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
+      return true
+    }
+    var stop = function () {
+      try { window.removeEventListener('resize', onResize) } catch (error) { void error }
+      try {
+        if (window.visualViewport !== undefined && window.visualViewport !== null) {
+          window.visualViewport.removeEventListener('resize', onResize)
+        }
+      } catch (error) {
+        void error
+      }
+    }
+    var onResize = function () {
+      if (!reposition()) stop()
+    }
+    if (find()) {
+      /**
+       * ★ 有 IME 且盾牌被顶到上面时，**菜单已经开好**再收键盘 ✓（不在 pointerdown 收 ✗）——
+       *   收完 `reposition` 会把菜单重新放到盾牌上方 ✓。
+       */
+      var box = trigger.getBoundingClientRect()
+      if (box.top < 220 && document.activeElement !== null && document.activeElement !== undefined && typeof document.activeElement.blur === 'function') {
+        setTimeout(function () { try { document.activeElement.blur() } catch (error) { void error } }, 0)
+      }
+      return
+    }
+    var timer = setTimeout(function () {
+      observer.disconnect()
+      stop()
+    }, 2000)
+    var observer = new MutationObserver(function () {
+      if (find()) {
+        clearTimeout(timer)
+        observer.disconnect()
+        var box = trigger.getBoundingClientRect()
+        if (box.top < 220 && document.activeElement !== null && document.activeElement !== undefined && typeof document.activeElement.blur === 'function') {
+          setTimeout(function () { try { document.activeElement.blur() } catch (error) { void error } }, 0)
+        }
+        window.addEventListener('resize', onResize)
+        if (window.visualViewport !== undefined && window.visualViewport !== null) {
+          window.visualViewport.addEventListener('resize', onResize)
+        }
+      }
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+  }
+
   function permissionTriggerButton(node) {
     try {
       if (node === null || node === undefined || node.closest === undefined) return null
@@ -17792,31 +17920,12 @@
              *   ⇒ "开/关菜单有概率收键盘"那条从根上消失 ✓。
              */
             /**
-             * ★★ 2026-10-28：盾牌被点时**先让 DSH 把菜单打开、再用 setTimeout 收键盘** ✓。
-             *
-             * 为什么不在 pointerdown 里 blur ✗：键盘一收，composer 立刻下移 ⇒ 同一指的
-             * pointerup 可能已经不在盾牌上 ⇒ 菜单根本不开 ✗（真机上这会变成"点了没反应"✗）。
-             * 放在 click 的下一拍 ✓：菜单已开 ✓、锚点已定 ✓，键盘收起时 Menu 的 rAF
-             * 跟随循环会把菜单重新放到盾牌上方 ✓（不再贴到屏幕顶 ✗）。
+             * ★★ 2026-10-28：盾牌菜单**自己定位** ✓（见 `tagPermissionMenu` 的长注释 ✓）。
+             *   **不再 blur 收键盘** ✗：菜单位置已经按盾牌的真实矩形算 ✓，收不收键盘都不影响 ✓；
+             *   反过来，blur 会让 composer 下移、pointerup 可能落空 ⇒ 菜单点不开 ✗。
              */
             var permissionTap = permissionTriggerButton(event.target)
-            if (permissionTap !== null) {
-              var focused = document.activeElement
-              if (
-                focused !== null &&
-                focused !== undefined &&
-                typeof focused.blur === 'function' &&
-                (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.isContentEditable === true)
-              ) {
-                setTimeout(function () {
-                  try {
-                    focused.blur()
-                  } catch (error) {
-                    void error
-                  }
-                }, 0)
-              }
-            }
+            if (permissionTap !== null) tagPermissionMenu(permissionTap)
             var clickTarget = event.target
             var modelTrigger = composerModelTrigger()
             if (modelTrigger !== null && clickTarget !== null && clickTarget.closest !== undefined && clickTarget.closest('button') === modelTrigger) {
@@ -25618,7 +25727,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1028133227'
+    var BOOT_STAMP = 'BUILD-1028141429'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
