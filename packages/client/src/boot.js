@@ -10842,7 +10842,18 @@
       /* ★ round 204：那颗钮是 `aria-haspopup="listbox"` ✓（0.2.0 源码 `InputBar` 的 `…_add` ✓）——
          它弹的是 **listbox** ✗ 不是 menu ✗ ⇒ 前两版找 `[role="menu"]` / `…_menu` 后缀全找不到 ✗
          （"关不掉"三连败的真因 ✓）。⇒ 藏 `[role="listbox"]` ✓。 */
-      'html[data-dsh-command-menu="hidden"] [role="listbox"] { visibility: hidden !important; }',
+      /**
+       * ★★ 2026-10-29（用户："那个菜单键……显示了两个重叠的菜单好像"）：
+       *   0.2.1-rc.3 里 DSH 那张命令 listbox 的**外层容器**（`data-menu-material` / `…_menu`）
+       *   还会留下自己的背景/阴影 ⇒ 只藏 `[role="listbox"]` 时，用户看到的是
+       *   **原生容器的空壳 + 我们这块** ⇒ 「两个重叠的菜单」✗。
+       *   ⇒ 连容器一起藏 ✓；作用域只在这个根标记存在时 ✓（命令菜单开着 ✓），
+       *   我们自绘的两块（`#dshm-command-menu` / `#dshm-model-menu`，都是 id、无 `_menu` 类）不受影响 ✓。
+       */
+      'html[data-dsh-command-menu="hidden"] [role="listbox"],',
+      'html[data-dsh-command-menu="hidden"] [role="menu"],',
+      'html[data-dsh-command-menu="hidden"] [data-menu-material],',
+      'html[data-dsh-command-menu="hidden"] [class*="_menu"] { visibility: hidden !important; }',
       /* ★ round 209（用户："只要在输入法展开的情况这个菜单就点不了" ✗）：
          那张触发器菜单是**贴着光标**弹的 ✓，而光标在输入框里、贴着屏幕底部 ⇒
          菜单大半**被键盘盖住** ⇒ 露出的那截下面没有可点的条目 ✗（不是事件被吞，是**点不到** ✓）。
@@ -16547,9 +16558,13 @@
     if (commandMenuEnsure() !== true) return
     var plusEntry = attachAnchor()
     if (plusEntry === null || plusEntry.anchor === null) return
+    /**
+     * ★ 2026-10-29：**先藏、再点** ✓ —— 顺序反了会让原生容器先画出来一帧 ✗；
+     *   而且只藏 `[role=listbox]` 不够（见 CSS 那条 ✓）。
+     */
+    document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
     // 让 DSH 把它的菜单渲染出来 ✓（aria-expanded=false ⇒ 替它点开 ✓；true ⇒ 已经开着 ✓）
     if (plusEntry.anchor.getAttribute('aria-expanded') !== 'true') plusEntry.anchor.click()
-    document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
     commandMenuHost.setAttribute('data-open', '1')
     commandMenuRows = []
     commandMenuRender()
