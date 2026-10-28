@@ -10691,31 +10691,10 @@
        *   文字到顶在**框内**滚 ✓，外层随内容自然增高 ✓ —— 正是用户要的 ✓
        *   （"我想要的只是文本框内的滑动，文本框到上限了就不再增加即可" ✓）。
        */
-      '[data-composer-stats], [data-dshm-stats-host="1"] {',
+      '[data-composer-stats] {',
       '  height: 0 !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important;',
       '  overflow: hidden !important; visibility: hidden !important;',
       '}',
-      /**
-       * ★★ 2026-10-28（rc.3）：新宿主可能是 `display: contents` 的 slot 包装层 ✗ ——
-       *   对**它**写 height/visibility 不会收掉里面的胶囊 ✓（本项目 0.17 就踩过一次 ✓）。
-       *   ⇒ 两颗胶囊自己也直接 `display:none` ✓（不依赖宿主是不是 contents ✓）。
-       */
-      '[data-dshm-stats-host="1"] [data-composer-stat] { display: none !important; }',
-      /**
-       * ★★ 兜底（与上面那条**同一目的** ✓，但**不依赖**宿主找得准不准 ✓）：
-       *   紧凑条真的挂上（`data-on=1` ✓）时，两颗原始胶囊**一律** `display:none` ✓ ——
-       *   `HTMLElement.click()` 对 `display:none` 的元素照样触发 ✓（转发点击不受影响 ✓）。
-       *   反过来，紧凑条没挂上（还没同步 / 还没有数据 ✓）⇒ **不动**胶囊 ✗（用户至少还有 DSH 原样 ✓）。
-       */
-      /**
-       * ★★ 2026-10-28 修正：**不能用 `display:none`** ✗ —— 这两颗胶囊是 DSH 那三个
-       *   小窗的**定位锚点** ✓（`DialogPill` 用它的 `getBoundingClientRect()` 算 left/top ✓）。
-       *   `display:none` ⇒ 锚点矩形 0×0 ⇒ 小窗跑到屏幕左上角 ✗（用户："会话统计、
-       *   token 用量的小窗无论打不打开输入法都上天"✓）。
-       *   ⇒ 只**隐身**、保留盒子 ✓（`visibility:hidden` 不改变 layout ✓，rect 仍是真实位置 ✓；
-       *     `HTMLElement.click()` 也照样能触发 ✓）。
-       */
-      'html[data-dshm-stats-compact="1"] [data-composer-stat] { visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }',
       /* 自绘的紧凑条：一条细进度条 + 一行小字；两段都可点，分别转发到 DSH 自己的对话框 */
       '#dshm-stats {',
       '  display: none; align-items: center; justify-content: center; gap: 6px;',
@@ -11189,19 +11168,9 @@
       '  [data-dshm-context-panel] {',
       '    min-height: 158px !important;',
       '    width: min(300px, 100vw - 24px) !important;',
-      '    left: 32px !important;',
-      '  }',
-      /**
-       * ★★ 2026-10-28（rc.3）：**不要**再用 `top:auto + bottom:var(...)` 覆盖 DSH 的纵向位置 ✗。
-       *   真机：会话统计 / token 用量 / 上下文三个小窗**无论键盘开不开都贴屏幕顶** ✗ ——
-       *   根因是 `anchorStatsPanel` 抓到的是面板**测量前**的 `{left:0, top:0}`（rc.3 的 pos
-       *   是异步测出来的 ✓），`bottom = 视口高 - 0` ⇒ 把面板锁在顶部 ✗。
-       *   ⇒ rc.3 **让 DSH 自己按锚点摆** ✓（锚点已保留真实盒子 ✓，见胶囊的 `visibility:hidden` ✓）；
-       *   rc.2 保持旧行为 ✓（`html:not([data-dshm-rc3="1"])` 才启用旧覆盖 ✓）。
-       */
-      '  html:not([data-dshm-rc3="1"]) [data-dshm-context-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
+      '    left: 32px !important;',
       '  }',
       /**
        * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：轮次底边 **859**、
@@ -11210,7 +11179,7 @@
        *   ⇒ 只覆盖**底边与 `top`** ✓，宽度 / 左边 / 高度**一律留给 DSH** ✗
        *   （它们本来就摆得对 ✓，多写一条就是多一处误伤 ✓）。
        */
-      '  html:not([data-dshm-rc3="1"]) [data-dshm-stats-panel] {',
+      '  [data-dshm-stats-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
@@ -11222,21 +11191,6 @@
        */
       '  [data-dshm-stats-center] {',
       '    left: var(--dshm-stats-panel-left, 8px) !important;',
-      '  }',
-      /**
-       * ★★ 2026-10-28：权限预设菜单（盾牌）**自己定位置** ✓ —— 不管 DSH 的
-       *   `Menu` 把锚点矩形算成什么（rc.3 实测它一律贴屏幕顶 ✗），都按**盾牌的真实矩形**
-       *   放到它上方 ✓：`bottom = 视口高 − 盾牌 top + 4` ✓（`--dshm-permission-bottom` 由 JS 写 ✓）。
-       *   `!important` 覆盖 DSH 每帧写的内联 `top/left` ✓（它的 rAF 循环改不过我们 ✓）。
-       */
-      '  [data-dshm-permission-menu="1"] {',
-      '    position: fixed !important;',
-      '    top: auto !important;',
-      '    bottom: var(--dshm-permission-bottom, 120px) !important;',
-      '    left: 12px !important;',
-      '    right: 12px !important;',
-      '    max-height: min(60vh, 420px) !important;',
-      '    overflow-y: auto !important;',
       '  }',
       /* ① 网格：中栏独占整行，侧栏与右栏都脱离网格成为覆盖层。
              必须显式写 grid-template-areas：侧栏改成 fixed 后**脱离网格流**，
@@ -15645,84 +15599,6 @@
     return null
   }
 
-  /**
-   * ★★ 2026-10-28（DSH 0.2.1-rc.3）：统计胶囊的宿主标记改了 ✓。
-   *
-   * rc.2：两颗胶囊包在一个 `[data-composer-stats]` 容器里 ✓（本文件一直用它当锚 ✓）。
-   * rc.3：容器属性没了 ✗，改成**两颗胶囊各自**带 `[data-composer-stat="activity"|"usage"]` ✓
-   *（见 `dsh-client-ui-chat/StatsPills.js` 的 `data-composer-stat`）。
-   * ⇒ 统一用"装这两颗胶囊的那个共同父节点"当宿主 ✓ —— 旧版走旧属性 ✓（行为一字不变），
-   *   rc.3 走共同父节点 ✓。找不到就返回 null ✓（老行为：收起状态栏 ✓，绝不乱挂 ✗）。
-   */
-  function statsHostElement() {
-    var legacy = document.querySelector('[data-composer-stats]')
-    /**
-     * ★ 旧容器**要有胶囊**才算数 ✓ —— rc.3 可能留下一个空的同名容器（上游重构残留 ✓），
-     *   直接认它会让新胶囊永远解析不到 ✗（症状正是"状态栏只剩上下文"✗）。
-     */
-    if (legacy !== null && legacy !== undefined && (legacy.querySelector('button') !== null || legacy.querySelector('[data-composer-stat]') !== null)) return legacy
-    /**
-     * ★★ rc.3 的**稳定锚**：DSH 给 dock 插槽留了语义属性 ✓
-     *   `div[data-slot="conversation.composer.dock"]`（本文件 0.17 那轮已经在给它写样式 ✓）——
-     *   它装两颗胶囊、**不含** ContextMeter（meter 是它在 dock 里的兄弟 ✓）。
-     *   优先用它 ✓；找不到再退回"胶囊的共同祖先" ✓（只为兜底 `data-slot` 被改名 ✗）。
-     */
-    var slot = document.querySelector('div[data-slot="conversation.composer.dock"]')
-    if (slot !== null && slot !== undefined && slot.querySelector('[data-composer-stat]') !== null) return slot
-    var first = document.querySelector('[data-composer-stat]')
-    if (first === null || first === undefined) return null
-    var all = document.querySelectorAll('[data-composer-stat]').length
-    /**
-     * 往上找到"**包含全部**胶囊的最低祖先" ✓ —— 不假设两颗是同一个直接父节点 ✓
-     * （rc.3 的 slot 包装层可能一层套一层 ✓；`display: contents` 的那层也照找 ✓）。
-     */
-    var parent = first.parentElement
-    while (parent !== null && parent !== undefined && parent !== document.body) {
-      if (parent.querySelectorAll('[data-composer-stat]').length >= all) return parent
-      parent = parent.parentElement
-    }
-    return first.parentElement
-  }
-
-  /** 宿主里那两颗胶囊的**可点元素** ✓（rc.3 的 `DialogPill` 是 button、`PlainPill` 是 span ✓）。 */
-  function statsPillButtons() {
-    var host = statsHostElement()
-    if (host === null || host === undefined) return []
-    var anchors = host.querySelectorAll('[data-composer-stat]')
-    /**
-     * ★ rc.2 的旧胶囊**没有** `data-composer-stat` ✓（那是 rc.3 才加的 ✓）——
-     *   旧宿主 `[data-composer-stats]` 里直接就是两颗 button ✓ ⇒ 退回到 button ✓。
-     *   不这么做，rc.2 上紧凑条会只剩"上下文"一段 ✗（回归 ✓）。
-     */
-    if (anchors.length === 0) anchors = host.querySelectorAll('button')
-    var out = []
-    for (var i = 0; i < anchors.length; i++) {
-      var button = anchors[i].querySelector('button')
-      out.push(button === null || button === undefined ? anchors[i] : button)
-    }
-    return out
-  }
-
-  /**
-   * ★★ 紧凑条插在**哪** ✓（rc.3 与 rc.2 不同 ✓）。
-   *
-   * rc.2：宿主 `[data-composer-stats]` 自己就是输入框下方那一行 ⇒ 插它后面 ✓（老行为 ✓）。
-   * rc.3：宿主是 dock 里的**插槽**（横向 flex 的一员 ✓）⇒ 插在**整个 dock 后面** ✓，
-   *   否则会变成 dock 里的第三个横排项、和插槽并排溢出 ✗（用户："东西变多了" ✗）。
-   */
-  function statsBarAnchor() {
-    var host = statsHostElement()
-    if (host === null || host === undefined) return null
-    /**
-     * rc.2：宿主自己就是那一行 ⇒ **原样插它后面** ✓（老行为一个字不变 ✓）。
-     * 只有 rc.3 的插槽（不是 `[data-composer-stats]` ✓）才上提到 dock 后面 ✓。
-     */
-    var legacy = document.querySelector('[data-composer-stats]')
-    if (legacy !== null && legacy !== undefined && host === legacy) return host
-    var dock = host.closest('[data-composer-dock]')
-    return dock === null || dock === undefined ? host : dock
-  }
-
   /** 从任意文案里取第一个百分比（对中英文都成立，不依赖具体措辞）。 */
   function parsePercent(text) {
     var match = /(\d+(?:\.\d+)?)\s*%/.exec(String(text === null || text === undefined ? '' : text))
@@ -15840,7 +15716,7 @@
    *   ⇒ 套件实测（390×915）：**888 / 859-873.5** 三块各在不同高度 ✗（真机上差 21px ✗，
    *   round 125 就是为它写死了 53.8333px ✓ —— 但写死常数只在那一台机器上对 ✗）。
    * ⇒ 现在**三块用同一套算法**：`底边 = 视口高 − (最高的那颗锚 top − G)` ✓
-   *   · 锚用 DSH 自己的语义标记找 —— `[data-composer-stat]`（rc.2 是 `[data-composer-stats]` ✓）✓（我们转发点击时用的就是它 ✓，
+   *   · 锚用 DSH 自己的语义标记找 —— `[data-composer-stats] button` ✓（我们转发点击时用的就是它 ✓，
    *     不是哈希、不是中文文案 ✓）；
    *   · G 由**这一块自己**反推 —— `它自己的锚 top − 它自己的自然底边` ✓（DSH 的间距 ✓，不是常数 ✓）；
    *   ⇒ 三块算出来是**同一个数** ⇒ 底边天然齐 ✓（不管设备 / 字号 / 安全区 ✓）。
@@ -15883,8 +15759,8 @@
       observer.disconnect()
       var box = panel.getBoundingClientRect()
       var bottom = window.innerHeight - box.bottom
-      var statsRow = statsHostElement()
-      var pills = statsRow === null || statsRow === undefined ? [] : statsPillButtons()
+      var statsRow = document.querySelector('[data-composer-stats]')
+      var pills = statsRow === null || statsRow === undefined ? [] : statsRow.querySelectorAll('button')
       var pillTop = null
       for (var p = 0; p < pills.length; p++) {
         if (pills[p] === anchor) continue
@@ -15950,7 +15826,9 @@
       }
       return
     }
-    var buttons = statsPillButtons()
+    var root = document.querySelector('[data-composer-stats]')
+    if (root === null || root === undefined) return
+    var buttons = root.querySelectorAll('button')
     if (buttons.length === 0) return
     var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
     /**
@@ -15986,21 +15864,8 @@
    */
   function syncStatsBar(bar) {
     if (bar === undefined || bar === null) return
-    var root = statsHostElement()
-    if (root !== null && root !== undefined && root.getAttribute('data-dshm-stats-host') !== '1') {
-      root.setAttribute('data-dshm-stats-host', '1')
-    }
+    var root = document.querySelector('[data-composer-stats]')
     var meter = contextMeterButton()
-    /**
-     * ★★ 2026-10-28：rc.3 的标记（两处 CSS 用它决定"要不要覆盖面板纵向位置" ✓）。
-     *   判据用**结构**（有没有 `[data-composer-stat]`）✓，不用版本号 ✗。
-     */
-    try {
-      if (document.querySelector('[data-composer-stat]') !== null) document.documentElement.setAttribute('data-dshm-rc3', '1')
-      else document.documentElement.removeAttribute('data-dshm-rc3')
-    } catch (error) {
-      void error
-    }
     // 输入框里那个环：**隐身但保留盒子**（CSS 里 `[data-dshm-meter="hidden"]`）。
     // 底部那条已经显示上下文占用了，输入框那格没必要再占一个位置；
     // 但它是那块面板的锚点、而且面板就渲染在它的父节点里 —— 只能藏、绝不能删 ✓。
@@ -16019,16 +15884,14 @@
       if (bar.state.signature !== '') {
         bar.state.signature = ''
         bar.element.dataset.on = '0'
-        try { document.documentElement.removeAttribute('data-dshm-stats-compact') } catch (error) { void error }
       }
       return
     }
     // 挂在宿主那行的**后面**（原位置，只是宿主那行已经收成 0 高）。
     // 判据用"父节点相同 + 紧邻"，这样无论是被摘掉、还是宿主自己重建成新节点，都能补回去 ✓
     if (root !== null && root !== undefined) {
-      var barAnchor = statsBarAnchor()
-      if (barAnchor !== null && (bar.element.parentNode !== barAnchor.parentNode || bar.element.previousElementSibling !== barAnchor)) {
-        barAnchor.insertAdjacentElement('afterend', bar.element)
+      if (bar.element.parentNode !== root.parentNode || bar.element.previousElementSibling !== root) {
+        root.insertAdjacentElement('afterend', bar.element)
       }
     } else if (bar.element.parentNode === null || bar.element.parentNode === undefined) {
       // 没有 StatsPills 但有上下文环（例如刚开始的会话）：挂在 composer 区域里，位置仍对 ✓
@@ -16046,7 +15909,7 @@
     //   （实测：探针里 `innerText` 恒为空，害得脚本以为每个会话都没有状态栏）。
     var all = ''
     if (root !== null && root !== undefined) {
-      var buttons = statsPillButtons()
+      var buttons = root.querySelectorAll('button')
       var labels = []
       for (var i = 0; i < buttons.length; i++) {
         var aria = buttons[i].getAttribute('aria-label')
@@ -16094,16 +15957,6 @@
     bar.sepA.style.display = hasContext && (hasTime || hasUsage) ? '' : 'none'
     bar.sepB.style.display = hasTime && hasUsage ? '' : 'none'
     bar.element.dataset.on = hasContext || hasTime || hasUsage ? '1' : '0'
-    /**
-     * ★★ 2026-10-28：把"紧凑条已接管"落成根标记 ✓ —— CSS 用它隐藏 rc.3 那两颗原始胶囊 ✓
-     *   （不依赖 `data-dshm-stats-host` 找得准不准 ✓；见上面那条注释 ✓）。
-     */
-    try {
-      if (bar.element.dataset.on === '1') document.documentElement.setAttribute('data-dshm-stats-compact', '1')
-      else document.documentElement.removeAttribute('data-dshm-stats-compact')
-    } catch (error) {
-      void error
-    }
     bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
   }
 
@@ -16820,8 +16673,6 @@
       return (
         t.closest('[data-composer-card="true"]') !== null ||
         t.closest('[data-composer-stats]') !== null ||
-        t.closest('[data-dshm-stats-host="1"]') !== null ||
-        t.closest('#dshm-stats') !== null ||
         t.closest('#dshm-model-menu') !== null ||
         t.closest('#dshm-attach') !== null ||
         t.closest('#dshm-command-btn') !== null
@@ -17720,135 +17571,6 @@
     }
   }
 
-  /**
-   * ★★ 2026-10-28：权限预设那颗**盾牌**的开/关菜单 ✓（用户真机截图：
-   *   「打开输入法时，权限窗口会飘到最上面，关闭输入法没有这种问题」✗）。
-   *
-   * 根因：我们那条 focus guard **刻意保焦点** ✓（点 composer 里的控件不许收键盘 ✓），
-   * 于是盾牌被点时键盘还开着 ✓；而手机键盘把 composer 顶到视口最上面（adjustPan ✓），
-   * DSH 的 Menu 是 `side: "top"`（开在锚点上方 ✓）⇒ 它只能贴到屏幕顶 ✗。
-   *
-   * 修法：**点盾牌时主动 blur 收键盘** ✓（权限选择不需要打字 ✓）——
-   * composer 回到下方 ⇒ Menu 的 rAF 跟随循环会把菜单正常开在盾牌上方 ✓。
-   * 判据只能用 `aria-label` ✓（DSH 没给 data-* / 稳定类名 ✗）：
-   * 文案来自 `permission.access.mode`（中文「访问模式，当前：…」/ 英文「Access mode, current: …」✓）。
-   */
-  /**
-   * ★★ 2026-10-28：权限菜单**自己定位** ✓（不再依赖 DSH 的 Menu 把锚点算对 ✗）。
-   *
-   * 真机：rc.3 的权限菜单**无论键盘开不开**都贴屏幕顶 ✗（Menu 的锚点矩形算成了 0 /
-   * 或它的 rAF 位置被顶到 0 ✓ —— 用户两张截图 ✓）。这里在点击后盯 2 秒，
-   * 找到"含「仅可查看」+「完全权限」的那块 `role=menu|dialog`" ⇒ 打标 ✓，
-   * 用**盾牌自己的矩形**把菜单底边放到盾牌上方 ✓（CSS 见 `[data-dshm-permission-menu]` ✓）。
-   *
-   * 为什么用 `!important` 覆盖 DSH 的内联 top/left ✓：它的 Menu 有一个每帧重算的 rAF 循环 ✗
-   * （普通内联写不过它 ✓）；`!important` 的 CSS 能盖住内联普通值 ✓。
-   */
-  function tagPermissionMenu(trigger) {
-    if (typeof MutationObserver !== 'function' || document.body === null || document.body === undefined) return
-    /** 点之前就存在的菜单/对话框（新出现的那块才是这一次点出来的 ✓）。 */
-    var before = new Set(document.querySelectorAll('[role="menu"], [role="dialog"]'))
-    var tag = function (menu) {
-      var box = trigger.getBoundingClientRect()
-      var bottom = Math.round(window.innerHeight - box.top + 4)
-      if (!(bottom > 0)) bottom = 120
-      menu.setAttribute('data-dshm-permission-menu', '1')
-      menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
-    }
-    var find = function () {
-      var menus = document.querySelectorAll('[role="menu"], [role="dialog"]')
-      var fallback = null
-      for (var i = 0; i < menus.length; i++) {
-        var menu = menus[i]
-        var text = menu.textContent || ''
-        var named = text.indexOf('完全权限') >= 0 && text.indexOf('仅可查看') >= 0
-        if (named) {
-          tag(menu)
-          return true
-        }
-        /**
-         * ★ 文案兜底（英文界面 / 上游改文案 ✓）：只认**这一下新出现**的菜单/对话框；
-         *   新块里如果同时有统计面板（极少见），优先带权限字样的那块 ✓。
-         */
-        if (!before.has(menu)) fallback = menu
-      }
-      if (fallback !== null) {
-        tag(fallback)
-        return true
-      }
-      return false
-    }
-    /**
-     * 菜单开着时**跟着盾牌重算** ✓ —— 键盘收起/旋转会让盾牌移动 ✓；
-     * 只在 `bottom` 还贴着"盾牌上方"时更新 ✓（用户手动滚动页面时也不跑偏 ✗）。
-     */
-    var reposition = function () {
-      var menu = document.querySelector('[data-dshm-permission-menu="1"]')
-      if (menu === null || menu === undefined) return false
-      var box = trigger.getBoundingClientRect()
-      var bottom = Math.round(window.innerHeight - box.top + 4)
-      if (bottom > 0) menu.style.setProperty('--dshm-permission-bottom', bottom + 'px')
-      return true
-    }
-    var stop = function () {
-      try { window.removeEventListener('resize', onResize) } catch (error) { void error }
-      try {
-        if (window.visualViewport !== undefined && window.visualViewport !== null) {
-          window.visualViewport.removeEventListener('resize', onResize)
-        }
-      } catch (error) {
-        void error
-      }
-    }
-    var onResize = function () {
-      if (!reposition()) stop()
-    }
-    if (find()) {
-      /**
-       * ★ 有 IME 且盾牌被顶到上面时，**菜单已经开好**再收键盘 ✓（不在 pointerdown 收 ✗）——
-       *   收完 `reposition` 会把菜单重新放到盾牌上方 ✓。
-       */
-      var box = trigger.getBoundingClientRect()
-      if (box.top < 220 && document.activeElement !== null && document.activeElement !== undefined && typeof document.activeElement.blur === 'function') {
-        setTimeout(function () { try { document.activeElement.blur() } catch (error) { void error } }, 0)
-      }
-      return
-    }
-    var timer = setTimeout(function () {
-      observer.disconnect()
-      stop()
-    }, 2000)
-    var observer = new MutationObserver(function () {
-      if (find()) {
-        clearTimeout(timer)
-        observer.disconnect()
-        var box = trigger.getBoundingClientRect()
-        if (box.top < 220 && document.activeElement !== null && document.activeElement !== undefined && typeof document.activeElement.blur === 'function') {
-          setTimeout(function () { try { document.activeElement.blur() } catch (error) { void error } }, 0)
-        }
-        window.addEventListener('resize', onResize)
-        if (window.visualViewport !== undefined && window.visualViewport !== null) {
-          window.visualViewport.addEventListener('resize', onResize)
-        }
-      }
-    })
-    observer.observe(document.body, { childList: true, subtree: true })
-  }
-
-  function permissionTriggerButton(node) {
-    try {
-      if (node === null || node === undefined || node.closest === undefined) return null
-      var button = node.closest('button')
-      if (button === null || button === undefined) return null
-      var label = button.getAttribute('aria-label') || ''
-      if (label.length === 0) return null
-      return label.indexOf('访问模式') >= 0 || /access mode/i.test(label) ? button : null
-    } catch (error) {
-      void error
-      return null
-    }
-  }
-
   function installComposerFocusProtection() {
     if (focusGuardStats.installed === true) return
     try {
@@ -17869,16 +17591,13 @@
           }
           focusGuardTyping = composerInputHasFocus()
           try {
+            if (composerInputHasFocus() !== true) return
             var target = event.target
             if (target === null || target === undefined || target.closest === undefined) return
             var control = target.closest('button, [role="button"]')
             if (control === null) return
-            if (composerInputHasFocus() !== true) return
             var inCard = control.closest('[data-composer-card="true"]') !== null
-            var inStatsRow =
-              control.closest('[data-composer-stats]') !== null ||
-              control.closest('[data-dshm-stats-host="1"]') !== null ||
-              control.closest('#dshm-stats') !== null
+            var inStatsRow = control.closest('[data-composer-stats]') !== null
             // ★ round 197c：我们自己那块菜单里的行也是控件 ✓ —— 点它们同样不许抢走输入框的焦点 ✗
             //   （用户："打开子菜单仍然会意外关闭输入法" ✓ ⇒ 就是这一档 ✗）。
             var inOurMenu = control.closest('#dshm-model-menu') !== null
@@ -17936,13 +17655,6 @@
              *   它的开关动作挂在 click 上 ✓ ⇒ 拦在这里就不会再有它的 blur/重渲染 ✓
              *   ⇒ "开/关菜单有概率收键盘"那条从根上消失 ✓。
              */
-            /**
-             * ★★ 2026-10-28：盾牌菜单**自己定位** ✓（见 `tagPermissionMenu` 的长注释 ✓）。
-             *   **不再 blur 收键盘** ✗：菜单位置已经按盾牌的真实矩形算 ✓，收不收键盘都不影响 ✓；
-             *   反过来，blur 会让 composer 下移、pointerup 可能落空 ⇒ 菜单点不开 ✗。
-             */
-            var permissionTap = permissionTriggerButton(event.target)
-            if (permissionTap !== null) tagPermissionMenu(permissionTap)
             var clickTarget = event.target
             var modelTrigger = composerModelTrigger()
             if (modelTrigger !== null && clickTarget !== null && clickTarget.closest !== undefined && clickTarget.closest('button') === modelTrigger) {
