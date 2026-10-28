@@ -34,6 +34,20 @@ export interface Config extends Partial<MobileHostConfig> {
     /** 是否往 index.html 注入 shim（默认开启）。 */
     injectShim?: boolean;
     /**
+     * 选择卡 / 权限卡**由谁先画** ✓（默认 `official` ✓）。
+     *
+     * - `official`（默认 ✓）：**不拦截** DSH 的 `approval/request` / `user-questions/request`
+     *   ⇒ 官方卡片在电脑与手机（DSH 界面）上**立即出现** ✓，手机直接点官方卡作答 ✓。
+     * - `phone-first`（旧行为 ✓）：插件 `prepend` 到 waterfall **最外层**、先把请求拦下来等手机 ✓，
+     *   超时（60 秒）才 `return next()` 交回官方卡 ✗ —— 期间**下游的官方卡一个字都没画** ✗。
+     *   只留给**旧版原生会话页**（`/mobile/chat`，非默认入口）✓。
+     *
+     * ★ 2026-10-28 用户反馈「选择卡和权限卡无论手机还是电脑都要等好久才出现」✓ ——
+     *   根因就是旧默认 `phone-first` 把官方卡挡在身后 ✓（本文件的注释早就写着这一条 ✓）。
+     *   `official` 下推送**不丢** ✓：审批/选择通知本来就走 `session/event` ✓，不靠 waterfall ✓。
+     */
+    phoneCardMediation?: 'official' | 'phone-first';
+    /**
      * 要读写的 profile 名（默认**从插件自身的位置推断**，见 `setup-config.ts`）。
      *
      * ★ 一般不用配：插件装在 `<DSH_HOME>/profiles/<profile>/node_modules/` 下，

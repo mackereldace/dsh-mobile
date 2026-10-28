@@ -690,14 +690,28 @@ export function apply(ctx, config = {}) {
                 },
             }),
     });
-    try {
-        const mounted = mountQuestionChannel(ctx, error => {
-            console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error);
-        });
-        console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`);
+    /**
+     * ★★ 2026-10-28：默认**不拦**官方卡（`official` ✓）—— 见 `Config.phoneCardMediation` 的长注释 ✓。
+     *
+     * 旧行为（`phone-first`）把 `user-questions/request` 拦在最外层等手机 ✓，
+     * 最长 60 秒里下游的官方选择卡**一个字都没画** ✗ ⇒ 用户看到「发了但第一时间看不到卡」✗。
+     * 现在默认直接放行 ⇒ 电脑与手机的官方卡立即出现 ✓；手机直接点官方卡作答 ✓。
+     */
+    const phoneFirstCards = config.phoneCardMediation === 'phone-first';
+    if (phoneFirstCards) {
+        try {
+            const mounted = mountQuestionChannel(ctx, error => {
+                console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error);
+            });
+            console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；phone-first；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`);
+        }
+        catch (error) {
+            console.warn('[dsh-mobile] 手机选择应答未挂载：', error);
+        }
     }
-    catch (error) {
-        console.warn('[dsh-mobile] 手机选择应答未挂载：', error);
+    else {
+        setDshChatChannels({ question: false });
+        console.log('[dsh-mobile] 选择卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）');
     }
     /**
      * 把端侧通道暴露给 agent：注册 `phone_notify` 工具。
@@ -852,7 +866,7 @@ export function apply(ctx, config = {}) {
              *   的 `Promise.resolve().then(…)` ✓）⇒ 应答者跑起来时这张表**一定**已经写好了 ✓。
              */
             const lastAsked = new Map();
-            if (typeof anyCtx.on === 'function') {
+            if (typeof anyCtx.on === 'function' && phoneFirstCards) {
                 // ★ 正确的观察方式是 `session/event`（DSH 自己的宿主插件都这么写：
                 //   dsh-agent-instructions / dsh-agent-loop / dsh-agent-presets ✓✓），
                 //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
@@ -1021,7 +1035,12 @@ export function apply(ctx, config = {}) {
         }
         else {
             setDshChatChannels({ approval: false });
-            console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效');
+            if (phoneFirstCards) {
+                console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效');
+            }
+            else {
+                console.log('[dsh-mobile] 审批卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）');
+            }
         }
     }
     void import(__rewriteRelativeImportExtension(TOOLS_MODULE))

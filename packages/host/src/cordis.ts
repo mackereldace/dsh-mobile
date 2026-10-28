@@ -82,6 +82,20 @@ export interface Config extends Partial<MobileHostConfig> {
   /** 是否往 index.html 注入 shim（默认开启）。 */
   injectShim?: boolean
   /**
+   * 选择卡 / 权限卡**由谁先画** ✓（默认 `official` ✓）。
+   *
+   * - `official`（默认 ✓）：**不拦截** DSH 的 `approval/request` / `user-questions/request`
+   *   ⇒ 官方卡片在电脑与手机（DSH 界面）上**立即出现** ✓，手机直接点官方卡作答 ✓。
+   * - `phone-first`（旧行为 ✓）：插件 `prepend` 到 waterfall **最外层**、先把请求拦下来等手机 ✓，
+   *   超时（60 秒）才 `return next()` 交回官方卡 ✗ —— 期间**下游的官方卡一个字都没画** ✗。
+   *   只留给**旧版原生会话页**（`/mobile/chat`，非默认入口）✓。
+   *
+   * ★ 2026-10-28 用户反馈「选择卡和权限卡无论手机还是电脑都要等好久才出现」✓ ——
+   *   根因就是旧默认 `phone-first` 把官方卡挡在身后 ✓（本文件的注释早就写着这一条 ✓）。
+   *   `official` 下推送**不丢** ✓：审批/选择通知本来就走 `session/event` ✓，不靠 waterfall ✓。
+   */
+  phoneCardMediation?: 'official' | 'phone-first'
+  /**
    * 要读写的 profile 名（默认**从插件自身的位置推断**，见 `setup-config.ts`）。
    *
    * ★ 一般不用配：插件装在 `<DSH_HOME>/profiles/<profile>/node_modules/` 下，
@@ -868,13 +882,26 @@ export function apply(ctx: Context, config: Config = {}): void {
         }),
   })
 
-  try {
-    const mounted = mountQuestionChannel(ctx as unknown as Parameters<typeof mountQuestionChannel>[0], error => {
-      console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error)
-    })
-    console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`)
-  } catch (error) {
-    console.warn('[dsh-mobile] 手机选择应答未挂载：', error)
+  /**
+   * ★★ 2026-10-28：默认**不拦**官方卡（`official` ✓）—— 见 `Config.phoneCardMediation` 的长注释 ✓。
+   *
+   * 旧行为（`phone-first`）把 `user-questions/request` 拦在最外层等手机 ✓，
+   * 最长 60 秒里下游的官方选择卡**一个字都没画** ✗ ⇒ 用户看到「发了但第一时间看不到卡」✗。
+   * 现在默认直接放行 ⇒ 电脑与手机的官方卡立即出现 ✓；手机直接点官方卡作答 ✓。
+   */
+  const phoneFirstCards = config.phoneCardMediation === 'phone-first'
+  if (phoneFirstCards) {
+    try {
+      const mounted = mountQuestionChannel(ctx as unknown as Parameters<typeof mountQuestionChannel>[0], error => {
+        console.warn('[dsh-mobile] 手机选择应答出错，交回桌面卡：', error)
+      })
+      console.log(`[dsh-mobile] 手机选择应答${mounted ? '已挂载' : '未挂载'}（user-questions/request；phone-first；前台 signal 到期或 60 秒无人应答 ⇒ 交回桌面卡）`)
+    } catch (error) {
+      console.warn('[dsh-mobile] 手机选择应答未挂载：', error)
+    }
+  } else {
+    setDshChatChannels({ question: false })
+    console.log('[dsh-mobile] 选择卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）')
   }
 
   /**
@@ -1048,7 +1075,7 @@ export function apply(ctx: Context, config: Config = {}): void {
        */
       const lastAsked: AskedApprovals = new Map()
 
-      if (typeof anyCtx.on === 'function') {
+      if (typeof anyCtx.on === 'function' && phoneFirstCards) {
         // ★ 正确的观察方式是 `session/event`（DSH 自己的宿主插件都这么写：
         //   dsh-agent-instructions / dsh-agent-loop / dsh-agent-presets ✓✓），
         //   而不是我原先猜的 `approval/asked` ✗ —— Cordis 对未知事件名**静默接受**，
@@ -1215,7 +1242,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       )
     } else {
       setDshChatChannels({ approval: false })
-      console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效')
+      if (phoneFirstCards) {
+        console.warn('[dsh-mobile] 手机裁决**未挂载**：approval/request 订阅不可用 ⇒ 手机上点了也不会生效')
+      } else {
+        console.log('[dsh-mobile] 审批卡交给 DSH 官方卡片（即时显示；未挂载 phone-first 中介）')
+      }
     }
   }
 
