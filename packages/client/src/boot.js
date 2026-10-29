@@ -12942,6 +12942,7 @@
        */
       modelMenuGetTunnel = getTunnel
       installComposerFocusProtection()
+      installNativeCommandFocusShield()
       installModelMenuDismiss()
       installHomeRoute()
     /**
@@ -16765,7 +16766,13 @@
           (el.classList !== undefined && el.classList !== null && el.classList.contains('dshp-rewind-menu')) ||
           (menuText.indexOf('回退上一步') >= 0 && menuText.indexOf('回退上一轮') >= 0) ||
           (/undo last step/i.test(menuText) && /undo last turn/i.test(menuText))
-        if (isPermissionMenu || isRewindMenu) {
+        /**
+         * ★★ 2026-10-29：原生命令菜单（`[role=listbox]`）同样是 `side:top` ✓ ——
+         *   它也贴着键盘上方的 ＋ ✓；通用键盘抬升会再把它往上推 ⇒ **显示不全** ✗。
+         *   由 `fitNativeCommandMenu` 自己按可用高度摆放/滚动 ✓，这里只豁免 ✓。
+         */
+        var isNativeCommand = el.getAttribute('data-dshm-native-command') === '1'
+        if (isPermissionMenu || isRewindMenu || isNativeCommand) {
           if (el.getAttribute('data-dshm-lift') !== '0') el.setAttribute('data-dshm-lift', '0')
           continue
         }
@@ -17799,6 +17806,19 @@
     HTMLElement.prototype.focus = function () {
       try {
         var node = this
+        /**
+         * ★ 2026-10-29：命令菜单打开期间，**直接吞掉**对任何可编辑元素的 focus 调用 ✓
+         *   （DSH 原生 ＋ 的 `keepFocus` 和菜单搜索框都是**程序化 focus**，光靠 blur 会
+         *   被它们重新抢回去 ✗ ⇒ 输入法还是弹 ✓）。用户亲手点在可编辑元素上 ⇒ 盾已停 ✓。
+         */
+        if (
+          nativeCommandFocusShieldUntil > Date.now() &&
+          nativeCommandUserTappedEditable !== true &&
+          composerEditableNode(node) === true
+        ) {
+          focusGuardStats.swallowedFocus += 1
+          return
+        }
         var tappedNow =
           focusGuardLastTapTarget !== null && node === focusGuardLastTapTarget &&
           Date.now() - focusGuardLastTapAt <= 700
@@ -18104,6 +18124,87 @@
    * 而那颗 ＋ 的 toggle 是坏的 ✓（桌面端同样 ✓）⇒ 我们把 ＋ **隐身但保留盒子** ✓，
    * 「指令」键落在它原位上 ✓，点击**替它开关那张命令菜单** ✓（开着就收 ✓，关着就替它点开 ✓）。
    */
+  /**
+   * ★★ 2026-10-29（用户："点击原生菜单仍然会自动打开输入法"）：**打开命令菜单期间的焦点盾** ✓。
+   *
+   * DSH 原生 ＋ 的 `keepFocus` 和菜单里的搜索框会在 **打开后的一小段时间里**
+   * 程序化地聚焦可编辑元素 ⇒ 输入法被弹出来 ✗（我们 0/120/320ms 的 blur 会漏掉
+   * 更晚的那一次 ✓）。这里在命令菜单打开后 1.6s 内：**任何**可编辑焦点（除了用户
+   * 亲手点到的那一个 ✓）一律 blur ✓。
+   *
+   * 判据"亲手点" = 这一次打开后发生过 pointerdown 在该可编辑元素上 ✓（点搜索框 ⇒ 允许 ✓）。
+   */
+  var nativeCommandFocusShieldUntil = 0
+  var nativeCommandUserTappedEditable = false
+  var nativeCommandFocusShieldInstalled = false
+
+  function nativeCommandFocusShieldStart() {
+    nativeCommandFocusShieldUntil = Date.now() + 1600
+    nativeCommandUserTappedEditable = false
+    /**
+     * 打开前输入框可能**已经**有焦点（只是键盘收着）⇒ 后面的 focusin 不会再来 ✗ ——
+     * 先把当前这个可编辑焦点 blur 掉 ✓（用户没在菜单里点它之前 ✓）。
+     */
+    try {
+      var active = document.activeElement
+      if (active !== null && active !== undefined && active.matches !== undefined && active.matches('input, textarea, [contenteditable]') === true) {
+        active.blur()
+      }
+    } catch (error) {
+      void error
+    }
+  }
+
+  function nativeCommandFocusShieldStop() {
+    nativeCommandFocusShieldUntil = 0
+  }
+
+  function installNativeCommandFocusShield() {
+    if (nativeCommandFocusShieldInstalled === true) return
+    nativeCommandFocusShieldInstalled = true
+    try {
+      document.addEventListener(
+        'focusin',
+        function (event) {
+          if (Date.now() >= nativeCommandFocusShieldUntil) return
+          if (nativeCommandUserTappedEditable === true) return
+          var target = event.target
+          if (target === null || target === undefined) return
+          try {
+            if (target.matches !== undefined && target.matches('input, textarea, [contenteditable]') === true) {
+              target.blur()
+            }
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+      document.addEventListener(
+        'pointerdown',
+        function (event) {
+          /**
+           * 用户在菜单里**动了一下** ⇒ 盾立刻停 ✓ —— 否则会把"条目点击后 DSH 把焦点
+           * 还给输入框以便插入指令"也一起 blur 掉 ✗（round 207 的合法流程 ✓）。
+           */
+          if (nativeCommandFocusShieldUntil > 0) nativeCommandFocusShieldStop()
+          var target = event.target
+          if (target === null || target === undefined) return
+          try {
+            if (target.matches !== undefined && target.matches('input, textarea, [contenteditable]') === true) {
+              nativeCommandUserTappedEditable = true
+            }
+          } catch (error) {
+            void error
+          }
+        },
+        true,
+      )
+    } catch (error) {
+      void error
+    }
+  }
+
   var nativeCommandOverlay = null
   var nativeCommandOverlayObserver = null
 
@@ -18141,12 +18242,53 @@
     nativeCommandOverlayWatch()
   }
 
+  /**
+   * ★★ 2026-10-29（用户："原生菜单显示不全"）：把原生命令菜单**按可用高度**摆放并滚动 ✓。
+   *
+   * 原生 listbox 自己是 `side:top`、高度是 DSH 定的（实测 392px）✗ ——
+   * 条目比这多 ⇒ 下面的条目要在自己的滚动区里找；再加上键盘/通用抬升，
+   * 顶部又会被推出视口 ⇒ 用户看到的就是"显示不全"✗。
+   * ⇒ 用和自绘命令菜单同一套算法：`底边 = ＋ 上沿 − 8` ✓、`高度 = min(560, 可用高度)` ✓、
+   *   `overflow-y:auto` ✓ —— 原生外观/条目一个字不动 ✓。
+   */
+  function fitNativeCommandMenu(listbox) {
+    try {
+      var plus = attachAnchor()
+      var plusRect = plus === null || plus.anchor === null ? null : plus.anchor.getBoundingClientRect()
+      if (plusRect === null || !(plusRect.height > 0)) return
+      var container = listbox.closest('[data-menu-material], [class*="_menu"]')
+      if (container === null || container === undefined) container = listbox.parentElement
+      if (container === null || container === undefined) return
+      var safeTop = 8
+      var topBar = document.getElementById('dshm-mobile-top')
+      if (topBar !== null && topBar !== undefined) {
+        var barTop = topBar.getBoundingClientRect().top
+        if (barTop > 0) safeTop = Math.round(barTop)
+      }
+      var available = Math.round(plusRect.top - 8 - safeTop)
+      var height = Math.max(140, Math.min(560, available))
+      container.style.setProperty('position', 'fixed', 'important')
+      container.style.setProperty('top', Math.round(plusRect.top - 8 - height) + 'px', 'important')
+      container.style.setProperty('bottom', 'auto', 'important')
+      container.style.setProperty('max-height', height + 'px', 'important')
+      container.style.setProperty('overflow-y', 'auto', 'important')
+      container.style.setProperty('-webkit-overflow-scrolling', 'touch', 'important')
+      listbox.style.setProperty('max-height', height + 'px', 'important')
+      listbox.style.setProperty('overflow-y', 'auto', 'important')
+    } catch (error) {
+      void error
+    }
+  }
+
   function nativeCommandOverlaySchedule() {
     var tries = 0
     var timer = setInterval(function () {
       tries += 1
-      if (document.querySelector('[role="listbox"]') !== null) {
+      var listbox = document.querySelector('[role="listbox"]')
+      if (listbox !== null) {
         clearInterval(timer)
+        listbox.setAttribute('data-dshm-native-command', '1')
+        fitNativeCommandMenu(listbox)
         nativeCommandOverlayEnsure()
       } else if (tries >= 20) {
         clearInterval(timer)
@@ -18197,30 +18339,9 @@
         closeDshMenuNear(plus.anchor)
         return
       }
-      var rootStyle = globalThis.getComputedStyle(document.documentElement)
-      var keyboard = parseFloat(rootStyle.getPropertyValue('--dshm-keyboard'))
-      var wasIme = (isNaN(keyboard) === false && keyboard > 0) || document.documentElement.getAttribute('data-dshm-kb') === '1'
+      nativeCommandFocusShieldStart()
       plus.anchor.click()
       nativeCommandOverlaySchedule()
-      /**
-       * ★ 原生菜单打开时 DSH 的 `keepFocus`/搜索框会把焦点塞回输入框 ⇒ **输入法被弹出来** ✗
-       *   （用户："没有打开输入法时，点击会打开输入法"✓）。只在**开之前键盘是关的**时，
-       *   把这一次自动拿到的可编辑焦点 blur 掉 ✓；开之前键盘就开着 ⇒ 不动它 ✓。
-       */
-      if (wasIme !== true) {
-        var blurAutoFocus = function () {
-          try {
-            var active = document.activeElement
-            if (active === null || active === undefined) return
-            if (active.matches !== undefined && active.matches('input, textarea, [contenteditable]') === true) active.blur()
-          } catch (error) {
-            void error
-          }
-        }
-        setTimeout(blurAutoFocus, 0)
-        setTimeout(blurAutoFocus, 120)
-        setTimeout(blurAutoFocus, 320)
-      }
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
