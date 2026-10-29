@@ -10881,6 +10881,15 @@
       '#dshm-command-overlay {',
       '  position: fixed; inset: 0; z-index: 99; background: transparent;',
       '}',
+      /**
+       * ★★ 2026-10-29（用户："聊天框打 / 还会出现原生的菜单……直接去掉吧"）：
+       *   DSH 的斜杠候选菜单就是 `[role="listbox"]` 那个原生框 ✓（和 ＋ 菜单同一个 ✓）。
+       *   `installNativeSlashMenuSuppressor` 在它一出现时标 `data-dshm-native-menu-hidden` ✓，
+       *   这条规则负责**当帧隐藏** ✓（不是等下一帧才藏 ✓）。
+       */
+      '[data-dshm-native-menu-hidden="1"] {',
+      '  display: none !important;',
+      '}',
       '#dshm-command-btn {',
       '  position: absolute; left: 0; top: 0; pointer-events: auto;',
       '  corner-shape: round; background: var(--dsw-specific-selector);',
@@ -12956,6 +12965,7 @@
       modelMenuGetTunnel = getTunnel
       installComposerFocusProtection()
       installNativeCommandFocusShield()
+      installNativeSlashMenuSuppressor()
       installModelMenuDismiss()
       installHomeRoute()
     /**
@@ -16512,8 +16522,12 @@
     { label: '计划 plan', desc: '进入或退出计划模式', cmd: '/plan ' },
     { label: '反馈 feedback', desc: '发送关于当前会话的反馈', cmd: '/feedback ' },
     { label: '压缩 compact', desc: '压缩以上对话内容', cmd: '/compact ' },
-    { label: '权限 permission', desc: '切换权限预设（沙箱模式与审批策略）', cmd: '/permission ' },
-    { label: '模型 model', desc: '选择本会话使用的模型', cmd: '/model ' },
+    /**
+     * ★ 2026-10-29（用户："精简一下，只用留一些必要的功能，像模型选择、文件那种
+     *   已经有的就没必要"）⇒ 删掉 **模型 model** 与 **权限 permission** ✓ ——
+     *   这两样在输入区已经有自己的键（模型键 / 权限键）✓，重复了 ✓。
+     *   文件 file 本来就不在这张清单里 ✓（有附件键 ✓）。
+     */
     { label: '下载日志 export', desc: '将当前会话内容导出为 ZIP', cmd: '/export ' },
     { label: 'purge', desc: 'DSH 指令权威性清洗（status/apply/revert/uninstall）', cmd: '/purge ' },
     { label: 'rewind', desc: '回退：子代理直接回退一次；主代理 /rewind once|round', cmd: '/rewind ' },
@@ -18169,6 +18183,62 @@
    *
    * 判据"亲手点" = 这一次打开后发生过 pointerdown 在该可编辑元素上 ✓（点搜索框 ⇒ 允许 ✓）。
    */
+  /**
+   * ★★ 2026-10-29（用户："手机端聊天框打 / 还会出现原生的菜单，直接去掉吧"）：
+   *   把 DSH 的斜杠候选菜单（`[role="listbox"]` 原生 surface ✓）**收掉并隐藏** ✓。
+   *
+   * 为什么不是只 CSS 藏：藏起来但菜单还开着 ⇒ Enter 会被它吃掉 ✗。
+   * 实测（真 DSH）：对输入框/文档派发一次 Escape ⇒ 菜单真的关掉 ✓、输入框里的 `/` 还在 ✓。
+   * ⇒ MutationObserver 一看到 listbox 出现：标隐藏（当帧生效 ✓）+ 派发 Escape 关掉 ✓。
+   *   之后用户继续打字若再次触发，观察器会再次收掉 ✓（用户看不到、也抢不到回车 ✓）。
+   */
+  var nativeSlashSuppressorInstalled = false
+
+  function installNativeSlashMenuSuppressor() {
+    if (nativeSlashSuppressorInstalled === true) return false
+    if (isMobileSurface() !== true) return false
+    nativeSlashSuppressorInstalled = true
+    var dismiss = function (listbox) {
+      try {
+        var surface = listbox.closest('[class*="_menu"]')
+        if (surface !== null && surface !== undefined) surface.setAttribute('data-dshm-native-menu-hidden', '1')
+        else listbox.setAttribute('data-dshm-native-menu-hidden', '1')
+      } catch (error) {
+        void error
+      }
+      try {
+        var options = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }
+        var input = composerInputNode()
+        if (input !== null && input !== undefined) input.dispatchEvent(new KeyboardEvent('keydown', options))
+        document.dispatchEvent(new KeyboardEvent('keydown', options))
+      } catch (error) {
+        void error
+      }
+    }
+    var sweep = function () {
+      try {
+        var listboxes = document.querySelectorAll('[role="listbox"]')
+        for (var i = 0; i < listboxes.length; i++) {
+          var listbox = listboxes[i]
+          if (listbox.closest('#dshm-command-menu') !== null || listbox.closest('#dshm-model-menu') !== null) continue
+          dismiss(listbox)
+        }
+      } catch (error) {
+        void error
+      }
+    }
+    try {
+      if (typeof MutationObserver !== 'function') return false
+      var observer = new MutationObserver(function () { sweep() })
+      observer.observe(document.documentElement, { childList: true, subtree: true })
+      sweep()
+      return true
+    } catch (error) {
+      void error
+      return false
+    }
+  }
+
   var nativeCommandFocusShieldUntil = 0
   var nativeCommandUserTappedEditable = false
   var nativeCommandFocusShieldInstalled = false
@@ -25779,7 +25849,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029050811'
+    var BOOT_STAMP = 'BUILD-1029051933'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

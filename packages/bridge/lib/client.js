@@ -68,7 +68,7 @@ window.__ModuleLoader__.load({
         ? fileAddressForFromDsh(sessionId, cwd, path)
         : fileAddressForLocal(sessionId, cwd, path)
 
-    const inject = ['sessions', 'sidebarRight', 'conversation']
+    const inject = ['sessions', 'sidebarRight', 'conversation', 'inputTriggers']
 
     function apply(ctx) {
       const service = (name) => {
@@ -204,6 +204,53 @@ window.__ModuleLoader__.load({
         },
       }
       globalThis.__DSHM_DSH_COMMANDS__ = commandsBridge
+
+      /**
+       * ★ 2026-10-29（用户："聊天框打 / 还会出现原生的菜单，这个主要是表现不好，直接去掉吧"）：
+       *   把 `@deepseek-ai/dsh-client-ui-input-trigger` 里 **command 源**的 `candidates`
+       *   换成空数组 ✓ —— 斜杠候选菜单永远没有行 ✓（不是先画出来再藏 ✗，所以不会闪 ✓）。
+       *   手打 `/cmd` 文本本身照常可输入、可发送 ✓（命令执行走发送链，不依赖这张菜单 ✓）。
+       *   源是 ui-commands 插件在启动时注册的 ✓ ⇒ 这里做一次有界轮询（最多 ~30s）等它出现 ✓。
+       */
+      const neutralizeSlashCommandMenu = () => {
+        try {
+          const inputTriggers = service('inputTriggers')
+          const live = inputTriggers === undefined || inputTriggers === null ? undefined : inputTriggers.live
+          const sources = live === undefined || live === null ? undefined : live.sources
+          if (!Array.isArray(sources)) return false
+          let patched = false
+          for (const source of sources) {
+            if (source === undefined || source === null) continue
+            if (source.trigger !== '/' || source.name !== 'command') continue
+            source.candidates = () => Promise.resolve([])
+            patched = true
+          }
+          if (patched === true) {
+            try {
+              const controllers = live.controllers
+              if (controllers !== undefined && controllers !== null && typeof controllers.values === 'function') {
+                for (const controller of controllers.values()) {
+                  try {
+                    if (typeof controller.dismiss === 'function') controller.dismiss()
+                  } catch (error) {
+                    /* 单个会话失败不影响其它 */
+                  }
+                }
+              }
+            } catch (error) {
+              /* ignore */
+            }
+          }
+          return patched
+        } catch (error) {
+          return false
+        }
+      }
+      let slashMenuTries = 0
+      const slashMenuTimer = setInterval(() => {
+        slashMenuTries += 1
+        if (neutralizeSlashCommandMenu() === true || slashMenuTries >= 100) clearInterval(slashMenuTimer)
+      }, 300)
     }
 
     return { apply, inject }
