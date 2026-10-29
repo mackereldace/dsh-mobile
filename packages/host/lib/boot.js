@@ -13926,7 +13926,7 @@
        * ★ 横向：右缘贴齐标签行右缘 ✓；宽度上限 = 从**最右那个 tab** 的右缘
        * 到标签行右缘再留 10px 空气 ✓ ⇒ 入口再长也只在自己那块空地里截断 ✓。
        */
-      var maxWidth = Math.round(tabsRect.right - row.rightMost - 10)
+      var maxWidth = Math.round(row.edgeRight - row.rightMost - 10)
       if (!(maxWidth > 24)) {
         // 那块空地连一个入口都放不下（标签行太窄 / 太挤 ✓）⇒ 宁可什么都不显示 ✗
         noteLineageOnce('标签行右端没有放得下入口的空地（' + maxWidth + 'px）⇒ 不显示')
@@ -13948,14 +13948,14 @@
        */
       var anchor = entry.offsetParent
       var cbTop = 0
-      var cbRight = tabsRect.right
+      var cbRight = row.edgeRight
       if (anchor !== null && anchor !== undefined) {
         var anchorRect = anchor.getBoundingClientRect()
         cbTop = anchorRect.top + anchor.clientTop
         cbRight = anchorRect.left + anchor.clientLeft + anchor.clientWidth
       }
       var box0 = entry.getBoundingClientRect()
-      var right = cbRight - tabsRect.right
+      var right = cbRight - row.edgeRight
       var top = targetCenterY - box0.height / 2 - cbTop
       var latest = box0
       for (var attempt = 0; attempt < 3; attempt++) {
@@ -13978,13 +13978,13 @@
           return false
         }
         var dy = targetCenterY - (latest.top + latest.height / 2)
-        var dx = tabsRect.right - latest.right
+        var dx = row.edgeRight - latest.right
         if (Math.abs(dy) <= 1 && Math.abs(dx) <= 1) break
         right -= dx
         top += dy
       }
       var dyFinal = targetCenterY - (latest.top + latest.height / 2)
-      var dxFinal = tabsRect.right - latest.right
+      var dxFinal = row.edgeRight - latest.right
       var offTarget = Math.abs(dyFinal) > 1 || Math.abs(dxFinal) > 1
       /**
        * ★★ round 158（A ✓）：**闭环收敛不了，也不许"藏起来"当结论** ✗✗
@@ -14015,7 +14015,7 @@
       if (overlap !== null) {
         var freshRow = lineageTabRow(header)
         if (freshRow !== null) {
-          var freshMax = Math.round(freshRow.rect.right - freshRow.rightMost - 10)
+          var freshMax = Math.round(freshRow.edgeRight - freshRow.rightMost - 10)
           if (freshMax > 24) {
             setLineageVars('--dshm-lineage-max', freshMax + 'px')
             latest = entry.getBoundingClientRect()
@@ -14096,12 +14096,59 @@
         if (b.right > rightMost) rightMost = b.right
         labels.push(String(buttons[i].textContent || '').trim().slice(0, 12))
       }
+      /**
+       * ★★ 2026-10-29（用户："子智能体错位了，原本是在最右边的，可能和装了 dsh-purge 有关"）：
+       *   以前用 `tablist` 自己的 `rect.right` 当右缘 —— 但装了 dsh-purge 后，标签行
+       *   被它插了 tab/包了一层 ⇒ `tablist` 的宽度可能只到「轨迹」为止 ✗ ⇒ 入口被摆到
+       *   中间、压在 tab 上 ✗。
+       *   ⇒ 右缘改成 **header 内容右缘 / 标签行父容器内容右缘** 取大者 ✓；
+       *     同时把父容器里的 **button / [role=tab]**（"…" 溢出键、purge 插进来的 tab ✓）
+       *     都算进 `rightMost` ✓ —— 入口只会落在**所有可交互元素右侧的空地**里 ✓。
+       */
+      var edgeRight = rect.right
+      try {
+        var headerRect = header.getBoundingClientRect()
+        var headerStyle = getComputedStyle(header)
+        var headerRight = headerRect.right - (parseFloat(headerStyle.paddingRight) || 0)
+        if (headerRight > edgeRight) edgeRight = headerRight
+      } catch (error) {
+        void error
+      }
+      try {
+        var container = row.parentElement
+        if (container !== null && container !== undefined) {
+          var containerRect = container.getBoundingClientRect()
+          var containerStyle = getComputedStyle(container)
+          var containerRight = containerRect.right - (parseFloat(containerStyle.paddingRight) || 0)
+          if (containerRight > edgeRight) edgeRight = containerRight
+          /**
+           * 右缘还得**避开**标签行右端的非 tab 控件（"…" 溢出键 / purge 插进来的按钮 ✓）：
+           *   取这些控件里最靠右的那个的**左缘 − 6px** 当边界 ✓ ⇒ 入口落在
+           *   「最后一个 tab ↔ 右端控件」之间的空地里 ✓，而不是压住 "…" ✗。
+           *   只在标签带子里（纵向 ±8px）的控件才算 ✓ —— 顶栏其它按钮不在这一行 ✓。
+           */
+          var controls = container.querySelectorAll('button, [role="button"], [data-dshm-purge-tab]')
+          for (var e = 0; e < controls.length; e++) {
+            var control = controls[e]
+            if (control.getAttribute('role') === 'tab') continue
+            if (control.closest !== undefined && control.closest('[data-dshm-lineage]') !== null) continue
+            var cr = control.getBoundingClientRect()
+            if (!(cr.width > 0) || !(cr.height > 0)) continue
+            if (cr.bottom < tabTop - 8 || cr.top > tabBottom + 8) continue
+            var boundary = cr.left - 6
+            if (boundary > rightMost + 24 && boundary < edgeRight) edgeRight = boundary
+          }
+        }
+      } catch (error) {
+        void error
+      }
       return {
         node: row,
         rect: rect,
         buttons: buttons,
         labels: labels,
         rightMost: rightMost,
+        edgeRight: edgeRight,
         tabTop: tabTop,
         tabBottom: tabBottom,
       }
@@ -25919,7 +25966,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029053548'
+    var BOOT_STAMP = 'BUILD-1029053909'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
