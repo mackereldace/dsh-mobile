@@ -219,11 +219,41 @@ window.__ModuleLoader__.load({
             }
           }
           faces.push(input)
+          /**
+           * ★ 2026-10-29（用户："输入命令不要清输入框内容，直接在当前输入框接着"）：
+           *   `setDraft` 是**整体替换** ✗ ⇒ 先读当前 draft ✓（dsh-purge 的 liveDraft 同款：
+           *   面自身的 `state.getSnapshot().draft` ✓），再拼接 ✓；拿不到状态时退回读 DOM 输入框 ✓。
+           */
+          /**
+           * ★ 2026-10-29（实测：追加变成了替换）：面自身的 `state.draft` **不一定**跟着
+           *   `setDraft` 更新 ✗（实测第一次写 `/goal ` 后它仍是空串 ⇒ 第二次又算成空 ⇒ 覆盖 ✗）。
+           *   **可见输入框的 DOM 才是真话** ✓ ⇒ 先读 DOM ✓；读不到再用面状态 ✓。
+           */
+          const readDraft = (face) => {
+            try {
+              const node = document.querySelector('[data-composer-card="true"] [contenteditable="true"], [data-composer-card="true"] textarea')
+              if (node !== null) {
+                const text = node.tagName === 'TEXTAREA' ? String(node.value || '') : String(node.innerText || '')
+                if (text !== '') return text.replace(/\u200b/g, '')
+              }
+            } catch (error) {
+              /* ignore */
+            }
+            try {
+              const snapshot = face === undefined || face === null ? undefined : face.state?.getSnapshot?.()
+              if (snapshot !== undefined && snapshot !== null && typeof snapshot.draft === 'string') return snapshot.draft
+            } catch (error) {
+              /* ignore */
+            }
+            return ''
+          }
           for (const face of faces) {
             if (face === undefined || face === null) continue
             if (typeof face.setDraft !== 'function') continue
             try {
-              face.setDraft(text)
+              const current = readDraft(face)
+              const separator = current === '' || /\s$/.test(current) ? '' : ' '
+              face.setDraft(current + separator + text)
               return true
             } catch (error) {
               /* try next */

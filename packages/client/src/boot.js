@@ -16588,6 +16588,12 @@
      */
     setTimeout(function () {
       try {
+        /**
+         * ★ 输入框一直有焦点（键盘开着、行按钮已被 preventDefault 挡住焦点转移）⇒
+         *   **不要再 focus** ✓ —— 那一下是多余的，正是"收一下再拉起"的另一半 ✓。
+         */
+        var input = composerInputNode()
+        if (input !== null && input !== undefined && document.activeElement === input) return
         focusComposerAtEnd()
       } catch (error) {
         void error
@@ -16659,6 +16665,18 @@
       desc.textContent = entry.desc
       button.appendChild(label)
       button.appendChild(desc)
+      /**
+       * ★ 2026-10-29（用户："点击命令一瞬间输入法想收然后立马拉起"）：
+       *   行按钮拿到焦点 ⇒ 输入框 blur ⇒ IME 收；我们 50ms 后再 focus ⇒ IME 又拉起 ✗。
+       *   `pointerdown` 上 preventDefault ⇒ 焦点**不转移** ✓（click 照常触发 ✓）。
+       */
+      button.addEventListener('pointerdown', function (event) {
+        try {
+          if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+        } catch (error) {
+          void error
+        }
+      })
       button.addEventListener('click', (function (it) {
         return function (event) {
           event.preventDefault()
@@ -18181,7 +18199,18 @@
       }
       found.input.click()
     }
-    button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
+    button.addEventListener('pointerdown', function (event) {
+      event.stopPropagation()
+      /**
+       * ★ 同一个目标：**开菜单这一下也不要把输入法收掉** ✓（键盘开着点指令键 ⇒
+       *   菜单浮在键盘上方 ✓，选完接着打字 ✓，不会再收一下再拉起 ✓）。
+       */
+      try {
+        if (event.cancelable !== false && event.preventDefault !== undefined) event.preventDefault()
+      } catch (error) {
+        void error
+      }
+    })
     button.addEventListener('click', forward)
     return button
   }
