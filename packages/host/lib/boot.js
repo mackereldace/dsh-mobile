@@ -10691,10 +10691,20 @@
        *   文字到顶在**框内**滚 ✓，外层随内容自然增高 ✓ —— 正是用户要的 ✓
        *   （"我想要的只是文本框内的滑动，文本框到上限了就不再增加即可" ✓）。
        */
-      '[data-composer-stats] {',
+      '[data-composer-stats], [data-dshm-stats-host="1"] {',
       '  height: 0 !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important;',
       '  overflow: hidden !important; visibility: hidden !important;',
       '}',
+      /**
+       * ★★ 2026-10-29（用户："修复底下会话统计，token 用量"）：**rc.3 的胶囊宿主换成了
+       *   dock 插槽 + 每颗胶囊各带 `[data-composer-stat]`** ✓。旧 `[data-composer-stats]`
+       *   在 rc.3 上找不到 ⇒ 紧凑条没挂、原生两行直接露出来（用户截图 ✓）。
+       *   ⇒ 新宿主隐藏时必须**保留胶囊的盒子** ✗（它是三个小窗的定位锚点：
+       *     用 display:none 会让锚点矩形 0×0 ⇒ 小窗飞左上角 ✗）——
+       *     只做 visibility/opacity ✓。
+       */
+      '[data-dshm-stats-host="1"] [data-composer-stat] { visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }',
+      'html[data-dshm-stats-compact="1"] [data-composer-stat] { visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }',
       /* 自绘的紧凑条：一条细进度条 + 一行小字；两段都可点，分别转发到 DSH 自己的对话框 */
       '#dshm-stats {',
       '  display: none; align-items: center; justify-content: center; gap: 6px;',
@@ -11221,9 +11231,17 @@
       '  [data-dshm-context-panel] {',
       '    min-height: 158px !important;',
       '    width: min(300px, 100vw - 24px) !important;',
+      '    left: 32px !important;',
+      '  }',
+      /**
+       * ★★ 2026-10-29（rc.3 的小窗"上天"）：rc.3 的面板位置是 DSH **异步测出来**的 ✗ ——
+       *   我们抓到的还是测量前的 {top:0} ⇒ bottom=视口高 ⇒ 锁死在顶部 ✗。
+       *   ⇒ **只有 rc.2** 才启用我们的 top/bottom 覆盖 ✓；rc.3 让 DSH 自己按锚点摆 ✓
+       *   （胶囊已保留盒子 ✓）。
+       */
+      '  html:not([data-dshm-rc3="1"]) [data-dshm-context-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
-      '    left: 32px !important;',
       '  }',
       /**
        * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：轮次底边 **859**、
@@ -11232,7 +11250,7 @@
        *   ⇒ 只覆盖**底边与 `top`** ✓，宽度 / 左边 / 高度**一律留给 DSH** ✗
        *   （它们本来就摆得对 ✓，多写一条就是多一处误伤 ✓）。
        */
-      '  [data-dshm-stats-panel] {',
+      '  html:not([data-dshm-rc3="1"]) [data-dshm-stats-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
@@ -15735,6 +15753,57 @@
     return null
   }
 
+  /**
+   * ★★ 2026-10-29：统计胶囊的宿主（rc.2 vs rc.3）。
+   *   rc.2：两颗胶囊包在 `[data-composer-stats]` 里 ✓；
+   *   rc.3：宿主属性没了 ✗，改成每颗胶囊各带 `[data-composer-stat]`，装在
+   *        `div[data-slot="conversation.composer.dock"]` 里 ✓。
+   *   ⇒ 旧容器**有胶囊才算数** ✓（rc.3 可能留下空壳）；否则用 dock 插槽；
+   *     再退回"包含全部胶囊的最低祖先" ✓；找不到返回 null ✓（老行为：收起 ✓）。
+   */
+  function statsHostElement() {
+    var legacy = document.querySelector('[data-composer-stats]')
+    if (legacy !== null && legacy !== undefined && (legacy.querySelector('button') !== null || legacy.querySelector('[data-composer-stat]') !== null)) return legacy
+    var slot = document.querySelector('div[data-slot="conversation.composer.dock"]')
+    if (slot !== null && slot !== undefined && slot.querySelector('[data-composer-stat]') !== null) return slot
+    var first = document.querySelector('[data-composer-stat]')
+    if (first === null || first === undefined) return null
+    var all = document.querySelectorAll('[data-composer-stat]').length
+    var parent = first.parentElement
+    while (parent !== null && parent !== undefined && parent !== document.body) {
+      if (parent.querySelectorAll('[data-composer-stat]').length >= all) return parent
+      parent = parent.parentElement
+    }
+    return first.parentElement
+  }
+
+  /** 宿主里两颗胶囊的**可点元素**（rc.3 的 DialogPill 是 button、PlainPill 是 span ✓）。 */
+  function statsPillButtons() {
+    var host = statsHostElement()
+    if (host === null || host === undefined) return []
+    var anchors = host.querySelectorAll('[data-composer-stat]')
+    if (anchors.length === 0) anchors = host.querySelectorAll('button')
+    var out = []
+    for (var i = 0; i < anchors.length; i++) {
+      var button = anchors[i].querySelector('button')
+      out.push(button === null || button === undefined ? anchors[i] : button)
+    }
+    return out
+  }
+
+  /**
+   * ★★ 2026-10-29：紧凑条插在哪。rc.2：插宿主行后面 ✓；rc.3：宿主是 dock 里的插槽 ✓
+   *   ⇒ 插到**整个 dock 后面** ✓（否则会变成 dock 里的第三个横排项、并排溢出 ✗）。
+   */
+  function statsBarAnchor() {
+    var host = statsHostElement()
+    if (host === null || host === undefined) return null
+    var legacy = document.querySelector('[data-composer-stats]')
+    if (legacy !== null && legacy !== undefined && host === legacy) return host
+    var dock = host.closest('[data-composer-dock]')
+    return dock === null || dock === undefined ? host : dock
+  }
+
   /** 从任意文案里取第一个百分比（对中英文都成立，不依赖具体措辞）。 */
   function parsePercent(text) {
     var match = /(\d+(?:\.\d+)?)\s*%/.exec(String(text === null || text === undefined ? '' : text))
@@ -15895,8 +15964,8 @@
       observer.disconnect()
       var box = panel.getBoundingClientRect()
       var bottom = window.innerHeight - box.bottom
-      var statsRow = document.querySelector('[data-composer-stats]')
-      var pills = statsRow === null || statsRow === undefined ? [] : statsRow.querySelectorAll('button')
+      var statsRow = statsHostElement()
+      var pills = statsRow === null || statsRow === undefined ? [] : statsPillButtons()
       var pillTop = null
       for (var p = 0; p < pills.length; p++) {
         if (pills[p] === anchor) continue
@@ -15962,9 +16031,7 @@
       }
       return
     }
-    var root = document.querySelector('[data-composer-stats]')
-    if (root === null || root === undefined) return
-    var buttons = root.querySelectorAll('button')
+    var buttons = statsPillButtons()
     if (buttons.length === 0) return
     var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
     /**
@@ -16000,7 +16067,20 @@
    */
   function syncStatsBar(bar) {
     if (bar === undefined || bar === null) return
-    var root = document.querySelector('[data-composer-stats]')
+    var root = statsHostElement()
+    if (root !== null && root !== undefined && root.getAttribute('data-dshm-stats-host') !== '1') {
+      root.setAttribute('data-dshm-stats-host', '1')
+    }
+    /**
+     * ★★ 2026-10-29：rc.3 标记（CSS 用它决定"要不要覆盖小窗纵向位置" ✓）——
+     *   判据是结构（有没有 `[data-composer-stat]`）✓，不是版本号 ✗。
+     */
+    try {
+      if (document.querySelector('[data-composer-stat]') !== null) document.documentElement.setAttribute('data-dshm-rc3', '1')
+      else document.documentElement.removeAttribute('data-dshm-rc3')
+    } catch (error) {
+      void error
+    }
     var meter = contextMeterButton()
     // 输入框里那个环：**隐身但保留盒子**（CSS 里 `[data-dshm-meter="hidden"]`）。
     // 底部那条已经显示上下文占用了，输入框那格没必要再占一个位置；
@@ -16026,8 +16106,9 @@
     // 挂在宿主那行的**后面**（原位置，只是宿主那行已经收成 0 高）。
     // 判据用"父节点相同 + 紧邻"，这样无论是被摘掉、还是宿主自己重建成新节点，都能补回去 ✓
     if (root !== null && root !== undefined) {
-      if (bar.element.parentNode !== root.parentNode || bar.element.previousElementSibling !== root) {
-        root.insertAdjacentElement('afterend', bar.element)
+      var barAnchor = statsBarAnchor()
+      if (barAnchor !== null && barAnchor !== undefined && (bar.element.parentNode !== barAnchor.parentNode || bar.element.previousElementSibling !== barAnchor)) {
+        barAnchor.insertAdjacentElement('afterend', bar.element)
       }
     } else if (bar.element.parentNode === null || bar.element.parentNode === undefined) {
       // 没有 StatsPills 但有上下文环（例如刚开始的会话）：挂在 composer 区域里，位置仍对 ✓
@@ -16045,7 +16126,7 @@
     //   （实测：探针里 `innerText` 恒为空，害得脚本以为每个会话都没有状态栏）。
     var all = ''
     if (root !== null && root !== undefined) {
-      var buttons = root.querySelectorAll('button')
+      var buttons = statsPillButtons()
       var labels = []
       for (var i = 0; i < buttons.length; i++) {
         var aria = buttons[i].getAttribute('aria-label')
@@ -16093,6 +16174,12 @@
     bar.sepA.style.display = hasContext && (hasTime || hasUsage) ? '' : 'none'
     bar.sepB.style.display = hasTime && hasUsage ? '' : 'none'
     bar.element.dataset.on = hasContext || hasTime || hasUsage ? '1' : '0'
+    try {
+      if (bar.element.dataset.on === '1') document.documentElement.setAttribute('data-dshm-stats-compact', '1')
+      else document.documentElement.removeAttribute('data-dshm-stats-compact')
+    } catch (error) {
+      void error
+    }
     bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
   }
 
@@ -17855,7 +17942,10 @@
             var control = target.closest('button, [role="button"]')
             if (control === null) return
             var inCard = control.closest('[data-composer-card="true"]') !== null
-            var inStatsRow = control.closest('[data-composer-stats]') !== null
+            var inStatsRow =
+              control.closest('[data-composer-stats]') !== null ||
+              control.closest('[data-dshm-stats-host="1"]') !== null ||
+              control.closest('#dshm-stats') !== null
             // ★ round 197c：我们自己那块菜单里的行也是控件 ✓ —— 点它们同样不许抢走输入框的焦点 ✗
             //   （用户："打开子菜单仍然会意外关闭输入法" ✓ ⇒ 就是这一档 ✗）。
             var inOurMenu = control.closest('#dshm-model-menu') !== null
@@ -26000,7 +26090,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029055216'
+    var BOOT_STAMP = 'BUILD-1029055946'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
