@@ -11260,6 +11260,16 @@
       '    right: 12px !important;',
       '  }',
       /**
+       * ★★ 2026-10-29（用户："点击的瞬间能看到一开始还在原位，只是瞬间移到理想位置"）：
+       *   对齐是"面板出现之后"才做的 ⇒ 面板会先在 DSH 的原位露一帧、再跳过去 ✗。
+       *   ⇒ 点开统计面板的那一下先打 `data-dshm-stats-opening`，把 dialog 全部藏住 ✓，
+       *     对齐算完再摘掉标记 ✓ —— 用户看到的是面板**直接出现在理想位置** ✓。
+       *   `visibility:hidden` 不改变布局 ✓（面板仍有真实矩形，能照常测量 ✓）。
+       */
+      'html[data-dshm-stats-opening="1"] [role="dialog"] {',
+      '  visibility: hidden !important;',
+      '}',
+      /**
        * ★ round 195：**只有「会话统计」那一块居中** ✓（用户点名 ✓）——
        *   左缘由 JS 按它自己的宽度算出来写进 `--dshm-stats-panel-left` ✓
        *   （用 `left` 而不是 `transform` ✓ —— `transform` 归 DSH 的进出场动画 ✗）。
@@ -16013,16 +16023,27 @@
       }
       return true
     }
+    var finish = function () {
+      try {
+        document.documentElement.removeAttribute('data-dshm-stats-opening')
+      } catch (error) {
+        void error
+      }
+    }
     var started = Date.now()
     var tick = function () {
       if (Date.now() - started > 1600) {
+        finish()
         debugBoxLine('[stats] ✗ 统计面板没在 1.6s 内认出来（这一块保持 DSH 自己的位置）')
         return
       }
       var panel = find()
       if (panel !== null) {
         var box = panel.getBoundingClientRect()
-        if (box.width > 0 && box.height > 0 && box.top > 4 && align(panel) === true) return
+        if (box.width > 0 && box.height > 0 && box.top > 4 && align(panel) === true) {
+          finish()
+          return
+        }
       }
       setTimeout(tick, 60)
     }
@@ -16040,17 +16061,37 @@
    * 就退回**同一族里还活着的那颗**，而不是"点了没反应" ✓。
    */
   function forwardStatsToggle(which) {
+    /**
+     * ★ 点开的那一下先藏 dialog ✓（见 CSS `data-dshm-stats-opening`）—— 对齐完再放开 ✓。
+     */
+    try {
+      document.documentElement.setAttribute('data-dshm-stats-opening', '1')
+    } catch (error) {
+      void error
+    }
+    var releaseOpening = function () {
+      try {
+        document.documentElement.removeAttribute('data-dshm-stats-opening')
+      } catch (error) {
+        void error
+      }
+    }
     if (which === 'context') {
       var meter = contextMeterButton()
       if (meter !== null) {
         // ★ 先挂观察者再点 ✓（顺序反了就抓不到那块面板 ✓）
         anchorStatsPanel(meter, 'data-dshm-context-panel', 'context')
         meter.click()
+      } else {
+        releaseOpening()
       }
       return
     }
     var buttons = statsPillButtons()
-    if (buttons.length === 0) return
+    if (buttons.length === 0) {
+      releaseOpening()
+      return
+    }
     var target = which === 'time' ? buttons[0] : buttons[buttons.length - 1]
     /**
      * ★★ round 194：**另外两块也要一起对齐** ✗ —— 套件实测（390×915）：
