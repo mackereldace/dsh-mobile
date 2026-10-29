@@ -109,6 +109,16 @@ export function runtimeAppManifestPaths(resourcesPath) {
     return [
         join(resourcesPath, 'app.asar', 'dsh', 'package.json'),
         join(resourcesPath, 'app.asar.unpacked', 'dsh', 'package.json'),
+        /**
+         * ★★ 2026-10-29（用户："两个 APK 原生壳上的问题，好像是因为装了 purge，给我认成
+         *   0.1.5-rc.1 了"）：
+         *   本机 DSH 是 **解包形态** `<resources>/app/dsh/package.json`（0.2.1-rc.3 ✓），
+         *   而这里只查了 `app.asar` / `app.asar.unpacked` ✗ ⇒ 读不到"正在跑的这份" ✗
+         *   ⇒ 退到 `<DSH_HOME>/profiles/node_modules/@deepseek-ai/dsh-app-boot`（旧镜像
+         *   0.1.5-rc.2 ✓）⇒ 手机卡片一直报旧版本 ✓。
+         *   ⇒ 补上解包形态 ✓；它和上面两条一样，描述的都是"**此刻在跑的那个 app**" ✓。
+         */
+        join(resourcesPath, 'app', 'dsh', 'package.json'),
     ];
 }
 function defaultResolve(specifier) {

@@ -133,8 +133,32 @@ describe('壁纸解析', () => {
     }
     const result = resolveWallpaper('darwin', run, () => true)
     assert.equal(result.ok, false)
-    assert.deepEqual(calls, ['plutil', 'defaults', 'osascript']) // 先现代位置，再 defaults + osascript 各一次
+    // 先现代位置，再 defaults + System Events + AppKit(JXA) 各一次
+    assert.deepEqual(calls, ['plutil', 'defaults', 'osascript', 'osascript'])
     assert.match(result.reason ?? '', /动态壁纸|文件路径/)
+  })
+
+  it('★ macOS：动态壁纸走 AppKit 拿到 HEIC，并转成手机能看的 JPEG', () => {
+    const dynamic = plistXml(
+      section('AllSpacesAndDisplays', [], 'com.apple.NeptuneOneExtension'),
+      section('SystemDefault', [], 'com.apple.NeptuneOneExtension'),
+    )
+    const calls: Array<{ command: string; args: readonly string[] }> = []
+    const run = (command: string, args: string[]): CommandResult => {
+      calls.push({ command, args })
+      if (command === 'plutil') return ok(dynamic)
+      if (command === 'osascript' && args[0] === '-l') return ok('/System/Library/CoreServices/DefaultDesktop.heic\n')
+      if (command === 'sips') return ok('')
+      return fail('no')
+    }
+    const result = resolveWallpaper('darwin', run, () => true)
+    assert.equal(result.ok, true)
+    assert.match(result.path ?? '', /\.jpg$/)
+    const jxa = calls.find((call) => call.command === 'osascript' && call.args[0] === '-l')
+    assert.notEqual(jxa, undefined)
+    const sips = calls.find((call) => call.command === 'sips')
+    assert.notEqual(sips, undefined)
+    assert.ok((sips?.args ?? []).includes('/System/Library/CoreServices/DefaultDesktop.heic'))
   })
 
   it('不支持的平台如实说，不猜', () => {

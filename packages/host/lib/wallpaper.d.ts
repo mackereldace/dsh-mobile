@@ -20,6 +20,16 @@ export declare function parseMacWallpaper(output: string): string | undefined;
 /** 文件后缀 ⇒ MIME（只认图片；不认识的返回 undefined ⇒ 调用方按失败处理 ✓）。 */
 export declare function imageMimeOf(path: string): string | undefined;
 /**
+ * ★★ 2026-10-29（用户："两个 APK 原生壳上的问题……没读到壁纸"）：
+ *   本机 macOS 的当前壁纸是 `/System/Library/CoreServices/DefaultDesktop.heic`（动态/默认 HEIC ✓）——
+ *   旧解析在 `Index.plist` 的 `Files` 里拿不到路径 ✗；但 AppKit 知道这个路径 ✓
+ *   （见 `resolveWallpaper` 里的 JXA 分支 ✓）。
+ *   HEIC 在 Android WebView 里显示不出来 ✗ ⇒ 用 macOS 自带的 `sips` 转成 JPEG ✓
+ *   （`-Z 1920` 控制体积 ✓；实测 4096×2160 的原图 1.3MB、1920 宽更小 ✓）。
+ *   ★ 只对手机显示不了的格式转码 ✓；PNG/JPEG 原样返回（不重复压缩 ✓）。
+ */
+export declare function phoneWallpaper(path: string, run: Runner, exists?: (path: string) => boolean): WallpaperResult;
+/**
  * ★★★ 2026-10-05（按本机实测新增）：从**现代位置**取当前壁纸的**文件路径**。
  * 来源：`~/Library/Application Support/com.apple.wallpaper/Store/Index.plist` ✓
  * （先 `plutil -convert xml1 -o - <该文件>` 转 **XML** 再喂进来 ✓）。

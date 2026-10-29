@@ -20,6 +20,8 @@
  * 依赖注入（`run`）是为了**能在电脑上断言** ✓ —— 真机上跑命令的只有很薄一层 ✓。
  */
 import { existsSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /** 跑一条命令并返回 stdout（注入用；生产是 child_process）。 */
 export interface CommandResult {
@@ -74,6 +76,30 @@ export function imageMimeOf(path: string): string | undefined {
   if (lower.endsWith('.bmp')) return 'image/bmp'
   if (lower.endsWith('.tiff') || lower.endsWith('.tif')) return 'image/tiff'
   return undefined
+}
+
+/** 手机（Android WebView）能直接显示的壁纸 MIME。HEIC/TIFF 不行 ⇒ 必须转码 ✓。 */
+const PHONE_SAFE_WALLPAPER_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'])
+
+/**
+ * ★★ 2026-10-29（用户："两个 APK 原生壳上的问题……没读到壁纸"）：
+ *   本机 macOS 的当前壁纸是 `/System/Library/CoreServices/DefaultDesktop.heic`（动态/默认 HEIC ✓）——
+ *   旧解析在 `Index.plist` 的 `Files` 里拿不到路径 ✗；但 AppKit 知道这个路径 ✓
+ *   （见 `resolveWallpaper` 里的 JXA 分支 ✓）。
+ *   HEIC 在 Android WebView 里显示不出来 ✗ ⇒ 用 macOS 自带的 `sips` 转成 JPEG ✓
+ *   （`-Z 1920` 控制体积 ✓；实测 4096×2160 的原图 1.3MB、1920 宽更小 ✓）。
+ *   ★ 只对手机显示不了的格式转码 ✓；PNG/JPEG 原样返回（不重复压缩 ✓）。
+ */
+export function phoneWallpaper(path: string, run: Runner, exists: (path: string) => boolean = existsSync): WallpaperResult {
+  const mime = imageMimeOf(path)
+  if (mime === undefined) return { ok: false, reason: `壁纸不是常见的图片格式：${path}` }
+  if (PHONE_SAFE_WALLPAPER_MIMES.has(mime)) return { ok: true, path }
+  const out = join(tmpdir(), `dshm-wallpaper-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`)
+  const converted = run('sips', ['-s', 'format', 'jpeg', '-s', 'formatOptions', '82', '-Z', '1920', path, '--out', out], 8000)
+  if (!converted.ok || !exists(out)) {
+    return { ok: false, reason: `壁纸是 ${mime}，转成手机能看的 JPEG 失败（sips）` }
+  }
+  return { ok: true, path: out }
 }
 
 /**
@@ -255,6 +281,11 @@ export function resolveWallpaper(
     if (imageMimeOf(path) === undefined) {
       return { ok: false, reason: `壁纸不是常见的图片格式：${path}` }
     }
+    /**
+     * ★ macOS 的 HEIC/TIFF 手机显示不了 ⇒ 统一在出口转 JPEG ✓（见 `phoneWallpaper`）。
+     *   Windows 那边保持原样（注册表给的通常是 jpg/png，且没有 sips ✓）。
+     */
+    if (platform === 'darwin') return phoneWallpaper(path, run, exists)
     return { ok: true, path }
   }
 
@@ -326,6 +357,27 @@ export function resolveWallpaper(
       ['-e', 'tell application "System Events" to get picture of current desktop'], 4000)
     if (script.ok) {
       const found = check(script.stdout.trim().replace(/^"|"$/g, ''), '系统接口')
+      if (found.ok) return found
+    }
+    /**
+     * ★★ 2026-10-29：动态/默认壁纸（Sonoma 的 DefaultDesktop.heic ✓）在 Index.plist 的
+     *   `Files` 里**没有路径** ✗，`defaults`/System Events 也拿不到 ✓ ——
+     *   但 **AppKit 自己知道**当前桌面的图片 URL ✓（`NSWorkspace.desktopImageURLForScreen` ✓）。
+     *   走 JXA（`osascript -l JavaScript` ✓）读它：不需要自动化权限 ✓、不截图 ✓。
+     *   本机实测输出：`/System/Library/CoreServices/DefaultDesktop.heic` ✓（HEIC ⇒ 出口转 JPEG ✓）。
+     */
+    const jxa = run(
+      'osascript',
+      [
+        '-l',
+        'JavaScript',
+        '-e',
+        'ObjC.import("AppKit"); var u = $.NSWorkspace.sharedWorkspace.desktopImageURLForScreen($.NSScreen.mainScreen); (u && u.path) ? u.path.js : ""',
+      ],
+      4000,
+    )
+    if (jxa.ok) {
+      const found = check(jxa.stdout.trim().replace(/^"|"$/g, ''), 'AppKit 桌面接口')
       if (found.ok) return found
     }
     return {

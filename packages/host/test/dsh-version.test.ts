@@ -206,6 +206,6 @@ describe('DSH 版本：正在运行的那个 app 优先', () => {
   it('★ 没给 resourcesPath（非 Electron）⇒ 这条来源自动跳过，不抛', () => {
     assert.deepEqual(runtimeAppManifestPaths(undefined), [])
     assert.deepEqual(runtimeAppManifestPaths(''), [])
-    assert.equal(runtimeAppManifestPaths('/x').length, 2)
+    assert.equal(runtimeAppManifestPaths('/x').length, 3)
   })
 })

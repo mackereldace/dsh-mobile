@@ -18,7 +18,7 @@
 import { execFileSync } from 'node:child_process'
 import type { KeyObject } from 'node:crypto'
 import { randomBytes, randomInt } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, unlinkSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Duplex } from 'node:stream'
@@ -3868,7 +3868,17 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
           pragma: 'no-cache',
           'x-dsh-mobile': 'desktop-wallpaper',
         })
-        res.end(readFileSync(found.path))
+        const wallpaperBytes = readFileSync(found.path)
+        res.end(wallpaperBytes)
+        /**
+         * ★ 2026-10-29：HEIC/TIFF 转码出来的临时 JPEG 用完就删 ✓（`phoneWallpaper` 的
+         *   `dshm-wallpaper-` 前缀 ✓）；原文件（用户自己的壁纸）绝不删 ✗。
+         */
+        try {
+          if (found.path.includes('dshm-wallpaper-')) unlinkSync(found.path)
+        } catch {
+          /* 删不掉不影响这次响应 */
+        }
         return true
       }
 
