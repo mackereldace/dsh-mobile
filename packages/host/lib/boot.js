@@ -15951,21 +15951,48 @@
    */
   function anchorStatsPanel(anchor, marker, which) {
     if (typeof MutationObserver !== 'function' || document.body === null) return
-    var before = new Set(document.querySelectorAll('[role="dialog"]'))
     /**
-     * ★★ 2026-10-29（用户："token 用量菜单明显低了一点，没有和另外两个对齐，而且不是很靠右"）：
-     *   ① 面板识别：先认"点前/点后新出现的 dialog" ✓；rc.3 里那两块可能是**复用**的 ✗
-     *      ⇒ 再按**面板文案**兜底（会话统计 / Token 用量 / 上下文 ✓，与语言无关的部分用中文+英文双写 ✓）。
-     *   ② 对齐：等 DSH 把面板**真的摆出来**（`box.top > 4`）再量 ✓ —— 之前量到的是测量前的
-     *      {top:0} ⇒ bottom=视口高 ⇒ 锁死顶部 ✗。
-     *   ③ 三块底边统一算（取最高的锚点）✓；Token 用量再右对齐到屏幕 − 12px ✓。
+     * ★★ 2026-10-29（用户："延迟明显、三个按钮有时秒出有时等一会，感觉不稳定"）：
+     *   上一版是"先藏 dialog → 每 60ms 轮询等 DSH 把面板摆出来 → 再对齐显示" ✗ ——
+     *   轮询间隔 + 等 DSH 定位这两段叠加，就是那个忽快忽慢的延迟 ✓。
+     *
+     *   其实**不需要等 DSH 定位**：DSH 的面板间距 `PANEL_GAP` 恒为 8px ✓（客户端 bundle 常量），
+     *   宽度在"隐藏测量"那一趟就已经是真的 ✓ ⇒ 面板一出现就能算好底边/左右并直接显示 ✓。
+     *   ⇒ 改成 MutationObserver（同一微任务里抓到面板 ✓）+ 立刻对齐 + 立刻显示；
+     *     轮询只留一个很短的兜底（0/16/32ms）✓。
      */
+    var GAP = 8 // DSH stat-dialog.ts 的 PANEL_GAP（恒 8）
+    var before = new Set(document.querySelectorAll('[role="dialog"]'))
     var patterns =
       which === 'usage'
         ? ['Token 用量', 'Token usage', '缓存命中', '未缓存输入', 'Cache hit']
         : which === 'time'
           ? ['会话统计', 'Session statistics', '模型用时', 'TTFT']
           : ['上下文', 'Context', '上下文已用']
+    var observer = null
+    var timer = null
+    var done = false
+    var finish = function () {
+      if (done === true) return
+      done = true
+      if (observer !== null) {
+        try {
+          observer.disconnect()
+        } catch (error) {
+          void error
+        }
+        observer = null
+      }
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      try {
+        document.documentElement.removeAttribute('data-dshm-stats-opening')
+      } catch (error) {
+        void error
+      }
+    }
     var find = function () {
       var dialogs = document.querySelectorAll('[role="dialog"]')
       var fresh = null
@@ -15985,26 +16012,22 @@
       }
       return null
     }
-    var align = function (panel) {
-      if (panel === null || panel === undefined || panel.isConnected === false) return false
+    var alignNow = function (panel) {
       var box = panel.getBoundingClientRect()
       if (!(box.width > 0) || !(box.height > 0)) return false
       var pills = statsPillButtons()
       var meter = contextMeterButton()
-      var anchorBox = anchor === null || anchor === undefined ? null : anchor.getBoundingClientRect()
-      var top = anchorBox !== null && anchorBox.height > 0 ? anchorBox.top : null
-      var consider = pills.slice()
-      if (meter !== null && meter !== undefined && meter !== anchor) consider.push(meter)
-      for (var i = 0; i < consider.length; i++) {
-        if (consider[i] === anchor) continue
-        var rect = consider[i].getBoundingClientRect()
+      var anchors = pills.slice()
+      if (meter !== null && meter !== undefined && anchors.indexOf(meter) < 0) anchors.push(meter)
+      if (anchor !== null && anchor !== undefined && anchors.indexOf(anchor) < 0) anchors.push(anchor)
+      var top = null
+      for (var i = 0; i < anchors.length; i++) {
+        var rect = anchors[i].getBoundingClientRect()
         if (!(rect.height > 0)) continue
         if (top === null || rect.top < top) top = rect.top
       }
       if (top === null) return false
-      var gap = anchorBox === null ? 8 : anchorBox.top - box.bottom
-      if (!(gap >= 0 && gap <= 64)) gap = 8
-      var bottom = window.innerHeight - (top - gap)
+      var bottom = window.innerHeight - (top - GAP)
       if (!(bottom >= 0 && bottom <= window.innerHeight)) return false
       var stale = document.querySelectorAll('[role="dialog"]')
       for (var q = 0; q < stale.length; q++) {
@@ -16023,31 +16046,34 @@
       }
       return true
     }
-    var finish = function () {
-      try {
-        document.documentElement.removeAttribute('data-dshm-stats-opening')
-      } catch (error) {
-        void error
-      }
-    }
-    var started = Date.now()
-    var tick = function () {
-      if (Date.now() - started > 1600) {
-        finish()
-        debugBoxLine('[stats] ✗ 统计面板没在 1.6s 内认出来（这一块保持 DSH 自己的位置）')
-        return
-      }
+    var tryFind = function () {
+      if (done === true) return
       var panel = find()
-      if (panel !== null) {
-        var box = panel.getBoundingClientRect()
-        if (box.width > 0 && box.height > 0 && box.top > 4 && align(panel) === true) {
-          finish()
-          return
-        }
-      }
-      setTimeout(tick, 60)
+      if (panel === null) return
+      if (alignNow(panel) === true) finish()
     }
-    setTimeout(tick, 0)
+    try {
+      observer = new MutationObserver(function () {
+        tryFind()
+      })
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class'],
+      })
+    } catch (error) {
+      void error
+    }
+    tryFind()
+    setTimeout(tryFind, 0)
+    setTimeout(tryFind, 16)
+    setTimeout(tryFind, 32)
+    timer = setTimeout(function () {
+      timer = null
+      finish()
+      debugBoxLine('[stats] ✗ 统计面板没在 1.2s 内认出来（这一块保持 DSH 自己的位置）')
+    }, 1200)
   }
 
   /**
@@ -26149,7 +26175,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029061644'
+    var BOOT_STAMP = 'BUILD-1029061939'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
