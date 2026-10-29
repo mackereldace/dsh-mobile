@@ -11239,7 +11239,7 @@
        *   ⇒ **只有 rc.2** 才启用我们的 top/bottom 覆盖 ✓；rc.3 让 DSH 自己按锚点摆 ✓
        *   （胶囊已保留盒子 ✓）。
        */
-      '  html:not([data-dshm-rc3="1"]) [data-dshm-context-panel] {',
+      '  [data-dshm-context-panel], [data-dshm-stats-panel] {',
       '    top: auto !important;',
       '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
       '  }',
@@ -11250,9 +11250,14 @@
        *   ⇒ 只覆盖**底边与 `top`** ✓，宽度 / 左边 / 高度**一律留给 DSH** ✗
        *   （它们本来就摆得对 ✓，多写一条就是多一处误伤 ✓）。
        */
-      '  html:not([data-dshm-rc3="1"]) [data-dshm-stats-panel] {',
-      '    top: auto !important;',
-      '    bottom: var(--dshm-context-panel-bottom, 53.8333px) !important;',
+      /**
+       * ★★ 2026-10-29（用户："token 用量菜单明显低了一点，没有和另外两个对齐，而且不是很靠右"）：
+       *   三块小窗的底边由 JS 统一算（同一个 `--dshm-context-panel-bottom` ✓）；
+       *   「Token 用量」再右对齐到屏幕 − 12px ✓（DSH 自己的 left 是锚点左缘，不够靠右 ✗）。
+       */
+      '  [data-dshm-stats-right] {',
+      '    left: auto !important;',
+      '    right: 12px !important;',
       '  }',
       /**
        * ★ round 195：**只有「会话统计」那一块居中** ✓（用户点名 ✓）——
@@ -15934,81 +15939,94 @@
    * @param anchor - 这一下点的**是哪颗控件**（上下文 = 那颗环；轮次/用量 = 对应的胶囊 ✓）。
    * @param marker - 打在这块面板上的属性名（上下文用 `data-dshm-context-panel` ✓、另两块用 `data-dshm-stats-panel` ✓）。
    */
-  function anchorStatsPanel(anchor, marker, center) {
+  function anchorStatsPanel(anchor, marker, which) {
     if (typeof MutationObserver !== 'function' || document.body === null) return
-    /**
-     * ★★ round 194：判据用"**点前/点后的 dialog 差集**" ✓ = 这一下**新出现**的那块 ✓。
-     *
-     * ★ 试过两版更"聪明"的判据，**都被套件当场打红** ✗，记在这里免得后人再走一遍：
-     *   ① 有界轮询"隐藏→可见 / 位置变了" ✗ —— 轮次/用量那两块是 DSH **复用**的元素 ✓，
-     *      既不是新建、也未必有 `display: none→block` ⇒ 认不出来 ⇒ 读数与改前**一字不差** ✗；
-     *   ② 换成几何识别（"看得见 + 高度像样 + 底边落在状态行上方那一带"）✗ ——
-     *      它**误伤了别的 dialog** ✗（套件读数从 859/859/873.5 变成 **888/830/873.5**、
-     *      上下文高度从 158 掉回 142 ✓ ⇒ 规则打在了错的东西上 ✗）。
-     *   ⇒ 回到**最保守**的那条 ✓：只认"新出现的" ✓；认不出就**什么都不做** ✓（宁可失效、不可误伤 ✓）。
-     *     对"复用的那两块"，我们**不碰**它们 ✓（DSH 怎么放就怎么放 ✓ —— 真机上三块本来就是齐的 ✓，
-     *     见 round 125 真机读数"三个面板底边同为 b816" ✓）。
-     */
     var before = new Set(document.querySelectorAll('[role="dialog"]'))
-    var timer = setTimeout(function () {
-      observer.disconnect()
-      debugBoxLine('[stats] ✗ 统计面板没能在 3 秒内认出来（这一块不做对齐、保持 DSH 自己的位置 ✓）')
-    }, 3000)
-    var observer = new MutationObserver(function () {
-      var fresh = []
-      var now = document.querySelectorAll('[role="dialog"]')
-      for (var i = 0; i < now.length; i++) if (!before.has(now[i])) fresh.push(now[i])
-      if (fresh.length === 0) return
-      var panel = fresh[fresh.length - 1]
-      clearTimeout(timer)
-      observer.disconnect()
+    /**
+     * ★★ 2026-10-29（用户："token 用量菜单明显低了一点，没有和另外两个对齐，而且不是很靠右"）：
+     *   ① 面板识别：先认"点前/点后新出现的 dialog" ✓；rc.3 里那两块可能是**复用**的 ✗
+     *      ⇒ 再按**面板文案**兜底（会话统计 / Token 用量 / 上下文 ✓，与语言无关的部分用中文+英文双写 ✓）。
+     *   ② 对齐：等 DSH 把面板**真的摆出来**（`box.top > 4`）再量 ✓ —— 之前量到的是测量前的
+     *      {top:0} ⇒ bottom=视口高 ⇒ 锁死顶部 ✗。
+     *   ③ 三块底边统一算（取最高的锚点）✓；Token 用量再右对齐到屏幕 − 12px ✓。
+     */
+    var patterns =
+      which === 'usage'
+        ? ['Token 用量', 'Token usage', '缓存命中', '未缓存输入', 'Cache hit']
+        : which === 'time'
+          ? ['会话统计', 'Session statistics', '模型用时', 'TTFT']
+          : ['上下文', 'Context', '上下文已用']
+    var find = function () {
+      var dialogs = document.querySelectorAll('[role="dialog"]')
+      var fresh = null
+      for (var i = 0; i < dialogs.length; i++) {
+        var dialog = dialogs[i]
+        if (before.has(dialog)) continue
+        var rect = dialog.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) fresh = dialog
+      }
+      if (fresh !== null) return fresh
+      for (var j = 0; j < dialogs.length; j++) {
+        var candidate = dialogs[j]
+        var box = candidate.getBoundingClientRect()
+        if (!(box.width > 0) || !(box.height > 0)) continue
+        var text = String(candidate.textContent || '')
+        for (var k = 0; k < patterns.length; k++) if (text.indexOf(patterns[k]) >= 0) return candidate
+      }
+      return null
+    }
+    var align = function (panel) {
+      if (panel === null || panel === undefined || panel.isConnected === false) return false
       var box = panel.getBoundingClientRect()
-      var bottom = window.innerHeight - box.bottom
-      var statsRow = statsHostElement()
-      var pills = statsRow === null || statsRow === undefined ? [] : statsPillButtons()
-      var pillTop = null
-      for (var p = 0; p < pills.length; p++) {
-        if (pills[p] === anchor) continue
-        var pillBox = pills[p].getBoundingClientRect()
-        if (pillBox.height <= 0) continue
-        if (pillTop === null || pillBox.top < pillTop) pillTop = pillBox.top
+      if (!(box.width > 0) || !(box.height > 0)) return false
+      var pills = statsPillButtons()
+      var meter = contextMeterButton()
+      var anchorBox = anchor === null || anchor === undefined ? null : anchor.getBoundingClientRect()
+      var top = anchorBox !== null && anchorBox.height > 0 ? anchorBox.top : null
+      var consider = pills.slice()
+      if (meter !== null && meter !== undefined && meter !== anchor) consider.push(meter)
+      for (var i = 0; i < consider.length; i++) {
+        if (consider[i] === anchor) continue
+        var rect = consider[i].getBoundingClientRect()
+        if (!(rect.height > 0)) continue
+        if (top === null || rect.top < top) top = rect.top
       }
-      if (anchor !== null && anchor !== undefined && pillTop !== null) {
-        var gap = anchor.getBoundingClientRect().top - box.bottom
-        if (gap >= 0 && gap <= 64) {
-          var intended = window.innerHeight - (pillTop - gap)
-          if (intended >= 0 && intended <= window.innerHeight) bottom = intended
-        }
-      }
-      if (bottom >= 0 && bottom <= window.innerHeight) {
-        panel.style.setProperty('--dshm-context-panel-bottom', Math.round(bottom * 100) / 100 + 'px')
-      } else {
-        debugBoxLine('[stats] ✗ 统计面板的底边量不到（' + String(Math.round(bottom)) + 'px）⇒ 回落到 53.8333px')
-      }
-      /**
-       * ★★ round 195（用户 2026-10-01 ✓）：
-       *   ① 用户要**只把「会话统计」那一块居中** ✓（另外两块位置很合适 ✓）——
-       *      而它当时是被**上一条规则顺带推歪**的 ✗：三块面板其实是**同一个被复用的元素** ✗，
-       *      上下文那次打上的 `data-dshm-context-panel` 一直留着 ✓，那条规则里的 `left: 32px`
-       *      就跟着套到了「会话统计」上 ✓ ⇒ 看着不居中 ✗。
-       *   ② ⇒ 两件事：**先把旧标记全摘掉** ✓（不许跨面板串味 ✗）；
-       *      需要居中的那一块（`which === 'time'` ✓）再按自己的宽度算出居中左缘 ✓
-       *      （用 `left` 而不是 `transform` ✓ —— `transform` 归 DSH 的进出场动画用 ✗）。
-       */
+      if (top === null) return false
+      var gap = anchorBox === null ? 8 : anchorBox.top - box.bottom
+      if (!(gap >= 0 && gap <= 64)) gap = 8
+      var bottom = window.innerHeight - (top - gap)
+      if (!(bottom >= 0 && bottom <= window.innerHeight)) return false
       var stale = document.querySelectorAll('[role="dialog"]')
       for (var q = 0; q < stale.length; q++) {
         stale[q].removeAttribute('data-dshm-context-panel')
         stale[q].removeAttribute('data-dshm-stats-panel')
         stale[q].removeAttribute('data-dshm-stats-center')
+        stale[q].removeAttribute('data-dshm-stats-right')
       }
+      panel.style.setProperty('--dshm-context-panel-bottom', Math.round(bottom * 100) / 100 + 'px')
       panel.setAttribute(marker, '1')
-      if (center === true) {
+      if (which === 'usage') panel.setAttribute('data-dshm-stats-right', '1')
+      if (which === 'time') {
         var centered = Math.round((window.innerWidth - box.width) / 2)
         if (centered >= 0) panel.style.setProperty('--dshm-stats-panel-left', centered + 'px')
         panel.setAttribute('data-dshm-stats-center', '1')
       }
-    })
-    observer.observe(document.body, { childList: true })
+      return true
+    }
+    var started = Date.now()
+    var tick = function () {
+      if (Date.now() - started > 1600) {
+        debugBoxLine('[stats] ✗ 统计面板没在 1.6s 内认出来（这一块保持 DSH 自己的位置）')
+        return
+      }
+      var panel = find()
+      if (panel !== null) {
+        var box = panel.getBoundingClientRect()
+        if (box.width > 0 && box.height > 0 && box.top > 4 && align(panel) === true) return
+      }
+      setTimeout(tick, 60)
+    }
+    setTimeout(tick, 0)
   }
 
   /**
@@ -16026,7 +16044,7 @@
       var meter = contextMeterButton()
       if (meter !== null) {
         // ★ 先挂观察者再点 ✓（顺序反了就抓不到那块面板 ✓）
-        anchorStatsPanel(meter, 'data-dshm-context-panel')
+        anchorStatsPanel(meter, 'data-dshm-context-panel', 'context')
         meter.click()
       }
       return
@@ -16041,8 +16059,8 @@
      *   而用户要的是"三块一样" ✓（0.15 真机读数就是"三个面板底边同为 b816" ✓）
      *   ⇒ 三块都用**同一套算法**算出同一个底边 ✓（见 `anchorStatsPanel` ✓）。
      */
-    // ★ 「轮次」= 用户说的「会话统计」✓ ⇒ 只有它要居中 ✓（另外两块不动 ✓）
-    anchorStatsPanel(target, 'data-dshm-stats-panel', which === 'time')
+    // ★ 「轮次」= 用户说的「会话统计」✓ ⇒ 居中；「Token 用量」⇒ 右对齐 ✓
+    anchorStatsPanel(target, 'data-dshm-stats-panel', which)
     target.click()
   }
 
