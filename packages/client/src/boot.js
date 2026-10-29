@@ -10933,16 +10933,29 @@
       '#dshm-command-menu-host[data-open="0"] { display: none; }',
       '#dshm-command-menu {',
       '  position: fixed; pointer-events: auto; box-sizing: border-box;',
-      '  width: min(220px, calc(100vw - 24px)); overflow: auto; border-radius: 18px; padding: 4px;',
-      '  background: var(--dsw-specific-selector, #232324);',
+      '  width: min(300px, calc(100vw - 24px)); overflow: auto; border-radius: 14px; padding: 6px;',
+      /**
+       * ★ 2026-10-29：观感对齐 DSH 其他菜单 ✓ —— 用**同一个** surface token +
+       *   `--dsw-menu-backdrop-filter` 的模糊 ✓（自绘命令菜单之前用的是
+       *   `--dsw-specific-selector`、也没有模糊 ⇒ 看起来比别的菜单"生" ✗）。
+       */
+      '  background: var(--dsw-specific-menu, #232324);',
+      '  -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%));',
+      '  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%));',
       '  border: .5px solid var(--dsw-alias-border-l1, rgba(255,255,255,.1));',
       '  box-shadow: var(--dsw-elevation-prominent, 0 12px 40px rgba(0,0,0,.5));',
       '}',
       '#dshm-command-menu .dshm-mmenu-row {',
-      '  display: flex; align-items: center; gap: 8px; width: 100%;',
-      '  min-height: 34px; padding: 4px 10px; border: none; border-radius: 12px;',
+      '  display: flex; align-items: center; gap: 10px; width: 100%;',
+      '  min-height: 38px; padding: 6px 10px; border: none; border-radius: 10px;',
       '  background: transparent; color: var(--dsw-alias-label-primary);',
       '  font-size: 13px; line-height: 18px; text-align: left; cursor: pointer; box-sizing: border-box;',
+      '}',
+      '#dshm-command-menu .dshm-cmd-label { flex: none; white-space: nowrap; }',
+      '#dshm-command-menu .dshm-cmd-desc {',
+      '  margin-left: auto; min-width: 0; max-width: 58%; text-align: right;',
+      '  font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary, #8b9096);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
       '#dshm-command-menu .dshm-mmenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
       /* ═══════════ 本地 app 面板：「电脑与智能体」（round 211 ✓）═══════════
@@ -16487,6 +16500,46 @@
     commandMenuPanel.style.left = left + 'px'
   }
 
+  /**
+   * ★★ 2026-10-29（用户："自制一个新菜单，完全弃用 DSH 原生的菜单和命令键"）：
+   *   **静态清单** —— 不再点 DSH 原生 ＋、不再读原生 listbox ✓（那正是"点一下就把
+   *   输入框 focus 起来、IME 弹出来"的根 ✓）。条目与原生菜单一致（附件那条除外 ✓ ——
+   *   我们有自己的附件键 ✓）；选中后把斜杠命令放进 composer ✓（走 bridge 的
+   *   `conversation.input.setDraft` ✓，不靠 DOM execCommand ✓）。
+   */
+  var COMMAND_MENU_ITEMS = [
+    { label: '目标 goal', desc: '设置或查看长期任务目标', cmd: '/goal ' },
+    { label: '计划 plan', desc: '进入或退出计划模式', cmd: '/plan ' },
+    { label: '反馈 feedback', desc: '发送关于当前会话的反馈', cmd: '/feedback ' },
+    { label: '压缩 compact', desc: '压缩以上对话内容', cmd: '/compact ' },
+    { label: '权限 permission', desc: '切换权限预设（沙箱模式与审批策略）', cmd: '/permission ' },
+    { label: '模型 model', desc: '选择本会话使用的模型', cmd: '/model ' },
+    { label: '下载日志 export', desc: '将当前会话内容导出为 ZIP', cmd: '/export ' },
+    { label: 'purge', desc: 'DSH 指令权威性清洗（status/apply/revert/uninstall）', cmd: '/purge ' },
+    { label: 'rewind', desc: '回退：子代理直接回退一次；主代理 /rewind once|round', cmd: '/rewind ' },
+    { label: 'rules', desc: '规则集切换（写入 AGENTS.md/CLAUDE.md）', cmd: '/rules ' },
+    { label: 'skills', desc: '官方用户 Skill（$DSH_HOME/skills）：list|import', cmd: '/skills ' },
+  ]
+
+  function commandMenuInsert(item) {
+    var sessionId = modelMenuSessionId()
+    var bridge = globalThis.__DSHM_DSH_COMMANDS__
+    var ok = false
+    if (bridge !== undefined && bridge !== null && typeof bridge.insert === 'function') {
+      try {
+        ok = bridge.insert(sessionId, item.cmd) === true
+      } catch (error) {
+        void error
+      }
+    }
+    if (ok !== true) {
+      debugBoxLine('[command] ✗ 没插进去：' + item.cmd + '（需要重启 DSH 让 bridge 的命令入口生效）')
+    } else {
+      debugBoxLine('[command] 已插入：' + item.cmd)
+    }
+    commandMenuClose()
+  }
+
   /** 从 DSH 那张（被我们藏着的）触发器菜单里读条目 ✓。 */
   function commandMenuCollect() {
     var items = []
@@ -16544,19 +16597,20 @@
       button.type = 'button'
       button.className = 'dshm-mmenu-row'
       var label = document.createElement('span')
+      label.className = 'dshm-cmd-label'
       label.textContent = entry.label
+      var desc = document.createElement('span')
+      desc.className = 'dshm-cmd-desc'
+      desc.textContent = entry.desc
       button.appendChild(label)
-      button.addEventListener('click', function (event) {
-        event.preventDefault()
-        event.stopPropagation()
-      })
-      button.addEventListener('pointerdown', (function (target) {
+      button.appendChild(desc)
+      button.addEventListener('click', (function (it) {
         return function (event) {
+          event.preventDefault()
           event.stopPropagation()
-          fireTap(target)
-          commandMenuClose()
+          commandMenuInsert(it)
         }
-      })(entry.node))
+      })(entry))
       commandMenuPanel.appendChild(button)
     }
   }
@@ -16567,29 +16621,10 @@
    */
   function commandMenuOpen() {
     if (commandMenuEnsure() !== true) return
-    var plusEntry = attachAnchor()
-    if (plusEntry === null || plusEntry.anchor === null) return
-    /**
-     * ★ 2026-10-29：**先藏、再点** ✓ —— 顺序反了会让原生容器先画出来一帧 ✗；
-     *   而且只藏 `[role=listbox]` 不够（见 CSS 那条 ✓）。
-     */
-    document.documentElement.setAttribute('data-dsh-command-menu', 'hidden')
-    // 让 DSH 把它的菜单渲染出来 ✓（aria-expanded=false ⇒ 替它点开 ✓；true ⇒ 已经开着 ✓）
-    if (plusEntry.anchor.getAttribute('aria-expanded') !== 'true') plusEntry.anchor.click()
     commandMenuHost.setAttribute('data-open', '1')
-    commandMenuRows = []
+    commandMenuRows = COMMAND_MENU_ITEMS
     commandMenuRender()
     commandMenuPlace()
-    // 条目要等 DSH 渲染 ✓ ⇒ 一小步轮询 ✓（有界 ✓：最多 400ms ✓）
-    var tries = 0
-    var timer = setInterval(function () {
-      tries += 1
-      commandMenuRows = commandMenuCollect()
-      if (commandMenuRows.length === 0 && tries < 8) return
-      clearInterval(timer)
-      commandMenuRender()
-      commandMenuPlace()
-    }, 50)
   }
 
   function commandMenuIsOpen() {
@@ -18084,12 +18119,18 @@
      */
     var forward = function (event) {
       if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
-      var found = attachAnchor()
-      if (found === null) {
-        debugBoxLine('[attach] ✗ 认不出输入卡片或那颗隐藏的 input[type=file] ⇒ 这一次点不了')
+      /**
+       * ★★ 2026-10-29（用户："自制一个新菜单，完全弃用 DSH 原生的菜单和命令键"）：
+       *   **只开我们自己的菜单** ✓ —— 不点 DSH 的 ＋、不读原生 listbox、不设
+       *   `data-dsh-command-menu` ✓。输入框不会被 focus ⇒ 输入法不会被弹出来 ✓。
+       *   条目来自静态清单 ✓；选中后经 bridge 的 `conversation.input.setDraft`
+       *   把斜杠命令放进 composer ✓。
+       */
+      if (commandMenuIsOpen() === true) {
+        commandMenuClose()
         return
       }
-      found.input.click()
+      commandMenuOpen()
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)

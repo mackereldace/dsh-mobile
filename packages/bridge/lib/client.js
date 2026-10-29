@@ -68,7 +68,7 @@ window.__ModuleLoader__.load({
         ? fileAddressForFromDsh(sessionId, cwd, path)
         : fileAddressForLocal(sessionId, cwd, path)
 
-    const inject = ['sessions', 'sidebarRight']
+    const inject = ['sessions', 'sidebarRight', 'conversation']
 
     function apply(ctx) {
       const service = (name) => {
@@ -143,6 +143,67 @@ window.__ModuleLoader__.load({
       }
 
       globalThis.__DSHM_DSH_PREVIEW__ = { ready: true, open, state }
+
+      /**
+       * ★ 2026-10-29（用户："自制一个新菜单，完全弃用 DSH 原生的菜单和命令键"）：
+       *   给 boot.js 一个**往 composer 里放文本**的入口 ✓ —— DSH 的输入框是受控编辑器，
+       *   `execCommand` 实测插不进去（text 为空 ✓）；这里走 DSH 自己的
+       *   `conversation.input.setDraft`（dsh-purge 的 rewind 也是这么做的 ✓）。
+       */
+      const commandsBridge = {
+        currentSessionId() {
+          try {
+            const sessions = service('sessions')
+            const snap = sessions?.list?.getSnapshot?.()
+            if (snap?.current) return String(snap.current)
+            if (Array.isArray(snap?.ids) && snap.ids.length > 0) return String(snap.ids[0])
+            const ids = Object.keys(snap?.byId ?? {})
+            if (ids.length > 0) return String(ids[0])
+          } catch (error) {
+            /* ignore */
+          }
+          try {
+            const fromUrl = new URLSearchParams(location.search).get('session')
+            if (fromUrl !== null && fromUrl !== '') return fromUrl
+          } catch (error) {
+            /* ignore */
+          }
+          return ''
+        },
+        insert(sessionId, text) {
+          const id = typeof sessionId === 'string' && sessionId !== '' ? sessionId : commandsBridge.currentSessionId()
+          if (!id || typeof text !== 'string' || text === '') return false
+          const conversation = service('conversation')
+          const input = conversation?.input
+          if (input === undefined || input === null) return false
+          const faces = []
+          try {
+            if (typeof input.shell === 'function') faces.push(input.shell(id))
+          } catch (error) {
+            /* ignore */
+          }
+          try {
+            const sessions = service('sessions')
+            const scope = typeof sessions?.scope === 'function' ? sessions.scope(id) : undefined
+            if (typeof input.for === 'function' && scope !== undefined) faces.push(input.for(scope))
+          } catch (error) {
+            /* ignore */
+          }
+          faces.push(input)
+          for (const face of faces) {
+            if (face === undefined || face === null) continue
+            if (typeof face.setDraft !== 'function') continue
+            try {
+              face.setDraft(text)
+              return true
+            } catch (error) {
+              /* try next */
+            }
+          }
+          return false
+        },
+      }
+      globalThis.__DSHM_DSH_COMMANDS__ = commandsBridge
     }
 
     return { apply, inject }
