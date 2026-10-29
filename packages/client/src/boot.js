@@ -16535,23 +16535,64 @@
     { label: 'skills', desc: '官方用户 Skill（$DSH_HOME/skills）：list|import', cmd: '/skills ' },
   ]
 
+  /** 选中命令后把焦点交回 composer，并把光标放到末尾 ✓（输入法该留着/弹回来）。 */
+  function focusComposerAtEnd() {
+    var input = composerInputNode()
+    if (input === null || input === undefined) return false
+    try {
+      input.focus()
+    } catch (error) {
+      void error
+    }
+    try {
+      var selection = document.getSelection()
+      if (selection !== null && selection !== undefined) {
+        var range = document.createRange()
+        range.selectNodeContents(input)
+        range.collapse(false)
+        selection.removeAllRanges()
+        selection.addRange(range)
+      }
+    } catch (error) {
+      void error
+    }
+    return true
+  }
+
   function commandMenuInsert(item) {
-    var sessionId = modelMenuSessionId()
+    /**
+     * ★★ 2026-10-29（用户："菜单点完了……没有东西出现"）：
+     *   **不要再传 `modelMenuSessionId()`** ✗ —— 它优先取地址栏的 `?session=` ✓，
+     *   而用户 App 内切会话时地址栏并**不更新** ✗ ⇒ 会往**旧会话**里写 draft ✓
+     *   （或者那个会话没 retained ⇒ `shell()` 拿不到 ⇒ 干脆不写 ✗）。
+     *   ⇒ 传 `undefined` ✓：bridge 用 **DSH 客户端自己的 current session** ✓（它才是真的当前 ✓）。
+     */
     var bridge = globalThis.__DSHM_DSH_COMMANDS__
     var ok = false
     if (bridge !== undefined && bridge !== null && typeof bridge.insert === 'function') {
       try {
-        ok = bridge.insert(sessionId, item.cmd) === true
+        ok = bridge.insert(undefined, item.cmd) === true
       } catch (error) {
         void error
       }
     }
     if (ok !== true) {
-      debugBoxLine('[command] ✗ 没插进去：' + item.cmd + '（需要重启 DSH 让 bridge 的命令入口生效）')
+      debugBoxLine('[command] ✗ 没插进去：' + item.cmd + '（bridge 入口不可用？）')
     } else {
       debugBoxLine('[command] 已插入：' + item.cmd)
     }
     commandMenuClose()
+    /**
+     * ★ 行按钮拿到焦点会把输入法收掉 ✗ ⇒ 插完把焦点还给 composer 末尾 ✓
+     *   （等一下让 DSH 先把 draft 状态刷完 ✓；不等太久，键盘是"接着就能打字"的观感 ✓）。
+     */
+    setTimeout(function () {
+      try {
+        focusComposerAtEnd()
+      } catch (error) {
+        void error
+      }
+    }, 50)
   }
 
   /** 从 DSH 那张（被我们藏着的）触发器菜单里读条目 ✓。 */

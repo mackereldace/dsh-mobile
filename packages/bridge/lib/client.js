@@ -152,6 +152,20 @@ window.__ModuleLoader__.load({
        */
       const commandsBridge = {
         currentSessionId() {
+          /**
+           * ★★ 2026-10-29（用户："菜单点完了……没有东西出现"）：
+           *   **DSH 里"当前会话"的真身是 `uiWorkspace.selection`** ✓（dsh-purge 的
+           *   rewind 就是用它 ✓）；`sessions.list.current` 只是列表上的标记 ✗，
+           *   实测它会指向**另一个/未 retained**的会话 ✗ ⇒ `shell()` 拿不到输入面 ⇒ 静默失败 ✗。
+           *   ⇒ 先取 selection ✓，再退回 list.current ✓。
+           */
+          try {
+            const workspace = service('uiWorkspace')
+            const selected = workspace?.selection?.getSnapshot?.()?.sessionId
+            if (typeof selected === 'string' && selected !== '') return selected
+          } catch (error) {
+            /* ignore */
+          }
           try {
             const sessions = service('sessions')
             const snap = sessions?.list?.getSnapshot?.()
@@ -171,23 +185,38 @@ window.__ModuleLoader__.load({
           return ''
         },
         insert(sessionId, text) {
-          const id = typeof sessionId === 'string' && sessionId !== '' ? sessionId : commandsBridge.currentSessionId()
-          if (!id || typeof text !== 'string' || text === '') return false
+          if (typeof text !== 'string' || text === '') return false
           const conversation = service('conversation')
           const input = conversation?.input
           if (input === undefined || input === null) return false
-          const faces = []
+          const ids = []
+          const pushId = (value) => {
+            if (typeof value !== 'string' || value === '') return
+            if (ids.includes(value)) return
+            ids.push(value)
+          }
+          pushId(sessionId)
+          pushId(commandsBridge.currentSessionId())
           try {
-            if (typeof input.shell === 'function') faces.push(input.shell(id))
+            const fromUrl = new URLSearchParams(location.search).get('session')
+            pushId(fromUrl)
           } catch (error) {
             /* ignore */
           }
-          try {
-            const sessions = service('sessions')
-            const scope = typeof sessions?.scope === 'function' ? sessions.scope(id) : undefined
-            if (typeof input.for === 'function' && scope !== undefined) faces.push(input.for(scope))
-          } catch (error) {
-            /* ignore */
+          const sessions = service('sessions')
+          const faces = []
+          for (const id of ids) {
+            try {
+              if (typeof input.shell === 'function') faces.push(input.shell(id))
+            } catch (error) {
+              /* ignore */
+            }
+            try {
+              const scope = typeof sessions?.scope === 'function' ? sessions.scope(id) : undefined
+              if (typeof input.for === 'function' && scope !== undefined) faces.push(input.for(scope))
+            } catch (error) {
+              /* ignore */
+            }
           }
           faces.push(input)
           for (const face of faces) {
