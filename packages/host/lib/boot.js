@@ -14105,6 +14105,16 @@
        *     同时把父容器里的 **button / [role=tab]**（"…" 溢出键、purge 插进来的 tab ✓）
        *     都算进 `rightMost` ✓ —— 入口只会落在**所有可交互元素右侧的空地**里 ✓。
        */
+      /**
+       * ★★ 2026-10-29（用户："又和 dsh-purge 重合了"）：
+       *   ① 右缘候选：header 内容右缘 / 标签行父容器内容右缘 取大者（不靠 tablist 自己的宽度 ✗）；
+       *   ② **rightMost 先把行内兄弟都算上** ✓ —— dsh-purge 的 chip 是 `last.after(el)` 插在
+       *      最后一颗 tab 后面的 ✓，不算它 ⇒ 入口的左缘会压到它身上 ✗（这正是"重合"✓）；
+       *   ③ 右端真正要避开的控件（"…" 溢出键 / header 里的右端按钮）在**整个 header** 里找 ✓
+       *      （原来看的是标签行的父容器，装不下 header 的右端动作 ✗）——
+       *      只取**最靠右**那一个、且它左缘 −6 之后还能留出 ≥96px 才当边界 ✓；
+       *   ④ 中间那类控件（purge chip）只进 rightMost，不当边界 ✓。
+       */
       var edgeRight = rect.right
       try {
         var headerRect = header.getBoundingClientRect()
@@ -14121,31 +14131,47 @@
           var containerStyle = getComputedStyle(container)
           var containerRight = containerRect.right - (parseFloat(containerStyle.paddingRight) || 0)
           if (containerRight > edgeRight) edgeRight = containerRight
-          /**
-           * 右缘还得**避开**标签行右端的非 tab 控件（"…" 溢出键 / purge 插进来的按钮 ✓）：
-           *   取这些控件里最靠右的那个的**左缘 − 6px** 当边界 ✓ ⇒ 入口落在
-           *   「最后一个 tab ↔ 右端控件」之间的空地里 ✓，而不是压住 "…" ✗。
-           *   只在标签带子里（纵向 ±8px）的控件才算 ✓ —— 顶栏其它按钮不在这一行 ✓。
-           */
-          var controls = container.querySelectorAll('button, [role="button"], [data-dshm-purge-tab]')
-          for (var e = 0; e < controls.length; e++) {
-            var control = controls[e]
-            if (control.getAttribute('role') === 'tab') continue
-            if (control.closest !== undefined && control.closest('[data-dshm-lineage]') !== null) continue
-            var cr = control.getBoundingClientRect()
-            if (!(cr.width > 0) || !(cr.height > 0)) continue
-            if (cr.bottom < tabTop - 8 || cr.top > tabBottom + 8) continue
-            /**
-             * ★★ 2026-10-29（用户："这次修改子智能体显示直接消失了"）：
-             *   dsh-purge 的 chip 是插在**最后一颗 tab 后面**的（`last.after(el)` ✓），
-             *   它里面的按钮左缘离 tab 只有几十像素 ⇒ 上一版把它也当成"右端控件"来避让 ✗
-             *   ⇒ 边界只比 tab 右缘多 ~24px ⇒ 宽度闸不过 ⇒ 入口整块被藏掉 ✗✗。
-             *   ⇒ 只有**真的在右端、且能留出足够宽度**（≥96px）的控件才配当边界 ✓；
-             *     中间那类（purge chip / 其它小控件）一律忽略 ✓ —— 入口回到最右边 ✓。
-             */
-            var boundary = cr.left - 6
-            if (boundary > rightMost + 96 && boundary < edgeRight) edgeRight = boundary
+        }
+      } catch (error) {
+        void error
+      }
+      try {
+        // 行内兄弟（purge chip / 其它 chip）的右缘也算进 rightMost；跳过我们自己的入口与 DSH 的隐形锚点。
+        for (var c = 0; c < row.children.length; c++) {
+          var child = row.children[c]
+          if (child === undefined || child === null) continue
+          if (child.closest !== undefined && (child.closest('[data-dshm-lineage]') !== null || child.hasAttribute('data-dshm-lineage-dsh'))) continue
+          var childRect = child.getBoundingClientRect()
+          if (!(childRect.width > 0) || !(childRect.height > 0)) continue
+          if (childRect.right > rightMost) rightMost = childRect.right
+        }
+      } catch (error) {
+        void error
+      }
+      try {
+        /**
+         * 在整个 header 里找**最靠右**的非 tab 控件（"…" 溢出键 / 右端动作 ✓），
+         * 它才配当边界；中间的 purge chip 不动它 ✓。
+         */
+        var controls = header.querySelectorAll('button, [role="button"], [data-dshm-purge-tab]')
+        var rightEnd = null
+        var rightEndRect = null
+        for (var e = 0; e < controls.length; e++) {
+          var control = controls[e]
+          if (control.getAttribute('role') === 'tab') continue
+          if (control.closest !== undefined && control.closest('[data-dshm-lineage]') !== null) continue
+          if (control.hasAttribute('data-dshm-lineage-dsh')) continue
+          var cr = control.getBoundingClientRect()
+          if (!(cr.width > 0) || !(cr.height > 0)) continue
+          if (cr.bottom < tabTop - 8 || cr.top > tabBottom + 8) continue
+          if (rightEndRect === null || cr.right > rightEndRect.right) {
+            rightEnd = control
+            rightEndRect = cr
           }
+        }
+        if (rightEnd !== null && rightEndRect !== null) {
+          var boundary = rightEndRect.left - 6
+          if (boundary > rightMost + 96 && boundary < edgeRight) edgeRight = boundary
         }
       } catch (error) {
         void error
@@ -25974,7 +26000,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029054305'
+    var BOOT_STAMP = 'BUILD-1029055216'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
