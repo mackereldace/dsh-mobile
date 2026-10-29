@@ -14135,8 +14135,16 @@
             var cr = control.getBoundingClientRect()
             if (!(cr.width > 0) || !(cr.height > 0)) continue
             if (cr.bottom < tabTop - 8 || cr.top > tabBottom + 8) continue
+            /**
+             * ★★ 2026-10-29（用户："这次修改子智能体显示直接消失了"）：
+             *   dsh-purge 的 chip 是插在**最后一颗 tab 后面**的（`last.after(el)` ✓），
+             *   它里面的按钮左缘离 tab 只有几十像素 ⇒ 上一版把它也当成"右端控件"来避让 ✗
+             *   ⇒ 边界只比 tab 右缘多 ~24px ⇒ 宽度闸不过 ⇒ 入口整块被藏掉 ✗✗。
+             *   ⇒ 只有**真的在右端、且能留出足够宽度**（≥96px）的控件才配当边界 ✓；
+             *     中间那类（purge chip / 其它小控件）一律忽略 ✓ —— 入口回到最右边 ✓。
+             */
             var boundary = cr.left - 6
-            if (boundary > rightMost + 24 && boundary < edgeRight) edgeRight = boundary
+            if (boundary > rightMost + 96 && boundary < edgeRight) edgeRight = boundary
           }
         }
       } catch (error) {
