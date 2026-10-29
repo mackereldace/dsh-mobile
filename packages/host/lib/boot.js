@@ -18119,18 +18119,12 @@
      */
     var forward = function (event) {
       if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
-      /**
-       * ★★ 2026-10-29（用户："自制一个新菜单，完全弃用 DSH 原生的菜单和命令键"）：
-       *   **只开我们自己的菜单** ✓ —— 不点 DSH 的 ＋、不读原生 listbox、不设
-       *   `data-dsh-command-menu` ✓。输入框不会被 focus ⇒ 输入法不会被弹出来 ✓。
-       *   条目来自静态清单 ✓；选中后经 bridge 的 `conversation.input.setDraft`
-       *   把斜杠命令放进 composer ✓。
-       */
-      if (commandMenuIsOpen() === true) {
-        commandMenuClose()
+      var found = attachAnchor()
+      if (found === null) {
+        debugBoxLine('[attach] ✗ 认不出输入卡片或那颗隐藏的 input[type=file] ⇒ 这一次点不了')
         return
       }
-      commandMenuOpen()
+      found.input.click()
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -18345,44 +18339,19 @@
     button.appendChild(buildCommandIcon())
     var forward = function (event) {
       if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
-      var found = attachAnchor()
-      if (found === null || found.anchor === null) {
-        debugBoxLine('[command] ✗ 认不出那颗合并 ＋ ⇒ 这一次点不了')
-        return
-      }
       /**
-       * ★ round 204：**按 `aria-expanded` 判开关** ✓（那是 DSH 自己维护的状态 ✓，现成的 ✓）；
-       *   浮层是 **listbox** ✗（`aria-haspopup="listbox"` ✓）—— 前两版找 menu 找不到就是这么栽的 ✗。
-       *   · `aria-expanded=true` ⇒ 它认为开着 ⇒ 我们把 listbox **藏起来** ✓（根标记 ✓）；
-       *   · 否则 ⇒ 撤标记 + 替它点开 ✓。
-       *   ⇒ 与它那个坏掉的 toggle 无关 ✓（我们只翻自己的标记 ✓）。
+       * ★★ 2026-10-29（用户：「回形针键被改成了命令菜单，命令键依然没改」）：
+       *   上一版打补丁时按字符串找 `var forward`，结果替换到了**附件键**的 forward 上 ✗ ——
+       *   于是回形针打开了命令菜单、指令键还留着原生那条路径 ✗。
+       *   现在各归各位：附件键 = `input.click()` ✓（见 buildAttachButton ✓）；
+       *   指令键 = **只开我们自己的静态菜单** ✓（不点 DSH ＋、不读原生 listbox、
+       *   不设 data-dsh-command-menu ⇒ 打开动作不 focus 输入框 ⇒ 不弹输入法 ✓）。
        */
-      /**
-       * ★★ 2026-10-29（用户：原生优先 ✓）：**不再画自绘命令菜单** ✓ —— 直接开 DSH 原生那张 ✓。
-       *
-       * 用户原话：「目前点击只有自绘了貌似，但是自绘的功能繁杂很丑，原生的又有些奇怪的小bug」
-       * + 选「原生优先（推荐）」✓ + 原生的小 bug =「没有打开输入法时，点击会打开输入法」✓。
-       *
-       * 这里只做三件事：① 再点能关（原生 toggle 坏 ✓）；② 开的时候不要把输入法带出来 ✓；
-       * ③ 把自绘那块（若还开着）收掉 ✓。自绘代码保留（可回退 ✓），但不再走 ✓。
-       */
-      if (commandMenuIsOpen() === true) commandMenuClose()
-      document.documentElement.removeAttribute('data-dsh-command-menu')
-      var plus = attachAnchor()
-      if (plus === null || plus.anchor === null) {
-        debugBoxLine('[command] ✗ 认不出那颗合并 ＋ ⇒ 这一次点不了')
+      if (commandMenuIsOpen() === true) {
+        commandMenuClose()
         return
       }
-      var alreadyOpen =
-        plus.anchor.getAttribute('aria-expanded') === 'true' ||
-        document.querySelector('[role="listbox"]') !== null
-      if (alreadyOpen === true) {
-        closeDshMenuNear(plus.anchor)
-        return
-      }
-      nativeCommandFocusShieldStart()
-      plus.anchor.click()
-      nativeCommandOverlaySchedule()
+      commandMenuOpen()
     }
     button.addEventListener('pointerdown', function (event) { event.stopPropagation() })
     button.addEventListener('click', forward)
@@ -23685,10 +23654,11 @@
   /**
    * 把一张这种图片换掉 ✓。**同步返回**（缓存命中时当场换 ✓）；异步失败保留原 src ✓。
    */
-  function adoptFileImage(element, getTunnel) {
+  function adoptFileImage(element, getTunnel, attempt) {
     if (element === null || element === undefined || element.tagName !== 'IMG') return
     var path = fileImagePathOf(element)
     if (path === undefined) return
+    var tries = attempt === undefined ? 0 : attempt
     var cached = fileImageCache.get(path)
     if (cached !== undefined) {
       if (cached.url !== undefined) {
@@ -23721,6 +23691,25 @@
       function (error) {
         fileImageCache.delete(path)
         debugBoxLine('[img] 工作区图片读取失败（保留 DSH 原始失败态）：' + path + ' · ' + describeError(error))
+        /**
+         * ★★ 2026-10-29（用户："重启以后聊天记录的图片又意外读取不到了"）：
+         *   **DSH 重启的窗口里隧道是断的** ⇒ 这一笔 `mobile/files/read` 在本地就失败了
+         *   ✗ 而旧代码**没有重试** ✗ —— 图片一直挂着 `/api/file` 的破图，直到 React 把它
+         *   重新渲染一遍才会有第二次机会 ✓（"之前修好、重启后又坏"正是这个形状 ✓）。
+         *   ⇒ 对**同一张图、同一个 path** 做有界退避重试 ✓（2.5s/5s/7.5s/10s ✓）；
+         *   图已经换掉（src 不再是 /api/file）或节点被移除 ⇒ 立刻停 ✓，不会空转 ✓。
+         */
+        if (tries >= 4) return
+        if (element.isConnected !== true) return
+        setTimeout(function () {
+          try {
+            if (element.isConnected !== true) return
+            if (fileImagePathOf(element) !== path) return
+            adoptFileImage(element, getTunnel, tries + 1)
+          } catch (retryError) {
+            void retryError
+          }
+        }, 2500 * (tries + 1))
       },
     )
   }
@@ -23761,6 +23750,25 @@
       attributeFilter: ['src'],
     })
     scan(document.documentElement)
+    /**
+     * ★ 隧道重连 / 回到前台时**补扫一遍** ✓ —— 重启窗口里失败的那些图，src 不会自己变，
+     *   MutationObserver 也就不会再来一次 ✓；这两条是"用户什么都没做、图该自己回来"的入口 ✓。
+     */
+    var rescan = function () {
+      try {
+        scan(document.documentElement)
+      } catch (error) {
+        void error
+      }
+    }
+    try {
+      globalThis.addEventListener('online', rescan)
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') rescan()
+      })
+    } catch (error) {
+      void error
+    }
     debugBoxLine('[img] 工作区图片已改走隧道（/api/file → mobile/files/read）')
     return true
   }
@@ -25771,7 +25779,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1029041640'
+    var BOOT_STAMP = 'BUILD-1029050811'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
