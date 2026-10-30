@@ -124,6 +124,13 @@ public final class HomeModel {
         public final String currentUrl;
         /** authority（`host:port`）⇒ 探测结果 ✓。 */
         public final Map<String, Probe> probes;
+        /**
+         * ★★ 2026-10-30：authority ⇒ **没探的原因**（通/没响应之外的第三种）✓。
+         *   「没探（没有它的证书）」与「探了没响应」在界面上一模一样 ✗ ——
+         *   用户看到「Tailscale 地址标探测不到」时，分不清是网络问题还是 pin 缺失 ✓。
+         *   有这张表就能如实写在长按详情里 ✓。
+         */
+        public final Map<String, String> addressNotes;
 
         public Input(
                 List<HostRecord> records,
@@ -131,11 +138,22 @@ public final class HomeModel {
                 String currentHost,
                 String currentUrl,
                 Map<String, Probe> probes) {
+            this(records, endpoints, currentHost, currentUrl, probes, null);
+        }
+
+        public Input(
+                List<HostRecord> records,
+                List<Slot> endpoints,
+                String currentHost,
+                String currentUrl,
+                Map<String, Probe> probes,
+                Map<String, String> addressNotes) {
             this.records = records == null ? Collections.<HostRecord>emptyList() : records;
             this.endpoints = endpoints == null ? Collections.<Slot>emptyList() : endpoints;
             this.currentHost = currentHost == null ? "" : currentHost;
             this.currentUrl = currentUrl == null ? "" : currentUrl;
             this.probes = probes == null ? Collections.<String, Probe>emptyMap() : probes;
+            this.addressNotes = addressNotes == null ? Collections.<String, String>emptyMap() : addressNotes;
         }
     }
 
@@ -150,14 +168,24 @@ public final class HomeModel {
         public final boolean current;
         public final boolean reachable;
         public final String version;
+        /**
+         * 没探/探不通的**人话原因**（可空）✓ —— 例如「没探（没有它的证书）」✓。
+         * 长按详情用它区分「没探」与「探了没响应」✓。
+         */
+        public final String note;
 
         Address(String authority, String url, String kind, boolean current, boolean reachable, String version) {
+            this(authority, url, kind, current, reachable, version, "");
+        }
+
+        Address(String authority, String url, String kind, boolean current, boolean reachable, String version, String note) {
             this.authority = authority;
             this.url = url;
             this.kind = kind;
             this.current = current;
             this.reachable = reachable;
             this.version = version;
+            this.note = note == null ? "" : note;
         }
     }
 
@@ -524,7 +552,7 @@ public final class HomeModel {
             else if (anyProbed) offlineCount += 1;
             else unknownCount += 1;
 
-            List<Instance> instances = buildInstances(bucket, input.currentHost);
+            List<Instance> instances = buildInstances(bucket, input.currentHost, input.addressNotes);
             machines.add(new Machine(key, known, name, machineCurrent, anyReachable, anyProbed && !anyReachable, !anyProbed, instances));
         }
 
@@ -541,7 +569,7 @@ public final class HomeModel {
     }
 
     /** 智能体/实例：键 = `hostId` ✓（探不到就按地址各自成行 ✓，**不猜**它们是不是同一个 ✓）。 */
-    private static List<Instance> buildInstances(List<Row> bucket, String currentHost) {
+    private static List<Instance> buildInstances(List<Row> bucket, String currentHost, Map<String, String> addressNotes) {
         LinkedHashMap<String, List<Row>> byInstance = new LinkedHashMap<String, List<Row>>();
         LinkedHashMap<String, Boolean> identified = new LinkedHashMap<String, Boolean>();
 
@@ -622,7 +650,14 @@ public final class HomeModel {
                 if (reachable) instanceOnline = true;
                 if (version.isEmpty() && row.probe != null && !row.probe.dshVersion.trim().isEmpty()) version = row.probe.dshVersion.trim();
                 if (title.isEmpty() && isInstanceNameCandidate(row.label)) title = row.label.trim();
-                addresses.add(new Address(row.authority, row.url.isEmpty() ? "https://" + row.authority + "/" : row.url, kindOf(row.authority), current, reachable, row.probe == null ? "" : row.probe.dshVersion.trim()));
+                addresses.add(new Address(
+                        row.authority,
+                        row.url.isEmpty() ? "https://" + row.authority + "/" : row.url,
+                        kindOf(row.authority),
+                        current,
+                        reachable,
+                        row.probe == null ? "" : row.probe.dshVersion.trim(),
+                        (addressNotes == null ? null : addressNotes.get(row.authority))));
             }
             Collections.sort(addresses, new Comparator<Address>() {
                 @Override

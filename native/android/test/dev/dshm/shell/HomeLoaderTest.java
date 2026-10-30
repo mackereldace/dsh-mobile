@@ -25,7 +25,7 @@ public final class HomeLoaderTest {
     private static int checks = 0;
 
     /** ★ 断言条数下界（**只许上调** ✓ —— 理由见 `HomeModelTest` 同名常量 ✓）。 */
-    private static final int EXPECTED_MIN_CHECKS = 54;
+    private static final int EXPECTED_MIN_CHECKS = 62;
 
     public static void main(String[] args) {
         throwingPinSourceIsJustNoPin();
@@ -42,6 +42,8 @@ public final class HomeLoaderTest {
         noDuplicateProbes();
         summaryIsReadable();
         probeUrlIsTheManifestNotTheSlot();
+        pinReusedForSameMachineAddresses();
+        tailscaleTimeoutIsLonger();
 
         System.out.println();
         System.out.println("── check-home-loader ──────────────────────────");
@@ -156,6 +158,51 @@ public final class HomeLoaderTest {
         check("没 pin 时一次探测都没发生", probe.calls.isEmpty());
         check("没 pin 的地址在快照里是「未知」而不是「离线」",
                 result.snapshot.machines.get(0).neverProbed && !result.snapshot.machines.get(0).offline);
+        check("★ 没探的原因写进地址（长按能分清「没 pin」与「没响应」）",
+                noteOf(result, "10.0.0.7:3443").contains("没有它的证书"));
+    }
+
+    /** ★★ 2026-10-30：同一台电脑的另一个地址没有 pin ⇒ 复用同一个指纹那条记录的 pin ✓。 */
+    private static void pinReusedForSameMachineAddresses() {
+        FakeProbes probe = new FakeProbes();
+        probe.byAuthority.put("10.0.0.5:3443", HomeModel.Probe.up("h1", "FP1", "mac", "1.0"));
+        probe.byAuthority.put("100.64.0.9:3453", HomeModel.Probe.up("h1", "FP1", "mac", "1.0"));
+        HomeLoader.Source source = source(
+                records(record("FP1", "mac", "https://10.0.0.5:3443", "https://100.64.0.9:3453")),
+                new ArrayList<HomeModel.Slot>(),
+                "10.0.0.9:3443",
+                pins("10.0.0.5:3443", "CA-1"),
+                probe,
+                1, 8);
+        HomeLoader.Result result = HomeLoader.load(source);
+        check("★ 同机另一个地址（Tailscale）复用了 pin，照常探测",
+                result.report.probed.contains("100.64.0.9:3453"));
+        check("不再被记进「没 pin」", !result.report.skippedNoPin.contains("100.64.0.9:3453"));
+        check("复用留痕（调试/长按可念）",
+                !result.report.pinReused.isEmpty()
+                        && result.report.pinReused.get(0).startsWith("100.64.0.9:3453"));
+        check("两条地址都探过", probe.calls.size() >= 2);
+    }
+
+    /** ★★ 2026-10-30：Tailscale 首连慢 ⇒ 探测超时单独放宽；局域网不变。 */
+    private static void tailscaleTimeoutIsLonger() {
+        check("Tailscale CGNAT 地址超时放宽到 6s", HomeLoader.timeoutFor("100.64.0.9:3453", 3000) == 6000);
+        check("局域网仍用原超时（不拖慢首页）", HomeLoader.timeoutFor("10.0.0.5:3443", 3000) == 3000);
+        check("MagicDNS 名同样放宽", HomeLoader.timeoutFor("mac-mini-2024.tailnet.ts.net:3453", 3000) == 6000);
+    }
+
+    /** 找一条地址的 note（长按详情用）✓。 */
+    private static String noteOf(HomeLoader.Result result, String authority) {
+        for (int i = 0; i < result.snapshot.machines.size(); i += 1) {
+            HomeModel.Machine machine = result.snapshot.machines.get(i);
+            for (int j = 0; j < machine.instances.size(); j += 1) {
+                HomeModel.Instance instance = machine.instances.get(j);
+                for (int k = 0; k < instance.addresses.size(); k += 1) {
+                    if (instance.addresses.get(k).authority.equals(authority)) return instance.addresses.get(k).note;
+                }
+            }
+        }
+        return "";
     }
 
     // ───────────────────────── ★ 安全承重 ─────────────────────────

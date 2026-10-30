@@ -120,6 +120,11 @@ public final class HomeLoader {
         public final List<String> skippedNotHttps = new ArrayList<String>();
         public final List<String> skippedNoPin = new ArrayList<String>();
         public final List<String> skippedOverLimit = new ArrayList<String>();
+        /**
+         * ★★ 2026-10-30：这台机器的**另一条地址**上有 pin ⇒ 复用它 ✓（同一台电脑的 CA 相同 ✓）。
+         *   `authority ← sibling` 形式，只给调试/长按详情看 ✓。
+         */
+        public final List<String> pinReused = new ArrayList<String>();
         /** 探过但没通 ✓（与"没探"分得清 ✓）。 */
         public final List<String> unreachable = new ArrayList<String>();
         public long elapsedMs = 0;
@@ -151,11 +156,14 @@ public final class HomeLoader {
         final String authority;
         final String url;
         final String caPem;
+        /** 这条地址的探测超时 ✓（Tailscale 首连慢 ⇒ 单独放宽 ✓）。 */
+        final int timeoutMs;
 
-        Plan(String authority, String url, String caPem) {
+        Plan(String authority, String url, String caPem, int timeoutMs) {
             this.authority = authority;
             this.url = url;
             this.caPem = caPem;
+            this.timeoutMs = timeoutMs;
         }
     }
 
@@ -165,6 +173,35 @@ public final class HomeLoader {
         HomeModel.Input input = new HomeModel.Input(
                 source.records, source.endpoints, source.currentHost, source.currentUrl, Collections.<String, HomeModel.Probe>emptyMap());
 
+        /**
+         * ★★ 2026-10-30：**同一台电脑的其它地址上的 pin 可以复用** ✓。
+         *
+         * 用户：手机上配了另一台电脑的 Tailscale 地址、页面也能打开，但长按卡片那条地址
+         * 一直「探测不到」✗。根因是探测层只认「**这条 authority 自己**」的 pin ✓（C3 那条
+         * 安全边界 ✓）；而那台电脑是**用局域网地址配对的** ⇒ Tailscale 那条没有专属 pin ✗
+         * ⇒ `skippedNoPin` ⇒ 看起来像「没响应」✗。
+         * · 同一台电脑（**同一条目录记录 / 同一个指纹** ✓）的所有地址共用同一张 CA ✓；
+         * · 复用的判据是**目录指纹** ✓，不是"看起来像同一个主机名" ✗；
+         * · 证书链仍然由那张 CA 验 ✓ ⇒ 换一台机器签不出它 ✗（C3 的边界不变 ✓）。
+         */
+        LinkedHashMap<String, String> fingerprintOfAuthority = new LinkedHashMap<String, String>();
+        LinkedHashMap<String, List<String>> siblingsOfFingerprint = new LinkedHashMap<String, List<String>>();
+        for (int i = 0; i < source.records.size(); i += 1) {
+            HomeModel.HostRecord record = source.records.get(i);
+            String fingerprint = record.fingerprint == null ? "" : record.fingerprint.trim();
+            if (fingerprint.isEmpty()) continue;
+            for (int j = 0; j < record.slots.size(); j += 1) {
+                String authority = HomeModel.authorityOf(record.slots.get(j));
+                if (authority.isEmpty()) continue;
+                if (!fingerprintOfAuthority.containsKey(authority)) fingerprintOfAuthority.put(authority, fingerprint);
+                List<String> siblings = siblingsOfFingerprint.get(fingerprint);
+                if (siblings == null) {
+                    siblings = new ArrayList<String>();
+                    siblingsOfFingerprint.put(fingerprint, siblings);
+                }
+                if (!siblings.contains(authority)) siblings.add(authority);
+            }
+        }
         List<Plan> plan = new ArrayList<Plan>();
         LinkedHashMap<String, String> urls = HomeModel.addressUrls(input);
         for (Map.Entry<String, String> entry : urls.entrySet()) {
@@ -209,6 +246,33 @@ public final class HomeLoader {
                 caPem = "";
             }
             if (caPem == null || caPem.trim().isEmpty()) {
+                /**
+                 * ★ 2026-10-30：这条 authority 没有专属 pin ⇒ 看**同一台电脑**的其它地址有没有 ✓
+                 *   （判定见上面 `siblingsOfFingerprint` 的注释 ✓）。
+                 */
+                String fingerprint = fingerprintOfAuthority.get(authority);
+                if (fingerprint != null) {
+                    List<String> siblings = siblingsOfFingerprint.get(fingerprint);
+                    if (siblings != null) {
+                        for (int s = 0; s < siblings.size(); s += 1) {
+                            String sibling = siblings.get(s);
+                            if (sibling.equals(authority)) continue;
+                            String siblingPem = "";
+                            try {
+                                siblingPem = source.pins == null ? "" : source.pins.caPemFor(sibling);
+                            } catch (Throwable error) {
+                                siblingPem = "";
+                            }
+                            if (siblingPem != null && !siblingPem.trim().isEmpty()) {
+                                caPem = siblingPem;
+                                report.pinReused.add(authority + " ← " + sibling);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (caPem == null || caPem.trim().isEmpty()) {
                 report.skippedNoPin.add(authority);
                 continue;
             }
@@ -228,18 +292,56 @@ public final class HomeLoader {
              * ★ 它为什么一直没露 ✗：假探测只记 `authority|caPem` ✓、**从没记过 URL** ✓
              * ⇒ 错 URL 谁也看不见 ✓（现在补了断言 ✓）。
              */
-            plan.add(new Plan(authority, manifestUrl(url), caPem));
+            plan.add(new Plan(authority, manifestUrl(url), caPem, timeoutFor(authority, source.timeoutMs)));
         }
 
         Map<String, HomeModel.Probe> probes = runPlan(source, plan, report);
         report.elapsedMs = (System.nanoTime() - started) / 1000000L;
 
+        /**
+         * ★★ 2026-10-30：把「没探的原因」也带进模型 ✓ —— 长按详情才能分清
+         *   「没探（没有它的证书）」与「探了没响应」✓（用户这次报的就是分不清 ✓）。
+         */
+        LinkedHashMap<String, String> notes = new LinkedHashMap<String, String>();
+        for (int i = 0; i < report.skippedNoPin.size(); i += 1) notes.put(report.skippedNoPin.get(i), "没探（没有它的证书）");
+        for (int i = 0; i < report.skippedNotHttps.size(); i += 1) notes.put(report.skippedNotHttps.get(i), "没探（不是 https）");
+        for (int i = 0; i < report.skippedOverLimit.size(); i += 1) notes.put(report.skippedOverLimit.get(i), "没探（地址超过上限）");
+
         HomeModel.Input ready = new HomeModel.Input(
-                source.records, source.endpoints, source.currentHost, source.currentUrl, probes);
+                source.records, source.endpoints, source.currentHost, source.currentUrl, probes, notes);
         return new Result(HomeModel.build(ready), report);
     }
 
     /** 跑探测计划 ✓（并行度 ≤1 ⇒ 顺序 ✓，测试用得上 ✓）。 */
+    /**
+     * ★★ 2026-10-30：Tailscale 地址（`100.64.0.0/10` ✓ / `*.ts.net` ✓）首连可能比局域网慢 ✓
+     *   （DERP / NAT 打洞 ✓）；用 3s 会把「其实能连」判成没响应 ✗ ⇒ 单独放宽到 6s ✓。
+     *   局域网仍用原超时 ✓（不拖慢首页 ✓）。
+     */
+    static int timeoutFor(String authority, int baseTimeoutMs) {
+        int base = baseTimeoutMs > 0 ? baseTimeoutMs : 3000;
+        if (!isTailscaleAuthority(authority)) return base;
+        return Math.max(base, 6000);
+    }
+
+    /** authority 是不是 Tailscale 的地址 ✓（CGNAT 网段或 MagicDNS 名 ✓，不做 DNS ✗）。 */
+    static boolean isTailscaleAuthority(String authority) {
+        if (authority == null) return false;
+        String host = authority.trim().toLowerCase(java.util.Locale.ROOT);
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) host = host.substring(0, colon);
+        if (host.endsWith(".ts.net")) return true;
+        String[] parts = host.split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            int first = Integer.parseInt(parts[0]);
+            int second = Integer.parseInt(parts[1]);
+            return first == 100 && second >= 64 && second <= 127;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
     private static Map<String, HomeModel.Probe> runPlan(Source source, List<Plan> plan, Report report) {
         Map<String, HomeModel.Probe> probes = new LinkedHashMap<String, HomeModel.Probe>();
         if (plan.isEmpty()) return probes;
@@ -264,7 +366,7 @@ public final class HomeLoader {
                 }
                 for (int i = 0; i < futures.size(); i += 1) {
                     try {
-                        results[i] = futures.get(i).get(source.timeoutMs + 2000L, TimeUnit.MILLISECONDS);
+                        results[i] = futures.get(i).get(plan.get(i).timeoutMs + 2000L, TimeUnit.MILLISECONDS);
                     } catch (Throwable error) {
                         results[i] = HomeModel.Probe.down();
                     }
@@ -306,7 +408,7 @@ public final class HomeLoader {
     /** 探测函数**抛异常 ⇒ 当不可用** ✓（首页不能因为一条地址把整屏带崩 ✗）。 */
     private static HomeModel.Probe safeProbe(Source source, Plan item) {
         try {
-            HomeModel.Probe probe = source.probe.probe(item.url, item.caPem, source.timeoutMs);
+            HomeModel.Probe probe = source.probe.probe(item.url, item.caPem, item.timeoutMs);
             return probe == null ? HomeModel.Probe.down() : probe;
         } catch (Throwable error) {
             return HomeModel.Probe.down();

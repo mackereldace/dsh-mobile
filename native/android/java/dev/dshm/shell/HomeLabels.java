@@ -94,7 +94,8 @@ public final class HomeLabels {
             for (int j = 0; j < instance.addresses.size(); j += 1) {
                 HomeModel.Address address = instance.addresses.get(j);
                 text.append("      ").append(address.authority);
-                text.append(address.reachable ? " —— 通" : " —— 没响应");
+                if (address.note != null && !address.note.isEmpty()) text.append(" —— ").append(address.note);
+                else text.append(address.reachable ? " —— 通" : " —— 没响应");
                 if (address.current) text.append("（正在用）");
                 if (address.version != null && !address.version.isEmpty()) text.append(" · ").append(address.version);
                 text.append('\n');
