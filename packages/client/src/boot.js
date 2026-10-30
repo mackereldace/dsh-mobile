@@ -24064,10 +24064,14 @@
       }
       return
     }
+    var view = element.ownerDocument !== null && element.ownerDocument !== undefined
+      && element.ownerDocument.defaultView !== null && element.ownerDocument.defaultView !== undefined
+      ? element.ownerDocument.defaultView
+      : globalThis
     if (
-      typeof URL === 'undefined' ||
-      typeof URL.createObjectURL !== 'function' ||
-      typeof Blob !== 'function'
+      typeof view.URL === 'undefined' ||
+      typeof view.URL.createObjectURL !== 'function' ||
+      typeof view.Blob !== 'function'
     ) {
       debugBoxLine('[img] 本页没有 Blob / URL.createObjectURL ⇒ 工作区图片只能继续用 /api/file（会失败）')
       return
@@ -24076,7 +24080,7 @@
     fileImageCache.set(path, entry)
     readRemoteFileBytes(getTunnel, path).then(
       function (bytes) {
-        var url = URL.createObjectURL(new Blob([bytes], { type: fileImageMimeOf(path) }))
+        var url = view.URL.createObjectURL(new view.Blob([bytes], { type: fileImageMimeOf(path) }))
         entry.url = url
         for (var i = 0; i < entry.waiters.length; i++) {
           var waiting = entry.waiters[i]
@@ -24121,15 +24125,75 @@
     if (fileImageObserver !== undefined) return false
     if (!isMobileSurface()) return false
     if (typeof MutationObserver !== 'function') return false
+    /**
+     * ★★ 2026-10-30（用户："图片桥又断了"）：**光看主文档不够** ✓ ——
+     *   · 文档预览里的图片可能在**同源 iframe** 里（侧栏的 Markdown/HTML 预览 ✓）；
+     *   · 设计系统/第三方组件可能把 `<img>` 放进 **shadow root** ✓。
+     *   这两处的 `<img>` 我们原来的 `document.querySelectorAll` 和主 MutationObserver
+     *   **都看不见** ✗ ⇒ 它们一直挂着 `/api/file` 的破图 ✓。
+     *   现在：每个 shadow root / 同源 iframe 的文档都**单独观察** ✓；
+     *   blob 也用**元素自己所在 window** 的 `URL`/`Blob` 建 ✓（跨 window 的 blob URL 可能不可用 ✗）。
+     */
+    var observed = new Set()
+    var observeRoot = function (root) {
+      if (root === null || root === undefined) return
+      if (observed.has(root)) return
+      observed.add(root)
+      try {
+        var observer = new MutationObserver(onRecords)
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['src', 'srcset'],
+        })
+      } catch (error) {
+        void error
+      }
+      scan(root)
+    }
+    var hookFrame = function (frame) {
+      if (frame === null || frame === undefined) return
+      var attach = function () {
+        var doc = null
+        try {
+          doc = frame.contentDocument
+        } catch (error) {
+          doc = null
+        }
+        if (doc !== null && doc !== undefined) observeRoot(doc)
+      }
+      if (frame.dataset === undefined || frame.dataset.dshmImgFrame !== '1') {
+        try {
+          frame.dataset.dshmImgFrame = '1'
+        } catch (error) {
+          void error
+        }
+        frame.addEventListener('load', attach)
+      }
+      attach()
+    }
     var scan = function (node) {
       if (node === null || node === undefined) return
+      if (node.nodeType === 9) {
+        if (node.documentElement !== null && node.documentElement !== undefined) scan(node.documentElement)
+        return
+      }
       if (node.nodeType !== 1) return
       if (node.tagName === 'IMG') adoptFileImage(node, getTunnel)
+      if (node.tagName === 'IFRAME') hookFrame(node)
+      if (node.shadowRoot !== null && node.shadowRoot !== undefined) observeRoot(node.shadowRoot)
       if (typeof node.querySelectorAll !== 'function') return
       var images = node.querySelectorAll('img')
       for (var i = 0; i < images.length; i++) adoptFileImage(images[i], getTunnel)
+      var frames = node.querySelectorAll('iframe')
+      for (var f = 0; f < frames.length; f++) hookFrame(frames[f])
+      var all = node.querySelectorAll('*')
+      for (var k = 0; k < all.length; k++) {
+        if (all[k].shadowRoot !== null && all[k].shadowRoot !== undefined) observeRoot(all[k].shadowRoot)
+      }
     }
-    fileImageObserver = new MutationObserver(function (records) {
+    var onRecords = function (records) {
       for (var i = 0; i < records.length; i++) {
         var record = records[i]
         if (record.type === 'attributes') {
@@ -24138,13 +24202,34 @@
         }
         for (var j = 0; j < record.addedNodes.length; j++) scan(record.addedNodes[j])
       }
-    })
+    }
+    fileImageObserver = new MutationObserver(onRecords)
     fileImageObserver.observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src'],
+      attributeFilter: ['src', 'srcset'],
     })
+    /**
+     * 新的 shadow root 也要能观察到 ✓ —— 钩住 `attachShadow`（open 模式 ✓：
+     * closed 的拿不到引用，只能靠父元素扫描时已有的那些 ✓）。
+     */
+    try {
+      if (typeof Element === 'function' && typeof Element.prototype.attachShadow === 'function') {
+        var originalAttach = Element.prototype.attachShadow
+        Element.prototype.attachShadow = function (init) {
+          var root = originalAttach.call(this, init)
+          try {
+            observeRoot(root)
+          } catch (error) {
+            void error
+          }
+          return root
+        }
+      }
+    } catch (error) {
+      void error
+    }
     scan(document.documentElement)
     /**
      * ★ 隧道重连 / 回到前台时**补扫一遍** ✓ —— 重启窗口里失败的那些图，src 不会自己变，
@@ -24153,6 +24238,13 @@
     var rescan = function () {
       try {
         scan(document.documentElement)
+        observed.forEach(function (root) {
+          try {
+            scan(root)
+          } catch (error) {
+            void error
+          }
+        })
       } catch (error) {
         void error
       }
