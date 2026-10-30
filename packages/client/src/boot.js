@@ -24018,6 +24018,20 @@
     bmp: 'image/bmp',
     svg: 'image/svg+xml',
   }
+  /**
+   * ★★ 2026-10-30（用户："图片无法预览 · 贴纸进行中 / 贴满之后"）：**先撤掉 `/api/file`** ✓。
+   *
+   * 手机的 DSH 页面没有 DSH 那枚 HTTP token（RPC 走的是插件隧道 ✓，裸 `<img>` 不是 ✓），
+   * 所以 `<img src="/api/file?…">` 在手机上会 401 ⇒ **DSH 自己的**图片组件 `onError`
+   * 把 `<img>` 换成「图片无法预览」文字 ✗。我们的桥事后再把 blob 塞回去时，
+   * `<img>` 已经被 React 卸载了 ✗ —— 读成功（审计里 4 次 `mobile/files/read` 全 ok ✓）
+   * 图却永远看不见 ✓。
+   * ⇒ 桥在**发起隧道读的同一步、同步地**把 src 换成 1×1 透明 GIF ✓，把那次注定 401 的
+   *   请求取消掉 ✓；等 blob 回来再换成真图 ✓。DSH 的 onError 就不会发生 ✓。
+   */
+  var FILE_IMAGE_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+  /** `data-dshm-img-path`：撤掉 `/api/file` 之后仍记得这张图是哪个工作区路径 ✓。 */
+  var FILE_IMAGE_PATH_ATTR = 'data-dshm-img-path'
   /** path → `{ url, waiters }` ✓（url 就绪后等着的 `<img>` 一起补 ✓）。 */
   var fileImageCache = new Map()
   var fileImageObserver
@@ -24053,6 +24067,14 @@
   function adoptFileImage(element, getTunnel, attempt) {
     if (element === null || element === undefined || element.tagName !== 'IMG') return
     var path = fileImagePathOf(element)
+    if (path === undefined) {
+      /**
+       * 已经撤成透明占位 / 已经换成 blob 的 `<img>`：从属性里把路径找回来 ✓
+       * （否则重试与 React 重渲染后的第二次机会都会在这里直接 return ✗）。
+       */
+      var remembered = element.getAttribute(FILE_IMAGE_PATH_ATTR)
+      if (typeof remembered === 'string' && remembered.length > 0) path = remembered
+    }
     if (path === undefined) return
     var tries = attempt === undefined ? 0 : attempt
     var cached = fileImageCache.get(path)
@@ -24078,6 +24100,16 @@
     }
     var entry = { url: undefined, waiters: [element] }
     fileImageCache.set(path, entry)
+    /**
+     * ★ 同步撤掉 `/api/file`（见 FILE_IMAGE_PLACEHOLDER 的说明 ✓）——
+     *   必须在 `readRemoteFileBytes` 之前、在同一个任务里做 ✓；晚一步 DSH 就先把 `<img>` 卸了 ✗。
+     */
+    try {
+      if (element.getAttribute(FILE_IMAGE_PATH_ATTR) !== path) element.setAttribute(FILE_IMAGE_PATH_ATTR, path)
+      if (element.getAttribute('src') !== FILE_IMAGE_PLACEHOLDER) element.src = FILE_IMAGE_PLACEHOLDER
+    } catch (error) {
+      void error
+    }
     readRemoteFileBytes(getTunnel, path).then(
       function (bytes) {
         var url = view.URL.createObjectURL(new view.Blob([bytes], { type: fileImageMimeOf(path) }))
@@ -24104,7 +24136,7 @@
         setTimeout(function () {
           try {
             if (element.isConnected !== true) return
-            if (fileImagePathOf(element) !== path) return
+            if (element.getAttribute(FILE_IMAGE_PATH_ATTR) !== path) return
             adoptFileImage(element, getTunnel, tries + 1)
           } catch (retryError) {
             void retryError
