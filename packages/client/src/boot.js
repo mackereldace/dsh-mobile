@@ -24032,6 +24032,31 @@
   var FILE_IMAGE_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
   /** `data-dshm-img-path`：撤掉 `/api/file` 之后仍记得这张图是哪个工作区路径 ✓。 */
   var FILE_IMAGE_PATH_ATTR = 'data-dshm-img-path'
+  /** 原来的 `/api/file` 地址 ✓ —— 最终失败时**换回去**，让 DSH 显示它自己的「图片无法预览」✗（不再留一块空白 ✓）。 */
+  var FILE_IMAGE_ORIGINAL_ATTR = 'data-dshm-img-original'
+  /**
+   * ★ 端侧取证（2026-10-31）✓：手机上看不到图时，电脑那边**一条线索都没有** ✗ ——
+   *   本地端点失败原先不写审计（宿主侧已修 ✓），这里再把"桥看到了什么/为什么失败"
+   *   发回宿主（`mobile/img/diag` ✓，只写审计 ✓，不改行为 ✓）。
+   *   去重：同一 phase + path 只报一次 ✓（重试不刷屏 ✓）。
+   */
+  var fileImageDiagSent = {}
+  function reportFileImageDiag(getTunnel, phase, path, reason) {
+    try {
+      var key = phase + '|' + (path === undefined ? '' : path)
+      if (fileImageDiagSent[key] === 1) return
+      fileImageDiagSent[key] = 1
+      var extra = 'imgs=' + document.querySelectorAll('img').length
+      callLocalEndpoint(getTunnel, 'mobile/img/diag', {
+        phase: phase,
+        path: path === undefined ? '' : path,
+        reason: reason === undefined ? '' : String(reason).slice(0, 200),
+        extra: extra,
+      }).catch(function () {})
+    } catch (error) {
+      void error
+    }
+  }
   /** path → `{ url, waiters }` ✓（url 就绪后等着的 `<img>` 一起补 ✓）。 */
   var fileImageCache = new Map()
   var fileImageObserver
@@ -24100,11 +24125,17 @@
     }
     var entry = { url: undefined, waiters: [element] }
     fileImageCache.set(path, entry)
+    reportFileImageDiag(getTunnel, 'adopt', path, '')
     /**
      * ★ 同步撤掉 `/api/file`（见 FILE_IMAGE_PLACEHOLDER 的说明 ✓）——
      *   必须在 `readRemoteFileBytes` 之前、在同一个任务里做 ✓；晚一步 DSH 就先把 `<img>` 卸了 ✗。
      */
     try {
+      var original = element.getAttribute('src')
+      if (typeof original === 'string' && original.length > 0 && original !== FILE_IMAGE_PLACEHOLDER
+        && element.getAttribute(FILE_IMAGE_ORIGINAL_ATTR) === null) {
+        element.setAttribute(FILE_IMAGE_ORIGINAL_ATTR, original)
+      }
       if (element.getAttribute(FILE_IMAGE_PATH_ATTR) !== path) element.setAttribute(FILE_IMAGE_PATH_ATTR, path)
       if (element.getAttribute('src') !== FILE_IMAGE_PLACEHOLDER) element.src = FILE_IMAGE_PLACEHOLDER
     } catch (error) {
@@ -24119,10 +24150,12 @@
           if (waiting !== null && waiting !== undefined) waiting.src = url
         }
         entry.waiters = []
+        reportFileImageDiag(getTunnel, 'ok', path, 'bytes=' + bytes.length)
       },
       function (error) {
         fileImageCache.delete(path)
-        debugBoxLine('[img] 工作区图片读取失败（保留 DSH 原始失败态）：' + path + ' · ' + describeError(error))
+        debugBoxLine('[img] 工作区图片读取失败（已报审计）：' + path + ' · ' + describeError(error))
+        reportFileImageDiag(getTunnel, 'failed', path, describeError(error))
         /**
          * ★★ 2026-10-29（用户："重启以后聊天记录的图片又意外读取不到了"）：
          *   **DSH 重启的窗口里隧道是断的** ⇒ 这一笔 `mobile/files/read` 在本地就失败了
@@ -24131,8 +24164,25 @@
          *   ⇒ 对**同一张图、同一个 path** 做有界退避重试 ✓（2.5s/5s/7.5s/10s ✓）；
          *   图已经换掉（src 不再是 /api/file）或节点被移除 ⇒ 立刻停 ✓，不会空转 ✓。
          */
-        if (tries >= 4) return
+        /**
+         * 重试：先密后疏 ✓（2.5/5/7.5/10s ×3 轮 ≈ 75s ✓）——
+         * DSH 重启 / 隧道重连的窗口通常在这之内恢复 ✓。
+         * ★ 全部失败后**换回原地址** ✗（`/api/file`）—— 让 DSH 自己显示「图片无法预览 · alt」✓，
+         *   而不是把一张 1×1 透明图永远留在那里（用户看到的就是"空出一行"✗）。
+         */
         if (element.isConnected !== true) return
+        if (tries >= 11) {
+          try {
+            var originalUrl = element.getAttribute(FILE_IMAGE_ORIGINAL_ATTR)
+            if (typeof originalUrl === 'string' && originalUrl.length > 0) {
+              element.removeAttribute(FILE_IMAGE_PATH_ATTR)
+              element.src = originalUrl
+            }
+          } catch (restoreError) {
+            void restoreError
+          }
+          return
+        }
         setTimeout(function () {
           try {
             if (element.isConnected !== true) return
@@ -24141,7 +24191,7 @@
           } catch (retryError) {
             void retryError
           }
-        }, 2500 * (tries + 1))
+        }, Math.min(10000, 2500 * ((tries % 4) + 1)))
       },
     )
   }
@@ -24290,6 +24340,21 @@
       void error
     }
     debugBoxLine('[img] 工作区图片已改走隧道（/api/file → mobile/files/read）')
+    reportFileImageDiag(getTunnel, 'install', '', '')
+    /**
+     * ★ 隧道重连成功时补扫一遍 ✓ —— 隧道断着的窗口里失败的那些图，src 不会自己变 ✓，
+     *   MutationObserver 也就不会再来一次 ✗；这是"用户什么都没做、图该自己回来"的入口 ✓。
+     */
+    try {
+      var live = getTunnel()
+      if (live !== undefined && live !== null && typeof live.onState === 'function') {
+        live.onState(function (state) {
+          if (state === 'connected') rescan()
+        })
+      }
+    } catch (error) {
+      void error
+    }
     return true
   }
 

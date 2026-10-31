@@ -33,8 +33,12 @@ const destinationDirectory = join(packageRoot, 'lib')
 const destination = join(destinationDirectory, 'boot.js')
 
 if (!existsSync(source)) {
-  console.error(`[copy-boot] 找不到源文件：${source}`)
-  process.exit(1)
+  /**
+   * 发行仓（`dsh-mobile-plugin`）里没有 `../client` —— `lib/boot.js` 是**提交进来的快照** ✓。
+   * 那里构建应当**跳过**而不是失败 ✓（发布包用的是快照 ✓）。
+   */
+  console.log(`[copy-boot] 没有源文件（${source}）⇒ 跳过（发行仓用已提交的 lib/boot.js 快照）`)
+  process.exit(0)
 }
 
 mkdirSync(destinationDirectory, { recursive: true })

@@ -621,7 +621,28 @@ export function createMobileHost(options) {
                 }
                 // 插件自有的隧道内端点在能力门禁**之前**处理：它们不是 DSH 的命名空间，
                 // 门禁不认识它们；设备身份已由上面的 resolveEstablishedDevice 保证。
-                const local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device);
+                /**
+                 * ★★★ 2026-10-31：**本地端点失败也必须记审计** ✗ ——
+                 *   原先这一句 `await invokeLocalEndpoint(...)` 在 try/catch **之外** ✓ ⇒
+                 *   `mobile/files/read` 一类失败（工作区根为空 / 路径越界 / 文件不存在）**一条都不留** ✗
+                 *   ⇒ 手机上"图片空着"、审计里干干净净 ✓ —— 排查时等于瞎的 ✓。
+                 *   现在把失败原因（`local failed: <message>`）也写进审计 ✓，成功那条照旧 ✓。
+                 */
+                let local;
+                try {
+                    local = await invokeLocalEndpoint(request.endpoint, request.payload, signal, device);
+                }
+                catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    store.record({
+                        deviceId: device.deviceId,
+                        kind: 'rpc',
+                        target: request.endpoint,
+                        detail: `local failed: ${message.slice(0, 160)}`,
+                        ok: false,
+                    });
+                    throw error;
+                }
                 if (local !== undefined) {
                     store.record({ deviceId: device.deviceId, kind: 'rpc', target: request.endpoint, detail: 'local', ok: true });
                     // ★ 本地端点返回的是**值** ⇒ 包成信封（= 改动前 tunnel 那层包法 ✓，形状不变 ✓）
@@ -2100,6 +2121,25 @@ export function createMobileHost(options) {
                 default:
                     return undefined;
             }
+        }
+        /**
+         * ★ 2026-10-31：图片桥的**端侧取证**（`boot.js` 在 adopt / ok / failed 时各报一次）✓。
+         *   只写审计、不改任何行为 ✓ —— 手机上看不到图时，这是唯一能把原因带回电脑的通道 ✓。
+         */
+        if (endpoint === 'mobile/img/diag') {
+            const args = readLocalArgs(payload);
+            const phase = typeof args['phase'] === 'string' && args['phase'].length > 0 ? args['phase'].slice(0, 24) : 'unknown';
+            const path = typeof args['path'] === 'string' ? args['path'].slice(0, 300) : '';
+            const reason = typeof args['reason'] === 'string' ? args['reason'].slice(0, 200) : '';
+            const extra = typeof args['extra'] === 'string' ? args['extra'].slice(0, 120) : '';
+            store.record({
+                deviceId: device.deviceId,
+                kind: 'rpc',
+                target: `mobile/img/${phase}`,
+                detail: [path, reason, extra].filter((value) => value.length > 0).join(' · ').slice(0, 400),
+                ok: phase !== 'failed',
+            });
+            return { phase: phase };
         }
         if (endpoint.startsWith('mobile/files/')) {
             const args = readLocalArgs(payload);

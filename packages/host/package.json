@@ -1,6 +1,6 @@
 {
   "name": "@dsh-mobile/host",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "DSH 宿主插件：手机端加密配对、设备注册表与 /mobile 隧道（把手机浏览器接入 DSH 全部业务 API）",
   "type": "module",
@@ -13,11 +13,24 @@
     "./protocol": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
     }
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-input-trigger",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-api-session-controller"
+      ],
+      "platform": "web"
     }
   },
   "peerDependencies": {
@@ -32,8 +45,9 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-boot.mjs",
-    "copy-boot": "node scripts/copy-boot.mjs"
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-boot.mjs && node scripts/copy-bridge.mjs",
+    "copy-boot": "node scripts/copy-boot.mjs",
+    "copy-bridge": "node scripts/copy-bridge.mjs"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
