@@ -107,6 +107,8 @@ export interface ListenerServer {
         ipv6Only?: boolean;
     }, callback: () => void): unknown;
     close(callback?: (error?: Error) => void): unknown;
+    /** Node ≥18.2：立刻掐掉 keep-alive 连接（`close()` 本身只停 accept）✓ */
+    closeAllConnections?(): unknown;
     setSecureContext?(context: {
         cert: Buffer;
         key: Buffer;
@@ -193,5 +195,10 @@ export declare function createLanListener(options: {
         key: Buffer;
     }, handler: (socket: LanSocket) => void) => ListenerServer;
     readonly connect?: (port: number, host: string) => LanSocket;
+    /**
+     * 只为可测：`EADDRINUSE` 重试的**基准间隔**（毫秒；默认 1000）✓。
+     * 真部署不传 ⇒ 1/2/3/4 秒 ✓；测试传 1ms ⇒ 不用真等 10 秒 ✓。
+     */
+    readonly retryDelayMs?: number;
 }): LanListener;
 //# sourceMappingURL=lan-listener.d.ts.map

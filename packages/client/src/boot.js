@@ -24052,7 +24052,20 @@
         path: path === undefined ? '' : path,
         reason: reason === undefined ? '' : String(reason).slice(0, 200),
         extra: extra,
-      }).catch(function () {})
+      }).catch(function () {
+        /**
+         * ★ 老宿主（还没有 `mobile/img/diag` 端点）⇒ 把线索编进**端点名** ✓：
+         *   老宿主会把它当未知端点 **拒绝**，而拒绝会写审计（target = 端点名）✓
+         *   ⇒ 不用重启 DSH 也能把"哪张图、什么错"带回电脑 ✓。
+         *   新宿主有 diag 端点 ⇒ 这条不会走 ✓（不产生噪音 ✓）。
+         */
+        try {
+          var packed = encodeURIComponent(phase + '|' + (path === undefined ? '' : path) + '|' + (reason === undefined ? '' : String(reason))).slice(0, 600)
+          callLocalEndpoint(getTunnel, 'mobile/img-failed/' + packed, {}).catch(function () {})
+        } catch (inner) {
+          void inner
+        }
+      })
     } catch (error) {
       void error
     }

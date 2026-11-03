@@ -18,7 +18,7 @@
  * 单一事实来源：`packages/bridge/lib/client.js` ✓（本次为复制，不是生成 ✓）。
  * 发行仓（`dsh-mobile-plugin`）没有 `../bridge` ⇒ **跳过** ✓（lib/client.js 是快照 ✓）。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,5 +34,30 @@ if (!existsSync(source)) {
 }
 
 mkdirSync(destinationDirectory, { recursive: true })
-copyFileSync(source, destination)
-console.log(`[copy-bridge] 已复制 client.js → ${destination}（${readFileSync(destination).length} 字节）`)
+/**
+ * ★★ 2026-11-03 真机事故：**模块 id 必须等于「包名」** ✗
+ *
+ * DSH 的 `dsh-client-modules` 规定：浏览器侧 `__ModuleLoader__.load({ id })` 的
+ * `id` **必须等于包名**（graph 行按包名去找这个模块）✓。
+ * 桥单独成包时包名是 `@dsh-mobile/bridge`，所以原先直接照抄 ✓；
+ * 并进 host 之后**包名变成了 `@dsh-mobile/host`**，再照抄就变成：
+ *   · 注册的是 `@dsh-mobile/bridge` ⇒ host 那一行 `import failed: could not load
+ *     "@dsh-mobile/host" … loaded without registering "@dsh-mobile/host"` ✗
+ *   · 同一个文件被 boot 的合并包与逐行包各执行一次 ⇒
+ *     `duplicate factory registration for "@dsh-mobile/bridge"` ✗
+ * ⇒ 整个 web boot 失败（用户看到的"开插件就进不去、只能禁用"✓）。
+ *
+ * 所以复制时**必须把 id 换成 host 的包名** ✓；桥自己那份（单独装桥的人）保持原名 ✓。
+ * 替换数必须是 1：将来桥里多出第二个 id 字面量时，这里**当场报错**，不要静默半改 ✗。
+ */
+const sourceText = readFileSync(source, 'utf8')
+const idPattern = /id: '@dsh-mobile\/bridge'/g
+const matches = sourceText.match(idPattern)
+if (matches === null || matches.length !== 1) {
+  throw new Error(
+    `[copy-bridge] 期望 client.js 里恰好 1 处 id: '@dsh-mobile/bridge'，实际 ${matches === null ? 0 : matches.length} 处 —— 拒绝生成可能半改的 client.js`,
+  )
+}
+const rewritten = sourceText.replace(idPattern, "id: '@dsh-mobile/host'")
+writeFileSync(destination, rewritten)
+console.log(`[copy-bridge] 已生成 client.js → ${destination}（${rewritten.length} 字节；模块 id = @dsh-mobile/host）`)

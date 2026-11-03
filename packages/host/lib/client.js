@@ -27,7 +27,7 @@
  * **cwd 是该路径祖先**的会话 ✓（没有就退回第一个会话 ✓，绝对路径照样能用 ✓）。
  */
 window.__ModuleLoader__.load({
-  id: '@dsh-mobile/bridge',
+  id: '@dsh-mobile/host',
   factory: (require) => {
     /**
      * 地址构造：**优先用 DSH 自己的函数** ✓，拿不到就用下面这份**等价移植** ✓。

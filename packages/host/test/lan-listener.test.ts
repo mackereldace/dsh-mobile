@@ -164,11 +164,12 @@ function errno(code: string): NodeJS.ErrnoException {
  * `listen` 里用 `queueMicrotask`（而不是同步回调）：真 `server.listen` 的 listening
  * 回调也是异步的，同步就绪会让"启动后立刻读状态"这类断言失去意义。
  */
-function makeFakeServer(options: { failWith?: NodeJS.ErrnoException } = {}): FakeServer {
+function makeFakeServer(options: { failWith?: NodeJS.ErrnoException; failTimes?: number } = {}): FakeServer {
   const emitter = new EventEmitter()
   const listenCalls: FakeServer['listenCalls'] = []
   const secureContexts: FakeServer['secureContexts'] = []
   let closed = 0
+  let failuresLeft = options.failTimes ?? (options.failWith === undefined ? 0 : Number.POSITIVE_INFINITY)
   const server: ListenerServer = {
     on(event: string, listener: (...args: never[]) => void) {
       emitter.on(event, listener as (...args: unknown[]) => void)
@@ -180,8 +181,10 @@ function makeFakeServer(options: { failWith?: NodeJS.ErrnoException } = {}): Fak
         host: opts.host,
         ...(opts.ipv6Only === undefined ? {} : { ipv6Only: opts.ipv6Only }),
       })
-      if (options.failWith !== undefined) queueMicrotask(() => emitter.emit('error', options.failWith))
-      else queueMicrotask(() => callback())
+      if (options.failWith !== undefined && failuresLeft > 0) {
+        failuresLeft -= 1
+        queueMicrotask(() => emitter.emit('error', options.failWith))
+      } else queueMicrotask(() => callback())
       return server
     },
     close(callback) {
@@ -200,6 +203,11 @@ function makeFakeServer(options: { failWith?: NodeJS.ErrnoException } = {}): Fak
 /** 等一轮微任务/宏任务，让假 server 的异步"就绪/报错"落地。 */
 function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve))
+}
+
+/** 真等一小段（重试间隔用 1ms 时，80ms 足够跑完 4 次）✓。 */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** 临时目录里的 TLS 材料（真文件；写文件不是占端口）。 */
@@ -467,24 +475,25 @@ describe('createLanListener：默认关闭、IPv6 伴随、端口冲突不换端
     }
   })
 
-  it('端口冲突（EADDRINUSE）⇒ 只警告、**不换端口**，并点明"可能上次的 lan-proxy 还活着"', async () => {
+  it('端口冲突（EADDRINUSE）⇒ 先重试 4 次，仍被占才警告并点明"可能上次的 lan-proxy 还活着"', async () => {
     const warnings: string[] = []
     const tcpServers: FakeServer[] = []
     const listener = createLanListener({
       enabled: true,
       plain: '0.0.0.0:3081',
       target: { host: '127.0.0.1', port: 3080 },
-      // 第一个（IPv4）失败，第二个（IPv6 伴随）正常 —— 与"老 lan-proxy 还在"的真实现象一致
+      // 第一个（IPv4）一直失败，第二个（IPv6 伴随）正常 —— 与"老 lan-proxy 还在"的真实现象一致
       createTcpServer: () => {
         const fake = makeFakeServer(tcpServers.length === 0 ? { failWith: errno('EADDRINUSE') } : {})
         tcpServers.push(fake)
         return fake.server
       },
+      retryDelayMs: 1,
       logger: { warn: (message) => warnings.push(message), info: () => {} },
     })
     listener.start()
-    await settle()
-    // ★ 必须重新取一次：`start()` 返回的是"那一刻"的快照，而假 server 的就绪/报错回调是异步的
+    await sleep(80)
+    // ★ 必须重新取一次：`start()` 返回的是"那一刻"的快照，而重试/就绪回调是异步的
     const status = listener.status()
     assert.equal(status.ok, false, '端口被占 ⇒ 手机入口不可用，自检必须报出来')
     const plainBinding = status.bindings.find((binding) => binding.kind === 'plain' && !binding.ipv6)
@@ -493,14 +502,47 @@ describe('createLanListener：默认关闭、IPv6 伴随、端口冲突不换端
     assert.ok(plainBinding?.hint?.includes('lan-proxy'), '提示必须点明"可能上一次的 lan-proxy 还活着"')
     assert.ok(plainBinding?.hint?.includes('不会自动换端口'))
     assert.ok(warnings.some((line) => line.includes('lan-proxy')))
-    // ★ 只有一次 3081 的 IPv4 尝试 + 一次 IPv6 伴随；**没有**换端口重试
+    // ★ 首次 + 4 次重试（同一端口，**没有**换端口）；IPv6 伴随只试一次
     assert.deepEqual(
       tcpServers.map((fake) => fake.listenCalls.map((call) => call.port)),
-      [[3081], [3081]],
+      [[3081, 3081, 3081, 3081, 3081], [3081]],
     )
     assert.deepEqual(
       status.warnings.some((line) => line.includes('lan-proxy')),
       true,
+    )
+  })
+
+  it('端口冲突只出现一次（旧进程正在退出）⇒ 自动重试成功，不报警、自检恢复 ok', async () => {
+    const warnings: string[] = []
+    const infos: string[] = []
+    const tcpServers: FakeServer[] = []
+    const listener = createLanListener({
+      enabled: true,
+      plain: '0.0.0.0:3081',
+      target: { host: '127.0.0.1', port: 3080 },
+      createTcpServer: () => {
+        // IPv4 第一次 EADDRINUSE，第二次就成功；IPv6 直接成功
+        const fake = makeFakeServer(tcpServers.length === 0 ? { failWith: errno('EADDRINUSE'), failTimes: 1 } : {})
+        tcpServers.push(fake)
+        return fake.server
+      },
+      retryDelayMs: 1,
+      logger: { warn: (message) => warnings.push(message), info: (message) => infos.push(message) },
+    })
+    listener.start()
+    await sleep(80)
+    const status = listener.status()
+    const plainBinding = status.bindings.find((binding) => binding.kind === 'plain' && !binding.ipv6)
+    assert.equal(plainBinding?.listening, true, '旧进程退出后重试必须自己把监听拿回来')
+    assert.equal(plainBinding?.code, undefined)
+    assert.equal(plainBinding?.hint, undefined)
+    assert.equal(status.ok, true)
+    assert.equal(warnings.some((line) => line.includes('lan-proxy')), false)
+    assert.ok(infos.some((line) => line.includes('暂时被占用')), '第一次被占要留一行说明，但不必恐吓')
+    assert.deepEqual(
+      tcpServers.map((fake) => fake.listenCalls.map((call) => call.port)),
+      [[3081, 3081], [3081]],
     )
   })
 

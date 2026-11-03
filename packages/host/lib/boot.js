@@ -24052,7 +24052,20 @@
         path: path === undefined ? '' : path,
         reason: reason === undefined ? '' : String(reason).slice(0, 200),
         extra: extra,
-      }).catch(function () {})
+      }).catch(function () {
+        /**
+         * ★ 老宿主（还没有 `mobile/img/diag` 端点）⇒ 把线索编进**端点名** ✓：
+         *   老宿主会把它当未知端点 **拒绝**，而拒绝会写审计（target = 端点名）✓
+         *   ⇒ 不用重启 DSH 也能把"哪张图、什么错"带回电脑 ✓。
+         *   新宿主有 diag 端点 ⇒ 这条不会走 ✓（不产生噪音 ✓）。
+         */
+        try {
+          var packed = encodeURIComponent(phase + '|' + (path === undefined ? '' : path) + '|' + (reason === undefined ? '' : String(reason))).slice(0, 600)
+          callLocalEndpoint(getTunnel, 'mobile/img-failed/' + packed, {}).catch(function () {})
+        } catch (inner) {
+          void inner
+        }
+      })
     } catch (error) {
       void error
     }
@@ -26364,7 +26377,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1031152255'
+    var BOOT_STAMP = 'BUILD-1103143200'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。

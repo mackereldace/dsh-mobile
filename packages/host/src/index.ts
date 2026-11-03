@@ -2449,6 +2449,36 @@ export function createMobileHost(options: {
       return
     }
 
+    /**
+     * ★ 2026-10-31 临时诊断：在工作区根下**真的**读一次文件，把 roots 与错误原样回给本机 ✓。
+     *   排查"手机上图片空着"时，它能区分三种原因：工作区根为空 / 路径越界 / 文件不存在 ✓。
+     *   只在 loopback（见 LOCAL_ONLY 名单）✓，不涉及任何写操作 ✓。
+     */
+    if (req.method === 'GET' && url.pathname === '/mobile/debug/fs-probe') {
+      const probePath = url.searchParams.get('path') ?? ''
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 5000)
+      try {
+        const roots = await listWorkspaceRoots(controller.signal)
+        const report: Record<string, unknown> = { path: probePath, roots }
+        try {
+          const chunk = await readChunk(probePath, 0, 1024 * 1024, roots)
+          report['ok'] = true
+          report['bytes'] = chunk.bytes
+          report['size'] = chunk.size
+          report['eof'] = chunk.eof
+        } catch (error) {
+          const failure = error as { code?: string; message?: string }
+          report['ok'] = false
+          report['error'] = { code: failure.code ?? null, message: String(failure.message ?? error) }
+        }
+        respondJson(res, 200, report)
+      } finally {
+        clearTimeout(timer)
+      }
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/mobile/audit') {
       respondJson(res, 200, {
         entries: service.listAudit({
@@ -4159,6 +4189,8 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
         // 端侧请求：让手机做事**只能从电脑本机发起**（否则同局域网的人就能指挥别人的手机）
         '/mobile/device/call',
         '/mobile/device/status',
+        // 临时诊断（只读一次工作区文件、只回错误）——只允许本机
+        '/mobile/debug/fs-probe',
       ])
       const PAIRING = new Set(['/mobile/pair/claim'])
 

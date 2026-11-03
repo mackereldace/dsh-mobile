@@ -261,6 +261,8 @@ export interface ListenerServer {
   on(event: 'close', listener: () => void): unknown
   listen(options: { port: number; host: string; ipv6Only?: boolean }, callback: () => void): unknown
   close(callback?: (error?: Error) => void): unknown
+  /** Node ≥18.2：立刻掐掉 keep-alive 连接（`close()` 本身只停 accept）✓ */
+  closeAllConnections?(): unknown
   setSecureContext?(context: { cert: Buffer; key: Buffer }): unknown
 }
 
@@ -297,6 +299,8 @@ interface BindingState {
   error?: string
   code?: string
   hint?: string
+  /** EADDRINUSE 的重试次数（上限见 `MAX_BIND_ATTEMPTS`）✓ */
+  attempts?: number
 }
 
 /** 监听器现状（写进 `/mobile/admin/selfcheck` 的 `listener` 段）。 */
@@ -415,6 +419,11 @@ export function createLanListener(options: {
     handler: (socket: LanSocket) => void,
   ) => ListenerServer
   readonly connect?: (port: number, host: string) => LanSocket
+  /**
+   * 只为可测：`EADDRINUSE` 重试的**基准间隔**（毫秒；默认 1000）✓。
+   * 真部署不传 ⇒ 1/2/3/4 秒 ✓；测试传 1ms ⇒ 不用真等 10 秒 ✓。
+   */
+  readonly retryDelayMs?: number
 }): LanListener {
   const logger = options.logger ?? {}
   const info = (message: string): void => logger.info?.(message)
@@ -440,6 +449,21 @@ export function createLanListener(options: {
 
   /** 已建立的监听（含 IPv6 伴随；关停时要一起收）。 */
   const servers: ListenerServer[] = []
+  /**
+   * ★★ 2026-11-03：`EADDRINUSE` **不再是一次就放弃** ✗
+   *
+   * 用户报"关闭/更新 DSH 后再启动就报错，只能禁用插件" ✓。实测（隔离实例）证明
+   * 端口被上一次进程占着时插件**不会抛**、DSH 也照常启动（只警告）✓ ——
+   * 所以那条不是本单的根因（根因是客户端模块 id，见 `scripts/copy-bridge.mjs`）✓。
+   * 但"上一次的进程还没退干净、端口要过一两秒才放"是**真实存在**的窗口 ✓ ⇒
+   * 这里给它 4 次、共约 10 秒的重试：旧进程一退出，监听自己回来 ✓，
+   * 不必让用户去 `lsof`/杀进程 ✓（真占着不放时照旧如实报错 ✗）。
+   */
+  const MAX_BIND_ATTEMPTS = 4
+  /** 重试间隔基准（测试可调到 1ms；生产恒为 1000ms）✓。 */
+  const retryDelayMs = options.retryDelayMs ?? 1000
+  /** 待触发的重试定时器（`dispose` 必须清掉；否则关了还会再 listen ✗）。 */
+  const retryTimers: ReturnType<typeof setTimeout>[] = []
   /** 只收 TLS 监听：热更新时对它们调 `setSecureContext`。 */
   const tlsServers: ListenerServer[] = []
   const bindings: BindingState[] = []
@@ -457,13 +481,50 @@ export function createLanListener(options: {
     bindings.push(binding)
     servers.push(server)
     if (kind === 'tls') tlsServers.push(server)
+    const label = `${kind === 'tls' ? 'HTTPS' : '明文'}${ipv6 ? ' IPv6' : ''}`
+    /**
+     * 真正的那一次 `listen` ✓ —— 首次调用与每次重试都走它 ✓，
+     * 这样"重试"不会多出第二种参数拼法 / 第二种状态写法 ✗。
+     */
+    const tryListen = (): void => {
+      if (disposed) return
+      server.listen({ port: endpoint.port, host: endpoint.host, ...(ipv6 ? { ipv6Only: true } : {}) }, () => {
+        binding.listening = true
+        // `exactOptionalPropertyTypes`：可选字段只能用 delete 清，不能赋 undefined ✗
+        delete binding.error
+        delete binding.code
+        delete binding.hint
+        info(`[dsh-mobile] ${label}监听：${endpoint.host}:${endpoint.port} → ${target.host}:${target.port}`)
+      })
+    }
     server.on('error', (error: NodeJS.ErrnoException) => {
       const code = typeof error.code === 'string' ? error.code : undefined
       binding.listening = false
       binding.error = errorMessage(error)
       if (code !== undefined) binding.code = code
       if (code === 'EADDRINUSE') binding.hint = conflictHint(endpoint.host, endpoint.port)
-      const label = `${kind === 'tls' ? 'HTTPS' : '明文'}${ipv6 ? ' IPv6' : ''}`
+      /**
+       * ★ 只对 `EADDRINUSE` 重试 ✓（别的错误重试没有意义 ✗）；
+       *   次数上限 4、间隔 1/2/3/4 秒 ✓ —— 覆盖"上一个 DSH 进程正在退出"那段窗口 ✓。
+       *   重试期间**不打 4 条**警告（每 2 秒一次会把启动日志刷花 ✗），只在第一次说明 ✓。
+       */
+      const attempts = binding.attempts ?? 0
+      if (code === 'EADDRINUSE' && attempts < MAX_BIND_ATTEMPTS) {
+        binding.attempts = attempts + 1
+        if (attempts === 0) {
+          info(
+            `[dsh-mobile] ${label}监听 ${endpoint.host}:${endpoint.port} 暂时被占用（EADDRINUSE）⇒ ` +
+              `每 1/2/3/4 秒重试共 4 次（多半是上一个 DSH 进程还没退干净）`,
+          )
+        }
+        const timer = setTimeout(() => {
+          const at = retryTimers.indexOf(timer)
+          if (at >= 0) retryTimers.splice(at, 1)
+          tryListen()
+        }, retryDelayMs * (attempts + 1))
+        retryTimers.push(timer)
+        return
+      }
       if (ipv6) {
         // IPv6 是**伴随**监听：起不来只影响蜂窝网 IPv6 直连，局域网照旧（与 lan-proxy 同语义）
         warn(`[dsh-mobile] IPv6 监听未启用（${code ?? errorMessage(error)}）——局域网不受影响`)
@@ -472,11 +533,7 @@ export function createLanListener(options: {
         if (code === 'EADDRINUSE') warn(`[dsh-mobile] ${conflictHint(endpoint.host, endpoint.port)}`)
       }
     })
-    server.listen({ port: endpoint.port, host: endpoint.host, ...(ipv6 ? { ipv6Only: true } : {}) }, () => {
-      binding.listening = true
-      const label = `${kind === 'tls' ? 'HTTPS' : '明文'}${ipv6 ? ' IPv6' : ''}`
-      info(`[dsh-mobile] ${label}监听：${endpoint.host}:${endpoint.port} → ${target.host}:${target.port}`)
-    })
+    tryListen()
   }
 
   /**
@@ -607,9 +664,18 @@ export function createLanListener(options: {
   function dispose(): void {
     if (disposed) return
     disposed = true
+    // ★ 先清掉待发的重试：否则 dispose 之后还会再 `listen` 一次 ✗（端口被我们自己的幽灵监听占住）
+    for (const timer of retryTimers) clearTimeout(timer)
+    retryTimers.length = 0
     for (const server of servers) {
       try {
         server.close(() => {})
+        /**
+         * ★ `close()` 只停 accept，**已建立的 keep-alive 连接**要等对端关 ✗；
+         *   配合 `closeAllConnections()` 立刻掐掉 ✓（Node ≥18.2，老运行时可选调用 ✓）。
+         *   端口本身在 `close()` 时就释放，但这么做能让"重启后端口还没回收"的观感消失 ✓。
+         */
+        server.closeAllConnections?.()
       } catch (error) {
         warn(`[dsh-mobile] 关闭监听失败（其余功能不受影响）：${errorMessage(error)}`)
       }
