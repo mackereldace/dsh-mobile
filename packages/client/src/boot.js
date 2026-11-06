@@ -7511,6 +7511,87 @@
   }
 
   /**
+   * 侧栏是「覆盖层」形态吗（DSH 0.2.2 起）。
+   *
+   * ## 为什么必须分形态（0.2.2 真机故障：抽屉拉开是一整片**黑**）
+   *
+   * 0.2.1 的侧栏是一列**网格轨道元素**：它一直摆在页面里，只是宽度被压成 0，
+   * 所以我们用 `left` 把它推到屏幕外、再推回来就够了 ✓。
+   *
+   * 0.2.2 把它改成了**覆盖层对话框**：`position: fixed` + 内联 `width`，
+   * 靠 **`transform: translateX(-100%)` + `visibility: hidden` + `inert` 属性**
+   * 自己藏起来（实测计算样式：`transition` 之外的位移**全在 transform 上**）。
+   * 我们只改 `left` ⇒ **一个像素都不动它** ⇒ 抽屉滑进来那一块什么都没有 ✓
+   * （用户原话：「打开后会话列表为空、显示为黑」✓；`colX` 量到 -264 就是这个原因 ✓）。
+   *
+   * ## 判据（只认 DSH 自己的「我正在藏着」标记）
+   *
+   * 三条任一成立即判为覆盖层：列上有 **`inert`** 属性 ✓、计算出的 **`visibility: hidden`** ✓、
+   * 内层根带 **`role="dialog"`** ✓（0.2.2 的侧栏根是 `role="dialog" aria-label="导航"` ✓）。
+   *
+   * ⚠️ **不能看 `position`** ✗：我们自己那条样式已经把 `position` 改成 `fixed !important` ✓
+   * ——那是我们干的，不是 DSH 的形态 ✓（这一条坑过一次：按 `position` 判会恒为真 ✓）。
+   *
+   * ## 为什么按元素缓存
+   *
+   * 判据要读计算样式（强制样式解析 ✓），而调用点在去抖观察者与每次开合里 ✓ ——
+   * 形态一页之内不会变 ✓ ⇒ 首次判定后按**列元素**缓存 ✓（换元素才重新判 ✓）。
+   */
+  var sidebarModeCache = { element: null, overlay: false }
+
+  function dshSidebarOverlayMode() {
+    var column = dshSidebarColumn()
+    if (column === null) return false
+    if (sidebarModeCache.element === column) return sidebarModeCache.overlay
+    var overlay = false
+    try {
+      if (column.hasAttribute('inert')) overlay = true
+      else if (getComputedStyle(column).visibility === 'hidden') overlay = true
+      else {
+        var root = dshSidebarRoot()
+        if (root !== null && root.getAttribute('role') === 'dialog') overlay = true
+      }
+    } catch (error) {
+      overlay = false
+    }
+    sidebarModeCache = { element: column, overlay: overlay }
+    return overlay
+  }
+
+  /** 把形态写进 `body[data-dshm-sidebar]`，供样式表按形态分支（见上面的说明）。 */
+  function syncSidebarMode() {
+    if (document.body === null || document.body === undefined) return
+    var next = dshSidebarOverlayMode() ? 'overlay' : 'native'
+    if (document.body.dataset.dshmSidebar !== next) document.body.dataset.dshmSidebar = next
+  }
+
+  /**
+   * 覆盖层形态下，开抽屉时把 DSH 的 `inert` 摘掉（关抽屉时还回去）。
+   *
+   * 为什么非摘不可：`inert` 会让整棵子树**不接收任何指针事件** ✓ —— 抽屉"看得见、
+   * 点不动"（会话行点不开）就是它 ✓。DSH 只在它自己那套状态变化时重写这个属性 ✓，
+   * 而我们的抽屉开关**不驱动**它 ✓ ⇒ 必须由我们在开合时补一次 ✓
+   * （`data-dshm-inert` 记住"是我们摘的"✓，关的时候只还自己摘过的那一次 ✓，
+   *  不去动 DSH 原本就该有的 ✓）。
+   */
+  function syncSidebarInert(open) {
+    var column = dshSidebarColumn()
+    if (column === null) return
+    if (!dshSidebarOverlayMode()) return
+    if (open === true) {
+      if (column.hasAttribute('inert')) {
+        column.dataset.dshmInert = '1'
+        column.removeAttribute('inert')
+      }
+      return
+    }
+    if (column.dataset.dshmInert === '1') {
+      column.setAttribute('inert', '')
+      delete column.dataset.dshmInert
+    }
+  }
+
+  /**
    * DSH 侧栏的内容根（自认收起时它带 `*_collapsed` 类）。
    *
    * 逐层走 `firstElementChild` 而不是 querySelector：DSH 在列与根之间夹了一层
@@ -8671,6 +8752,15 @@
    * @param mutate - 真正改状态的那一下 ✓（必须**同步**完成 ✓）。
    */
   function flipDrawerMotion(mutate) {
+    /**
+     * ★ 覆盖层形态（0.2.2 起）**不走 FLIP** ✓：那一列的位移已经由样式表的
+     *   `transition: transform` 负责（合成层移动 ✓），再叠一段内联 transform
+     *   只会和 `!important` 的样式规则打架（内联输 ✓ ⇒ 白算一次布局 ✓）。
+     */
+    if (dshSidebarOverlayMode()) {
+      mutate()
+      return
+    }
     var node = document.querySelector('[class*="sidebarCol"]')
     if (node === null || node === undefined || node.style === undefined || node.getBoundingClientRect === undefined) {
       mutate()
@@ -11152,6 +11242,33 @@
              （margin-top 只动上方 ✓，认变量的那条 max(2px, ...) 才是管下面的 ✓）。
          验收：check-mobile-layout 里 round 129 那五条断言（上间隙真的变大 ✓ /
          下方余量不变 ✓ / inset=0 时底部不动 ✓ / 不误伤输入框 ✓ / 有没有小白条都拉开 ✓）。 */
+      /**
+       * ★★★ 2026-11-06（用户："最底下那一栏上下文的，和输入框的距离要比和小白条的距离大，
+       *   我希望是一样大的"；并明确要**变窄**而不是加宽 ✗）：
+       *   `margin-top: 8px` → **-23px**，把这一行**往上收**，让上下两段留白相等 ✓。
+       *
+       * ## 为什么是负数（实测扫出来的，不是估的）
+       *
+       * 这一行的**底边是钉死的** ✓（它是 composer 最后一块 ✓，`padding-bottom` 决定它到安全区
+       * 的距离 ✓），而它到上方输入卡片的距离 = DSH 卡片自己的下内边距（约 26px ✓，
+       * **不是我们的** ✗）+ 我们这条 `margin-top` ✓。
+       * 于是 `margin-top` 每减 8，卡片就被"放下来"8px（composer 变短 ✓），**上方留白减 8** ✓，
+       * 而文字与安全区之间的距离**纹丝不动** ✓。实测（412×915，改前 `8px`）：
+       *
+       * | inset | margin-top | 上留白 | 下留白 |
+       * |---|---|---|---|
+       * | 0  | 8 | 37 | 8 |
+       * | 0  | -16 | 13 | 8 |
+       * | 34 | 8 | 35 | 2 |
+       * | 34 | -24 | 3 | 2 |
+       *
+       * ⇒ 取 **-23px**：inset=0 时上 6 / 下 8 ✓、inset≥4 时上 4 / 下 2 ✓
+       *   —— 两边差都在 2px 内 ✓（真机上肉眼就是"相等"✓），而且**总高变小** ✓（不是加宽 ✗）。
+       * ★ 上一版我加的是 `padding-bottom`（把下面撑大去迁就上面）✗ —— 那是"加宽"，
+       *   用户当场否掉 ✓；这一次只动**我们自己那一侧**（margin）✓，`padding-bottom`
+       *   与安全区那条口径**一个字没改** ✓。
+       * ★ 负值是安全的：实测最紧那档（inset=34、-24）上留白仍有 3px ✓ ⇒ 不会压到卡片 ✓。
+       */
       '#dshm-stats { margin-top: 8px; padding-bottom: max(2px, calc(var(--dshm-safe-bottom, 0px) - 2px)); }',
       /* ★★ round 148（用户："滚动条是没有了，但是**距离还是远**"✓）：**键盘弹起时把那笔补偿收掉** ✓。
          真机实测（`--dshm-safe-bottom: 20px` 那一档 ✓）：
@@ -11339,6 +11456,24 @@
       '    left: 0 !important;',
       // 阴影投向**右侧**（盖在让位后的主页面上），这是"纵深"的来源
       '    box-shadow: var(--dsw-elevation-prominent, 14px 0 36px rgba(0,0,0,.55));',
+      '  }',
+      /**
+       * ★★ 0.2.2 起：侧栏是**覆盖层对话框**，DSH 用 transform + visibility + inert 自己藏它
+       *   （判据见 `dshSidebarOverlayMode()` 的说明）。上面那套 `left` 位移对它无效
+       *   ⇒ 抽屉拉开是一整片黑。这一组只在**覆盖层形态**下接管"把它挪进来"：
+       *   · 关态：与 DSH 自己一样用 `translateX(-100% - 8px)`（不是新发明 ✓）；
+       *   · 开态：`transform: none` ✓ —— 静止开态**没有** transform ✓
+       *     ⇒ 不会额外制造 fixed 包含块（round 160 记下的设置弹窗那条坑 ✓）。
+       *   `visibility: visible` 是必须的：DSH 藏它用的是 `visibility: hidden` ✓，
+       *   而 inert 由 `syncSidebarInert()` 在开合时摘/还 ✓（样式改不了 inert ✓）。
+       */
+      '  body[data-dshm-sidebar="overlay"] [class*="sidebarCol"] {',
+      '    left: 0 !important;',
+      '    visibility: visible !important;',
+      '    transform: translateX(calc(-1 * var(--dshm-drawer-w) - 8px)) !important;',
+      '  }',
+      '  body[data-dshm-sidebar="overlay"][data-dsh-mobile-drawer="open"] [class*="sidebarCol"] {',
+      '    transform: none !important;',
       '  }',
       /**
        * ★★ round 164（用户 B ✓）：**触屏上 `:hover` 是"粘"的** —— 用户原话：
@@ -11785,13 +11920,23 @@
        */
       '  html[data-dshm-shell="android"] ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }',
       '  html[data-dshm-shell="android"] { scrollbar-width: none !important; }',
-      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:first-child {',
-      '    padding: 0 12px 0 10px !important; font-size: 15px !important; line-height: 20px !important;',
+      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:last-child {',
+      '    gap: 3px !important;',
+      /* ★ 2026-11-06：DSH 0.2.2 的窄屏样式把导航改成了**横向条**
+         （`@media (width<=767px) .navList{flex-direction:row;overflow:auto hidden}` ✓）。
+         用户早就拍板要**纵排**（"我不喜欢设置页面侧滑滚动才能显示全"✓）⇒
+         这一笔把它压回纵排（`overflow: visible` 顺带取消那条横向滚动 ✓）。 */
+      '    flex-direction: column !important; overflow: visible !important;',
+      '    padding: 8px 16px 6px !important;',
       '  }',
-      '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:last-child { gap: 3px !important; }',
       '  html[data-dshm-shell="android"] [data-dshm-panel] > nav > div:last-child > button {',
       '    height: 34px !important; padding: 5px 14px 5px 10px !important;',
       '    font-size: 13.5px !important; line-height: 20px !important;',
+      /* ★ 2026-11-06：同一条窄屏样式还给了 `.navCell{flex:1 0 auto; min-width:108px;
+         justify-content:center}` ✓ —— 纵排之后这三笔必须改回"整宽、左对齐、可收缩" ✓，
+            否则每一项都会被撑成 108px 宽并居中 ✓。 */
+      '    width: 100% !important; min-width: 0 !important; flex: 0 0 auto !important;',
+      '    justify-content: flex-start !important;',
       '  }',
       /* ★ 壳里：把 DSH 的内容头（「打开配置文件」+ 那个 × ）**整条藏掉** ✓
          （用户："打开配置文件那个地方手机上删掉…它右边的那个关闭键也不要"✓）。
@@ -11853,12 +11998,41 @@
       '  html[data-dshm-shell="android"] [data-dshm-panel][data-dshm-conn-active="1"] [data-dshm-conn="1"] {',
       '    display: block !important;',
       '  }',
-      '  [data-dshm-panel] > div:last-child {',
-      '    width: 100% !important; flex: 1 1 auto !important; min-width: 0 !important;',
+      /* ★★ 2026-11-06：正文列**不再写 `width: 100%`** ✗✗ —— 那正是用户截图里
+         "右边被切掉一条"的根因 ✓。
+         DSH 的 `.options` 是 `box-sizing: content-box` ✓、自带 `padding: 0 16px 24px` ✓
+         ⇒ `width:100%`（= 412px）**再加** 32px 内边距 = **444px** ✗ ⇒ 比面板宽 32px ✓，
+         而面板自己 `overflow:hidden` ✓ ⇒ 右边那 32px 直接被切掉、还拖不到 ✓
+         （实测读数：panel 412 / options 444，见本轮验收 ✓）。
+         判据改成 `width:auto` ✓（纵向 flex 子项本来就会撑满 ✓）+
+         `box-sizing:border-box` 兜底 ✓ ⇒ 内边距算在里面，永远不会比面板宽 ✓。
+         选择器也从 `> div:last-child` 换成**我们自己的标记** ✓ ——
+         0.2.2 的弹窗是 `[navTitle, nav, header, options]` 平级结构 ✓，
+         `> div:last-child` 恰好还落在 options 上 ✓，但哪天又多一个兄弟就会打偏 ✓。 */
+      '  [data-dshm-settings-options] {',
+      '    width: auto !important; max-width: 100% !important; box-sizing: border-box !important;',
+      '    flex: 1 1 auto !important; min-width: 0 !important;',
       /* 整屏之后内容必须**自己滚**：实测内容列高 857px 而屏幕只有 915px 减去导航与标题栏，
          不给它滚动就会溢出到屏幕外（底部控件点不到 ✗）。`min-height: 0` 是 flex 子项
          能真正收缩的前提 —— 少了它，`overflow-y: auto` 形同虚设 ✓。 */
       '    min-height: 0 !important; overflow-y: auto !important; -webkit-overflow-scrolling: touch;',
+      '  }',
+      /* ★★ 2026-11-06：**「标题 / 导航」不许被挤扁** ✗✗ —— 这是切到「连接与设备」之后
+         「设置」这两个字只剩一条横缝的根因 ✓（实测：它们默认 `flex-shrink:1` ✓，
+         面板总高超出视口时 flexbox 会**先挤它们** ✓，而真正该滚的是正文 ✓）。
+         判据：面板里除了「正文」两兄弟（`[data-dshm-settings-options]` / 我们的
+         `[data-dshm-conn]`）和 0.2.1 那层包装（`[data-dshm-settings-content]`）之外，
+         一律不许收缩 ✓ —— 于是超出多少都由正文那份 `overflow-y:auto` 吃掉 ✓。 */
+      '  [data-dshm-panel] > nav,',
+      '  [data-dshm-panel] > div:not([data-dshm-settings-options]):not([data-dshm-conn]):not([data-dshm-settings-content]) {',
+      '    flex: 0 0 auto !important;',
+      '  }',
+      /* 0.2.1 那层包装（`[nav, content]` 结构里的 content ✓）：它自己就是**纵向滚动容器** ✓。
+         0.2.2 没有这一层 ✓，所以这条规则在那儿不命中 ✓（两边共用同一套 CSS ✓）。 */
+      '  [data-dshm-settings-content] {',
+      '    display: flex !important; flex-direction: column !important;',
+      '    flex: 1 1 auto !important; min-width: 0 !important; min-height: 0 !important;',
+      '    width: auto !important; box-sizing: border-box !important;',
       '  }',
 
       /* ⑧ 收窄正文两侧留白：DSH 按桌面阅读宽度给了 16~24px
@@ -13046,6 +13220,13 @@
     function syncDrawer() {
       if (document.body === null || document.body === undefined) return
       var open = document.body.dataset.dshMobileDrawer === 'open'
+      /**
+       * ★★ 0.2.2：侧栏形态与 `inert` 必须在**每次同步时**对一次账 ✓
+       *   （形态决定样式表走哪一支 ✓；`inert` 决定抽屉里的行能不能点 ✓ ——
+       *   而 DSH 重渲染时会把它写回来 ✓，所以这里不能只在开合那一下做 ✓）。
+       */
+      syncSidebarMode()
+      syncSidebarInert(open)
       // 内容常驻：即使抽屉关着也让 DSH 保持展开（否则关闭动画会突然变空）
       ensureSidebarExpanded()
       applyPush()
@@ -13107,35 +13288,99 @@
     }
 
     /**
-     * 给设置弹窗里的**结构位置**打我们自己的属性 ✓（CSS 只认属性，不认哈希类名 ✓）。
+     * 认出设置弹窗里**四个结构位置**（导航 / 内容容器 / 头部 / 正文），**两代结构都认** ✓。
      *
-     * DSH 的结构（来自它的 `SettingsPanel` ✓，实测一致 ✓）：
-     *   panel            = `.VOzbGW_panel`       （调用方已打 `data-dshm-panel` ✓）
+     * ## 为什么必须两代都认（2026-11-06，用户报的「设置面板全坏」✗）
+     *
+     * 0.2.1 的结构（我们原先唯一认的那种 ✗）：
      *   panel.children   = [nav, content]
      *   content.children = [header, options]
-     *   header.children  = [actions（`settings.action` 槽 =「打开配置文件」）, close（那个 × ）]
      *
-     * 为什么按**子节点顺序**认而不是按类名：类名是构建哈希 ✗（见 tagSettingsOverlay ✓）。
-     * 这个顺序假设与既有 CSS（`> nav` / `> div:last-child` ✓）和验收脚本
-     * （`panel.children[panel.children.length - 1]` ✓）**完全一致** ⇒ 没有新增一类风险 ✓。
+     * 0.2.2 改了（`SettingsPanel` 的 JSX 实测 ✓）：
+     *   panel.children = [navTitle（「设置」标题）, nav, header, options]   ← 四个**平级**兄弟
      *
-     * ★ 为什么用 `children[1]` 而不是 `lastElementChild` ✗：我们自己的正文
-     *   （`.dshm-conn-body` ✓）就追加在 `content` 末尾 ✓ —— 用 lastElementChild 会在
-     *   "我们选中过之后再跑一轮"时把我们的正文误认成 options ✗（这一轮就会自己踩到 ✓）。
+     * 我们原来写死 `panel.children[1]` 当 content ✓ ⇒ 在 0.2.2 上拿到的是 **nav** ✗：
+     *   · `data-dshm-settings-header` 打在 `nav > navList` 上 ⇒ 壳里那条
+     *     `[data-dshm-settings-header]{display:none}` 把**整个导航列藏掉了** ✗
+     *     （用户截图 1：设置页上只剩「设置」两个字，四项导航一项都没有 ✓）；
+     *   · `[data-dshm-settings-options]` 一个都没打上 ✗ ⇒ 「连接与设备」的显隐门控失效 ✓；
+     *   · 「打开配置文件」+ × 那条头部**没被藏掉** ✗（截图里就明晃晃在那儿 ✓）；
+     *   · 关闭键的标记落到了**第二颗导航按钮**上 ✗ ⇒ 关设置时会把分组切走 ✓。
+     *
+     * ## 判据为什么不认类名、也不认固定下标 ✓
+     * 类名是构建哈希（`_77Pn0W_…`）✗，换代就变 ✓；下标是**布局细节**，也换代就变 ✓。
+     * 这里只用两条**语义**事实：
+     *   ① 弹窗里那个 `<nav>` 是导航（语义标签 ✓，两代都在 ✓）；
+     *   ② nav **之后**还剩几个兄弟：剩 2 个及以上 ⇒ 0.2.2 那套平级结构（header → options ✓）；
+     *      只剩 1 个 ⇒ 0.2.1 那套包装结构（content 里再分 header / options ✓）。
+     *
+     * @returns `{ nav, content, header, options }`；认不出（结构又变了）⇒ `null` ✓（调用方什么都不做 ✓）。
+     *   `content` = **我们那份正文要挂进去的容器** ✓ —— 0.2.2 下就是 panel 自己 ✓
+     *   （它已经是纵向 flex ✓，我们那份正文作为最后一个兄弟排在 options 之后 ✓，
+     *   再由 `[data-dshm-conn-active="1"]` 把 DSH 那份 options 藏掉 ✓，两边不写对方的地盘 ✓）。
+     */
+    function settingsChromeParts(panel) {
+      if (panel === undefined || panel === null) return null
+      var kids = []
+      for (var i = 0; i < panel.children.length; i++) kids.push(panel.children[i])
+      var navIndex = -1
+      for (var k = 0; k < kids.length; k++) {
+        if (kids[k].tagName === 'NAV') {
+          navIndex = k
+          break
+        }
+      }
+      if (navIndex < 0) return null
+      var nav = kids[navIndex]
+      var after = kids.slice(navIndex + 1)
+      // 0.2.2：[navTitle, nav, header, options] —— nav 之后还有 ≥2 个兄弟
+      if (after.length >= 2) {
+        return { nav: nav, content: panel, header: after[0], options: after[after.length - 1] }
+      }
+      // 0.2.1：[nav, content] —— content 里再分 header / options
+      if (after.length !== 1) return null
+      var wrapper = after[0]
+      if (wrapper.children.length < 2) return null
+      return { nav: nav, content: wrapper, header: wrapper.children[0], options: wrapper.children[1] }
+    }
+
+    /**
+     * 给设置弹窗里的**结构位置**打我们自己的属性 ✓（CSS 只认属性，不认哈希类名 ✓）。
+     *
+     * 结构由 `settingsChromeParts` 认（两代都认 ✓，见它的说明 ✓）；
+     * 这里只负责**打标记**，每个标记都幂等 ✓（同一元素重复打同一个值没有副作用 ✓）。
+     *   · header  = 「打开配置文件」+ × 那一行（壳里藏掉 ✓）；
+     *   · options = DSH 真正的正文列（要量宽度、要显隐 ✓）；
+     *   · actions = header 里那一列 action 槽（「打开配置文件」按钮 ✓）；
+     *   · close   = header 里**最后一颗** `<button>`（那个 × ✓）。
+     *     ★ 为什么要「最后一颗 button」而不是 `children[1]` ✗：0.2.2 的 header 里
+     *       actions 可能塞多个节点 ✓，下标会漂 ✓；而 × 永远是那颗收尾的 button ✓
+     *       （两代 JSX 里它都是兄弟列表的最后一项 ✓）。
      */
     function tagSettingsChrome(panel) {
-      var content = panel.children[1]
-      if (content === undefined || content === null) return
-      var header = content.children[0]
-      var options = content.children[1]
-      if (options !== undefined && options !== null) options.setAttribute('data-dshm-settings-options', '1')
+      var parts = settingsChromeParts(panel)
+      if (parts === null) return
+      if (parts.options !== undefined && parts.options !== null) parts.options.setAttribute('data-dshm-settings-options', '1')
+      /**
+       * ★ 0.2.1 那种「nav + 一层包装」结构里，包装层是**可收缩的滚动容器** ✓ ——
+       *   必须打上标记 ✓，否则下面那条「非滚动项一律 `flex-shrink: 0`」会把它的收缩能力拿走 ✗
+       *   （症状：正文被挤出屏幕而不是自己滚 ✓）。0.2.2 没有这一层 ✓（`content` 就是 panel 本身 ✓），
+       *   所以只在**它不是 panel** 时才打 ✓。
+       */
+      if (parts.content !== undefined && parts.content !== null && parts.content !== panel) {
+        parts.content.setAttribute('data-dshm-settings-content', '1')
+      }
+      var header = parts.header
       if (header === undefined || header === null) return
       header.setAttribute('data-dshm-settings-header', '1')
       var actions = header.children[0]
       if (actions !== undefined && actions !== null) actions.setAttribute('data-dshm-settings-actions', '1')
-      var close = header.children[1]
-      if (close !== undefined && close !== null && close.tagName === 'BUTTON') {
-        close.setAttribute('data-dshm-settings-close', '1')
+      for (var i = header.children.length - 1; i >= 0; i--) {
+        var candidate = header.children[i]
+        if (candidate !== undefined && candidate !== null && candidate.tagName === 'BUTTON') {
+          candidate.setAttribute('data-dshm-settings-close', '1')
+          break
+        }
       }
     }
 
@@ -13227,8 +13472,13 @@
       if (nav === null || nav === undefined) return
       var navList = nav.lastElementChild
       if (navList === null || navList === undefined) return
-      var content = panel.children[1]
-      if (content === undefined || content === null) return
+      /**
+       * ★ 2026-11-06：这里原来是 `panel.children[1]` ✓ —— 0.2.2 起 `children[1]` 是 **nav** ✗
+       *   （见 `settingsChromeParts` 的说明 ✓），判据必须走同一把尺子 ✓
+       *   （认不出结构 ⇒ 直接让开 ✓，绝不往猜错的位置塞节点 ✗）。
+       */
+      var parts = settingsChromeParts(panel)
+      if (parts === null) return
       var cell = navList.querySelector('[data-dshm-conn-nav="1"]')
       if (cell === null || cell === undefined) {
         cell = document.createElement('button')
@@ -13283,9 +13533,16 @@
      * 挂在 `content`（flex 列）里则是**并排的一个兄弟** ✓ —— 再用一条
      * `[data-dshm-conn-active="1"] [data-dshm-settings-options] { display: none }` ✓
      * 把 DSH 那份藏掉 ✓，两边互不写对方的地盘 ✓。
+     *
+     * ★ 2026-11-06：`content` 由 `settingsChromeParts` 给 ✓ —— 0.2.2 的弹窗是
+     *   `[navTitle, nav, header, options]` **平级**结构 ✓，没有那层包装 ✓ ⇒
+     *   `content` = panel 自己 ✓（我们这份正文排在 options 之后 ✓，仍是并排兄弟 ✓）。
+     *   原来写死 `panel.children[1]` ✗ ⇒ 在 0.2.2 上会把正文塞进 **nav** 里 ✓✗。
      */
     function mountConnBody(panel, fresh) {
-      var content = panel.children[1]
+      var parts = settingsChromeParts(panel)
+      if (parts === null) return
+      var content = parts.content
       if (content === undefined || content === null) return
       var body = content.querySelector('[data-dshm-conn="1"]')
       if (body === null || body === undefined) {
@@ -16266,7 +16523,47 @@
       void error
     }
     bar.element.setAttribute('title', (all + ' ' + (hasContext ? meter.getAttribute('aria-label') : '')).trim())
+    /**
+     * ★★ 2026-11-06：**底栏几何读数**（只在 `?debug=1` 时写进调试框 ✓，一次同步最多一行 ✓）。
+     *
+     * 为什么要有它：这段时间在调"这一行与输入框 / 与小白条的两段留白"，而
+     * **每台设备的组合都不一样**（DSH 输入卡片自己的下内边距、壳报的安全区、composer 的锚点）——
+     * 只靠截图反推会一直猜 ✗（已经被用户点过一次"不要盲调"✗）。
+     * 这一行把三个数直接念出来：上留白 / 下留白 / 安全区，按它调就不用猜 ✓。
+     */
+    if (DEBUG_BOX_ON) {
+      try {
+        var cardNode = document.querySelector('[data-composer-card="true"]')
+        if (cardNode !== null && cardNode !== undefined) {
+          var glyphNode = bar.element.firstElementChild === null || bar.element.firstElementChild === undefined ? bar.element : bar.element.firstElementChild
+          var gRect = glyphNode.getBoundingClientRect()
+          var cRect = cardNode.getBoundingClientRect()
+          var insetPx = 0
+          try {
+            insetPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dshm-safe-bottom')) || 0
+          } catch (error) {
+            void error
+          }
+          var line =
+            '[stats] 上留白=' + Math.round(gRect.top - cRect.bottom) +
+            ' 下留白=' + Math.round(window.innerHeight - insetPx - gRect.bottom) +
+            ' 安全区=' + Math.round(insetPx) +
+            ' 视口h=' + Math.round(window.innerHeight) +
+            ' 卡片底=' + Math.round(cRect.bottom) +
+            ' 行底=' + Math.round(bar.element.getBoundingClientRect().bottom)
+          if (line !== lastStatsGeometryLine) {
+            lastStatsGeometryLine = line
+            debugBoxLine(line)
+          }
+        }
+      } catch (error) {
+        void error
+      }
+    }
   }
+
+  /** 上一次写进调试框的底栏几何（字符串相同就不重复写 ✓ —— 它在 120ms 心跳上跑 ✓）。 */
+  var lastStatsGeometryLine = ''
 
   /** 自绘的「添加附件」键（全文档只有一个 ✓；建一次、之后只挪 ✓）。 */
   var attachButton = null
@@ -17839,7 +18136,7 @@
    * 把 `homeMachines()` 的行按 **IP（hostname）** 聚成"电脑" ✓，每台下挂它的"智能体"✓
    * （用户反馈 ② ✓："一台电脑上多个智能体集成到一个菜单上，横向长矩形，点击那一栏就展开其下的
    * 所有智能体，并标注智能体的名字和版本" ✓）。
-   * ★ 端口 = 实例 ✓（3453 = 0.2.0 桌面版 / 3443 = 0.1.5 生产 / 3741 = 0.1.7 … 未来 codex ✓）；
+   * ★ 端口 = 实例 ✓（3453 = 0.2.0 桌面版 / 3443 = 0.1.5 生产 / 3741 = 0.1.7 …）；
    *   版本从 `/mobile/manifest` 探 ✓，探不到就写「版本未知」✓（**不猜** ✗）。
    */
   function homeComputers() {
@@ -20486,7 +20783,7 @@
     return String(root.path).replace(/\/+$/, '') + '/' + raw.replace(/^(?:\.\/)+/, '')
   }
 
-  /** dsh-resource 文件地址的前缀（与 packages/bridge/lib/client.js 的等价移植一致 ✓）。 */
+  /** dsh-resource 文件地址的前缀（与 packages/host/src/client.js 的等价移植一致 ✓）。 */
   var CHAT_FILE_ADDRESS_PREFIX = 'dsh-resource://file/'
   var CHAT_FILE_SESSION_PREFIX = 'dsh-resource://file/session/'
 
@@ -21646,7 +21943,7 @@
   }
 
   /**
-   * DSH 预览桥（`@dsh-mobile/bridge` ✓ 宿主侧声明、页面里由它注册 ✓）。
+   * DSH 预览桥（已并进 `@dsh-mobile/host` ✓ 宿主侧声明、页面里由它注册 ✓）。
    *
    * 它把 DSH **自带**的文档预览交给我们 ✓ —— 那套预览内置 KaTeX ✓
    * （公式与 DSH 聊天里一模一样 ✓），并且支持 **PDF** ✓、代码 ✓、图片 ✓、HTML ✓。
@@ -25822,13 +26119,47 @@
     // 关键：把 DSH 的全部业务流量接进加密隧道
     globalThis.__DSH_TRANSPORT__ = {
       fetch: async function (input, init) {
-        var url = typeof input === 'string' ? input : input.url
-        var path = new URL(url, location.href)
-        var endpoint = path.pathname.replace(/^\/api\//, '')
         var body = init && init.body !== undefined ? init.body : undefined
+        /**
+         * ★★★ 判据**只看信封**：真有 `method` 字符串的才是 DSH 连接层的 RPC ✓；
+         *   其余（`dsh-client-hmr` 的 `GET plugins/events` 那种 SSE、以及任何没有 body 的
+         *   请求）一律交回**页面原生 fetch** ✓，一个字节都不碰 ✓。
+         *
+         * ## 为什么不再拿 URL 路径判（2026-11-05 真机事故：手机上"新建对话 403、侧栏点不动"）
+         *
+         * 第一版写的是「路径必须以 `/api/` 开头才算 RPC」✓ —— **错在 URL 的形状上** ✗：
+         * DSH 的连接层发的是**相对地址**（`createWebConnectionRpc`：
+         * ``send(`${channel}/${endpoint}`.slice(1))`` ⇒ 实际传进来的是 `'api/session/list'`，
+         * **没有前导斜杠** ✓）。用 `new URL(raw, location.href)` 解析时，基准是
+         * `/mobile/app` ⇒ 解析成 **`/mobile/api/session/list`** ⇒ 前缀不是 `/api/` ⇒
+         * 被当成"非 RPC"交还原生 fetch ⇒ 页面对 **DSH 的鉴权栅栏**裸发 POST ⇒ **401/403**，
+         * 而 `session/list` / `session/create` / `session/prompt` **一条都没进隧道** ✓
+         * （审计里只剩 `mobile/device/pending` 与 `$events` ✓ —— 那份审计就是证据 ✓）。
+         *
+         * ⇒ 判据与 URL 彻底解耦：**信封里有 `method` 就走隧道**。这条路对相对地址、
+         * 绝对地址、`Request` 对象都成立 ✓，也与 0.2.1 的行为完全一致 ✓
+         * （0.2.1 从来看的也是 `envelope.method` ✓）。
+         * ★ 上传钩子那条注释里记的同一个坑（「基准必须是站点根，不能是 `location.href`」✓）
+         *   在这里换了一种表现 ✓ —— 所以这次干脆不看 URL ✓。
+         */
+        var envelope = {}
+        if (body !== undefined) {
+          try {
+            envelope = JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))
+          } catch (error) {
+            envelope = {}
+          }
+        }
+        if (
+          envelope === null ||
+          typeof envelope !== 'object' ||
+          typeof envelope.method !== 'string' ||
+          envelope.method.length === 0
+        ) {
+          return globalThis.fetch(input, init)
+        }
         // 页面交给我们的 body 就是 DSH 的 client-request 信封；直接交给隧道，
         // 宿主按同一信封解析（不再重复解包/改名）。
-        var envelope = body === undefined ? {} : JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))
         // 沿用 DSH 自己的 rpcId（它要校验响应 id 与请求 id 相同），见 Tunnel.prototype.rpc 的说明
         var response = await tunnel.rpc(envelope.method, envelope.payload, envelope.rpcId)
         if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {
@@ -27954,6 +28285,22 @@
         )
         var sessionId = url.searchParams.get('sessionId') || ''
         var name = url.searchParams.get('name') || undefined
+        /**
+         * ★★★ 2026-11-06：`mediaType` 决定这是不是**图片**上传 —— 而它决定回执的**形状** ✓。
+         *
+         * DSH 0.2.2 的上传有两条互不相通的路（源码核对过 ✓）：
+         *   · 普通文件 ⇒ Remote 方法 `fileUploads/upload` ⇒ `{receiptId, file:{…}}`；
+         *   · **图片** ⇒ **只有 HTTP 原始路由带 `?mediaType=`** 时才走
+         *     `service.uploadImageStream(…)`（`dsh-client-file-upload/lib/index.js:34`）⇒
+         *     `{receiptId, image:{attachmentId, mediaType, bytes, width, height}}`；
+         *     `uploadImageStream` 在 Remote 表里**没有对应方法** ✗。
+         *
+         * 旧代码把两者都翻成 `fileUploads/upload` ⇒ 图片拿回**文件**回执 ⇒
+         * 客户端按 `imageUploadValue` 校验字段 ⇒ TypeError ⇒ 界面把图标成 failed
+         * （真机现象：**文件出现了，但有个红色的圈，也没有报错** ✓）。
+         * ⇒ 图片改走宿主的 `mobile/upload/image`（宿主直接调 `uploadImageStream` ✓）。
+         */
+        var mediaType = url.searchParams.get('mediaType') || ''
         var bytes
         try {
           bytes = await readBodyBytes(init === undefined ? undefined : init.body)
@@ -27971,19 +28318,24 @@
         if (transport === undefined || transport.placeholder === true) {
           return uploadResponse(503, { ok: false, error: { code: 'mobile/offline', message: '与电脑的加密隧道尚未建立', details: {} } })
         }
+        var isImage = mediaType.length > 0
+        var encoded = bytesToBase64(bytes)
+        var uploadArgs
+        if (isImage) {
+          uploadArgs = { sessionId: sessionId, mediaType: mediaType, dataBase64: encoded }
+          if (name !== undefined) uploadArgs.name = name
+        } else {
+          uploadArgs = { agentId: sessionId, request: name === undefined ? { data: encoded } : { data: encoded, name: name } }
+        }
         var request = {
           type: 'client-request',
           rpcId: 'upload-' + b64u(crypto.getRandomValues(new Uint8Array(8))),
-          method: 'fileUploads/upload',
-          payload: {
-            args: {
-              agentId: sessionId,
-              request: name === undefined ? { data: bytesToBase64(bytes) } : { data: bytesToBase64(bytes), name: name },
-            },
-          },
+          method: isImage ? 'mobile/upload/image' : 'fileUploads/upload',
+          payload: { args: uploadArgs },
         }
         try {
-          var response = await transport.fetch('/api/fileUploads/upload', { method: 'POST', body: JSON.stringify(request) })
+          var target = isImage ? '/api/mobile/upload/image' : '/api/fileUploads/upload'
+          var response = await transport.fetch(target, { method: 'POST', body: JSON.stringify(request) })
           var envelope = await response.json()
           showDebug('响应：' + JSON.stringify(envelope.result).slice(0, 400))
           return uploadResponse(200, envelope.result)
@@ -28022,7 +28374,7 @@
     try {
       /**
        * ★★★ 2026-10-04 用户报："我们自己的会话页上**顶栏意外存在**"✗ ——
-       *   我们那张页（`/mobile/chat` ✓）与 Codex 页**都明确声明了**
+       *   我们的页面**都明确声明了**
        *   `globalThis.__DSH_MOBILE_NO_SHELL__ = true` ✓（注释写着"只装隧道、不装 DSH 的外壳 UI"✓），
        *   而这里**从来没有认过这个标记** ✗ ⇒ 手机宽度 < 1024 时照样套上顶栏与抽屉 ✓（他截图为证 ✓）。
        * ⇒ 把这条**显式退出**放在最前 ✗：页面说"不要外壳"，就**绝不装** ✓ ——
