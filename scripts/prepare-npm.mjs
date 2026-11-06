@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 为"发到 npm"**准备**两个包（★ 只准备，不发布 ✗ —— 发布是你账号的事 ✓）。
+ * 为"发到 npm"**准备**要发布的包（★ 只准备，不发布 ✗ —— 发布是你账号的事 ✓）。
  *
  * ## 为什么要在**临时目录**里改名，而不是直接改仓库 ✗
  *
@@ -14,7 +14,7 @@
  * ## 用法
  *
  *   node scripts/prepare-npm.mjs --scope @yourname
- *   node scripts/prepare-npm.mjs --host-name dsh-mobile-host --bridge-name dsh-mobile-preview-bridge
+ *   node scripts/prepare-npm.mjs --host-name dsh-mobile-host
  *
  * 之后照它打印的两条命令发布（★ scoped 包必须 `--access public` ✓，否则默认私有 ✗）。
  */
@@ -37,9 +37,9 @@ if (scope !== undefined && !/^@[a-z0-9][a-z0-9-]*$/.test(scope)) {
   process.exit(2)
 }
 
+// ★ 2026-11-03：预览桥已经并进 host（`packages/host/src/client.js`）⇒ 只发 host 一个包 ✓
 const packages = [
   { dir: 'packages/host', fallback: 'dsh-mobile-host', override: arg('host-name') },
-  { dir: 'packages/bridge', fallback: 'dsh-mobile-preview-bridge', override: arg('bridge-name') },
 ]
 
 const planned = []
@@ -81,7 +81,7 @@ for (const entry of packages) {
   planned.push({ name, target, previous: manifest.name })
 }
 
-console.log('已准备好两个包（★ 只准备，没有发布 ✓）：\n')
+console.log('已准备好要发布的包（★ 只准备，没有发布 ✓）：\n')
 for (const item of planned) {
   console.log(`  ${item.previous}  →  ${item.name}`)
   console.log(`      ${item.target}`)
@@ -92,9 +92,9 @@ console.log(`
   # ① 登录（这台机器的默认缓存有点小毛病 ⇒ 建议显式给一个临时缓存 ✓）
   npm --cache /tmp/npmcache login
 
-  # ② 发布两个包（scoped 必须 --access public ✓）
+  # ② 发布（scoped 必须 --access public ✓）
 ${planned.map((item) => `  npm --cache /tmp/npmcache publish ${item.target} --access public`).join('\n')}
 
 ★ 有 2FA 的账号会在发布时要求一次性验证码 ✓。
-★ 发布之后，别人在 DSH 插件页的 **ID** 那一栏填的就是上面那两个包名 ✓。
+★ 发布之后，别人在 DSH 插件页的 **ID** 那一栏填的就是上面那个包名 ✓。
 `)

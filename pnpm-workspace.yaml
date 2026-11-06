@@ -11,6 +11,6 @@ packages:
 #
 # ⇒ 现在**不需要**了 ✓：
 #   · host 的 `dependencies` 已清空 ✓（protocol 由构建**内联进 `host/lib/protocol/`** ✓，
-#     见 `scripts/build-lib.mjs` 里那段说明 ✓；bridge 自己成了一个 bundle ✓，由用户顶层安装 ✓）；
+#     见 `scripts/build-lib.mjs` 里那段说明 ✓；预览桥已经并进 host 一个包 ✓）；
 #   · `packages/client` 对 protocol 用的仍是 `workspace:*` ✓ —— 那条在 workspace 里本来就能解析 ✓。
 # ⇒ **别再把 overrides 加回来** ✗（除非又有人把内部包写成 git 依赖 ✓）。

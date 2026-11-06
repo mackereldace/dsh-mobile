@@ -47,6 +47,8 @@ import { HOST_ASSETS_ROOT, copyRuntimeAssets } from './lib/runtime-assets.mjs'
 import {
   derivePhoneEntry,
   normalizeBase,
+  portOfListenerAddress,
+  readCurrentConfig,
   readPreservedKeys,
   readPreservedListener,
   removeBlock,
@@ -212,17 +214,16 @@ const profileDir = dirname(patchFile)
 const profileModules = join(profileDir, 'node_modules')
 
 /**
- * 需要安装的包：插件本体、协议依赖，以及**预览桥**。
+ * 需要安装的包：插件本体与协议依赖。
  *
- * 桥（`@dsh-mobile/bridge`）是 round 99 新增的 ✓：DSH 的文档预览能力在它的依赖注入
- * 容器里 ✗，而我们的注入脚本拿不到 `ctx` ✓ —— DSH 的模块加载器要求
- * 客户端 bundle 的注册**与宿主声明的 graph 行匹配** ✓，
- * 所以必须作为一个正式插件被声明（下面 patchBlock 里的第二个 insert ✓）。
+ * ★ 2026-11-03：**预览桥不再是一个独立包** ✓ —— 它的浏览器半已经并进 host
+ *   （`packages/host/src/client.js` → `lib/client.js` ✓，`dsh.client` 声明的就是它 ✓）。
+ *   以前这里装三份、patch 里插两行；现在只装 host 一份、patch 只插 `mobile-host` 一行 ✓
+ *   —— 少一个包、少一行、也少一次"两个客户端各跑一遍"的机会 ✓。
  */
 const PACKAGES = [
   { name: '@dsh-mobile/protocol', source: join(repoRoot, 'packages', 'protocol') },
   { name: '@dsh-mobile/host', source: join(repoRoot, 'packages', 'host') },
-  { name: '@dsh-mobile/bridge', source: join(repoRoot, 'packages', 'bridge') },
 ]
 
 /**
@@ -270,6 +271,25 @@ function patchBlock(trustedHosts, preserved, derived) {
 
 function log(message) {
   console.log(`[install-host] ${message}`)
+}
+
+/**
+ * 电脑端配对控制台的地址（**只可能是回环**）✓。
+ *
+ * 2026-11-03 用户实测：安装器最后只教人 `POST /mobile/pair/code` ✗，
+ * 于是有人去开 DSH 自己的 `/mobile` 页面 —— 那是**手机角色** ✗
+ * （它的 `/mobile/pair/pending` 探针走内嵌协议，到不了插件的回环端点）。
+ * 电脑端只有 `http://127.0.0.1:<明文监听端口>/mobile` 这一条路 ✓。
+ * 端口从写好的 patch 里读回（配置里没有 listener 就用默认 3081）✓。
+ */
+function desktopConsoleUrl() {
+  try {
+    const current = readCurrentConfig(patchFile)
+    const port = portOfListenerAddress(current?.listener?.plain)
+    return `http://127.0.0.1:${port ?? '3081'}/mobile`
+  } catch {
+    return 'http://127.0.0.1:3081/mobile'
+  }
 }
 
 /** ★ 警告走 **stderr**：调用方（部署脚本 / 测试）可以单独看它，且不 fail（见 warnNoPhoneEntry）。 */
@@ -352,7 +372,7 @@ function installPackages() {
         join(repoRoot, HOST_ASSETS_ROOT),
         join(destination, 'lib', 'assets'),
       )
-      log(`已装入运行时 assets：${assetsCopied} 个文件 → ${join(destination, 'lib', 'assets')}（会话页 HTML 与 css/js ✓、codex 页脚本 ✓）`)
+      log(`已装入运行时 assets：${assetsCopied} 个文件 → ${join(destination, 'lib', 'assets')}（会话页 HTML 与 css/js ✓、页面脚本 ✓）`)
     }
     log(`已安装 ${pkg.name} → ${destination}`)
   }
@@ -572,8 +592,8 @@ async function main() {
     log('')
     log('已写入机器专属配置（只补 config、没动任何文件）✓。下一步：')
     log('  1. 重启 DSH web（配置在启动时读一次）')
-    log(`  2. 打开 http://127.0.0.1:<端口>/mobile/manifest 应返回 JSON（含 protocolVersion 与主机指纹）`)
-    log('  3. POST /mobile/pair/code 生成配对码，然后在手机上用 dsh-mobile 扫码')
+    log(`  2. 在**电脑浏览器**打开 ${desktopConsoleUrl()}（配对控制台）→ 点「生成配对码」`)
+    log('  3. 手机装了 App 直接扫码；没装 App 就用手机浏览器打开页面上那行 HTTPS 局域网地址（不是 127.0.0.1）')
     return
   }
   preflight()
@@ -583,8 +603,8 @@ async function main() {
   log('')
   log('安装完成。下一步：')
   log(`  1. 重启 DSH web（当前进程不会自动加载新插件）`)
-  log(`  2. 打开 http://127.0.0.1:3080/mobile/manifest 应返回 JSON（含 protocolVersion 与主机指纹）`)
-  log(`  3. POST /mobile/pair/code 生成配对码，然后在手机上用 dsh-mobile 扫码`)
+  log(`  2. 在**电脑浏览器**打开 ${desktopConsoleUrl()}（配对控制台）→ 点「生成配对码」`)
+  log('  3. 手机装了 App 直接扫码；没装 App 就用手机浏览器打开页面上那行 HTTPS 局域网地址（不是 127.0.0.1）')
   log('')
   log('注意：局域网访问需要 DSH 绑定所有网卡并声明可信主机，例如：')
   log('  dsh web --host 0.0.0.0 --trusted-host <电脑局域网IP>')

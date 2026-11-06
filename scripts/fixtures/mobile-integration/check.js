@@ -13,14 +13,7 @@ try {
   check('完整生产 boot 保留原始 API 身份', boot === integration.product && typeof boot.openFiles === 'function' && typeof boot.apk?.apply === 'function')
   const expected = params.get('viewport')?.split('x').map(Number)
   if (expected) check('实际视口尺寸', innerWidth === expected[0] && innerHeight === expected[1], [innerWidth, innerHeight])
-  if (document.body.getAttribute('data-mobile-backend') === 'codex') {
-    document.querySelector('#menu').click(); await pause(300)
-    check('Codex 共用侧滑宽度', Math.abs(rect('.mobile-codex-surface').left - Math.min(innerWidth * .64, 264)) <= 2, { left:rect('.mobile-codex-surface').left, width:innerWidth })
-    document.querySelector('[data-navigation-action=settings]').click(); await wait(() => document.querySelector('#management-field-model'))
-    check('Codex 原生默认设置通道', integration.requests.some(request => request.method === 'mobile/manage/settings/read' && request.args.backend === 'codex'))
-    document.querySelector('.management-close').click(); await pause(300)
-    check('Codex 关闭管理页恢复聊天和遮罩', document.querySelector('#mobile-management').hidden && document.querySelector('#scrim').hidden && Math.abs(rect('.mobile-codex-surface').left) <= 2)
-  } else {
+ else {
     await wait(() => document.querySelector('.native-message') && document.querySelector('[data-cell=context]'))
     const main = document.querySelector('main'), input = document.querySelector('#input')
     evidence.initial = { header: rect('.chat-top').height, tabs: rect('#tabs').height, viewport: [innerWidth, innerHeight], dock: rect('#floating-dock').height }

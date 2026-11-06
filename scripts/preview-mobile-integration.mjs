@@ -28,11 +28,7 @@ export async function startMobileIntegration() {
         html = html.replace('</body>', '<script type="module" src="/fixture/check.js"></script></body>')
         reply(200, html, 'text/html'); return
       }
-      if (path === '/mobile/codex') {
-        const { CODEX_PAGE_HTML } = await import('../packages/host/src/codex/codex-page.ts')
-        reply(200, CODEX_PAGE_HTML.replace('<script src="/mobile/codex/ui.js">', '<script src="/fixture/transport.js"></script><script src="/mobile/codex/ui.js">').replace('</body>', '<script type="module" src="/fixture/check.js"></script></body>'), 'text/html'); return
-      }
-      if (path === '/mobile/codex/ui.js') { reply(200, await readFile(join(root, 'packages/host/lib/assets/codex/ui.js')), 'text/javascript'); return }
+
       const name = path.startsWith('/mobile/chat/') ? path.slice(13) : ''
       if (allow.has(name)) { reply(200, await readFile(join(assetRoot, name)), types[extname(name)]); return }
       reply(404, '隔离验收未提供此资源')

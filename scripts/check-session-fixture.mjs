@@ -81,7 +81,7 @@ function judgeFind(row, label) {
   console.log(`  —— ${label} session-${row.id}（slug=${row.slug}，日志=[${row.logs.join(', ')}]）`)
   check(
     found !== undefined,
-    `${label}：裸 id 能找到会话（改前只认 v3 时「只有 v4」这里必红 ✗）`,
+    `${label}：裸 id 能找到会话（${label === '只有 v4' ? '删掉 v4 那半' : '删掉 v3 那半'}时这里必红 ✗）`,
     found === undefined ? '返回 undefined ⇒ 找不到 ✗' : found.log,
   )
   if (found === undefined) return
@@ -142,7 +142,7 @@ if (ws === undefined) {
   const missing = existWithLog.filter((id) => !foundAll.includes(id))
   check(
     missing.length === 0,
-    '工作区表里**每一条**真会话都被找到（只认 v3 时 here 必红 ✗）',
+    '工作区表里**每一条**真会话都被找到（只认 v3、或只认 v4 时 here 必红 ✗）',
     missing.length === 0 ? `${foundAll.length} 条齐` : `少 ${missing.length} 条：${missing.slice(0, 5).join(', ')}`,
   )
   // 只认 v3 的旧夹具在这个工作区能捞到的条数（改前读数，供"数量变多"对照 ✓）

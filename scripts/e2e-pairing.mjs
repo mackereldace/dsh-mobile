@@ -73,6 +73,12 @@ const PHONE_SCHEME = TLS_PORT > 0 ? 'https' : 'http'
 const PHONE_PORT = TLS_PORT > 0 ? TLS_PORT : PROXY_PORT
 const PHONE_URL = `${PHONE_SCHEME}://127.0.0.1:${PHONE_PORT}/mobile`
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+/**
+ * （原来还有一条可选的「Codex 独立页面」步骤 —— Codex 后端已整套移除 ✓，一并删了。）
+ *
+ * 为什么挂在**这个**脚本里：它需要"一台已经配好对的手机"这一整套前置
+ * （临时 DSH + 插件 + 真 Chrome + 配对）——重写一遍就是又一处分叉 ✓。
+ */
 
 const problems = []
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -606,6 +612,8 @@ try {
   log(`  手机端 boot.js 日志 ${tunnelCalls.length} 条${tunnelCalls.length > 0 ? `：${tunnelCalls.slice(0, 3).join(' | ')}` : ''}`)
   const phoneConsole = phone.consoleLines.filter((line) => /error|失败|decrypt|handshake/i.test(line))
   if (phoneConsole.length > 0) log(`  手机端 console（错误类）：${phoneConsole.slice(0, 6).join(' | ')}`)
+
+
 } finally {
   phone?.close()
   desktop.close()

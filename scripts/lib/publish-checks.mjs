@@ -23,10 +23,10 @@
 /** 输入：远端产物里那几段文本 + 两端的 APK 字节数。 */
 export function verifyPublishedArtifacts(input) {
   const problems = []
-  const { boot, tunnel, index, codexBridge, remoteApkSize, localApkSize } = input
+  const { boot, tunnel, index, remoteApkSize, localApkSize } = input
 
   // ① 产物里不许有裸引用（曾让用户装机报"protocol 这包不存在"）
-  if (codexBridge.includes("'@dsh-mobile/protocol'")) {
+  if (index.includes("'@dsh-mobile/protocol'")) {
     problems.push('产物里还有裸引用 @dsh-mobile/protocol')
   }
 

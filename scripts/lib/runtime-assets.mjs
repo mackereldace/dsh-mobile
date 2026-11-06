@@ -48,8 +48,7 @@ import { dirname, join } from 'node:path'
  * `join` 会在 Windows 上自己换成反斜杠 ✓）。
  *
  * 来源就是 `packages/host/src/index.ts` 里那两处读盘点 ✓：
- *   · `dsh-chat/*` —— 会话页的 HTML 与 css/js ✓（`chatAssets` 那张表 ✓）；
- *   · `codex/ui.js` —— codex 页的客户端脚本 ✓。
+ *   · `dsh-chat/*` —— 会话页的 HTML 与 css/js ✓（`chatAssets` 那张表 ✓）。
  */
 export const RUNTIME_ASSETS = [
   'dsh-chat/page.html',
@@ -70,7 +69,6 @@ export const RUNTIME_ASSETS = [
   'dsh-chat/native.css',
   'dsh-chat/file-panel.css',
   'dsh-chat/whale.svg',
-  'codex/ui.js',
 ]
 
 /** 资源的源目录（相对仓库根 ✓）。 */

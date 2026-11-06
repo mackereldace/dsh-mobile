@@ -5,7 +5,7 @@
  * ## 为什么要有这个脚本（第一阶段第 2 项）
  *
  * 插件仓里那份 `lib/` 是"实际在跑的产物"的快照 —— 它**不是**从源码重建的
- * （HEAD 曾经编译不过；现已隔离 Codex 修好，但仍以产物为准，见插件仓 README）。
+ * （以产物为准，见插件仓 README）。
  * 在这之前，同步靠我**手动** `cp` + `git worktree` + 手打推送命令 ⇒
  * 忘一次，用户就会装到旧包。已经吃过两次亏：
  *   · 一次是**内联 protocol 漏改写**（子目录里的裸引用没被改），
@@ -35,12 +35,47 @@ import { verifyPublishedArtifacts } from './lib/publish-checks.mjs'
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const REMOTE = 'https://github.com/mackereldace/dsh-mobile-plugin.git'
-const PROXY = 'http://127.0.0.1:7892'
+/**
+ * 代理：显式 `PLUGIN_SYNC_PROXY` 优先；未设置时读 macOS 系统代理（HTTPS/HTTP），
+ * 兜底旧的 7892。`off` 表示直连。2026-11-04：代理端口从 7892 变成系统代理 7890，
+ * 写死端口会让"明明挂了代理"仍然失败 ✗。
+ */
+function detectProxy() {
+  if (process.env.PLUGIN_SYNC_PROXY !== undefined) return process.env.PLUGIN_SYNC_PROXY
+  try {
+    const out = execFileSync('scutil', ['--proxy'], { encoding: 'utf8' })
+    const host = out.match(/HTTPSProxy\s*:\s*(\S+)/)?.[1] ?? out.match(/HTTPProxy\s*:\s*(\S+)/)?.[1]
+    const port = out.match(/HTTPSPort\s*:\s*(\d+)/)?.[1] ?? out.match(/HTTPPort\s*:\s*(\d+)/)?.[1]
+    if (host !== undefined && port !== undefined) return `http://${host}:${port}`
+  } catch {
+    /* 非 macOS 或 scutil 不可用 */
+  }
+  return 'http://127.0.0.1:7892'
+}
+const PROXY = detectProxy()
 const checkOnly = process.argv.includes('--check')
 
 /** 所有 git 调用都带上这一条（只在命令上带，绝不写进配置）。 */
+/** 访问远端失败时给一条能行动的提示（而不是一坨 Node Buffer 栈）。 */
+function fetchRemote() {
+  try {
+    git(['fetch', '--quiet', REMOTE, 'main'])
+  } catch (error) {
+    const detail = String(error.stderr || error.message || '')
+      .replace(/\u0000/g, '')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .slice(-5)
+      .join('\n  ')
+    console.error('[sync] ✗ 无法读取远端插件仓。')
+    console.error(`  代理：${PROXY || '（禁用）'}（用 PLUGIN_SYNC_PROXY 覆盖；设为 off 可禁用）`)
+    console.error(`  ${detail.slice(0, 800)}`)
+    process.exit(1)
+  }
+}
+
 const git = (args, cwd = repo) =>
-  execFileSync('git', ['-c', `http.proxy=${PROXY}`, ...args], {
+  execFileSync('git', [...(PROXY && PROXY !== 'off' ? ['-c', `http.proxy=${PROXY}`] : []), ...args], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
@@ -58,16 +93,25 @@ if (!existsSync(hostLib)) {
 const work = mkdtempSync(join(tmpdir(), 'dshm-plugin-sync-'))
 try {
   console.log('[sync] 取远端当前状态…')
-  git(['fetch', '--quiet', REMOTE, 'main'])
+  fetchRemote()
   const tip = git(['rev-parse', 'FETCH_HEAD']).trim()
   console.log(`[sync] 远端 tip = ${tip.slice(0, 8)}`)
 
   git(['worktree', 'add', '--detach', '--quiet', work, tip])
-  // 只同步产物（插件仓里的 src/test 是随产物一起留档的，也一并更新）
-  for (const dir of ['lib', 'src', 'test', 'assets']) {
+  /**
+   * ★★ 2026-11-04：插件仓整体变为**生成物**（用户拍板"只维护主仓"）✓。
+   *   除了构建产物 `lib`，源码留档 `src/test`、构建脚本 `scripts`、运行资源 `assets`
+   *   也一起同步；顶层 `package.json` / `tsconfig*.json` / `cordis.patch.yml` 同理 ✓。
+   *   `README.md` 的唯一源是主仓 `packages/host/README.release.md`（带"生成物"横幅）✓。
+   */
+  for (const dir of ['lib', 'src', 'test', 'scripts', 'assets']) {
     rmSync(join(work, dir), { recursive: true, force: true })
     cpSync(join(repo, 'packages', 'host', dir), join(work, dir), { recursive: true })
   }
+  for (const file of ['package.json', 'tsconfig.json', 'tsconfig.build.json', 'cordis.patch.yml']) {
+    cpSync(join(repo, 'packages', 'host', file), join(work, file), { force: true })
+  }
+  cpSync(join(repo, 'packages', 'host', 'README.release.md'), join(work, 'README.md'), { force: true })
   git(['add', '-A'], work)
   const dirty = git(['status', '--porcelain'], work).trim()
   if (dirty.length === 0) {
@@ -75,6 +119,7 @@ try {
   } else if (checkOnly) {
     console.log('[sync] --check：有差异未推送：')
     console.log(dirty.split('\n').slice(0, 12).map((line) => '  ' + line).join('\n'))
+    process.exitCode = 1
   } else {
     execFileSync('git', ['-c', 'user.name=dsh-mobile', '-c', 'user.email=noreply@example.com',
       'commit', '--quiet', '-m', 'chore: 同步宿主产物'], { cwd: work, stdio: 'inherit' })
@@ -86,7 +131,7 @@ try {
 }
 
 // ── 从远端核对（不看本地）──
-git(['fetch', '--quiet', REMOTE, 'main'])
+fetchRemote()
 const remoteTip = git(['rev-parse', 'FETCH_HEAD']).trim()
 const readRemote = (file) => git(['show', `FETCH_HEAD:${file}`])
 /**
@@ -112,10 +157,25 @@ const problems = verifyPublishedArtifacts({
   boot: readRemote('lib/boot.js'),
   tunnel: readRemote('lib/tunnel.js'),
   index: readRemote('lib/index.js'),
-  codexBridge: readRemote('lib/codex/codex-bridge.js'),
   remoteApkSize,
   localApkSize,
 })
+/**
+ * ★ 生成物完整性：远端 package.json 的版本必须等于主仓；README 必须带"生成物"横幅。
+ *   旧版只手抄 lib，这两项没人管 ⇒ 插件仓 README 一直是手写、版本靠记 ✓。
+ */
+try {
+  const remotePkg = JSON.parse(readRemote('package.json'))
+  const localPkg = JSON.parse(readFileSync(join(repo, 'packages', 'host', 'package.json'), 'utf8'))
+  if (remotePkg.version !== localPkg.version) problems.push(`package.json 版本：远端 ${remotePkg.version} ≠ 本地 ${localPkg.version}`)
+} catch (error) {
+  problems.push(`package.json 读取失败：${error.message}`)
+}
+try {
+  if (!readRemote('README.md').includes('本仓库是生成物')) problems.push('README.md 缺少"本仓库是生成物"横幅')
+} catch (error) {
+  problems.push(`README.md 读取失败：${error.message}`)
+}
 
 console.log(`[sync] 远端 = ${remoteTip.slice(0, 8)}`)
 if (problems.length > 0) {

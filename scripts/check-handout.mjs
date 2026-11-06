@@ -38,7 +38,6 @@ try {
     boot: read('lib/boot.js'),
     tunnel: read('lib/tunnel.js'),
     index: read('lib/index.js'),
-    codexBridge: read('lib/codex/codex-bridge.js'),
     remoteApkSize: statSync(join(root, 'lib', 'dsh-mobile.apk')).size,
     localApkSize: existsSync(localApk) ? statSync(localApk).size : -1,
   })

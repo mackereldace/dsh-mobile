@@ -52,7 +52,7 @@ try {
     const target = join(repo, 'packages', pkg, 'lib')
     /**
      * 递归列出产物（**相对路径**）。
-     * 原来只 `readdirSync` 顶层，于是源码里一旦有子目录（例如 src/codex/），
+     * 原来只 `readdirSync` 顶层，于是源码里一旦有子目录（例如子目录），
      * 它编译出来的子目录**永远不会被复制进 lib/**，最后表现为"加载校验时找不到模块"。
      */
     const listBuilt = (dir, prefix) => {
@@ -121,7 +121,7 @@ try {
      * 递归遍历产物目录，并且**按文件所在深度算相对路径**。
      *
      * 原来只 `readdirSync` 顶层、且把相对路径写死成 `./protocol/index.js`。
-     * 2026-10-04 把 Codex 那一线搬进 `lib/codex/` 之后，那个文件里的裸引用就**没人改写**了，
+     * 有子目录之后，那个文件里的裸引用就**没人改写**了，
      * 于是发出去的包里留着一句 `import ... from '@dsh-mobile/protocol'` ——
      * 用户在 Windows 上装插件时，pnpm 去 npm 上找这个包，报"protocol 这包不存在"。
      * ⇒ 现在：递归 + 按深度生成 `../protocol/index.js` 这样的相对路径。
@@ -178,7 +178,7 @@ try {
       join(repo, 'packages', 'host', 'lib', 'assets'),
     )
     console.log(
-      `[build-lib] 已拷入运行时 assets → packages/host/lib/assets/（${assetsCopied} 个文件 ✓ —— 会话页与 codex 页的磁盘资源 ✓）`,
+      `[build-lib] 已拷入运行时 assets → packages/host/lib/assets/（${assetsCopied} 个文件 ✓ —— 会话页与页面脚本的磁盘资源 ✓）`,
     )
   }
 
@@ -210,6 +210,19 @@ try {
       const bootCode = buildBootPayload(readFileSync(bootSrc, 'utf8'), { stamp })
       writeFileSync(bootTarget, bootCode)
       console.log(`[build-lib] 已同步 boot.js → packages/host/lib/boot.js（戳 ${stamp}）`)
+    }
+    /**
+     * ★ 2026-11-03：`client.js`（预览桥的浏览器半）也变成**源码在 src、产物在 lib** ✓。
+     *   以前它由 `copy-bridge.mjs` 从 `packages/bridge/lib/client.js` 复制 ✗；
+     *   桥包删掉以后，真源是 `packages/host/src/client.js` ✓ ——
+     *   这条部署路径（`build-lib.mjs`）也必须同步它，不然 `lib/client.js` 会停在旧版本 ✗。
+     *   生成逻辑（含"id 必须等于包名"的两道断言）只在 `copy-client.mjs` 里有一份 ✓。
+     */
+    const clientSrc = join(repo, 'packages', 'host', 'src', 'client.js')
+    const clientTarget = join(repo, 'packages', 'host', 'lib', 'client.js')
+    if (existsSync(clientSrc) && existsSync(clientTarget)) {
+      backups.push({ to: clientTarget, data: readFileSync(clientTarget) })
+      execFileSync(process.execPath, [join(repo, 'packages', 'host', 'scripts', 'copy-client.mjs')], { stdio: 'inherit' })
     }
   }
 } catch (error) {

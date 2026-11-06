@@ -27,11 +27,11 @@ try {
     for (let step = 1; step <= 3; step++) { await pause(25); await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + (toX - x) * step / 3, y, id: 81 }] }) }
     await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); await pause(350)
   }
-  const matrix = process.env['DSHM_MOBILE_SMOKE'] ? [[412, 915, 'dark', 'dsh']] : [[412,915,'dark','dsh'],[390,844,'dark','dsh'],[360,800,'dark','dsh'],[412,915,'light','dsh'],[390,844,'light','dsh'],[360,800,'light','dsh'],[390,844,'dark','codex']]
+  const matrix = process.env['DSHM_MOBILE_SMOKE'] ? [[412, 915, 'dark', 'dsh']] : [[412,915,'dark','dsh'],[390,844,'dark','dsh'],[360,800,'dark','dsh'],[412,915,'light','dsh'],[390,844,'light','dsh'],[360,800,'light','dsh']]
   for (const [width, height, theme, backend] of matrix) {
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: true, screenWidth: width, screenHeight: height })
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] })
-    const url = new URL(preview.url); if (backend === 'codex') url.pathname = '/mobile/codex'; url.searchParams.set('viewport', width + 'x' + height); url.searchParams.set('theme', theme)
+    const url = new URL(preview.url); url.searchParams.set('viewport', width + 'x' + height); url.searchParams.set('theme', theme)
     await send('Page.navigate', { url: url.toString() })
     let report
     for (let i = 0; i < 400; i++) {
@@ -60,7 +60,7 @@ try {
       await evaluate("document.querySelector('#native-swipe-code-check').remove()")
     }
     const screenshot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }); await writeFile(join(dir, label + '.png'), Buffer.from(screenshot.data, 'base64'))
-    const minimum = backend === 'codex' ? 6 : 48
+    const minimum = 48
     if (report.checks.length < minimum) { report.ok = false; report.errors.push('断言数低于最低要求 ' + minimum) }
     reports.push({ label, ...report }); console.log(label + ': ' + report.checks.filter(check => check.pass).length + '/' + report.checks.length + (report.ok ? ' PASS' : ' FAIL ' + [...report.errors, ...report.checks.filter(check => !check.pass).map(check => check.label)].join('; ')))
     if (!report.ok) break

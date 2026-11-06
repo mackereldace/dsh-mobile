@@ -6738,7 +6738,7 @@ try {
   //
   // 用户记忆里"打开就是渲染好的"那个预览 = DSH 自带（KaTeX / PDF / 图片 ✓），
   // 它的入口是 ctx.sidebarRight.openResource ✓ —— 而 ctx 只有**宿主声明的客户端 bundle**
-  // 才拿得到 ✓（见 packages/bridge/lib/client.js 的长注释 ✓）。
+  // 才拿得到 ✓（见 packages/host/src/client.js 的长注释 ✓）。
   // 这一节同时回答用户的另一个问题："聊天里的文件链接在手机上点不开" ✓ ——
   // 那正是同一个右侧栏 ✓，所以这里**量它的宽度**（0 就是打不开 ✓）。
   const previewBridgeState = JSON.parse(

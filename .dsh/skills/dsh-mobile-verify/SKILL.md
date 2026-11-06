@@ -185,7 +185,7 @@ node scripts/ui-preview.mjs     # 起真实 DSH + 代理 + 移动视口，自动
 packages/host      31 个 .ts   ← 宿主模块，改动需重启 DSH
 packages/protocol  13 个 .ts   ← 隧道协议
 packages/client     5 个 .ts   ← 客户端，刷新即可
-packages/bridge                ← 预览桥（客户端 bundle）
+packages/host/src/client.js   ← 浏览器半（预览桥；构建时复制成 lib/client.js）
 apps/shell                     ← Flutter 原生外壳（2.0 G 是 build/，已 gitignore）
 native/android                 ← 原生工程
 scripts/                       ← 验收脚本矩阵

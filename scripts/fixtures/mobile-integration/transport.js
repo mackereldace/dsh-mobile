@@ -22,12 +22,7 @@
         if (method.endsWith('/plugins/set-enabled')) { if (args.revision !== revision) return { result: { ok: false, error: { message: '版本已变化，请重新读取' } } }; plugins.set(backend, args.enabled); revision++ }
         return wire({ ok: true, backend, plugin: plugin(backend), fields: [], configReason: '此插件无公开配置项', applyMessage: '状态已重新读取' })
       }
-      if (method.startsWith('mobile/codex/')) {
-        if (method.endsWith('/threads/list')) return wire({ data: [], threads: [] })
-        if (method.endsWith('/projects/list')) return wire({ projects: [] })
-        if (method.endsWith('/events')) return wire({ events: [], nextCursor: 0 })
-        return wire({ ready: true, available: true })
-      }
+
       if (method === 'mobile/dsh/upload' && uploadFailures-- > 0) return { result: { ok: false, error: { message: '联测上传失败，可重试' } } }
       if (method === 'mobile/dsh/send' && sendFailures-- > 0) return { result: { ok: false, error: { message: '联测发送失败，草稿保留' } } }
       const response = await fixture.tunnel.rpc(method, payload)

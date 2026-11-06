@@ -7,7 +7,7 @@
  * 这两条路由的毛病**全是"没有症状"的那一类** ✗：
  *   · 路由忘了注册 ⇒ 404 ✓（手机上表现为"页面打不开"✓，但电脑上看不出为什么 ✓）；
  *   · 页面里漏了 `<script src="/mobile/boot.js">` ⇒ **页面能打开、永远连不上** ✗
- *     （我第一版就漏了 ✓ —— 靠"照抄 Codex 页"才发现 ✓）；
+ *     （我第一版就漏了 ✓ —— 靠"照抄另一张页"才发现 ✓）；
  *   · CSP 写错 ⇒ 样式/脚本被浏览器挡掉 ✓（打开是一片白 ✓）；
  *   · 缩略图那条失败路径 ⇒ 回一句系统原文 ✓（用户看不懂去哪儿开权限 ✓）。
  * 这些都**只能在"真发一次请求"里现形** ✓ —— 单测打不到它们 ✓。
@@ -24,7 +24,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { startStandaloneHost } from '../packages/host/src/codex/standalone.ts'
+import { startStandaloneHost } from '../packages/host/src/standalone.ts'
 
 /**
  * ★ 先探一个**空闲端口** ✗ —— 我第一版写 `plain: '127.0.0.1:0'`（让系统挑 ✓），

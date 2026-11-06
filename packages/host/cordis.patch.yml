@@ -28,12 +28,13 @@
 #     `24-0.17官方插件管理-调研与接入方案.md` §5.3 与 §9 ✓（**尚未定稿** ✗：要在临时 profile 上
 #     真装一次、看它到底报什么错再定 ✓，别照文档猜 ✗）。
 #
-# ## 只有一条行了（★ 桥搬走了 ✗ —— 2026-09-29 实测逼出来的 ✓）
+# ## 只有一条行（★ 桥已经并进来又整个删掉 ✓）
 #
-# 原先这里还有第二条 `mobile-preview-bridge` ✓。现在它搬去 `@dsh-mobile/bridge`
-# **自己的** `cordis.patch.yml` ✓ —— 原因见那份文件的开头（`blockExoticSubdeps` ✗：
-# 桥不能再当 host 的子依赖 ✓，而能装的顶层东西必须自己是 bundle ✓）。
-# ⇒ 官方那条路要**装两次**（host 一次、bridge 一次 ✓）；自研安装器不受影响 ✓。
+# 2026-09-29 曾把预览桥拆成独立 bundle（`@dsh-mobile/bridge`）以绕开
+# `blockExoticSubdeps` ✓；2026-10-31 又并回本包 ✓；2026-11-03 那个独立包**整个删除** ✓
+# —— 浏览器半现在是 `packages/host/src/client.js` ✓（构建时复制成 `lib/client.js` ✓，
+# 模块 id 必须是本包名 `@dsh-mobile/host` ✓，见 `scripts/copy-client.mjs`）。
+# ⇒ 现在**只装这一个包、只有下面这一行** ✓。
 - insert:
     - id: mobile-host
       name: '@dsh-mobile/host'

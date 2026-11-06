@@ -730,7 +730,7 @@ const FAKE_BOOT = `
        *   ?phase=sent   ⇒ 只看"发出去之后"（那时旧会话的内容还在 ✓）
        *   ?phase=create ⇒ 再点一次「＋ 新会话」（看"切到空会话之后"✓）
        * ★ 注意：这段是**模板字符串**里的内容 ✗ —— 里面不许出现反引号，
-       *   我第一次就在这儿写了反引号，把 FAKE_BOOT 整段截断了 ✓（与 codex 页那条教训同款 ✓）。
+       *   我第一次就在这儿写了反引号，把 FAKE_BOOT 整段截断了 ✓（同类教训 ✓）。
        */
       var phase2 = new URLSearchParams(location.search).get('phase') || 'sent'
       if (phase2 === 'send-fail' || phase2 === 'read-fail') {

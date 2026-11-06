@@ -120,6 +120,23 @@ for (const [marker, label] of requiredMarkers) {
   if (!html.includes(marker)) problems.push(`缺少${label}（${marker}）`)
 }
 
+/**
+ * 2b) ★ 电脑端地址只有一个来源（宿主注入）✓ —— 2026-11-03 用户实测的误导点：
+ *   页面曾用 `probeDesktopUrl()` 在**手机**上探 `127.0.0.1:location.port` / `:3080` ✗
+ *   （手机的回环是手机自己 ⇒ 永远探不到电脑 ✓），兜底还写 `127.0.0.1:<DSH端口>/mobile` ✗，
+ *   把人指到没有维护的那条路上 ✓。现在：宿主按**明文监听端口**注入 `DESKTOP_URL` ✓。
+ */
+{
+  const placeholderHits = (html.match(/__DSHM_DESKTOP_URL__/g) ?? []).length
+  if (placeholderHits !== 1) {
+    problems.push(`电脑端地址占位符 __DSHM_DESKTOP_URL__ 必须恰好 1 处（实际 ${placeholderHits} 处；宿主靠它注入）`)
+  }
+  if (!html.includes('var DESKTOP_URL')) problems.push('缺少 DESKTOP_URL 常量（手机侧第 1 步必须用宿主给出的电脑地址）')
+  if (html.includes('probeDesktopUrl')) problems.push('页面里仍有 probeDesktopUrl（手机会去探自己的回环，永远探不到电脑）')
+  if (html.includes('127.0.0.1:3080')) problems.push('页面里仍把 3080 当电脑端口（电脑控制台 = 明文监听端口，默认 3081）')
+  if (!html.includes('id="desktop-self"')) problems.push('缺少 desktop-self（电脑侧要显示真实的本机地址）')
+}
+
 /** 3) 内联脚本必须能通过语法解析——这是最关键的一条。 */
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
 // 启动入口可能在任何一段内联脚本里（当前是第二段）
