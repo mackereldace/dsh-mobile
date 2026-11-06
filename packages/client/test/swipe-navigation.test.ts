@@ -53,6 +53,11 @@ interface StubNode {
     getPropertyValue(name: string): string
   }
   width: number
+  attributes: Map<string, string>
+  hasAttribute(name: string): boolean
+  getAttribute(name: string): string | null
+  setAttribute(name: string, value: string): void
+  removeAttribute(name: string): void
   closest(selector: string): StubNode | null
   getBoundingClientRect(): { left: number; top: number; width: number; height: number }
   appendChild(child: StubNode): StubNode
@@ -173,6 +178,18 @@ function buildHarness(overrides: { getComputedStyle?: (node: unknown) => { overf
      *   它是**模块级**函数 ✓，不切进来就是 `ReferenceError` ✗（同上面那条教训 ✓）。
      */
     grabFunction('flipDrawerMotion'),
+    /**
+     * ★ 2026-11-05（round 595 起）：`flipDrawerMotion` 会问"侧栏是不是覆盖层形态" ✓ ——
+     *   那几个是**模块级**函数 ✓，不切进来就是 `ReferenceError` ✗
+     *   （拖动第一帧就炸 ✓，表现为抽屉相关的用例整组红 ✓）。
+     */
+    grabVar('sidebarModeCache'),
+    grabFunction('classHasSuffix'),
+    grabFunction('dshSidebarColumn'),
+    grabFunction('dshSidebarRoot'),
+    grabFunction('dshSidebarOverlayMode'),
+    grabFunction('syncSidebarMode'),
+    grabFunction('syncSidebarInert'),
     grabFunction('installSwipeNavigation'),
   ].join('\n')
 

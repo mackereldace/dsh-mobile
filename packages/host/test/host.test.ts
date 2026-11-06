@@ -1272,7 +1272,7 @@ test('管理目录与设置读写由设备能力分别授权，拒绝请求不�
     const mobile = await env.connect({ pairingTicket: env.pairing.ticket.ticket })
     const reads = ['capabilities', 'settings/read', 'plugins/list', 'plugins/read']
     const writes = ['settings/write', 'plugins/configure', 'plugins/set-enabled']
-    for (const backend of ['dsh', 'codex']) for (const path of [...reads, ...writes]) {
+    for (const backend of ['dsh']) for (const path of [...reads, ...writes]) {
       const count = env.calls.length
       const response = await mobile.call('mobile/manage/' + path, { backend, id: 'fixture', value: true, enabled: false, revision: 1 })
       assert.equal(response.ok, false, path)

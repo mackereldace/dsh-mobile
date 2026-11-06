@@ -9,17 +9,10 @@ export function applyMobileTheme(doc, preference) {
   doc.body?.toggleAttribute('data-ds-dark-theme', Boolean(dark))
   try { win.localStorage?.setItem(THEME_KEY, theme) } catch { /* Storage can be disabled in a private WebView. */ }
 }
-export function navigateMobileBackend(backend, doc = document) {
-  const win = doc.defaultView || globalThis
-  if (!['dsh', 'codex'].includes(backend)) throw new Error('未知会话来源')
-  const url = new URL(win.location.href), input = doc.querySelector('#input')
-  if (input) {
-    try { win.sessionStorage?.setItem('dshm-route-draft:' + url.pathname + ':' + (url.searchParams.get('session') || ''), input.value) } catch { /* The current page still retains its draft. */ }
-  }
-  url.pathname = backend === 'codex' ? '/mobile/codex' : '/mobile/chat'
-  url.searchParams.delete('session'); url.searchParams.delete('parent'); url.searchParams.delete('mode'); url.searchParams.set('mobile', '1')
-  win.location.assign(url.toString())
-}
+/**
+ * ★ 2026-11-07：`navigateMobileBackend()`（"切到 Codex 页面 / 切回 DSH"）已删 ✓ ——
+ *   Codex 后端整套移除之后，手机表面只有一个来源 ✓，没有"切换"这件事了。
+ */
 
 export function mountManagement({ root, backend = 'dsh', call, boot, onStateChange }) {
   const doc = root.ownerDocument || root, win = doc.defaultView || globalThis
@@ -31,7 +24,9 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
   panel.setAttribute('aria-label', '设置与插件'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true')
   portal.appendChild(panel)
   let page = null, section = 'general', selected = null, data = null, capability = null, epoch = 0, disposed = false, cleanupConnection = null
-  let busy = false, feedback = '', failure = '', opener = null, selectedBackend = backend
+  let busy = false, feedback = '', failure = '', opener = null
+  /** ★ 只有一个后端了 ✓（Codex 已移除）—— 协议里的 `backend` 字段仍传 `'dsh'` ✓。 */
+  const selectedBackend = 'dsh'
   const drafts = new Map()
   // RPC has no cancellation contract. Keep a timed-out write locked until its
   // actual promise settles and a new read confirms the server's revision.
@@ -137,11 +132,6 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
     head.appendChild(element('strong', 'management-title', selected ? data?.plugin?.name || '插件详情' : page === 'plugins' ? '插件' : '设置'))
     head.appendChild(button('关闭', () => close(), 'management-close')); panel.appendChild(head)
     const content = element('div', 'management-content'); panel.appendChild(content)
-    const sources = element('label', 'management-backend', '会话来源 '), select = element('select', 'management-control')
-    for (const [value, label] of [['dsh', 'DSH'], ['codex', 'Codex']]) { const option = element('option', '', label); option.value = value; select.appendChild(option) }
-    select.value = selectedBackend; select.disabled = busy; select.setAttribute('aria-label', '管理的后端')
-    select.addEventListener('change', () => { epoch++; selectedBackend = select.value; selected = null; data = null; capability = null; feedback = ''; void load() })
-    sources.appendChild(select); content.appendChild(sources)
     if (page === 'settings') {
       const tabs = element('nav', 'management-sections'); tabs.setAttribute('aria-label', '设置分类')
       for (const [key, label] of [['general', '模型与权限'], ['connection', '连接与设备'], ['appearance', '外观']]) {
@@ -162,7 +152,7 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
       for (const [value, text] of [['system', '跟随系统'], ['dark', '暗色'], ['light', '浅色']]) { const option = element('option', '', text); option.value = value; choice.appendChild(option) }
       choice.value = doc.documentElement?.getAttribute('data-theme') || 'system'
       choice.addEventListener('change', () => applyMobileTheme(doc, choice.value)); label.appendChild(choice); content.appendChild(label)
-      status(content, '主题保存在这台手机，并用于 DSH 和 Codex 页面。'); return
+      status(content, '主题保存在这台手机，用于所有页面。'); return
     }
     if (busy && !data) status(content, '正在读取…')
     if (failure || !data && !busy) content.appendChild(button('重新读取', () => { feedback = ''; void load() }))
@@ -229,35 +219,3 @@ export function mountManagement({ root, backend = 'dsh', call, boot, onStateChan
   return { open, close, back, available: () => page !== null, state: () => ({ page, section, selected, backend: selectedBackend, busy }), dispose() { close(false); disposed = true; epoch++; doc.removeEventListener('keydown', key); panel.remove() } }
 }
 
-/** The existing Codex renderer remains responsible for conversation operations. */
-if (typeof document !== 'undefined' && document.body?.getAttribute('data-mobile-backend') === 'codex') {
-  const doc = document, boot = globalThis.__DSH_MOBILE_BOOT__, drawer = doc.querySelector('#drawer')
-  doc.documentElement.setAttribute('data-mobile-backend', 'codex')
-  const tunnel = boot?.tunnel
-  const call = (endpoint, args) => Promise.resolve(tunnel?.rpc(endpoint, { args })).then(response => {
-    if (response?.result?.ok !== true) throw new Error(response?.result?.error?.message || '隧道尚未连接')
-    return response.result.value
-  })
-  const management = mountManagement({ root: doc, backend: 'codex', call, boot })
-  if (drawer) {
-    const footer = doc.createElement('div'); footer.className = 'session-drawer-footer'
-    for (const [key, label] of [['plugins', '插件'], ['settings', '设置']]) {
-      const item = doc.createElement('button'); item.type = 'button'; item.textContent = label; item.className = 'session-management-link'; item.setAttribute('data-navigation-action', key)
-      item.addEventListener('click', () => { drawer.classList.remove('open'); const scrim = doc.querySelector('#scrim'); if (scrim) scrim.hidden = true; management.open(key) }); footer.appendChild(item)
-    }
-    const source = doc.createElement('button'); source.type = 'button'; source.className = 'session-management-link'; source.textContent = '切换到 DSH'; source.addEventListener('click', () => navigateMobileBackend('dsh', doc)); footer.appendChild(source); drawer.appendChild(footer)
-    const surface = doc.createElement('div'); surface.className = 'mobile-codex-surface'
-    for (const item of [doc.querySelector('#bar'), doc.querySelector('main'), doc.querySelector('#composer')]) if (item) surface.appendChild(item)
-    doc.body.appendChild(surface)
-    const sync = () => { doc.body.setAttribute('data-dsh-mobile-drawer', drawer.classList.contains('open') ? 'open' : 'closed'); boot?.reportBackAvailable?.() }
-    new MutationObserver(sync).observe(drawer, { attributes: true, attributeFilter: ['class'] }); sync()
-    boot?.setNavigationHandlers?.({ available: () => management.available() || drawer.classList.contains('open'), back: () => {
-      if (management.back()) return true
-      if (!drawer.classList.contains('open')) return false
-      drawer.classList.remove('open'); const scrim = doc.querySelector('#scrim'); if (scrim) scrim.hidden = true; return true
-    } })
-  }
-  try { applyMobileTheme(doc, localStorage.getItem(THEME_KEY) || 'system') } catch { /* System theme remains valid. */ }
-  const input = doc.querySelector('#input')
-  try { if (input && !input.value) input.value = sessionStorage.getItem('dshm-route-draft:' + location.pathname + ':') || '' } catch { /* Storage can be unavailable. */ }
-}

@@ -1,6 +1,5 @@
-import type { CodexManagementMethod } from './codex/codex-bridge.ts';
 import type { GatewayCaller } from './dsh-chat-bridge.ts';
-export type ManagementBackend = 'dsh' | 'codex';
+export type ManagementBackend = 'dsh';
 export type ManagementScalar = string | number | boolean | null;
 export interface ManagementField {
     readonly id: string;
@@ -37,12 +36,8 @@ export interface ManagementPlugin {
     readonly status: string;
     readonly version?: string;
 }
-export interface ManagementCodexBridge {
-    managementRequest(method: CodexManagementMethod, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
-}
 export interface MobileManagementDeps {
     readonly call: GatewayCaller;
-    readonly codex?: ManagementCodexBridge;
 }
 export declare const MOBILE_MANAGEMENT_PATHS: {
     readonly capabilities: "mobile/manage/capabilities";

@@ -382,11 +382,6 @@ const OLD_DEPLOYMENT_PATCH = [
   "          - '10.0.0.5:3081'",
   "          - '10.0.0.5:3443'",
   "        publicBaseUrl: 'http://10.0.0.5:3081'",
-  '    # 预览桥（round 99）：把 DSH 自带的文档预览（KaTeX / PDF / 图片）暴露给手机外壳。',
-  '    # 它**必须**在这里被声明 ✓ —— DSH 的客户端 bundle 注册要求"与 graph 行匹配" ✓，',
-  '    # 只在页面里 load 是无效的 ✗（见 packages/bridge/lib/client.js 的说明）。',
-  '    - id: mobile-preview-bridge',
-  "      name: '@dsh-mobile/bridge'",
   '# <<< dsh-mobile host plugin <<<',
   '',
 ].join('\n')

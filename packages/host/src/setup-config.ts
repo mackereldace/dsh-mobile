@@ -658,11 +658,6 @@ export function renderInsertPatch(config: MobileSetupConfig): string {
 - insert:
     - id: mobile-host
       name: '@dsh-mobile/host'${block}
-    # 预览桥（round 99）：把 DSH 自带的文档预览（KaTeX / PDF / 图片）暴露给手机外壳。
-    # 它**必须**在这里被声明 ✓ —— DSH 的客户端 bundle 注册要求"与 graph 行匹配" ✓，
-    # 只在页面里 load 是无效的 ✗（见 packages/bridge/lib/client.js 的说明）。
-    - id: mobile-preview-bridge
-      name: '@dsh-mobile/bridge'
 ${MARKER_END}
 `
 }

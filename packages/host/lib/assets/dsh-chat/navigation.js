@@ -196,12 +196,11 @@ export function mountNavigation(options) {
   create.disabled = typeof options.onCreate !== 'function'
   const groups = node('div', 'session-groups')
   const footer = node('div', 'session-drawer-footer')
-  const source = append(footer, node('label', 'session-backend-row', '会话来源'))
-  const backend = append(source, node('select', 'session-backend-select')); backend.setAttribute('aria-label', '会话来源')
-  for (const [value, label] of [['dsh', 'DSH'], ['codex', 'Codex']]) {
-    const option = node('option', '', label); option.value = value; backend.appendChild(option)
-  }
-  backend.value = options.backend || 'dsh'; backend.disabled = typeof options.onBackendChange !== 'function'
+  /**
+   * ★ 2026-11-07：「会话来源」那颗下拉删掉了 ✓ —— 它存在的唯一理由是
+   *   "同一个手机表面既能连 DSH 也能连 Codex" ✓，而 Codex 后端已整套移除 ✓。
+   *   `options.onBackendChange` 与 `options.backend` 两个入参一并作废 ✓（没有第二个来源可以切）。
+   */
   const plugins = append(footer, button('session-row session-management-link', '插件', 'plugins'))
   const settings = append(footer, button('session-row session-management-link', '设置', 'settings'))
   for (const item of [plugins, settings]) item.disabled = typeof options.onManage !== 'function'
@@ -398,7 +397,6 @@ export function mountNavigation(options) {
   listen(titleButton, 'click', () => { if (openMenu(actions, titleButton, paintHeader)) { setFeedback(''); rename.focus() } })
   listen(badge, 'click', () => { openMenu(catalogPanel, badge, paintCatalog) })
   listen(search, 'input', paintGroups)
-  listen(backend, 'change', () => { hide(); void dispatch(options.onBackendChange, [backend.value], '切换来源失败') })
   listen(plugins, 'click', () => { hide(); void dispatch(options.onManage, ['plugins'], '打开插件失败') })
   listen(settings, 'click', () => { hide(); void dispatch(options.onManage, ['settings'], '打开设置失败') })
   listen(create, 'click', () => { const cwd = text(session(currentId)?.cwd); hide(); void dispatch(options.onCreate, [cwd ? { cwd } : {}], '新建会话失败') })
@@ -450,7 +448,7 @@ export function mountNavigation(options) {
   listen(doc, 'keydown', event => {
     if (event.key === 'Escape' && [drawer, actions, catalogPanel].some(panel => panel?.hidden === false)) { event.preventDefault(); hide(true) }
     if (event.key !== 'Tab' || drawer?.hidden !== false) return
-    const focusable = [closeDrawer, search, create, ...groups.querySelectorAll('button'), backend, plugins, settings].filter(el => !el.disabled && !el.hidden)
+    const focusable = [closeDrawer, search, create, ...groups.querySelectorAll('button'), plugins, settings].filter(el => !el.disabled && !el.hidden)
     const first = focusable[0], last = focusable.at(-1), active = doc.activeElement
     if ((event.shiftKey && (active === first || !drawer.contains(active))) || (!event.shiftKey && (active === last || !drawer.contains(active)))) {
       event.preventDefault(); (event.shiftKey ? last : first)?.focus()

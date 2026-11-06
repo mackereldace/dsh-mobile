@@ -2017,6 +2017,30 @@ describe('cordis：DSH 前端定位（软链安装 + 运行中 DSH 的安装锚�
     assert.equal(resolver.problem(), undefined, '最终成功 ⇒ problem 必须是 undefined（别反过来吓唬用户 ✗）')
   })
 
+  test('★★ 桌面 App 形态：老锚全拿不到时，从 App 的 Resources（app.asar/dsh/...）解析到前端', () => {
+    /**
+     * **怎么把它打红**：删掉 `directAppSources` 的候选（或不把它并进 `sources`）⇒
+     * 桌面版 DSH 的 host 里（profileContext 拿不到、argv/moduleUrl 都在 asar 外）⇒ 解析失败 ⇒
+     * 手机端看到 503 "应用外壳不可用"（用户 2026-11-05 真机截图 ✓）。
+     */
+    const root = realTempDir('dshm-dist-app-')
+    const frontend = join(root, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-web-frontend')
+    mkdirSync(join(frontend, 'dist'), { recursive: true })
+    const index = join(frontend, 'dist', 'index.html')
+    writeFileSync(index, '<!doctype html>')
+    const io = recordingLogger()
+    const resolver = createDistIndexResolver({ appResources: root, logger: io.logger })
+    assert.equal(resolver.resolve(), index, '★ App Resources 这条路必须命中（桌面 runner 现场唯一的路 ✓）')
+    assert.equal(resolver.problem(), undefined)
+    assert.equal(resolver.anchor(), index)
+    const attempts = resolver.attempts()
+    assert.equal(attempts[0]?.ok, false, '① 安装锚拿不到（桌面 runner 现场就是没有它 ✓）')
+    const hit = attempts.find((item) => item.ok)
+    assert.ok(hit !== undefined, '必须在 App Resources 这条路上命中')
+    assert.match(hit?.label ?? '', /DSH 桌面 App 资源/)
+    assert.equal(io.warns.length, 0, '成功时不许打警告')
+  })
+
   test('★★ 三条路全失败 ⇒ undefined **且**原因里含"试了哪几条、各自栽在哪"；日志只打一行（不静默、也不刷屏）', () => {
     /**
      * **怎么把它打红**：① 把 `problem()` 记的原因去掉（失败只返回 `undefined`）⇒ 前几条断言红；

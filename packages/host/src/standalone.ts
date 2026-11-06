@@ -1,10 +1,10 @@
 /**
- * 独立服务：不用 DSH，直接把手机接进 Codex。
+ * 独立服务：不用 DSH，直接起一台手机宿主（检查脚本用它「打真 HTTP ✓」）。
  *
  * ## 它和 DSH 插件的关系
  *
  * 两者用的是**同一套宿主核心**（`createMobileHost`：配对页、设备库、能力位、
- * E2E 隧道、`/mobile/codex` 页面与 `mobile/codex/*` 端点），差别只在装配：
+ * E2E 隧道、会话页与本地端点），差别只在装配：
  *
  *   · DSH 插件：路由挂在 DSH 的 webServer 上，业务调用转发给 DSH 的 Typert 网关；
  *   · 独立服务：自己起一个 loopback HTTP 服务当"内部目标"，再由
@@ -27,15 +27,15 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
-import { createMobileHost, DEFAULT_CONFIG, type MobileHostService, type RemoteGateway } from '../index.ts'
-import { DeviceStore } from '../devices.ts'
-import { loadOrCreateHostIdentity } from '../cordis.ts'
-import { createLanListener, type LanListener } from '../lan-listener.ts'
-import { detectLanIp, isAddressPresent, listLanCandidates } from '../lan.ts'
-import { createTlsManager, type TlsManager } from '../tls-cert.ts'
+import { createMobileHost, DEFAULT_CONFIG, type MobileHostService, type RemoteGateway } from './index.ts'
+import { DeviceStore } from './devices.ts'
+import { loadOrCreateHostIdentity } from './cordis.ts'
+import { createLanListener, type LanListener } from './lan-listener.ts'
+import { detectLanIp, isAddressPresent, listLanCandidates } from './lan.ts'
+import { createTlsManager, type TlsManager } from './tls-cert.ts'
 
-/** 手机入口路径：独立服务没有 DSH 外壳，直接进 Codex 页。 */
-export const STANDALONE_ENTRY_PATH = '/mobile/codex'
+/** 手机入口路径：独立服务没有 DSH 外壳，直接进我们自己的页面。 */
+export const STANDALONE_ENTRY_PATH = '/mobile/app'
 
 /** 默认监听（刻意避开 DSH 插件的 3081/3443，两边可以同时跑）。 */
 export const DEFAULT_STANDALONE_PLAIN = '0.0.0.0:3082'
@@ -43,7 +43,7 @@ export const DEFAULT_STANDALONE_TLS = '0.0.0.0:3444'
 
 /** 默认数据目录（身份 / 设备库 / 审计 / 自签证书）。 */
 export function defaultStandaloneDataDir(home: string = homedir()): string {
-  return join(home, '.codex-mobile')
+  return join(home, '.dsh-mobile-standalone')
 }
 
 export interface StandaloneHostOptions {
@@ -56,10 +56,6 @@ export interface StandaloneHostOptions {
   /** DSH 插件的数据目录；存在且目标目录为空时会**拷贝**过来（身份/设备/证书不丢）。 */
   readonly migrateFrom?: string
   readonly logger?: { readonly log: (message: string) => void; readonly warn: (message: string) => void }
-  /** Codex CLI / CODEX_HOME（透传给 CodexBridge；省略时用其默认值）。 */
-  readonly codexCli?: string
-  readonly codexArgs?: readonly string[]
-  readonly codexHome?: string
 }
 
 export interface StandaloneHost {
@@ -142,8 +138,8 @@ export async function startStandaloneHost(options: StandaloneHostOptions): Promi
   let handleUpgrade: ((req: IncomingMessage, socket: Duplex) => void) | undefined
   const server: Server = createServer((req, res) => {
     if (handleHttp?.(req, res) === true) return
-    res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'x-codex-host': 'standalone' })
-    res.end(JSON.stringify({ code: 'codex-host/not-found', message: '这个独立服务只提供 /mobile/* 与 /mobile/codex' }))
+    res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'x-dsh-mobile-host': 'standalone' })
+    res.end(JSON.stringify({ code: 'dsh-mobile-host/not-found', message: '这个独立服务只提供 /mobile/* 本地端点' }))
   })
   server.on('upgrade', (req, socket) => {
     if (handleUpgrade === undefined) {
@@ -179,7 +175,7 @@ export async function startStandaloneHost(options: StandaloneHostOptions): Promi
   /**
    * 端口优先取**真实绑定**结果；绑定还没写进状态时退回配置串里那个端口。
    * 为什么必须有兜底：`listener.start()` 之后的头几十毫秒里，status 里可能还没有 binding，
-   * 于是打印出来的手机地址会**丢掉端口**（`https://10.34.255.229/mobile/codex` ✗）——
+   * 于是打印出来的手机地址会**丢掉端口**（`https://10.34.255.229/mobile/app` ✗）——
    * 用户照着填必然连不上。
    */
   const tlsPort = boundPort('tls') ?? portOfAddress(options.tls ?? DEFAULT_STANDALONE_TLS)
@@ -214,10 +210,10 @@ export async function startStandaloneHost(options: StandaloneHostOptions): Promi
    */
   const gateway: RemoteGateway = {
     async invoke(request) {
-      throw Object.assign(new Error(`独立服务没有 DSH 网关（${request.namespace}/${request.method}）`), { code: 'codex-host/no-gateway' })
+      throw Object.assign(new Error(`独立服务没有 DSH 网关（${request.namespace}/${request.method}）`), { code: 'dsh-mobile-host/no-gateway' })
     },
     async stream(request) {
-      throw Object.assign(new Error(`独立服务没有 DSH 网关（${request.namespace}/${request.method}）`), { code: 'codex-host/no-gateway' })
+      throw Object.assign(new Error(`独立服务没有 DSH 网关（${request.namespace}/${request.method}）`), { code: 'dsh-mobile-host/no-gateway' })
     },
   }
 
@@ -237,17 +233,6 @@ export async function startStandaloneHost(options: StandaloneHostOptions): Promi
   const bootScriptPath = bootScriptCandidates.find((candidate) => existsSync(candidate))
   if (bootScriptPath === undefined) {
     warn(`找不到 boot.js（试过：${bootScriptCandidates.join(' / ')}）—— 手机页面将装不上传输层`)
-  }
-  /**
-   * Codex 侧参数：宿主核心是在 `getCodexBridge()` 里读 `DSH_MOBILE_CODEX_*` 环境变量，
-   * 独立服务不另造一套装配，直接在这些变量还没被读过之前写进本进程环境 ✓。
-   */
-  if (options.codexCli !== undefined) process.env['DSH_MOBILE_CODEX_CLI'] = options.codexCli
-  if (options.codexArgs !== undefined) process.env['DSH_MOBILE_CODEX_ARGS'] = JSON.stringify(options.codexArgs)
-  if (options.codexHome !== undefined) process.env['DSH_MOBILE_CODEX_HOME'] = options.codexHome
-  // 手机新建的会话默认落在用户主目录（服务自己的 cwd 是仓库目录，不适合当工作区）
-  if (process.env['DSH_MOBILE_CODEX_CWD'] === undefined || process.env['DSH_MOBILE_CODEX_CWD'].length === 0) {
-    process.env['DSH_MOBILE_CODEX_CWD'] = homedir()
   }
 
   const service = createMobileHost({
@@ -297,7 +282,6 @@ export async function startStandaloneHost(options: StandaloneHostOptions): Promi
       } catch {
         /* 忽略 */
       }
-      service.stopCodexBridge()
       await new Promise<void>((resolve) => server.close(() => resolve()))
     },
   }

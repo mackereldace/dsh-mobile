@@ -76,7 +76,7 @@ describe('mobile/dsh 桥：端点分发', () => {
   it('不认识的端点 ⇒ undefined（让它继续往下走）', async () => {
     const { call } = fakeGateway()
     assert.equal(await handleDshChatEndpoint({ call }, 'mobile/dsh/nope', args({})), undefined)
-    assert.equal(await handleDshChatEndpoint({ call }, 'mobile/codex/status', args({})), undefined)
+    assert.equal(await handleDshChatEndpoint({ call }, 'mobile/files/list', args({})), undefined)
   })
 
   it('列会话：用 **`_request`** 这个参数名调 session/list（不是 request）', async () => {

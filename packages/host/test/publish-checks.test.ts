@@ -15,7 +15,6 @@ import { verifyPublishedArtifacts } from '../../../scripts/lib/publish-checks.mj
 
 /** 一份"全都正常"的样本。 */
 const good = () => ({
-  codexBridge: "import { ErrorCode } from '../protocol/index.js'",
   boot: [
     '__dshmSetHosts', '__dshmForgetHost',
     'var BYTES_TAG = \'$dshmBytes\'', 'decodeBinaryValue(JSON.parse(fromUtf8(body)))',
@@ -44,7 +43,7 @@ describe('发布核对：每条闸都要会响（坏样本必须报出问题）'
   }
 
   it('① 裸引用', () => {
-    const problems = broken((i) => { i.codexBridge = "import { ErrorCode } from '@dsh-mobile/protocol'" })
+    const problems = broken((i) => { i.index = "import { ErrorCode } from '@dsh-mobile/protocol'" })
     assert.ok(problems.some((p) => p.includes('裸引用')), problems.join(' | '))
   })
 

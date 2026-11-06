@@ -470,8 +470,6 @@ export interface MobileHost extends MobileHostService {
     stopRelayDialer(): void;
     /** 停止中继回源通道。 */
     stopRelayHttpBackhaul(): void;
-    /** 停止 Codex 宿主桥（懒启动过才需要）。 */
-    stopCodexBridge(): void;
 }
 /**
  * 创建宿主插件主体。
@@ -491,6 +489,26 @@ export declare function createMobileHost(options: {
      * 所以只有独立服务 / 测试替身才该省略 ✓。
      */
     readonly gatewayPeer?: () => GatewayPeer | undefined;
+    /**
+     * ★★★ 2026-11-06：**图片上传**的宿主侧入口（隧道内端点 `mobile/upload/image`）。
+     *
+     * 为什么非要它（真机：附件卡上出现红圈、且没有任何报错）：
+     * DSH 0.2.2 的上传有**两条**结果形状 —— 普通文件走 Remote 方法 `fileUploads/upload`
+     * 回 `{receiptId, file:{…}}`；而**图片只走 HTTP 原始路由的 `?mediaType=`** 那一支，
+     * 回 `{receiptId, image:{attachmentId, mediaType, bytes, width, height}}`，
+     * 并且 `uploadImageStream` **在 Remote 表里没有方法**（只有服务实例上有）。
+     * 手机侧的上传钩子只会发 RPC ⇒ 图片拿回文件回执 ⇒ 客户端 `imageUploadValue` 校验失败
+     * ⇒ 图标 failed（那个红圈 ✓）。⇒ 由适配器注入这个函数，直接调服务那一支。
+     *
+     * 省略时该端点回一句人话（不静默失败）。
+     */
+    readonly imageUpload?: (request: {
+        readonly sessionId: string;
+        readonly mediaType: string;
+        readonly name?: string;
+        readonly data: Uint8Array;
+        readonly signal: AbortSignal;
+    }) => Promise<unknown>;
     /** 可用连接地址（用于二维码 payload 与 manifest）。 */
     readonly endpoints: () => string[];
     /** 本机 DSH 的监听端口（回源通道要用它做环回请求）。 */
@@ -529,8 +547,8 @@ export declare function createMobileHost(options: {
     /**
      * 手机配对成功后应该落到的**入口路径**（默认 `/mobile/app` = DSH 外壳）。
      *
-     * 独立服务（standalone.ts）把它设成 `/mobile/codex` —— 那里没有 DSH 前端，
-     * 手机必须直接落到 Codex 页面；否则配对完成后会打开一个 503 的外壳路径。
+     * 独立服务（standalone.ts）用它把手机落到自己的入口页 ——
+     * 那里没有 DSH 前端，落到外壳路径会是 503。
      */
     readonly entryPath?: string;
     /**

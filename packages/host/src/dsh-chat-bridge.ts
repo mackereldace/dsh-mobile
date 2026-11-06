@@ -7,7 +7,7 @@
  * 但 DSH 的端点**不是给第三方用的契约**：名字与形状随版本变（0.15 → 0.17 → 0.2.0 都动过），
  * 而且参数名怪（`session/list` 的参数叫 `_request`，`session/page` 叫 `request`）。
  * ⇒ 把"**认 DSH**"这件事关在这一层：手机只认 `mobile/dsh/*`，
- * 哪天 DSH 换了名字/形状，**只改这一个文件**（与 `codex-bridge` 是同一条思路）。
+ * 哪天 DSH 换了名字/形状，**只改这一个文件**（与 `gateway-rpc` 是同一条思路）。
  *
  * ## 形状来源（不是猜的）
  *
@@ -66,7 +66,7 @@
  * ## 与隧道的关系
  *
  * 调用走**已有的通用网关透传**（`invokeGatewayEndpoint` ✓）—— 不新造协议 ✓；
- * 与 `mobile/codex/*` 一样放在**能力门禁之前** ✓（设备身份已由隧道握手保证 ✓）。
+ * 与其它 `mobile/*` 本地端点一样放在**能力门禁之前** ✓（设备身份已由隧道握手保证 ✓）。
  */
 
 import { ErrorCode } from '@dsh-mobile/protocol'
@@ -1390,7 +1390,7 @@ async function headSeqFromList(
 
 // ────────────────────────────── 工具 ──────────────────────────────
 
-/** 从 typert 信封里取业务参数（`{args:{…}}` ✓ —— 与 `codex-bridge` 同一套 ✓）。 */
+/** 从 typert 信封里取业务参数（`{args:{…}}` ✓ —— 与 `gateway-rpc` 同一套 ✓）。 */
 function readArgs(payload: unknown): Record<string, unknown> {
   const envelope = payload as { readonly args?: Record<string, unknown> } | undefined
   const args = envelope?.args

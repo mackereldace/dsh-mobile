@@ -37,7 +37,7 @@ const flush = async () => { await new Promise(resolve => setImmediate(resolve)) 
 const deferred = () => { let resolve!: (data: Data) => void, reject!: (error: Error) => void; const promise = new Promise<Data>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 function mounted() {
   const doc = new Document(), pending = deferred(), calls: { endpoint: string; args: Data }[] = []
-  const values = new Map([['dsh', 'model-a'], ['codex', 'model-a']]); let revision = 1, failNext = false
+  const values = new Map([['dsh', 'model-a']]); let revision = 1, failNext = false
   const data = (backend = 'dsh') => ({ ok: true, backend, fields: [{ id: 'model', label: '模型', type: 'select', value: values.get(backend), choices: [{ value: 'model-a', label: 'A' }, { value: 'model-b', label: 'B' }], writable: true, revision }] })
   const manager = mountManagement({ root: doc, backend: 'dsh', call: (endpoint: string, args: Data) => {
     calls.push({ endpoint, args })
@@ -73,16 +73,6 @@ describe('mobile management write recovery', () => {
       p.confirm(); await flush(); assert.equal(p.locked(), false)
       assert.equal(p.doc.querySelector('#management-field-model')!.value, '1')
       assert.ok(p.calls.filter(call => call.endpoint.endsWith('/read')).length >= 4, 'settlement must trigger an authoritative new read')
-    } finally { p.manager.dispose() }
-  })
-  it('late acknowledgement from a timed-out backend cannot overwrite the new backend or lock it', async () => {
-    const p = mounted()
-    try {
-      p.manager.open('settings'); await flush(); p.edit(); p.submit(); await flush(); p.doc.expire(); await flush()
-      const backend = p.doc.querySelector('.management-backend')!.querySelector('select')!; backend.value = 'codex'; backend.fire('change'); await flush()
-      assert.equal(p.locked(), false); assert.equal(p.doc.querySelector('#management-field-model')!.value, '0')
-      p.confirm(); await flush()
-      assert.equal(p.manager.state().backend, 'codex'); assert.equal(p.doc.querySelector('#management-field-model')!.value, '0'); assert.equal(p.locked(), false)
     } finally { p.manager.dispose() }
   })
   it('a confirmed failure preserves the edited field and allows a subsequent deliberate retry', async () => {

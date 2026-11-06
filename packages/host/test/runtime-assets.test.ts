@@ -1,5 +1,5 @@
 /**
- * ★★ 宿主**运行时磁盘资源**（会话页 HTML 与 css/js ✓、codex 页脚本 ✓）的定向回归测试。
+ * ★★ 宿主**运行时磁盘资源**（会话页 HTML 与 css/js ✓）的定向回归测试。
  *
  * ## 为什么要有它（用户 2026-10-05 实测的真 bug ✓）
  *
@@ -165,10 +165,6 @@ describe('运行时 assets：清单（**唯一一份** ✓）', () => {
         `清单漏了 dsh-chat/${name} ✗ —— index.ts 会去读它，却没人把它装出去 ✓（这正是用户那条 mobile/internal 的成因 ✓）`,
       )
     }
-    assert.ok(
-      RUNTIME_ASSETS.includes('codex/ui.js'),
-      '清单漏了 codex/ui.js ✗ —— codex 页的脚本同样是「从磁盘的真文件发出去」✓',
-    )
   })
 
   it('★ 清单里的每个文件在 packages/host/assets 下都真的存在（拼错了要当场红 ✗）', () => {
@@ -244,8 +240,6 @@ describe('运行时 assets：装出去（**用户那条 bug 的直接断言** �
     // 再按**插件自己的位置**解析一次 ✓（路由就是这么找的 ✓ —— 模块在 lib/ 里 ✓）
     const moduleUrl = pathToFileURL(join(pkgDir, 'lib', 'host-assets.js')).href
     assert.equal(resolveHostAsset('dsh-chat/page.html', moduleUrl), page)
-    // codex 页脚本也一起装上（同一个清单 ✓）
-    assert.ok(existsSync(join(pkgDir, 'lib', 'assets', 'codex', 'ui.js')), 'codex 页脚本没被装出去 ✗')
   })
 
   it('★ 构建与安装**两边**都必须调用同一份拷贝实现（只补一处 ⇒ 另一条上线路径上照样丢 ✗）', () => {

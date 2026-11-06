@@ -3727,15 +3727,41 @@ function transportBlockLines(): string[] {
     .filter((line) => line.length > 0)
 }
 
-/** ★★ 冻住的那一份（= 2026-10-06 方案 A 落地时主传输的样子 ✓）。 */
+/**
+ * ★★ 冻住的那一份。
+ *
+ * 冻结时刻：2026-10-06 方案 A 落地 ✓；
+ * **2026-11-05 二次冻结**（DSH 0.2.2 兼容 ✓）：主传输里多了「不是 RPC 信封就交还原生 fetch」
+ * 这一跳 —— 理由是 0.2.2 起 `dsh-client-hmr` 的 `GET plugins/events`（SSE）也会走
+ * `__DSH_TRANSPORT__.fetch` ✓，旧代码把它当信封解析 ⇒ `method` undefined ⇒
+ * 宿主抛 `Cannot read properties of undefined (reading 'startsWith')`
+ * （插件审计里的 `rpc | undefined | local failed` ✓）+ 页面拿到形状不对的 JSON ✓。
+ * ★ 同一天曾按 **URL 前缀** 判 RPC（`'/api/'` 开头）—— **那是个事故** ✗：DSH 传进来的是
+ * **相对地址**（`'api/session/list'`，`createWebConnectionRpc` 里 `.slice(1)` 去掉了前导斜杠 ✓），
+ * 按 `location.href` 解析成 `/mobile/api/...` ⇒ 全被交还原生 fetch ⇒ 手机上所有会话调用
+ * 401/403（"新建对话 403、侧栏点不动"✓）。现在的判据**只看信封**：有 `method` 就走隧道 ✓。
+ * ★ 这一处是**唯一**被允许动的理由；除此之外仍按"逐行一致"守 ✓。
+ */
 const TRANSPORT_BLOCK_LINES: string[] = [
   'globalThis.__DSH_TRANSPORT__ = {',
   'fetch: async function (input, init) {',
-  "var url = typeof input === 'string' ? input : input.url",
-  'var path = new URL(url, location.href)',
-  "var endpoint = path.pathname.replace(/^\\/api\\//, '')",
   'var body = init && init.body !== undefined ? init.body : undefined',
-  "var envelope = body === undefined ? {} : JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))",
+  'var envelope = {}',
+  'if (body !== undefined) {',
+  'try {',
+  "envelope = JSON.parse(typeof body === 'string' ? body : fromUtf8(new Uint8Array(body)))",
+  '} catch (error) {',
+  'envelope = {}',
+  '}',
+  '}',
+  'if (',
+  'envelope === null ||',
+  "typeof envelope !== 'object' ||",
+  "typeof envelope.method !== 'string' ||",
+  'envelope.method.length === 0',
+  ') {',
+  'return globalThis.fetch(input, init)',
+  '}',
   'var response = await tunnel.rpc(envelope.method, envelope.payload, envelope.rpcId)',
   'if (envelope.rpcId !== undefined && response.rpcId !== envelope.rpcId) {',
   "console.warn('[dsh-mobile] rpcId 不一致（会导致 DSH 拒绝该响应）：发出', envelope.rpcId, '收到', response.rpcId)",

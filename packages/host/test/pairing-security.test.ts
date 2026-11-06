@@ -300,7 +300,7 @@ test('T3 回源拒绝名单覆盖整个 /mobile/device/*，且不误伤手机要
     '/mobile/app.apk',
     '/mobile/pair/claim',
     '/assets/index-abc123.js',
-    '/plugins/@dsh-mobile/bridge/client.js',
+    '/plugins/@dsh-mobile/host/client.js',
   ]) {
     assert.equal(isRefusedRelayBackhaulPath(path), false, `${path} 是手机要用的路径，不能被误拒`)
   }

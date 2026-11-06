@@ -1,7 +1,7 @@
 /**
  * 会话页的**画**那一半（DOM）—— 会话页骨架的第二块。
  *
- * ★ 纯 JS、直接发给浏览器（与 `assets/codex/ui.js` 同一类 ✓）。
+ * ★ 纯 JS、直接发给浏览器。
  * ★ 取数循环在 `poller.js` 里（**不碰 DOM** ✓，能单测 ✓）；这里只回答"长什么样" ✓。
  *
  * ## 三条与首页一致的口径（观感归用户拍板 ✓，所以色值只在 CSS 变量里出现一次 ✗）
@@ -28,7 +28,7 @@ import { mountComposerControls } from './composer.js'
 import { mountNavigation } from './navigation.js'
 import { mountStatistics } from './stats.js'
 import { mountMobileShell } from './shell.js'
-import { mountManagement, navigateMobileBackend } from './management.js'
+import { mountManagement } from './management.js'
 
 export function chatLog(text) {
   try { console.log(text) } catch (error) { void error }
@@ -1940,13 +1940,6 @@ export function mountChat(options) {
     onCreate: request => { prepareSwitch(); return options.onCreate?.(request) },
     onRename: options.rename, onFiles: typeof options.onFiles === 'function' ? () => { nativeStatistics.close(); nativeControls.back?.(); return options.onFiles() } : undefined,
     onManage: nativeManagement ? kind => { nativeStatistics.close(); nativeControls.back?.(); nativeManagement.open(kind) } : undefined,
-    onBackendChange: typeof options.manage === 'function' ? backend => {
-      if (backend === 'dsh') return
-      if (pendingSends.size || [...attachmentDrafts.values()].some(files => files.some(file => file.uploading))) throw new Error('请等当前发送或上传结束后再切换来源')
-      const ready = activeAttachments().filter(file => file.receiptId).map(({ name, size, receiptId }) => ({ name, size, receiptId, uploading: false, error: '' }))
-      try { globalThis.sessionStorage?.setItem('dshm-attachments:' + currentSessionId, JSON.stringify(ready)) } catch { /* In-page drafts still remain valid. */ }
-      navigateMobileBackend(backend, root)
-    } : undefined,
     onRefresh: () => { loading = true; error = ''; notice = ''; paint(); return options.onRefresh?.() },
     onError: text => setNotice(text), onNotice: text => setNotice(text), onLog: chatLog,
   })

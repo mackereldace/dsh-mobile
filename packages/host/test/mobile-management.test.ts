@@ -98,62 +98,11 @@ function makeDsh() {
     setOverride(value: boolean) { override = value }, setToggleOverride(value: boolean) { toggleOverride = value } }
 }
 
-function makeCodex() {
-  const calls: Array<{ method: string; args: Row }> = []
-  let version = 'v1'
-  let versionMissing = false
-  let writeStatus = 'ok'
-  let failWrite = false
-  const config: Row = { model: 'model-a', model_reasoning_effort: 'high', approval_policy: 'on-request', sandbox_mode: 'read-only', apiKey: 'DO_NOT_LEAK',
-    plugins: { 'repo.plugin@local': { enabled: true, mcp_servers: { 'server.with.dots': { enabled: true, default_tools_approval_mode: 'prompt', bearer_token: 'DO_NOT_LEAK' } } } } }
-  const requirements: Row = { allowedApprovalPolicies: ['untrusted', 'on-request'], allowedSandboxModes: ['read-only', 'workspace-write'] }
-  const plugins: Row[] = [
-    { id: 'repo.plugin@local', name: 'repo.plugin', enabled: true, installed: true, remotePluginId: null, source: { type: 'local', path: '/trusted/repo' }, availability: 'available', localVersion: '1.2.3', interface: { displayName: '本地插件', shortDescription: '公开描述' } },
-    { id: 'remote@workspace', name: 'remote', enabled: true, installed: true, remotePluginId: 'real-remote-id', source: { type: 'remote' }, availability: 'available' },
-    { id: 'simple@local', name: 'simple', enabled: true, installed: true, remotePluginId: null, source: { type: 'local', path: '/trusted/repo' }, availability: 'available' },
-  ]
-  const deps: MobileManagementDeps = {
-    call: async () => { throw new Error('must not call DSH for Codex') },
-    codex: { async managementRequest(method, args) {
-      calls.push({ method, args })
-      switch (method) {
-        case 'config/read': return { config: structuredClone(config), origins: {}, layers: versionMissing ? [] : [{ name: { type: 'user', file: '/private/test/config.toml', profile: null }, version, config: {} }] }
-        case 'configRequirements/read': return { requirements: structuredClone(requirements) }
-        case 'model/list': return { data: [
-          { id: 'model-a', model: 'model-a', displayName: 'A', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }] },
-          { id: 'model-b', model: 'model-b', displayName: 'B', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] },
-        ], nextCursor: null }
-        case 'plugin/installed': return { marketplaces: [{ name: 'local', path: '/trusted/repo/.codex/plugins/marketplace.json', plugins: structuredClone(plugins) }], marketplaceLoadErrors: [] }
-        case 'plugin/read': return { plugin: { summary: plugins.find(value => value['name'] === args['pluginName']), description: '原生插件详情', mcpServers: args['pluginName'] === 'simple' ? [] : ['server.with.dots'], apiKey: 'DO_NOT_LEAK' } }
-        case 'config/batchWrite': {
-          if (failWrite) throw new Error('原生写入失败')
-          if (args['expectedVersion'] !== version) throw new Error('native version conflict')
-          for (const edit of args['edits'] as Row[]) {
-            const path = (String(edit['keyPath']).match(/"(?:[^"\\]|\\.)*"|[^.]+/g) ?? []).map(key => key.startsWith('"') ? JSON.parse(key) as string : key)
-            let cursor = config
-            for (const key of path.slice(0, -1)) { cursor[key] ??= {}; cursor = row(cursor[key]) }
-            const key = path.at(-1)!
-            if (writeStatus !== 'okOverridden') cursor[key] = edit['value']
-            if (path[0] === 'plugins' && path[2] === 'enabled' && writeStatus !== 'okOverridden') {
-              const plugin = plugins.find(value => value['id'] === path[1]); if (plugin) plugin['enabled'] = edit['value']
-            }
-          }
-          version = `${version}+`
-          return { status: writeStatus, version, filePath: '/private/test/config.toml', overriddenMetadata: { arbitrarySecret: 'DO_NOT_LEAK' } }
-        }
-      }
-    } },
-  }
-  return { deps, calls, config, requirements, plugins, setVersion(value: string) { version = value }, setMissingVersion(value: boolean) { versionMissing = value },
-    setStatus(value: string) { writeStatus = value }, setFailWrite(value: boolean) { failWrite = value } }
-}
-
 describe('移动管理：端点和后端隔离', () => {
   it('未知端点继续分发；管理端点要求明确后端', async () => {
     const fixture = makeDsh()
     assert.equal(await handleManagementEndpoint(fixture.deps, 'other/path', {}, undefined), undefined)
-    await assert.rejects(handleManagementEndpoint(fixture.deps, PATHS.settingsRead, { args: {} }), /明确选择/)
-    await assert.rejects(handleManagementEndpoint(fixture.deps, PATHS.settingsRead, { args: { backend: 'codex' } }), /未连接/)
+    await assert.rejects(handleManagementEndpoint(fixture.deps, PATHS.settingsRead, { args: { backend: 'codex' } }), /已移除/)
     assert.equal(fixture.calls.length, 0)
   })
   it('取消在原生调用前生效，不继续读取或持久写入', async () => {
@@ -308,105 +257,5 @@ describe('DSH 插件配置和启停', () => {
     fixture.setApplication('applied'); fixture.setToggleOverride(true)
     const result = await invoke(fixture.deps, PATHS.pluginsSetEnabled, { id: original.plugin.id, enabled: false, revision: original.revision })
     assert.equal(result.application, 'overridden'); assert.equal(result.plugin.enabled, true)
-  })
-})
-
-describe('Codex 配置和插件原生版本契约', () => {
-  it('只输出常用字段和受策略限制的选项，不输出路径/凭据/完整 config', async () => {
-    const fixture = makeCodex(); const result = await invoke(fixture.deps, PATHS.settingsRead, { backend: 'codex' })
-    assert.deepEqual(result.fields.map(field => field.id), ['model', 'model_reasoning_effort', 'approval_policy', 'sandbox_mode'])
-    assert.deepEqual(byField(result, 'approval_policy').choices?.map(choice => choice.value), ['untrusted', 'on-request'])
-    assert.deepEqual(byField(result, 'sandbox_mode').choices?.map(choice => choice.value), ['read-only', 'workspace-write'])
-    assert.equal(JSON.stringify(result).includes('DO_NOT_LEAK'), false)
-    assert.equal(JSON.stringify(result).includes('/private/test'), false)
-  })
-  it('模型写使用原生 expectedVersion，清除旧推理覆盖并回读；拒绝自选文件地址', async () => {
-    const fixture = makeCodex()
-    const result = await invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'model', value: 'model-b', revision: 'v1', filePath: '/untrusted/file' })
-    assert.deepEqual(fixture.calls.find(call => call.method === 'config/batchWrite')?.args, { expectedVersion: 'v1', reloadUserConfig: false, edits: [
-      { keyPath: 'model', value: 'model-b', mergeStrategy: 'replace' }, { keyPath: 'model_reasoning_effort', value: null, mergeStrategy: 'replace' },
-    ] })
-    assert.equal(byField(result, 'model').value, 'model-b')
-    assert.equal(byField(result, 'model_reasoning_effort').value, null)
-    assert.equal(result.revision, 'v1+')
-    assert.equal(JSON.stringify(result).includes('DO_NOT_LEAK'), false)
-  })
-  it('未知键、过期/缺失版本、管理策略禁用的选项不执行写', async () => {
-    for (const args of [ { id: 'apiKey', value: 'x', revision: 'v1' }, { id: 'model', value: 'fake', revision: 'v1' },
-      { id: 'model', value: 'model-b', revision: 'old' }, { id: 'sandbox_mode', value: 'danger-full-access', revision: 'v1' } ]) {
-      const fixture = makeCodex(); await assert.rejects(invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', ...args }))
-      assert.equal(fixture.calls.some(call => call.method === 'config/batchWrite'), false)
-    }
-    const fixture = makeCodex(); fixture.setMissingVersion(true)
-    const result = await invoke(fixture.deps, PATHS.settingsRead, { backend: 'codex' })
-    assert.ok(result.fields.every(field => !field.writable))
-    await assert.rejects(invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'model', value: 'model-b', revision: '' }))
-  })
-  it('原生策略指定模型/推理及 granular 审批时，控件不能伪装为可写', async () => {
-    const fixture = makeCodex(); fixture.requirements['models'] = { newThread: { model: 'model-b', modelReasoningEffort: 'low' } }
-    fixture.config['approval_policy'] = { granular: { rules: true } }
-    const result = await invoke(fixture.deps, PATHS.settingsRead, { backend: 'codex' })
-    assert.equal(byField(result, 'model').writable, false)
-    assert.equal(byField(result, 'model_reasoning_effort').writable, false)
-    assert.equal(byField(result, 'approval_policy').writable, false)
-  })
-  it('命名权限方案显示真实方案，不能声称修改旧 sandbox_mode 会生效', async () => {
-    const fixture = makeCodex(); fixture.config['default_permissions'] = ':read-only'
-    const result = await invoke(fixture.deps, PATHS.settingsRead, { backend: 'codex' })
-    assert.equal(byField(result, 'default_permissions').value, ':read-only')
-    assert.equal(byField(result, 'default_permissions').writable, false)
-    assert.equal(byField(result, 'sandbox_mode').writable, false)
-    assert.match(byField(result, 'sandbox_mode').reason ?? '', /已由方案接管/)
-    await assert.rejects(invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'sandbox_mode', value: 'workspace-write', revision: 'v1' }), /权限方案/)
-    assert.equal(fixture.calls.some(call => call.method === 'config/batchWrite'), false)
-  })
-  it('原生拒绝和 okOverridden 不伪装成功应用', async () => {
-    const fixture = makeCodex(); fixture.setFailWrite(true)
-    await assert.rejects(invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'model', value: 'model-b', revision: 'v1' }), /原生写入失败/)
-    fixture.setFailWrite(false); fixture.setStatus('failed')
-    await assert.rejects(invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'model', value: 'model-b', revision: 'v1' }), /真实配置写入回执/)
-    fixture.setStatus('okOverridden')
-    const result = await invoke(fixture.deps, PATHS.settingsWrite, { backend: 'codex', id: 'model', value: 'model-a', revision: 'v1+' })
-    assert.equal(result.application, 'overridden')
-    assert.equal(byField(result, 'model').value, 'model-b')
-  })
-  it('本地插件真实启停通过带引号的原生 keyPath，不混淆点号或覆盖其他配置', async () => {
-    const fixture = makeCodex(); const list = await invoke(fixture.deps, PATHS.pluginsList, { backend: 'codex' })
-    const plugin = list.plugins.find(value => value.id === 'repo.plugin@local')!
-    assert.equal(plugin.canToggle, true)
-    const result = await invoke(fixture.deps, PATHS.pluginsSetEnabled, { backend: 'codex', id: plugin.id, enabled: false, revision: plugin.revision })
-    assert.deepEqual(fixture.calls.find(call => call.method === 'config/batchWrite')?.args, { expectedVersion: 'v1', reloadUserConfig: true,
-      edits: [{ keyPath: 'plugins."repo.plugin@local".enabled', value: false, mergeStrategy: 'replace' }] })
-    assert.equal(result.plugin.enabled, false)
-    assert.equal(result.application, 'restart-required')
-    assert.match(result.applyMessage ?? '', /重开 Codex/)
-  })
-  it('工作区管理的 remote 插件和伪造身份不能走用户配置启停', async () => {
-    const fixture = makeCodex(); const list = await invoke(fixture.deps, PATHS.pluginsList, { backend: 'codex' })
-    const remote = list.plugins.find(value => value.id === 'remote@workspace')!
-    assert.equal(remote.canToggle, false)
-    await assert.rejects(invoke(fixture.deps, PATHS.pluginsSetEnabled, { backend: 'codex', id: remote.id, enabled: false, revision: remote.revision }), /工作区服务管理/)
-    await assert.rejects(invoke(fixture.deps, PATHS.pluginsSetEnabled, { backend: 'codex', id: 'fake@local', enabled: false, revision: 'v1' }), /已不存在/)
-    assert.equal(fixture.calls.some(call => call.method === 'config/batchWrite'), false)
-  })
-  it('MCP 公共 enable/approval 字段来自插件详情；未公开通用表时说明限制', async () => {
-    const fixture = makeCodex(); const detail = await invoke(fixture.deps, PATHS.pluginsRead, { backend: 'codex', id: 'repo.plugin@local' })
-    assert.equal(detail.fields.length, 2)
-    assert.equal(byField(detail, JSON.stringify(['mcp_servers', 'server.with.dots', 'enabled'])).value, true)
-    assert.equal(JSON.stringify(detail).includes('DO_NOT_LEAK'), false)
-    const simple = await invoke(fixture.deps, PATHS.pluginsRead, { backend: 'codex', id: 'simple@local' })
-    assert.equal(simple.plugin.canConfigure, false); assert.deepEqual(simple.fields, []); assert.match(simple.configReason ?? '', /没有公开/)
-  })
-  it('MCP 配置写只命中详情公开服务器和字段，并保留 bearer token', async () => {
-    const fixture = makeCodex(); const fieldId = JSON.stringify(['mcp_servers', 'server.with.dots', 'default_tools_approval_mode'])
-    const saved = await invoke(fixture.deps, PATHS.pluginsConfigure, { backend: 'codex', id: 'repo.plugin@local', fieldId, value: 'writes', revision: 'v1' })
-    assert.equal(byField(saved, fieldId).value, 'writes')
-    assert.deepEqual(fixture.calls.find(call => call.method === 'config/batchWrite')?.args['edits'], [{ keyPath: 'plugins."repo.plugin@local"."mcp_servers"."server.with.dots"."default_tools_approval_mode"', value: 'writes', mergeStrategy: 'replace' }])
-    assert.equal(row(row(row(fixture.config['plugins'])['repo.plugin@local'])['mcp_servers'])['server.with.dots'] !== undefined, true)
-    assert.equal(row(row(row(row(fixture.config['plugins'])['repo.plugin@local'])['mcp_servers'])['server.with.dots'])['bearer_token'], 'DO_NOT_LEAK')
-    for (const fieldId of [JSON.stringify(['mcp_servers', 'fake', 'enabled']), JSON.stringify(['mcp_servers', 'server.with.dots', 'bearer_token'])]) {
-      const fresh = makeCodex(); await assert.rejects(invoke(fresh.deps, PATHS.pluginsConfigure, { backend: 'codex', id: 'repo.plugin@local', fieldId, value: 'x', revision: 'v1' }))
-      assert.equal(fresh.calls.some(call => call.method === 'config/batchWrite'), false)
-    }
   })
 })

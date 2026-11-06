@@ -24,14 +24,12 @@ import { createClientSourceRegistry, promptRefOfTunnelCall, } from "./client-sou
 import { DeviceStore } from "./devices.js";
 import { imageMimeOf, resolveWallpaper, wallpaperSize } from "./wallpaper.js";
 import { DeviceCallQueue, DEVICE_CAPABILITIES, selectDeliveryTargets, } from "./device-calls.js";
-import { CodexBridge, handleCodexEndpoint } from "./codex/codex-bridge.js";
-import { CODEX_PAGE_HTML, CODEX_PAGE_PATH, CODEX_PAGE_SCRIPT_PATH } from "./codex/codex-page.js";
 import { deriveLanTrust, isIpLiteralHostname, localMachineName, matchesDerivedTrust, } from "./lan-trust.js";
 import { probeDshFrontend } from "./dsh-probe.js";
 /**
- * ★ 运行时磁盘资源（会话页 HTML 与 css/js ✓、codex 页脚本 ✓）的路径解析 ✓ ——
+ * ★ 运行时磁盘资源（会话页 HTML 与 css/js ✓、页面脚本 ✓）的路径解析 ✓ ——
  *   收敛到 `host-assets.ts` **一处** ✓（2026-10-05 ✓）。
- *   原先这里与下面 codex 那处各写一份候选路径字面量 ✗
+ *   原先这里与别处各写一份候选路径字面量 ✗
  *   ⇒ 只能靠「真起宿主 + 真发请求」才验得到 ✓，而**「装到 profile 之后还在不在」
  *     谁也没验** ✗（用户那条 `mobile/internal` 就是这么溜到手机上的 ✓）。
  */
@@ -1254,6 +1252,12 @@ export function createMobileHost(options) {
         }
         return removed;
     }
+    /**
+     * 配对二维码的载荷 —— `createPairing` 与 QR 路由**共用这一处** ✓
+     * （两边各拼一次字符串，迟早一边改了另一边没改 ✗）。
+     */
+    const pairingPayloadOf = (ticket) => Buffer.from(JSON.stringify(ticket), 'utf8').toString('base64url');
+    const pairingQrPayloadOf = (ticket) => `dshmobile://pair?d=${pairingPayloadOf(ticket)}`;
     const service = {
         store,
         /**
@@ -1321,7 +1325,7 @@ export function createMobileHost(options) {
             store.record({ deviceId: '(host)', kind: 'pair-code', detail: `配对码 ${code}，有效期至 ${expiresAt}`, ok: true });
             return {
                 ticket,
-                qrPayload: `dshmobile://pair?d=${Buffer.from(JSON.stringify(ticket), 'utf8').toString('base64url')}`,
+                qrPayload: pairingQrPayloadOf(ticket),
                 expiresAt,
             };
         },
@@ -1434,7 +1438,7 @@ export function createMobileHost(options) {
                 return undefined;
             if (pairing.state !== 'open')
                 return undefined;
-            return Buffer.from(JSON.stringify(pairing.ticket), 'utf8').toString('base64url');
+            return pairingPayloadOf(pairing.ticket);
         },
         connectedCount: () => sessions.size,
         connectedSession: (deviceId) => sessions.get(deviceId),
@@ -1956,48 +1960,6 @@ export function createMobileHost(options) {
         return args !== null && typeof args === 'object' ? args : {};
     }
     /**
-     * Codex 宿主桥（懒启动）。
-     *
-     * ★ 为什么懒启动：Codex CLI 不是每台机器都有、也不是每个人都在用 ✓。
-     *   第一次真正收到 `mobile/codex/*` 调用时才 spawn `codex app-server`
-     *   （stdio，见 codex-bridge.ts 的模块说明）；没人用就一个进程都不多 ✓。
-     *
-     * ★ 环境变量（都可选，默认值见 codex-bridge.ts）：
-     *   `DSH_MOBILE_CODEX_CLI`  —— CLI 路径（默认 macOS 官方包位置，再退回 PATH 里的 `codex`）
-     *   `DSH_MOBILE_CODEX_HOME` —— CODEX_HOME（默认沿用本进程的 `CODEX_HOME`，再退回 `~/.codex`）
-     *   `DSH_MOBILE_CODEX_ARGS` —— JSON 字符串数组，作为 CLI 参数（默认 `["app-server"]`）。
-     *   `DSH_MOBILE_CODEX_CWD`  —— 手机新建会话时的默认工作目录（缺省交给 app-server 自己决定）
-     *   最后一条是**测试钩子**：e2e（scripts/e2e-pairing.mjs --codex-page）用它把"CLI"指向
-     *   假 app-server（test/fixtures/fake-codex-app-server.mjs），从而不依赖真 Codex ✓。
-     */
-    let codexBridge;
-    function getCodexBridge() {
-        if (codexBridge === undefined) {
-            const cliPath = process.env['DSH_MOBILE_CODEX_CLI'];
-            const codexHome = process.env['DSH_MOBILE_CODEX_HOME'];
-            const rawArgs = process.env['DSH_MOBILE_CODEX_ARGS'];
-            const defaultCwd = process.env['DSH_MOBILE_CODEX_CWD'];
-            let cliArgs;
-            if (rawArgs !== undefined && rawArgs.length > 0) {
-                try {
-                    const parsed = JSON.parse(rawArgs);
-                    if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string'))
-                        cliArgs = parsed;
-                }
-                catch {
-                    // 解析失败就按默认走（[app-server]），不因为一个测试钩子把插件搞挂 ✗
-                }
-            }
-            codexBridge = new CodexBridge({
-                ...(cliPath === undefined || cliPath.length === 0 ? {} : { cliPath }),
-                ...(codexHome === undefined || codexHome.length === 0 ? {} : { codexHome }),
-                ...(cliArgs === undefined ? {} : { cliArgs }),
-                ...(defaultCwd === undefined || defaultCwd.length === 0 ? {} : { defaultCwd }),
-            });
-        }
-        return codexBridge;
-    }
-    /**
      * 处理**插件自有**的隧道内端点（`mobile/` 前缀）。
      *
      * 为什么放在隧道委派而不是 HTTP 路由：这些都是"在电脑上做事"的动作，
@@ -2018,11 +1980,10 @@ export function createMobileHost(options) {
                 throw new Error('未知管理接口');
             return handleManagementEndpoint({
                 call: (target, args, innerSignal) => invokeGatewayEndpoint(options.gateway, target, args, innerSignal ?? signal),
-                codex: { managementRequest: (method, args, innerSignal) => getCodexBridge().managementRequest(method, args, innerSignal) },
             }, endpoint, payload, signal);
         }
         // ── 会话页数据面（我们自己的页面用它承载 DSH 的输出）──────────────────
-        // 与 `mobile/codex/*` 同一个位置与理由：它不是 DSH 命名空间的端点，
+        // 与其它 `mobile/*` 本地端点同一个位置与理由：它不是 DSH 命名空间的端点，
         // 设备身份已由隧道握手保证；桥的职责见 dsh-chat-bridge.ts（认 DSH 的形状只在那一个文件里）。
         if (endpoint.startsWith('mobile/dsh/')) {
             const gate = capabilityCheck(device, endpoint);
@@ -2070,14 +2031,6 @@ export function createMobileHost(options) {
                 });
             }
             return openInApp(typeof args['app'] === 'string' ? args['app'] : '', typeof args['path'] === 'string' ? args['path'] : '', args['action'] === 'reveal' ? 'reveal' : 'open', roots);
-        }
-        // ── Codex 宿主桥 ──────────────────────────────────────────────────
-        // 与 DSH 无关的一组端点：宿主直接连 Codex app-server（stdio），手机用它们
-        // 列会话 / 发消息 / 收增量 / 裁决审批（协议与安全默认见 codex-bridge.ts）。
-        // 放在能力门禁之前：与其它 `mobile/*` 一样，它不属于 DSH 命名空间，
-        // 设备身份已由隧道握手保证；Codex 自己的审批则由桥逐条展示给手机 ✓。
-        if (endpoint.startsWith('mobile/codex/')) {
-            return handleCodexEndpoint(getCodexBridge(), endpoint, payload);
         }
         // ── 工作区文件管理 ───────────────────────────────────────────────
         // 全部要求路径落在工作区根之内（见 workspace-files.ts 的安全说明）。
@@ -2152,6 +2105,31 @@ export function createMobileHost(options) {
                 default:
                     return undefined;
             }
+        }
+        /**
+         * ★★★ 2026-11-06：**图片上传**（见 `options.imageUpload` 的说明）。
+         *
+         * 参数：`{ args: { sessionId, mediaType, name?, dataBase64 } }`。
+         * 返回值与 DSH 自己的原始路由**逐字段一致**：`{ receiptId, image: { … } }`
+         * （调用方会把本地返回值包成 `{ok:true, value}` = 客户端要的 RemoteResult ✓）。
+         */
+        if (endpoint === 'mobile/upload/image') {
+            const gate = capabilityCheck(device, endpoint);
+            if (!gate.ok)
+                throw Object.assign(new Error(gate.message), { code: gate.code });
+            const args = readLocalArgs(payload);
+            const sessionId = typeof args['sessionId'] === 'string' ? args['sessionId'] : '';
+            const mediaType = typeof args['mediaType'] === 'string' ? args['mediaType'] : '';
+            const dataBase64 = typeof args['dataBase64'] === 'string' ? args['dataBase64'] : '';
+            const name = typeof args['name'] === 'string' && args['name'].length > 0 ? args['name'] : undefined;
+            if (sessionId.length === 0 || mediaType.length === 0 || dataBase64.length === 0) {
+                throw Object.assign(new Error('图片上传缺少 sessionId / mediaType / dataBase64'), { code: ErrorCode.Internal });
+            }
+            if (options.imageUpload === undefined) {
+                throw Object.assign(new Error('当前 DSH 没有提供图片上传入口（imageUpload 未注入）'), { code: ErrorCode.Internal });
+            }
+            const data = Buffer.from(dataBase64, 'base64');
+            return options.imageUpload({ sessionId, mediaType, ...(name === undefined ? {} : { name }), data: new Uint8Array(data), signal });
         }
         /**
          * ★ 2026-10-31：图片桥的**端侧取证**（`boot.js` 在 adopt / ok / failed 时各报一次）✓。
@@ -2382,11 +2360,6 @@ export function createMobileHost(options) {
         stopRelayDialer,
         /** 停止中继回源通道。 */
         stopRelayHttpBackhaul,
-        /** 停止 Codex 宿主桥（懒启动过才需要；进程退出/插件卸载时调用）。 */
-        stopCodexBridge() {
-            codexBridge?.dispose();
-            codexBridge = undefined;
-        },
         handleUpgrade(req, socket) {
             /**
              * ★ base 用**常量**，不拿 `Host` 头去拼 —— 这里只需要 `pathname`。
@@ -3107,11 +3080,11 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
             }
             /**
              * 会话页：我们自己的页面（承载 DSH 输出的那一层 ✓）。
-             * 与 Codex 页同样是"工具界面"⇒ 彻底不缓存 ✓；CSP 放开内联样式与同源脚本 ✓，
+             * 它是"工具界面"⇒ 彻底不缓存 ✓；CSP 放开内联样式与同源脚本 ✓，
              * 隧道是 wss: 同源升级，因此 connect-src 里显式带上 wss: ✓。
              */
             // 会话页（我们自己的页面 ✓）：HTML 与 css/js 都是 **assets/dsh-chat/ 下的真文件** ✓
-            //（HTML 也放文件里，是 codex 页那条教训的延伸：模板字符串转义会把脚本截断 ✗）
+            //（HTML 也放文件里 —— 模板字符串转义会把脚本截断，这坑踩过不止一次 ✗）
             const chatAssets = {
                 'page.html': 'page.html',
                 'theme.css': 'theme.css',
@@ -3145,7 +3118,7 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                     return undefined;
                 /**
                  * ★★ 路径解析收敛到 `host-assets.ts` **一处** ✓（2026-10-05）——
-                 *   原先这里是一对内联字面量候选 ✓，与 codex 那处各写一遍 ✗。
+                 *   原先这里是一对内联字面量候选 ✓，与别处各写一遍 ✗。
                  *   它**相对插件自身** ✓、与 cwd 无关 ✓，现在还能被单测在
                  *   **任意 cwd** 下钉住 ✓（`test/runtime-assets.test.ts` ✓）。
                  *
@@ -3339,12 +3312,26 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
             if (req.method === 'GET' && (url.pathname === '/mobile' || url.pathname === '/mobile/')) {
                 /**
                  * 入口路径可配置（默认 `/mobile/app`）：
-                 * 独立服务没有 DSH 外壳，配对完必须落到 `/mobile/codex` ✓。
+                 * 独立服务没有 DSH 外壳，配对完必须落到它自己给出的入口页 ✓。
                  * 页面里那两处 `/mobile/app` 就是"配对完成后去哪"（自动跳转 + 手动链接），
                  * 其余出现只是注释；因此做一次整体替换即可，且**只在非默认值时才做** ✓。
                  */
                 const entryPath = options.entryPath !== undefined && options.entryPath.length > 0 ? options.entryPath : '/mobile/app';
-                const pairingHtml = entryPath === '/mobile/app' ? PAIRING_PAGE_HTML : PAIRING_PAGE_HTML.split('/mobile/app').join(entryPath);
+                /**
+                 * ★★ 2026-11-03：**电脑端配对控制台的地址由宿主给出** ✓ ——
+                 *   页面自己**不许**猜端口（旧版在手机侧用 `probeDesktopUrl` 去探
+                 *   `127.0.0.1:location.port` / `:3080` ✗ —— 那只会在**手机自己**的回环上失败，
+                 *   兜底还写成 `127.0.0.1:<DSH端口>/mobile` ✗，把用户指到没有维护的那条路上 ✓）。
+                 *
+                 *   真值只有一个来源：**明文监听**（`listener.bindings` 里非 IPv6 的 `plain`）✓。
+                 *   电脑必须用它、并且只能用 `127.0.0.1:<这个端口>` ✓（局域网地址是手机角色 ✗）。
+                 */
+                const plainBinding = options.listener
+                    ?.status()
+                    .bindings.find((binding) => binding.kind === 'plain' && !binding.ipv6);
+                const desktopUrl = plainBinding === undefined ? '' : `http://127.0.0.1:${plainBinding.port}/mobile`;
+                const pageTemplate = entryPath === '/mobile/app' ? PAIRING_PAGE_HTML : PAIRING_PAGE_HTML.split('/mobile/app').join(entryPath);
+                const pairingHtml = pageTemplate.replace('__DSHM_DESKTOP_URL__', desktopUrl);
                 const body = Buffer.from(pairingHtml, 'utf8');
                 res.writeHead(200, {
                     'content-type': 'text/html; charset=utf-8',
@@ -3358,57 +3345,6 @@ window.addEventListener('unhandledrejection', function(e){ addErr('rejection: ' 
                     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:",
                     'referrer-policy': 'no-referrer',
                     'x-content-type-options': 'nosniff',
-                });
-                res.end(body);
-                return true;
-            }
-            // Codex 独立页面：不经 DSH 前端，直接用同一条隧道（见 codex-page.ts 的模块说明）。
-            // 与配对页同样是"工具界面"⇒ 彻底不缓存；CSP 放开内联脚本与同源 boot.js，
-            // 隧道是 wss: 同源升级，因此 connect-src 里显式带上 wss:（'self' 在部分浏览器上
-            // 不覆盖 ws/wss 的 scheme 升级，宁可写全 ✓）。
-            const codexPagePaths = new Set([CODEX_PAGE_PATH, `${CODEX_PAGE_PATH}/`]);
-            if (options.appShellAlias === true) {
-                // 原版配对链路（APK 扫码 / 配对页跳转）都落在 /mobile/app 上 ⇒ 这里发同一份页面。
-                codexPagePaths.add('/mobile/app');
-                codexPagePaths.add('/mobile/app/');
-            }
-            if (req.method === 'GET' && codexPagePaths.has(url.pathname)) {
-                const body = Buffer.from(CODEX_PAGE_HTML, 'utf8');
-                res.writeHead(200, {
-                    'content-type': 'text/html; charset=utf-8',
-                    'content-length': String(body.length),
-                    'cache-control': 'no-store, must-revalidate',
-                    pragma: 'no-cache',
-                    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:",
-                    'referrer-policy': 'no-referrer',
-                    'x-content-type-options': 'nosniff',
-                    'x-dsh-mobile': 'codex-page',
-                });
-                res.end(body);
-                return true;
-            }
-            /**
-             * Codex 页面的客户端脚本：**从磁盘的真文件发出去**（assets/codex/ui.js）。
-             * 为什么是文件而不是内联字符串：模板字符串转义把脚本截断过一次又一次 ✗（见 codex-page.ts 的说明）。
-             */
-            if (req.method === 'GET' && url.pathname === CODEX_PAGE_SCRIPT_PATH) {
-                /**
-                 * ★ 与上面会话页**同一份**解析实现 ✓（2026-10-05 收敛 ✓）——
-                 *   这里原先自己写了一份一样的候选数组 ✗。
-                 *   ★ 它同样**只**从磁盘读 ✓ ⇒ 「assets 装没装出去」这件事对 codex 页一样致命 ✗
-                 *     （codex/ 那棵树也在 `scripts/lib/runtime-assets.mjs` 的清单里 ✓）。
-                 */
-                const found = resolveHostAsset('codex/ui.js');
-                if (found === undefined) {
-                    respondJson(res, 404, wireError(ErrorCode.Internal, `codex ui.js 未找到（试过 ${hostAssetCandidates('codex/ui.js').join(' / ')}）`));
-                    return true;
-                }
-                const body = readFileSync(found);
-                res.writeHead(200, {
-                    'content-type': 'text/javascript; charset=utf-8',
-                    'content-length': String(body.length),
-                    'cache-control': 'no-store, must-revalidate',
-                    pragma: 'no-cache',
                 });
                 res.end(body);
                 return true;

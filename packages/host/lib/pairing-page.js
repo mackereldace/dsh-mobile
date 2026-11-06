@@ -2,14 +2,14 @@
  * 配对页 HTML —— **由 scripts/gen-pairing-page.mjs 自动生成，请勿手工编辑**。
  * 源文件：packages/host/src/pairing-page.html
  *
- * 生成时间：2026-09-28T04:42:48.570Z
- * 大小：126062 字节
+ * 生成时间：2026-11-03T15:32:20.694Z
+ * 大小：126456 字节
  *
  * ★ 下面两个 sha256 是给校验脚本用的"同步戳" ✓（scripts/check-pairing-page.mjs ✓）：
  *   源 HTML 改过、或 vendored 编码器换过之后**忘了重新跑本脚本** ✗ 时，
  *   构建产物里的 HTML 还是旧的 ✓ ⇒ 那两个戳对不上 ⇒ 校验当场报红 ✗。
  *   为什么不用"比对正文"的办法 ✗：那要把模板字面量转义规则再抄一份 ✓（迟早走偏 ✗）。
- * 源 HTML sha256：90d6f96dbf1088186d4a74bcc5870a7b970d49c31279255d801b39ecea5325e6
+ * 源 HTML sha256：a8d231b0c2d24f79b88229eb6f0084fe68e7ea2d25e49ed24e14a432bb78127c
  * 内联编码器 sha256：b80a0cc76c03d7e441d874df570f8fc93d956c1976d476e1525838d1b5cd71b8
  */
 export const PAIRING_PAGE_HTML = `<!doctype html>
@@ -274,9 +274,14 @@ export const PAIRING_PAGE_HTML = `<!doctype html>
             <div class="card" style="background:var(--bg);margin-top:12px">
               <p class="muted" style="margin-top:0">手机请打开这个地址（<strong>必须 HTTPS</strong>）：</p>
               <p class="mono" id="phone-url" style="word-break:break-all;margin:4px 0"></p>
-              <p class="note" style="margin-bottom:0">
-                电脑继续留在这个页面（本机地址 127.0.0.1）操作即可——
-                生成配对码、确认指纹都必须在电脑本机完成。
+              <p class="note" style="margin:0 0 4px">
+                电脑端：本页就是配对控制台（<span class="mono" id="desktop-self">127.0.0.1:3081</span>）——
+                请始终用这个<strong>本机地址</strong>打开；局域网地址是手机角色，不能当控制台。
+              </p>
+              <p class="note" style="margin:0">
+                手机端：<strong>装了 App</strong> 就直接扫上面的二维码（不用输地址）；
+                <strong>没装 App</strong> 就用手机浏览器打开上面那行 <strong>HTTPS 局域网地址</strong>
+                （不能用 <span class="mono">127.0.0.1</span>，那是电脑自己的回环地址）。
               </p>
             </div>
           </div>
@@ -2639,6 +2644,9 @@ var qrcode = function() {
     <script>
       'use strict'
       var API = ''
+      // 电脑端配对控制台的地址（由宿主在发页时注入 ✓ —— 手机侧第 1 步用它 ✓，**绝不**让页面猜端口 ✗）。
+      // 空串 = 宿主没给出（例如监听没起来/旧宿主）⇒ 走兜底文案 ✓。
+      var DESKTOP_URL = '__DSHM_DESKTOP_URL__'
       // phoneBaseUrl：手机应访问的基地址（来自 manifest，见 generatePairing 的说明）
       // expiresAt：当前配对码的到期毫秒数（用来把过期的二维码从屏幕上撤掉，见 checkPairingExpiry）
       var state = { profile: null, tunnel: null, code: null, timer: null, phoneBaseUrl: null, expiresAt: null, caFingerprint: null }
@@ -3087,7 +3095,15 @@ var qrcode = function() {
         div.className = 'dev'
         var left = document.createElement('div')
         var name = document.createElement('div')
-        name.innerHTML = '<strong>' + escapeHtml(location.host) + '</strong>'
+        // 显示**本浏览器保存的那台电脑**的地址，而不是本页的 location.host ✗
+        // （本页可能是从 127.0.0.1 打开的，直接用 location.host 会让人以为手机要连回环地址 ✗）。
+        var shownHost = ''
+        try {
+          shownHost = new URL(stored.baseUrl).host
+        } catch (error) {
+          shownHost = ''
+        }
+        name.innerHTML = '<strong>' + escapeHtml(shownHost || location.host) + '</strong>'
         var note = document.createElement('div')
         note.className = 'muted'
         note.style.fontSize = '12px'
@@ -3555,25 +3571,6 @@ var qrcode = function() {
        * 候选来自常见约定：与当前端口相同（若当前就是 DSH 端口），
        * 以及 3080（默认端口）。全部失败时不误导用户，只提示"电脑上的本机地址"。
        */
-      async function probeDesktopUrl() {
-        var host = location.hostname
-        var port = location.port || '80'
-        var candidates = []
-        // 同端口（当手机上访问的恰好就是 DSH 端口时成立）
-        candidates.push('http://127.0.0.1:' + port)
-        // 常见默认端口
-        if (port !== '3080') candidates.push('http://127.0.0.1:3080')
-        for (var i = 0; i < candidates.length; i++) {
-          try {
-            var response = await fetch(candidates[i] + '/mobile/pair/pending', { method: 'GET' })
-            if (response.ok) return candidates[i] + '/mobile'
-          } catch (error) {
-            /* 跨源失败或不可达：继续下一个 */
-          }
-        }
-        return undefined
-      }
-
       // ───────────────────────── 启动 ─────────────────────────
 
       async function boot() {
@@ -3610,6 +3607,7 @@ var qrcode = function() {
 
         if (local) {
           text('subtitle', '配对控制台（本页在电脑上打开）')
+          text('desktop-self', location.host)
           show('desktop', true)
           $('gen').onclick = generatePairing
           $('refresh').onclick = function () {
@@ -3626,15 +3624,13 @@ var qrcode = function() {
           $('scan-qr').onclick = scanQr
           $('open-gui').onclick = openGui
           await renderPhoneHosts()
-          probeDesktopUrl().then(function (desktopUrl) {
-            if (desktopUrl !== undefined) {
-              text('desktop-url', desktopUrl)
-              text('desktop-url-note', '（该地址只能在电脑本机打开，手机打不开——这是刻意的安全设计）')
-            } else {
-              text('desktop-url', '127.0.0.1:<DSH端口>/mobile')
-              text('desktop-url-note', '请在电脑上用它自己的本机地址打开配对页（形如 http://127.0.0.1:3080/mobile）。')
-            }
-          })
+          if (DESKTOP_URL) {
+            text('desktop-url', DESKTOP_URL)
+            text('desktop-url-note', '（该地址只能在电脑本机打开；手机打不开——这是刻意的安全设计）')
+          } else {
+            text('desktop-url', '（宿主没给出电脑地址）')
+            text('desktop-url-note', '请在电脑本机浏览器打开「明文监听端口 + /mobile」（默认 http://127.0.0.1:3081/mobile）。')
+          }
           var stored = await readStored()
           if (stored) {
             // ★ 找到了就说"本浏览器已保存" ✓ —— 这是**读的结论**，不是"配对状态"的结论 ✓

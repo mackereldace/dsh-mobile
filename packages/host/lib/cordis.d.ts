@@ -148,6 +148,14 @@ export interface DistIndexResolverOptions {
     processEntry?: string | undefined;
     /** ③ 插件自身的模块地址（`import.meta.url` ✓）。 */
     moduleUrl?: string | undefined;
+    /**
+     * ④ 桌面 App 的 Resources 目录（默认 `process.resourcesPath` ✓；CLI 里是 undefined ✓）。
+     * 2026-11-05：桌面版 DSH 的 host 拿不到 profileContext 安装锚时，用 App 自己的
+     * `app.asar/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html` 兜底 ✓。
+     */
+    appResources?: string | undefined;
+    /** ④ 显式指定可执行文件（默认不读 `process.execPath`；用于从 `../Resources` 推导 ✓）。 */
+    execPath?: string | undefined;
     /** 文件存在性判据（单测注入点；默认 `existsSync` ✓）。 */
     exists?: ((path: string) => boolean) | undefined;
     /** 日志出口（默认 `console.log` / `console.warn` ✓）。 */
@@ -156,60 +164,6 @@ export interface DistIndexResolverOptions {
         warn?: ((message: string) => void) | undefined;
     } | undefined;
 }
-/**
- * 定位 DSH 前端 `dist/index.html`。
- *
- * ## ★★ 2026-09-30 修：锚必须落在"**运行中那套 DSH**"上，不许落在插件自己身上 ✗
- *
- * 旧实现只有一条路：`createRequire(import.meta.url)` —— 即**从插件自己的模块位置**解析
- * `@deepseek-ai/dsh-web-frontend` ✓。它在**拷贝安装**（插件实体在
- * `<DSH_HOME>/profiles/<profile>/node_modules/@dsh-mobile/host/` 里，生产就是这种 ✓）下是对的 ✓，
- * 但在**本地路径 / `link:` 安装**（pnpm 建软链；桌面 UI 装本地路径必然如此 ✓）下**必然失败** ✗：
- * `import.meta.url` 指向的是**仓库**（`…/dsh-mobile/packages/host/lib/cordis.js` ✓），
- * 从仓库解析前端包必然失败 ⇒ 返回 `undefined` ⇒ 手机端只看到一句"应用外壳不可用"，
- * 而**日志里没有任何原因** ✗（真机现场：DSH 桌面版 0.2.0-rc.2、profile=`desktop`、
- * `link:/…/dsh-mobile/packages/host` ⇒ `http://127.0.0.1:19387/mobile` 报外壳不可用 ✗）。
- *
- * 这与今天刚修过的 `resolveProfilePatchPath`（见 `setup-config.ts`）是**同一个病** ✓：
- * "从插件自身位置推断环境"在软链安装下必错 ✗。那里的处方是"**显式传参 + 拿不准就报错**"✓，
- * 这里照**同一个形状**来 ✓（不新造第二套机制 ✗）：
- *
- * | 顺序 | 锚 | 为什么是它 |
- * |---|---|---|
- * | ① | `ctx.get('profileContext').installAnchor` | DSH 自己挂上来的**安装锚** = 运行中那套 DSH 的 `package.json` ✓（`readProfileContextInstallAnchor` 有依据 ✓） |
- * | ② | `process.argv[1]` | 正在运行的进程入口（`dsh` 的 `bin.js` / 桌面版 host 入口 ✓）⇒ 从它旁边必然上溯得到安装目录 ✓ |
- * | ③ | `import.meta.url` | **拷贝安装**下它是对的 ⇒ 必须保留 ✓（软链安装下会被 ① 或 ② 抢先 ✓） |
- *
- * ## 依据（读类型/实现，不猜 ✗）
- *
- * · `@deepseek-ai/dsh-app-boot` 的 `ProfileModuleFallbackOptions.installAnchor`
- *   （`lib/types/profile.d.ts:95-102`）：**"Absolute package.json path of the running dsh installation."** ✓
- *   —— 同一个锚也是 `resolveBundleDir(binName, packageName, installAnchor, profileDir)` 的**第一**锚 ✓，
- *   顺序是契约原话："The installation-first order is the contract that `@deepseek-ai/dsh-base`
- *   (and every other in-box bundle) always comes from the same installation as the running dsh,
- *   never from a profile-local copy." ✓ ⇒ 前端也该**先**从安装解析 ✓（它必须与运行中的服务端同版本 ✓）。
- * · 桌面版 0.2.0-rc.2 的 profile-boot 就是把它挂在 ctx 上的（真机现场那套 ✓）：
- *   `hostCtx.provide('profileContext', { …, installAnchor: options.resolvedProfile?.installAnchor ?? INSTALL_ANCHOR, … })`
- *   而 `INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))` ✓。
- * · DSH 自己的 README（打包进 `@deepseek-ai/dsh` 的那份 ✓）原话：
- *   "A resolved application profile supplies its own **installation anchor** for runtime package resolution" ✓。
- *
- * ## 绝不静默（本次一并修的 ✗）
- *
- * 三条路都失败时：
- *   1. **打一行能念的日志** ✓（`[dsh-mobile]` 前缀，列出三条路各自的失败原因 ✓，且**只在结论变化时**打一次——
- *      每个请求打一遍会把日志刷爆 ✗）；
- *   2. 把这行原因**留在解析器上** ✓ ⇒ `/mobile/app` 的 503 文案带上它
- *      （`…（未找到 DSH 前端 dist/index.html：<原因>）` ✓）。
- *
- * ## 行为不变的部分（别弄坏 ✗）
- *
- * · 解析成功 ⇒ 与原实现**同一条路径** ✓（`join(dirname(manifest), 'dist', 'index.html')` ✓）；
- * · 解析不到 ⇒ 插件**照常工作** ✓（只是手机端拿不到外壳 ✓），返回 `undefined` 而不是抛错 ✓。
- * · 唯一新增的判据是"**文件得真的在**"✓：解析到前端包但 `dist/index.html` 缺失时按失败处理
- *   （并说清是哪个文件缺 ✓）—— 原先那种情况下 `getAppShell()` 一样拿不到外壳（`statSync` 会抛 ✓），
- *   所以行为等价，只是**从静默变成有原因** ✓。
- */
 export declare function createDistIndexResolver(options?: DistIndexResolverOptions): DistIndexResolver;
 /**
  * `/mobile/app` 那句"外壳不可用"的 503 文案（★ **必须带上原因** ✗）。

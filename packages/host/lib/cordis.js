@@ -234,12 +234,53 @@ function describeResolutionError(error) {
  *   （并说清是哪个文件缺 ✓）—— 原先那种情况下 `getAppShell()` 一样拿不到外壳（`statSync` 会抛 ✓），
  *   所以行为等价，只是**从静默变成有原因** ✓。
  */
+/**
+ * 桌面 App 的 Resources 直瞄候选。
+ *
+ * 为什么需要它 ✗：桌面版 DSH 的 host 里 `profileContext.installAnchor` 可能不存在，
+ * 而 `process.argv[1]` / `import.meta.url` 都在 asar 外 ⇒ 老三条路全失败；但**运行中的 App**
+ * 自己的 Resources 里一定有这份前端 ✓（`process.resourcesPath` / 显式 `execPath` 推导）。
+ * CLI 里 `process.resourcesPath` 是 undefined ⇒ 不会多出失败路 ✓（老用例的"试了 3 条路"不变 ✓）。
+ *
+ * 候选顺序：app.asar → app → app.asar.unpacked（打包/解包/开发三种形态 ✓）。
+ */
+function directAppSources(options) {
+    const roots = [];
+    const add = (root) => {
+        const value = usableAnchor(root);
+        if (value !== undefined && !roots.includes(value))
+            roots.push(value);
+    };
+    add(options.appResources ?? (typeof process === 'undefined' ? undefined : process.resourcesPath));
+    if (options.execPath !== undefined)
+        add(join(dirname(options.execPath), '..', 'Resources'));
+    const out = [];
+    for (const root of roots) {
+        for (const [label, relative] of [
+            ['DSH 桌面 App 资源（app.asar/dsh/node_modules）', ['app.asar', 'dsh', 'node_modules']],
+            ['DSH 桌面 App 资源（app/dsh/node_modules）', ['app', 'dsh', 'node_modules']],
+            ['DSH 桌面 App 资源（app.asar.unpacked/dsh/node_modules）', ['app.asar.unpacked', 'dsh', 'node_modules']],
+        ]) {
+            out.push({
+                label,
+                direct: join(root, ...relative, '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html'),
+            });
+        }
+    }
+    return out;
+}
 export function createDistIndexResolver(options = {}) {
     const exists = options.exists ?? existsSync;
     const log = options.logger?.log ?? ((message) => console.log(message));
     const warn = options.logger?.warn ?? ((message) => console.warn(message));
     /**
-     * ★ 三条路，**顺序即契约**：先"运行中那套 DSH"（①②），最后才退到"插件自己"（③）✓。
+     * ★★ 2026-11-05：新增"**桌面 App 的 Resources**"直瞄路（`app.asar/dsh/node_modules/...`）——
+     *   桌面版 DSH 的 host 里 `profileContext.installAnchor` 可能拿不到（CLI 有、桌面 runner 没有 ✓），
+     *   `process.argv[1]` / `import.meta.url` 又都落在 asar 外 ⇒ 老三条路全断 ⇒ 手机端 503
+     *   "应用外壳不可用"（用户 2026-11-05 真机截图 ✓）。App 的 Resources 是**运行中那套 DSH**
+     *   自己的安装位置，最可靠 ✓。
+     *
+     * 顺序即契约：① 安装锚 → ② App Resources 直瞄 → ③ 进程入口 → ④ 插件自己 ✓。
      * ⚠️ 每条都带 `label`：失败时用户看到的是"试了哪几条、各自栽在哪" ✓，不是一句"没找到" ✗。
      */
     const sources = [
@@ -247,6 +288,7 @@ export function createDistIndexResolver(options = {}) {
             label: "运行中 DSH 的安装锚（ctx.get('profileContext').installAnchor）",
             anchor: usableAnchor(options.installAnchor),
         },
+        ...directAppSources(options),
         { label: '正在运行的进程入口（process.argv[1]）', anchor: usableAnchor(options.processEntry) },
         {
             label: '插件自身位置（import.meta.url；**拷贝安装**下这条路是对的）',
@@ -263,6 +305,16 @@ export function createDistIndexResolver(options = {}) {
         let path;
         let anchor;
         for (const source of sources) {
+            if (source.direct !== undefined) {
+                if (exists(source.direct)) {
+                    attempts.push({ label: source.label, anchor: source.direct, ok: true, detail: source.direct });
+                    path = source.direct;
+                    anchor = source.direct;
+                    break;
+                }
+                attempts.push({ label: source.label, anchor: source.direct, ok: false, detail: `文件不在（${source.direct}）` });
+                continue;
+            }
             if (source.anchor === undefined) {
                 // 这条锚**本次运行里根本不存在**（老 DSH 没有 profileContext / 进程没有脚本入口 ✓）。
                 // 也要记一条 ✗：否则用户看到"两条路都失败"，却不知道本来还有第三条 ✓。
@@ -643,6 +695,30 @@ export function apply(ctx, config = {}) {
         gateway,
         // ★ DSH 0.2.1 起：每次网关调用都要带它（取不到时退回旧行为，见上面那个 resolver）
         gatewayPeer,
+        /**
+         * ★★★ 2026-11-06：**图片上传**入口（见 `createMobileHost` 里 `imageUpload` 的说明）。
+         *
+         * 为什么要由适配器注入：`uploadImageStream` 是 `fileUploads` **服务实例**上的方法，
+         * 而它在 Typert 的 Remote 表里**没有**对应方法（图片只走 HTTP 原始路由的 `?mediaType=`）
+         * ⇒ 手机侧的上传钩子自己翻不出来 ⇒ 只能在这里现取服务、直接调。
+         * 每次都 `ctx.get('fileUploads')`（服务可能晚于本插件注册 ⇒ 与 `dsh-question.ts` 同一理由）。
+         */
+        imageUpload: async (request) => {
+            const service = ctx.get('fileUploads');
+            if (service === undefined || typeof service.uploadImageStream !== 'function') {
+                throw new Error('当前 DSH 的 fileUploads 服务没有 uploadImageStream（版本太旧？）');
+            }
+            return service.uploadImageStream({
+                sessionId: request.sessionId,
+                mediaType: request.mediaType,
+                ...(request.name === undefined ? {} : { name: request.name }),
+                // 服务那边是 `for await (const chunk of data)` ⇒ 交一个"只吐一块"的异步迭代器
+                data: (async function* () {
+                    yield request.data;
+                })(),
+                signal: request.signal,
+            });
+        },
         endpoints,
         // 回源通道要用端口做环回请求（复用插件自己的 HTTP 路由，不另写一套）
         selfPort: port,
@@ -673,7 +749,15 @@ export function apply(ctx, config = {}) {
         ...(machine.phoneBaseUrl === undefined ? {} : { phoneBaseUrl: machine.phoneBaseUrl }),
         // 传**函数**而不是路径：前端升级 / 安装位置变化不必重启插件（与原先一致 ✓）
         distIndex: () => distResolver.resolve(),
-        renderIndex: (html) => ctx.webServer.renderIndex(html),
+        /**
+         * ★★ 2026-11-05（用户真机：手机端 "应用外壳不可用"；audit 里
+         *   `Cannot read properties of undefined (reading 'principal')`）：
+         *   DSH 0.2.2 的 `webServer.renderIndex(html, peer)` **必须**带 peer（它读 `peer.principal` ✓）；
+         *   旧写法只传 html ⇒ peer undefined ⇒ 外壳渲染整段抛错 ⇒ `/mobile/app` 503 ✓。
+         *   这里用网关同一个「调用方 Peer」（`connection.browserPeer` ⇒ createPeer 兜底 ✓），
+         *   与 DSH 自己的 `dsh-host-frontend-static` 用法一致 ✓。
+         */
+        renderIndex: (html) => ctx.webServer.renderIndex(html, gatewayPeer()),
         // 自签证书管理器：manifest / 自检 / `/mobile/trust.crt` 都从它取（见上面的长注释）
         tls,
         // 局域网监听器（C1）：自检的 `listener` 段读它（默认关闭时是"未启用"，不是故障）
@@ -1316,9 +1400,6 @@ export function apply(ctx, config = {}) {
          * 挂进的是**现有那个** `ctx.effect`（不是新加一个）——多一个 effect 就多一处漏清理。
          */
         listener?.dispose();
-        // Codex 宿主桥：懒启动过才需要收；内部会先把待裁决的审批按"取消"应答掉，
-        // 不留一个悬着的 app-server 子进程，也不留一个永远等不到的审批 ✓。
-        mobileHost.stopCodexBridge();
     });
     ctx.logger?.info?.(`[mobile-host] 已启用：设备管理 GET /mobile/devices，配对码 POST /mobile/pair/code，` +
         `本机接入配置 GET/POST ${SETUP_PATH}（仅 loopback，写在 ` +

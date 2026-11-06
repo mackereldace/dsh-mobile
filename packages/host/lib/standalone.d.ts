@@ -1,10 +1,10 @@
 /**
- * 独立服务：不用 DSH，直接把手机接进 Codex。
+ * 独立服务：不用 DSH，直接起一台手机宿主（检查脚本用它「打真 HTTP ✓」）。
  *
  * ## 它和 DSH 插件的关系
  *
  * 两者用的是**同一套宿主核心**（`createMobileHost`：配对页、设备库、能力位、
- * E2E 隧道、`/mobile/codex` 页面与 `mobile/codex/*` 端点），差别只在装配：
+ * E2E 隧道、会话页与本地端点），差别只在装配：
  *
  *   · DSH 插件：路由挂在 DSH 的 webServer 上，业务调用转发给 DSH 的 Typert 网关；
  *   · 独立服务：自己起一个 loopback HTTP 服务当"内部目标"，再由
@@ -18,9 +18,9 @@
  * 顺手把 `tls/` 也搬过来，则手机上装过的自签 CA 也继续有效 ✓。
  * 拷贝（而不是共用）是为了避免两个进程同时写同一份 `devices.json` ✓。
  */
-import { type MobileHostService } from '../index.ts';
-/** 手机入口路径：独立服务没有 DSH 外壳，直接进 Codex 页。 */
-export declare const STANDALONE_ENTRY_PATH = "/mobile/codex";
+import { type MobileHostService } from './index.ts';
+/** 手机入口路径：独立服务没有 DSH 外壳，直接进我们自己的页面。 */
+export declare const STANDALONE_ENTRY_PATH = "/mobile/app";
 /** 默认监听（刻意避开 DSH 插件的 3081/3443，两边可以同时跑）。 */
 export declare const DEFAULT_STANDALONE_PLAIN = "0.0.0.0:3082";
 export declare const DEFAULT_STANDALONE_TLS = "0.0.0.0:3444";
@@ -39,10 +39,6 @@ export interface StandaloneHostOptions {
         readonly log: (message: string) => void;
         readonly warn: (message: string) => void;
     };
-    /** Codex CLI / CODEX_HOME（透传给 CodexBridge；省略时用其默认值）。 */
-    readonly codexCli?: string;
-    readonly codexArgs?: readonly string[];
-    readonly codexHome?: string;
 }
 export interface StandaloneHost {
     readonly service: MobileHostService;
