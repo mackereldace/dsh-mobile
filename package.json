@@ -15,6 +15,7 @@
     "build:check": "node scripts/build-lib.mjs --check",
     "sync:plugin": "node scripts/build-lib.mjs && node scripts/sync-plugin-repo.mjs",
     "check:plugin": "node scripts/sync-plugin-repo.mjs --check",
+    "publish:apk": "node scripts/publish-apk.mjs",
     "check:prod": "node scripts/check-production.mjs",
     "check:relay-volume": "node scripts/check-relay-volume.mjs",
     "check:relay-isolation": "node scripts/check-relay-isolation.mjs",
