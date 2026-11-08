@@ -1,6 +1,6 @@
 {
   "name": "@dsh-mobile/host",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": false,
   "description": "DSH 宿主插件：手机端加密配对、设备注册表与 /mobile 隧道（把手机浏览器接入 DSH 全部业务 API）",
   "type": "module",

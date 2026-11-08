@@ -3109,99 +3109,17 @@ window.__ModuleLoader__.load({
           slots.inject('main', () => slots.register({ name: 'main', key: PANEL_ID }, PairingPanel))
 
           /**
-           * ★★ 2026-11-04（用户："dsh 新版本把原来我们放子智能体，dshpurge 的顶栏去掉了，能恢复吗"）：
-           *   新版把这两个入口改成了**条件显示** ✓：
-           *   · 子智能体目录（`ui-subagent` 的 `subagent-catalog`）只在**会话里有子智能体**时渲染 ✗；
-           *   · dsh-purge 的标签片只挂在**视图 tab 行**，而 tab 行在"只有一个视图"时整行隐藏 ✗。
-           *   ⇒ tab 行恢复后（developerTools ✓）：
-           *   · 子智能体入口**不再注入自定义 chip** ✗ —— 2026-11-04 用户：
-           *     "你电脑上做的这个子智能体入口也不是原生的" ⇒ 保留 DSH **原生**的
-           *     `subagent-catalog` / lineage ✓（它有自己的位置和显示条件，不再改它）✓；
-           *   · 标题行 actions 只保留 dsh-purge 的**兜底** ✓（tab 行已有标签片时自动隐藏）✓。
-           *   只在电脑端注册 ✓（`/mobile/*` 上面已经提前 return ✓）。
-           *
-           * ★★★ 2026-11-08（用户报："在别人的新电脑上安装我们的插件，标题栏旁边会显示
-           *   dsh purge，即使别人电脑没装"）—— **根因就是这段兜底** ✓：
-           *   原判据只有一条「有没有 purge 的内联页签片」✗ ⇒ 别人机器上**根本没装 purge** ⇒
-           *   页签片永远不存在 ⇒ `hasInlinePurge` 恒为 false ⇒ 兜底**永远渲染** ✓；
-           *   点它 `openPurge()` 找不到 launcher ⇒ **死按钮**（不报错、什么都不发生）✗。
-           *   ⇒ 判据必须是**两条**：① 这台机器**装过 purge**（DOM 里出现它自己的锚点 ✓）
-           *     ② 它没有内联页签（有就让它原生的显示 ✓）。
-           *   ⚠ 别拿 `[class*="dshp-"]` 当"装过"的判据 ✗ —— 我们自己的 CSS 也引用
-           *   `.dshp-rewind-menu` ✓，宽判据会把"没装"误判成"装了" ✗；只认它**确实会渲染的锚点** ✓。
+           * ★★★ 2026-11-08（用户：「你把这个多余的画去掉就行吧」）—— **这里原来有一段
+           *   `TopbarActions`，往 `conversation.session.header.actions` 里塞一个文案为
+           *   `dsh-purge` 的兜底按钮**，本轮整段删掉 ✓，别再加回来 ✗：
+           *   · 它是 2026-11-04 为「purge 顶栏入口被 DSH 新版条件显示掉」加的；那台机器上
+           *     purge 本体的三个入口早已被**破甲**（`@local/dsh-purge-entry`，本地插件）收进左侧栏 ✓；
+           *   · 更糟的是判据只看了「purge 有没有内联页签」——破甲隐藏用的是 CSS `display:none`
+           *     （隐藏 ≠ 移除 ⇒ `querySelector` 照样命中），所以在**装了破甲的机器上**它被顺带遮住，
+           *     而在**别人没装 purge 的新电脑上**它恒为显示 ⇒ 一个点不动的死按钮 ✓（用户就是这么发现的）✓；
+           *   · 结论：purge 的入口归 purge/破甲自己管 ✓，我们不再冒充它的入口 ✓。
+           *   守卫：`packages/host/test/purge-shortcut-gate.test.ts` 反向断言「这里不许再出现」✓。
            */
-          const PURGE_INLINE = '[data-testid="dsh-purge-tab-chip"], .dshp-tab-chip'
-          const PURGE_ANCHORS = [
-            PURGE_INLINE,
-            '[data-testid="dsh-purge-launch"]',
-            '[data-testid="dsh-purge-hero-chip"]',
-            '.dshp-launch',
-            '.dshp-dock',
-          ].join(', ')
-          const TopbarActions = () => {
-            /** `installed` 与 `inline` 是两件事 ✓ —— 只看 `inline` 就会在没装的机器上误显示 ✓ */
-            const [purge, setPurge] = React.useState({ installed: false, inline: false })
-            React.useEffect(() => {
-              const check = () => {
-                try {
-                  const inline = Boolean(document.querySelector(PURGE_INLINE))
-                  const installed = inline || Boolean(document.querySelector(PURGE_ANCHORS))
-                  setPurge((prev) =>
-                    prev.installed === installed && prev.inline === inline ? prev : { installed, inline },
-                  )
-                } catch (error) {
-                  void error
-                }
-              }
-              check()
-              let observer
-              try {
-                observer = new MutationObserver(check)
-                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
-              } catch (error) {
-                void error
-              }
-              const timer = setInterval(check, 800)
-              return () => {
-                if (observer !== undefined) observer.disconnect()
-                clearInterval(timer)
-              }
-            }, [])
-            const chipStyle = {
-              height: 26,
-              padding: '0 8px',
-              borderRadius: 6,
-              border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.28))',
-              background: 'transparent',
-              color: 'inherit',
-              font: 'inherit',
-              fontSize: 12,
-              lineHeight: '24px',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              whiteSpace: 'nowrap',
-            }
-            const openPurge = () => {
-              const launcher =
-                document.querySelector('[data-testid="dsh-purge-launch"]') || document.querySelector('.dshp-launch')
-              if (launcher !== null && typeof launcher.click === 'function') launcher.click()
-            }
-            return purge.installed && !purge.inline
-              ? React.createElement(
-                  'button',
-                  { type: 'button', style: chipStyle, title: '打开 dsh-purge', onClick: openPurge },
-                  'dsh-purge',
-                )
-              : null
-          }
-          slots.inject('conversation.session.header.actions', () =>
-            slots.register(
-              { name: 'conversation.session.header.actions', id: 'dsh-mobile-topbar', order: 5 },
-              TopbarActions,
-            ),
-          )
           return true
         } catch (error) {
           return true
