@@ -825,13 +825,36 @@ window.__ModuleLoader__.load({
            *     `subagent-catalog` / lineage ✓（它有自己的位置和显示条件，不再改它）✓；
            *   · 标题行 actions 只保留 dsh-purge 的**兜底** ✓（tab 行已有标签片时自动隐藏）✓。
            *   只在电脑端注册 ✓（`/mobile/*` 上面已经提前 return ✓）。
+           *
+           * ★★★ 2026-11-08（用户报："在别人的新电脑上安装我们的插件，标题栏旁边会显示
+           *   dsh purge，即使别人电脑没装"）—— **根因就是这段兜底** ✓：
+           *   原判据只有一条「有没有 purge 的内联页签片」✗ ⇒ 别人机器上**根本没装 purge** ⇒
+           *   页签片永远不存在 ⇒ `hasInlinePurge` 恒为 false ⇒ 兜底**永远渲染** ✓；
+           *   点它 `openPurge()` 找不到 launcher ⇒ **死按钮**（不报错、什么都不发生）✗。
+           *   ⇒ 判据必须是**两条**：① 这台机器**装过 purge**（DOM 里出现它自己的锚点 ✓）
+           *     ② 它没有内联页签（有就让它原生的显示 ✓）。
+           *   ⚠ 别拿 `[class*="dshp-"]` 当"装过"的判据 ✗ —— 我们自己的 CSS 也引用
+           *   `.dshp-rewind-menu` ✓，宽判据会把"没装"误判成"装了" ✗；只认它**确实会渲染的锚点** ✓。
            */
+          const PURGE_INLINE = '[data-testid="dsh-purge-tab-chip"], .dshp-tab-chip'
+          const PURGE_ANCHORS = [
+            PURGE_INLINE,
+            '[data-testid="dsh-purge-launch"]',
+            '[data-testid="dsh-purge-hero-chip"]',
+            '.dshp-launch',
+            '.dshp-dock',
+          ].join(', ')
           const TopbarActions = () => {
-            const [hasInlinePurge, setHasInlinePurge] = React.useState(false)
+            /** `installed` 与 `inline` 是两件事 ✓ —— 只看 `inline` 就会在没装的机器上误显示 ✓ */
+            const [purge, setPurge] = React.useState({ installed: false, inline: false })
             React.useEffect(() => {
               const check = () => {
                 try {
-                  setHasInlinePurge(Boolean(document.querySelector('.dshp-tab-chip, [data-testid="dsh-purge-tab-chip"]')))
+                  const inline = Boolean(document.querySelector(PURGE_INLINE))
+                  const installed = inline || Boolean(document.querySelector(PURGE_ANCHORS))
+                  setPurge((prev) =>
+                    prev.installed === installed && prev.inline === inline ? prev : { installed, inline },
+                  )
                 } catch (error) {
                   void error
                 }
@@ -871,13 +894,13 @@ window.__ModuleLoader__.load({
                 document.querySelector('[data-testid="dsh-purge-launch"]') || document.querySelector('.dshp-launch')
               if (launcher !== null && typeof launcher.click === 'function') launcher.click()
             }
-            return hasInlinePurge
-              ? null
-              : React.createElement(
+            return purge.installed && !purge.inline
+              ? React.createElement(
                   'button',
                   { type: 'button', style: chipStyle, title: '打开 dsh-purge', onClick: openPurge },
                   'dsh-purge',
                 )
+              : null
           }
           slots.inject('conversation.session.header.actions', () =>
             slots.register(
