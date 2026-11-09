@@ -3232,6 +3232,59 @@
   }
 
   /**
+   * ★★ 性能读数（用户反馈「右侧文件夹 / 预览文档明显卡顿」的**真机取证**入口 ✓）。
+   *
+   * 桌面上能证明的只有"我们这份实现本身多快"（见 `scripts/perf-files-panel.mjs` ✓）——
+   * 手机上是**网络**慢还是**渲染**慢，只有在真机上把两段时间分开记下来才说得清 ✓。
+   * 所以一律分成两段记：
+   *   · `网络` = 请求发出 → 响应回来 ✓（含 RTT 与 payload 传输 ✓）；
+   *   · `渲染` = 响应 → 首帧 ✓（含 base64/解码 / 建 DOM / 布局 ✓）。
+   * 用户下次再喊"卡"，让他 `?debug=1` 打开调试框，把那几行 `[perf]` 念给我们即可 ✓——
+   * 不必再来回猜 ✓。
+   *
+   * 只在 `?debug=1` 时进调试框 ✓（`debugBoxLine` 自己就是 no-op ✓）⇒ 普通用户零开销 ✓。
+   */
+  function perfNow() {
+    try {
+      if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now()
+    } catch (error) {
+      void error
+    }
+    return Date.now()
+  }
+  /** 追加一行性能读数 ✓（`parts` = `[标签, 值]` 的数组；值为 `null`/`undefined` 的项跳过 ✓）。 */
+  function perfLine(label, parts) {
+    if (!DEBUG_BOX_ON) return
+    var text = '[perf] ' + label
+    for (var i = 0; i < parts.length; i++) {
+      var pair = parts[i]
+      if (pair === null || pair === undefined || pair[1] === null || pair[1] === undefined) continue
+      text += ' · ' + pair[0] + ' ' + pair[1]
+    }
+    debugBoxLine(text)
+  }
+  /** 等首帧之后再做一件事 ✓（两帧 = 布局与绘制都过了 ✓；没有 rAF 的环境退回定时器 ✓）。 */
+  function afterPaint(action) {
+    try {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            try {
+              action()
+            } catch (error) {
+              void error
+            }
+          })
+        })
+        return
+      }
+    } catch (error) {
+      void error
+    }
+    setTimeout(action, 32)
+  }
+
+  /**
    * ★★ round 185：端侧**投递链的取证记录** ✓ —— 只记事实，**一行逻辑都不改** ✗。
    *
    * 为什么要有它 ✗：2026-09-30 用户真机报「有提权请求，但手机一点反应都没有」✓，
@@ -10610,6 +10663,13 @@
       '  color: var(--dsw-alias-label-primary, #f5f6f7);',
       '  user-select: text; -webkit-user-select: text;',
       '}',
+      /**
+       * 分片渲染的**续片**（第二片起 ✓）—— 去掉上边框与圆角，让一份日志看起来仍像**一块**
+       * 卡片，而不是十来个独立小卡片 ✓。第一片保持原样（一个字节不动 ✓）。
+       * 走 `data-dshm-part` 属性而不是另起一个类名：CSS 与 JS 各写一处类名容易漂 ✗。
+       */
+      '.dshm-preview-text[data-dshm-part="1"] { border-top: 0; border-radius: 0; }',
+      '.dshm-preview-text-host { display: flex; flex-direction: column; }',
       '.dshm-preview-image { display: block; max-width: 100%; height: auto; border-radius: 10px; }',
       '.dshm-preview-image[data-zoom="1"] { max-width: none; }',
       '.dshm-preview-fallback {',
@@ -20260,6 +20320,26 @@
   async function openFilesSheet(sheet, getTunnel, targetDir, focusName) {
     cancelFilesReads(sheet)
     var generation = sheet.readGeneration
+    /**
+     * ★ 性能读数（见 `perfLine`）：从"点了文件夹键"到"第一屏画出来" ✓。
+     * 这一条最能回答用户那句「访问右侧文件夹有卡顿」：**是等了两跳，还是我们自己画得慢** ✓。
+     */
+    var openStartedAt = perfNow()
+    var workspaceArrivedAt = 0
+    /**
+     * 打开面板的两条出口（工作区列表 / 卡片指名直接进某目录 ✓）**共用这一份读数** ✓
+     * —— 两处各写一遍必然会漂 ✗（本项目对"同一概念两份实现"零容忍 ✓）。
+     */
+    var logOpen = function (view) {
+      afterPaint(function () {
+        perfLine('打开面板（' + view + '）', [
+          ['工作区', Math.round((workspaceArrivedAt || perfNow()) - openStartedAt) + 'ms'],
+          ['打开方式', appsState.done === true ? Math.round(appsState.arrivedAt - openStartedAt) + 'ms' : '后台继续（不挡首屏）'],
+          ['首屏', Math.round(perfNow() - openStartedAt) + 'ms'],
+          ['工作区数', workspaces.length],
+        ])
+      })
+    }
     var retry = function () { void openFilesSheet(sheet, getTunnel, targetDir, focusName) }
     sheet.setOpen(true)
     // ★ 先给一个**兜底的**"返回文件视图"，再由具体的渲染函数覆盖成更精确的那个
@@ -20294,9 +20374,41 @@
     }
     sheetMessage(sheet.body, '读取工作区…')
 
+    /**
+     * ★★ **两条请求同时发**（用户真机："访问右侧文件夹有卡顿"✓）。
+     *
+     * 原来这里是**串行**的：先等 `workspace/follow` 的 baseline ✓，再等 `mobile/openInApp/apps` ✓
+     * ⇒ 打开面板要**两个 RTT** 才画出第一屏 ✗（局域网 2×5–20ms，中继/Tailscale 2×100ms+ ✓）。
+     * 而这两条**互不依赖** ✓：工作区列表只用到 `workspaces` ✓，`targets`（打开方式）只是每行右端
+     * 那排按钮 ✓ —— 没有它行照样能画（旧宿主本来就没有这条端点 ✓）。
+     * ⇒ 一起发 ⇒ **第一个 RTT 回来就能上屏** ✓；打开方式稍后到就**就地补一次** ✓。
+     *
+     * 为什么先用 `targets = undefined` 画、再整屏重画一次而不是"补按钮" ✗：
+     * `renderWorkspaceList` 本来就是**幂等**的（先 `replaceChildren` ✓），
+     * 而给每行补按钮要再写一套"找到那一行再塞一块"的代码 —— 同一个概念两份实现 ✓（本项目零容忍 ✗）。
+     * 前提是**用户还停在那一屏**（已经进到文件浏览器 / 关了面板就不许再画 ✓，见下面的判据 ✓）。
+     */
+    var appsState = { done: false, value: undefined }
+    var targetsPending = Promise.resolve()
+      .then(function () {
+        return waitFilesRead(sheet, generation, callLocalEndpoint(getTunnel, 'mobile/openInApp/apps', {}), undefined, '读取打开方式')
+      })
+      .then(function (value) {
+        appsState.done = true
+        appsState.value = value
+        appsState.arrivedAt = perfNow()
+        return value
+      })
+      .catch(function (error) {
+        console.info('[dsh-mobile] 电脑端尚未提供「打开方式」列表（可能需要重启 DSH），退回基础动作：', error && error.message)
+        appsState.done = true
+        return undefined
+      })
+
     var workspaces = []
     try {
       workspaces = await readFilesWorkspaceBaseline(sheet, generation, tunnel)
+      workspaceArrivedAt = perfNow()
     } catch (error) {
       if (error && error.code === 'dshm/files-read-cancelled') return
       filesReadFailure(sheet, generation, '读取工作区失败：' + String(error && error.message ? error.message : error), retry)
@@ -20309,16 +20421,9 @@
       return
     }
 
-    // 打开方式：拿不到就退化为"只有访达/在本地打开"（旧宿主还没重启时的表现），
-    // 这样**面板永远可用**，不会因为宿主版本旧而变成一块空白。
-    var targets = undefined
-    try {
-      targets = await waitFilesRead(sheet, generation, callLocalEndpoint(getTunnel, 'mobile/openInApp/apps', {}), undefined, '读取打开方式')
-    } catch (error) {
-      console.info('[dsh-mobile] 电脑端尚未提供「打开方式」列表（可能需要重启 DSH），退回基础动作：', error && error.message)
-    }
-
-    if (!filesReadCurrent(sheet, generation) || sheet.currentView !== 'files') return
+    // 打开方式：**已经开始取了**（见上 ✓）。这里给"已经到手的那一份"：
+    // 到手了就用 ✓；还没到就先按"只有基础动作"画 ✓，到手后再补一次 ✓。
+    var targets = appsState.done === true ? appsState.value : undefined
 
     // 当前会话所属的工作区排到最前（DSH 侧栏用 folder_active 标记激活的工作区）。
     var activeTitle = activeWorkspaceTitle()
@@ -20363,12 +20468,37 @@
       }
       if (picked !== null) {
         renderFileBrowser(sheet, picked, targets, getTunnel, targetDir, focusName)
+        logOpen('直接进目录')
         return
       }
       setNote('这个文件不在任何工作区里 ⇒ 只能给你工作区列表（' + targetDir + '）')
     }
 
     renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel)
+    // ★ 性能读数（见 `perfLine` ✓）：`工作区` = 第一跳（流）✓、`打开方式` = 第二跳（RPC）✓、
+    // `首屏` = 点键到列表画出来 ✓ —— 第二跳现在**不挡首屏** ✓，比首屏晚属正常 ✓。
+    logOpen('工作区列表')
+
+    /**
+     * ★★ 第二跳（打开方式）**晚到**时补画一次 ✓ —— 与上面那段"两条一起发"配套 ✓。
+     *
+     * 三条判据缺一不可：
+     *   · 面板还在（`filesReadCurrent` ✓）；
+     *   · **还停在工作区列表**那一屏 ✓（`sheet.fileBrowserState` 只在文件浏览器里存在 ✓）——
+     *     用户已经点进某个目录了，这时候再整屏重画就把人家**弹回列表**了 ✗；
+     *   · `restoreFiles` 仍是列表那份 ✓（`renderWorkspaceList` 里设的 ✓，文件浏览器会覆盖它 ✗）。
+     * 补画走的是**同一份** `renderWorkspaceList` ✓（幂等、先 clearChildren ✓），
+     * 不另写"给每行补按钮"的第二套 ✗。
+     */
+    if (appsState.done !== true) {
+      targetsPending.then(function (value) {
+        targets = value
+        if (!filesReadCurrent(sheet, generation) || sheet.currentView !== 'files') return
+        if (sheet.fileBrowserState !== undefined) return
+        if (sheet.restoreFiles !== sheet.restoreWorkspaceList) return
+        renderWorkspaceList(sheet, workspaces, activeTitle, targets, getTunnel)
+      })
+    }
   }
 
   /** 一级：工作区列表。 */
@@ -22581,6 +22711,165 @@
   }
 
   /**
+   * 预览的**分片渲染**（用户真机：「预览文档都有明显的卡顿」这一条的修法）。
+   *
+   * ## 为什么必须分片 —— 实测，不是猜
+   *
+   * 6× CPU 降速（≈ 中端安卓）下预览 200 KB markdown（宿主读取上限）：
+   *   · **一次性渲染 = 一条 855 ms 的长任务**（其中布局 508 ms、样式 218 ms）；
+   *   · 12 KB 一片逐个追加 = 每片 ~50–150 ms。
+   * 长任务期间手指、滚动、动画、点击**全都不走** —— 用户看到的就是"卡住"。
+   * 而网络那侧是干净的：预览只等**一个** RTT（`mobile/files/read` 一块）⇒
+   * 卡的是**渲染**，不是网络。测量脚本：`scripts/perf-files-panel.mjs`（可复跑）。
+   *
+   * ## 两条走过弯路、不许再回头
+   *
+   * ① **"先建完 DOM、再分帧插进文档"不行** ✗ —— 建 DOM 那一步本身就占满一条任务；
+   * ② **把切片直接塞进同一个容器也不行** ✗ —— 每追加一片都要重排**已累积的全部内容**
+   *    （实测第 10 片要 300 ms，越往下越慢 ⇒ 二次复杂度）。
+   * ⇒ 每片进**自己的** `.dshm-md-part` ✓，兄弟节点各排各的（块级布局是增量的 ✓）。
+   *
+   * ## 切点为什么在"空行 + 围栏/公式都关着"的地方
+   *
+   * 切在代码围栏或 `$$` 公式中间 ⇒ 两侧各被当成普通段落解析 ⇒ 内容"变形" ✗
+   * （围栏里一个 `#` 会变成标题 ✓）。所以扫描时记着围栏与块级公式状态，
+   * **只在两者都关着**的空行处切 ✓；找不到安全点（一整段超长行 ✓）就退化成按字节硬切 ✓
+   * —— 宁可少一点格式，也不让用户等一整秒 ✓。
+   */
+  var PREVIEW_MARKDOWN_FIRST_BYTES = 20 * 1024
+  var PREVIEW_MARKDOWN_STEP_BYTES = 20 * 1024
+  /** 纯文本（含"看源码"）的分片粒度：按**行**切（`<pre>` 的布局成本与行数成正比 ✓）。 */
+  var PREVIEW_TEXT_FIRST_LINES = 1200
+  var PREVIEW_TEXT_STEP_LINES = 1200
+
+  /**
+   * 从第 `from` 行起，取一片 markdown 到第几行（不含）✓ —— 只找切点，不碰 DOM ✓。
+   *
+   * 渲染仍然交给 `renderMarkdownInto`（**同一份解析器** ✓）：
+   * 分片只负责"哪里可以断开"，不新写第二套 markdown ✗（本项目对"同一概念两份实现"零容忍 ✓）。
+   */
+  function markdownSliceEnd(lines, from, budgetBytes) {
+    var bytes = 0
+    var fence = ''
+    var inMath = false
+    var safe = -1
+    for (var i = from; i < lines.length; i++) {
+      var line = String(lines[i])
+      if (fence === '') {
+        if (inMath) {
+          if (line.indexOf('$$') >= 0 || line.indexOf('\\]') >= 0) inMath = false
+        } else {
+          var opened = /^\s*(```|~~~)/.exec(line)
+          if (opened !== null) {
+            fence = opened[1]
+          } else {
+            var mathOpen = /^\s*(\$\$|\\\[)/.exec(line)
+            // 同一行就闭合（`$$x$$` / `\[x\]`）⇒ 不算"开着"✓（否则后面再也不会切 ✓）
+            if (mathOpen !== null) {
+              var closer = mathOpen[1] === '$$' ? '$$' : '\\]'
+              // 只看"开符号**之后**还有没有闭符号" ⇒ 同一行闭合的不算开着 ✓
+              if (line.slice(mathOpen[0].length).indexOf(closer) < 0) inMath = true
+            }
+          }
+        }
+      } else if (new RegExp('^\\s*' + fence).test(line)) {
+        fence = ''
+      }
+      bytes += line.length + 1
+      if (fence === '' && inMath !== true && /^\s*$/.test(line)) safe = i + 1
+      if (bytes >= budgetBytes && safe > from) return safe
+      // 兜底：预算的 4 倍还没遇到安全点（一整段超长行 / 一整个大代码块）⇒ 硬切，
+      // 否则"找不到空行"就等于又要一次性渲染完（那正是这一轮要消灭的卡顿 ✓）。
+      if (bytes >= budgetBytes * 4) return i + 1
+    }
+    return lines.length
+  }
+
+  /**
+   * 分片渲染器（markdown 与纯文本共用一套驱动，只有"这一片怎么画"不同 ✓）。
+   *
+   * @returns `{ advance, state }` —— `advance()` 画下一片并返回"是不是全画完了"；
+   *          `state()` 给诊断/验收读：`{ rendered, total, done, parts }` ✓。
+   */
+  function startLazyPreviewRender(options) {
+    var host = options.host
+    var markdown = options.mode === 'markdown'
+    var lines = String(options.text === null || options.text === undefined ? '' : options.text).split('\n')
+    var stepBytes = Number(options.stepBytes) > 0 ? Number(options.stepBytes) : PREVIEW_MARKDOWN_STEP_BYTES
+    var stepLines = Number(options.stepLines) > 0 ? Number(options.stepLines) : PREVIEW_TEXT_STEP_LINES
+    var cursor = 0
+    var parts = 0
+    var footer = null
+    var info = null
+    var more = null
+
+    var paint = function (budget) {
+      var end = markdown ? markdownSliceEnd(lines, cursor, budget) : Math.min(lines.length, cursor + stepLines)
+      if (end <= cursor) end = Math.min(lines.length, cursor + 1)
+      var slice = lines.slice(cursor, end).join('\n')
+      var node
+      if (markdown) {
+        node = document.createElement('div')
+        node.className = 'dshm-md-part'
+        node.setAttribute('data-dshm-md-part', '1')
+        renderMarkdownInto(node, slice)
+      } else {
+        node = document.createElement('pre')
+        node.className = 'dshm-preview-text'
+        node.setAttribute('data-dshm-preview', 'text')
+        // 续片不带那圈卡片边框（见 CSS 里那条 `[data-dshm-part]` ✓）——
+        // 否则一份日志会被画成十几个独立卡片 ✓
+        if (parts > 0) node.setAttribute('data-dshm-part', '1')
+        node.textContent = slice
+      }
+      host.insertBefore(node, footer)
+      parts += 1
+      cursor = end
+      if (cursor >= lines.length) {
+        if (footer !== null) footer.remove()
+        footer = null
+        info = null
+        more = null
+      } else {
+        if (footer === null) {
+          footer = document.createElement('div')
+          footer.className = 'dshm-more'
+          footer.setAttribute('data-dshm-preview-more', '1')
+          info = document.createElement('div')
+          info.className = 'dshm-more-info'
+          info.setAttribute('data-dshm-preview-progress', '1')
+          footer.appendChild(info)
+          // 再点一次继续 —— 与文件列表的「继续显示 N 项」**同一个形态** ✓
+          // （同一个交互概念只许一种写法 ✓）
+          more = toolButton('', function () { paint(stepBytes) })
+          more.setAttribute('data-dshm-preview-next', '1')
+          footer.appendChild(more)
+          host.appendChild(footer)
+        }
+        /**
+         * 文案与**下一次真的会加多少**必须一致 ✓（本项目的"绝不假装"那条的同源要求 ✓）：
+         * markdown 是按**字节**切的 ✓，所以这里把下一片先算一遍（只扫 16 KB，可忽略 ✓）
+         * 才知道"接下来是多少行"；纯文本按行切，直接就是 `stepLines` ✓。
+         */
+        var nextEnd = markdown
+          ? markdownSliceEnd(lines, cursor, stepBytes)
+          : Math.min(lines.length, cursor + stepLines)
+        info.textContent = '已显示 ' + String(cursor) + ' / 共 ' + String(lines.length) + ' 行'
+        more.textContent = '继续显示接下来的 ' + String(Math.max(1, nextEnd - cursor)) + ' 行'
+      }
+      if (typeof options.onProgress === 'function') options.onProgress(cursor, lines.length)
+      return cursor >= lines.length
+    }
+
+    // 第一片：预算更大（首屏要有内容可读 ✓），但仍是一个小任务 ✓
+    paint(Number(options.firstBytes) > 0 ? Number(options.firstBytes) : stepBytes)
+    return {
+      advance: function () { return paint(stepBytes) },
+      state: function () { return { rendered: cursor, total: lines.length, done: cursor >= lines.length, parts: parts } },
+    }
+  }
+
+  /**
    * PDF：**走 DSH 自带预览** ✓；没有预览桥就**只给真能走的两条路** ✓（下载 / 在电脑上打开 ✓）。
    *
    * ★ 改写的原因（本轮 U2 ✓）：这里原来用 `globalThis.open(blobUrl, '_blank')` 开一个 blob 新标签 ✗ ——
@@ -22784,26 +23073,69 @@
     /** 已加载的原文（markdown 要在"预览/源码"之间切换，所以要留着 ✓）。 */
     var loaded = null
     var asSource = false
+    /**
+     * 当前这一屏的分片渲染器 ✓（`null` = 还没画 / 已经画完 ✓）。
+     *
+     * 为什么要留着它：① 验收与调试要读"已经画了多少行"（`state()` ✓）；
+     * ② 「看源码 / 看排版」来回切时要把上一份**作废** ✗ —— 否则旧渲染器还挂着，
+     * 用户再点它的「继续显示」，内容会追加到一个已经不在页面上的容器里 ✓。
+     */
+    var lazyView = null
 
     var paintText = function () {
       if (loaded === null) return
+      lazyView = null
       if (isMarkdown && asSource !== true) {
         var box = document.createElement('div')
         box.className = 'dshm-md'
         box.setAttribute('data-dshm-preview', 'markdown')
-        renderMarkdownInto(box, loaded)
         host.replaceChildren(box)
+        /**
+         * ★★ 分片渲染（用户真机"预览文档明显卡顿"✓）：
+         *   先画 16 KB（约一屏半 ✓），其余由底部的「继续显示」按 12 KB 追加 ✓。
+         *   一次性画完的代价实测是**一条 855 ms 的长任务**（200 KB @6× CPU ✓），
+         *   分片之后每片 ~50–150 ms ✓ —— 见 `startLazyPreviewRender` 那段注释 ✓。
+         */
+        lazyView = startLazyPreviewRender({
+          host: box,
+          text: loaded,
+          mode: 'markdown',
+          firstBytes: PREVIEW_MARKDOWN_FIRST_BYTES,
+          stepBytes: PREVIEW_MARKDOWN_STEP_BYTES,
+        })
       } else {
-        var pre = document.createElement('pre')
-        pre.className = 'dshm-preview-text'
-        pre.setAttribute('data-dshm-preview', 'text')
-        pre.textContent = loaded
-        host.replaceChildren(pre)
+        var lineCount = loaded === '' ? 1 : loaded.split('\n').length
+        /**
+         * 纯文本也分片，但**只在真的很多行时**（`.log` / 源码 ✓）——
+         * 少于 `PREVIEW_TEXT_FIRST_LINES` 行就还是**一个** `<pre>` ✓：
+         * 那种大小的一次性布局本来就快 ✓，多切几片只会多几圈边框 ✓。
+         * ★ 超长单行（600 KB 的 `A` 串 ✓，验收夹具就是这样）行数 = 1 ⇒ 走单块那条路 ✓。
+         */
+        if (lineCount > PREVIEW_TEXT_FIRST_LINES) {
+          var preHost = document.createElement('div')
+          preHost.className = 'dshm-preview-text-host'
+          host.replaceChildren(preHost)
+          lazyView = startLazyPreviewRender({
+            host: preHost,
+            text: loaded,
+            mode: 'text',
+            firstLines: PREVIEW_TEXT_FIRST_LINES,
+            stepLines: PREVIEW_TEXT_STEP_LINES,
+            stepBytes: 0,
+          })
+        } else {
+          var pre = document.createElement('pre')
+          pre.className = 'dshm-preview-text'
+          pre.setAttribute('data-dshm-preview', 'text')
+          pre.textContent = loaded
+          host.replaceChildren(pre)
+        }
       }
     }
 
     var showText = function (result, notePrefix) {
       if (!previewCurrent()) return
+      var previewArrivedAt = perfNow()
       var text = new TextDecoder('utf-8', { fatal: false }).decode(result.bytes)
       loaded = text
       var lines = text === '' ? 0 : text.split('\n').length
@@ -22813,6 +23145,21 @@
         (notePrefix === undefined ? '' : ' · ' + notePrefix) +
         (isMarkdown ? ' · ' + (asSource ? '源码' : '已排版') : '')
       paintText()
+      /**
+       * ★ 性能读数（见 `perfLine` ✓）：`网络` = 发出读取到字节到手 ✓；
+       * `渲染` = 到首帧 ✓（现在是**分片**的，所以再记一片数与已画行数 ✓ ——
+       * 这两个数直接说明"卡的那一下"到底画了多少东西 ✓）。
+       */
+      afterPaint(function () {
+        if (!previewCurrent()) return
+        var view = lazyView === null ? null : lazyView.state()
+        perfLine('预览 ' + entry.name, [
+          ['大小', formatSize(result.size)],
+          ['网络', Math.round(previewArrivedAt - readStartedAt) + 'ms'],
+          ['渲染', Math.round(perfNow() - previewArrivedAt) + 'ms'],
+          ['分片', view === null ? null : view.parts + ' 片 / ' + view.rendered + ' 行' + (view.done ? '（已全部显示）' : '（还有 ' + (view.total - view.rendered) + ' 行）')],
+        ])
+      })
     }
 
     if (isMarkdown) {
@@ -22828,6 +23175,7 @@
 
     var showImage = function (result) {
       if (!previewCurrent()) return
+      var imageArrivedAt = perfNow()
       var blob = new Blob([result.bytes], { type: 'image/' + (ext === 'svg' ? 'svg+xml' : ext) })
       var url = URL.createObjectURL(blob)
       sheet.previewObjectUrl = url
@@ -22837,6 +23185,12 @@
       image.alt = entry.name
       image.addEventListener('load', function () {
         meta.textContent = formatSize(result.size) + ' · ' + String(image.naturalWidth) + '×' + String(image.naturalHeight) + ' · 点图切换原始大小'
+        // ★ 性能读数：图片这条路的成本是"读字节 + 解码"✓（解码到 load 才算完 ✓）
+        perfLine('预览 ' + entry.name, [
+          ['大小', formatSize(result.size)],
+          ['网络', Math.round(imageArrivedAt - readStartedAt) + 'ms'],
+          ['解码到可显示', Math.round(perfNow() - imageArrivedAt) + 'ms'],
+        ])
       })
       image.addEventListener('error', function () {
         fail('图片解码失败（格式可能不被浏览器支持）。')
@@ -22848,6 +23202,8 @@
       host.replaceChildren(image)
     }
 
+    /** ★ 性能读数（见 `perfLine`）：读取起点 ✓（`网络` 从发出 `mobile/files/read` 算起 ✓）。 */
+    var readStartedAt = 0
     var progress = function (read, total) {
       if (!previewCurrent()) return
       // 大文件要能看出"在传"（秒表 + 字节数），否则和第 74 轮那个白屏是同一类观感问题 ✓
@@ -22855,6 +23211,7 @@
       else meta.textContent = '读取中 ' + formatSize(read)
     }
     var read = function (cap, wantImage) {
+      readStartedAt = perfNow()
       readFileBytes(state, entry.path, cap, progress).then(
         function (result) {
           if (wantImage) showImage(result)
@@ -22977,9 +23334,12 @@
       }
     }
     var stopLoading = renderLoading(sheet, state, path)
+    // ★ 性能读数（见 `perfLine`）：`网络` 从这一行算起，`渲染` 到首帧为止 ✓
+    var listRequestedAt = perfNow()
 
     waitFilesRead(sheet, generation, callLocalEndpoint(state.getTunnel, 'mobile/files/list', { path: path }), undefined, '读取目录').then(
       function (listing) {
+        var listArrivedAt = perfNow()
         stopLoading()
         if (!current()) return
         var resolved = String(listing.path || path)
@@ -23014,6 +23374,19 @@
         // ★ round 128：卡片「打开所在目录」可能指名要落到**某一行** ✓ ——
         //   目录跳过去还不算完，"那一行到底在哪"才是用户在意的事 ✓（见 focusNamedRow ✓）。
         focusNamedRow(sheet, state)
+        /**
+         * ★ 性能读数（用户真机"切目录卡"的取证 ✓）：网络 / 渲染分开记 ✓。
+         * 一行读完就知道该查哪一头：`网络` 大 ⇒ 隧道与 payload ✓；`渲染` 大 ⇒ 我们自己的 DOM ✓。
+         */
+        var entryCount = (listing.entries || []).length
+        afterPaint(function () {
+          perfLine('目录 ' + shortPath(resolved), [
+            ['项数', entryCount],
+            ['网络', Math.round(listArrivedAt - listRequestedAt) + 'ms'],
+            ['渲染', Math.round(perfNow() - listArrivedAt) + 'ms'],
+            ['已画', document.querySelectorAll('#dsh-mobile-sheet-body .dshm-file').length + ' 行'],
+          ])
+        })
       },
       function (error) {
         stopLoading()
@@ -26708,7 +27081,7 @@
     // ★ 版本标记：一眼看出**手机跑的到底是哪一版脚本**。
     //   这一条是今天最后才想到、却最该早有的东西 —— 前面几轮我反复"改了、部署了"，
     //   而手机可能一直跑缓存里的旧副本（no-store 只能阻止**将来**缓存 ✗）。
-    var BOOT_STAMP = 'BUILD-1108121928'
+    var BOOT_STAMP = 'BUILD-1109154409'
     /**
      * ★ 把"安全区到底是多少"写进调试框 ✓ —— 用户报"全屏时控件被状态栏盖住"时，
      *   一张截图就能判断：是变量没生效 ✗、还是生效了但没作用到那一层 ✗。
