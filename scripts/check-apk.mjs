@@ -78,8 +78,14 @@ let failed = 0
  *   缺 SDK / 缺证书时本脚本本来就会**跳过**若干条 ✓（打印 `·` ✓），
  *   那时按这个数判红是**误报** ✗ —— 见文件末尾的 `environmentComplete` ✓。
  *
- * ★★ **现在的构成（保活轮之后 ✓）：包信息 13 + APK 内容 4 + 资源文案 3 + dex 符号 26 +
- *   TOFU/链 3 = 49 ✓ + 原生首页那一套 1 ✓ + **底部标签图标 1 = 51** ✓（= 下面那个 `EXPECTED_MIN_CHECKS` ✓ —— 两处必须同时改 ✗）。
+ * ★★ **现在的构成（round 186 之后 ✓）：包信息 13 + APK 内容 4 + 资源文案 4 + dex 符号 28 +
+ *   TOFU/链 3 = 52 ✓ + 原生首页那一套 1 ✓ + **底部标签图标 1 = 54** ✓。
+ *   ⚠️ 而脚本**实测**是 **55** 条 ✓ —— 差的那 1 条属于哪一类**没数准** ✓（与上面那句
+ *      "数错不会让任何断言变红"同一个道理 ✓；下一个人真要动这个数，请先跑一遍数清楚 ✓）。
+ *   ★ 下界因此取 **54** ✓（**留 1 条余量**：环境缺件时本脚本会跳过若干条 ✓，见文件末尾
+ *      `environmentComplete` ✓ —— 取满就有"环境不全 ⇒ 误报红"的风险 ✗）。**改这里必须同时改
+ *      下面那个 `EXPECTED_MIN_CHECKS`** ✗。
+ *   （round 186 只加不减 ✓：资源文案 +1 ✓（相册那三条 ✓）、dex 符号 +2 ✓（相册那条路 ✓ + 零权限取图 ✓）✓。）
  *   ⚠️ 这一行此前写的是"40 = …dex 符号 22…"✗ —— 那个数**与代码从来就对不上** ✓：
  *      round 174 时 dex 实际已经是 **23** 组 ✓（下面历史段落里的"22"是漏算了一组 ✓）。
  *      以本行为准 ✓（数错不会让任何断言变红 ✗，只会让下一个人以为"删几条也没事"✗ —— 正是防呆要防的东西 ✓）。
@@ -139,8 +145,21 @@ let failed = 0
  *        ⇒ dex 的字符串表里**根本没有这个名字** ✗ ⇒ 拿它当判据只会得到一条
  *        "实现完全正确也**永远红**"的假断言 ✗（比没有断言更糟 ✓）。
  *        ★ 类型的判据在**清单**那边 ✓（`foregroundServiceType=0x40000000` ✓）—— 那也正是安卓自己读的地方 ✓。
+ *    ★★ **round 186**（2026-11-14）从 51 抬到 **54** ✓ —— 用户点名的**「扫码配对能扫相册图片」**✓
+ *      （原话：「给我们项目的手机端的扫码配对加一个可以扫描相册图片的功能」✓）。
+ *      三条新的（每一条都能被打红 ✓）：
+ *        · 资源：`scan_album` / `scan_album_not_found` / `scan_album_failed` ✓
+ *          （按钮上的字 + 两种失败 ✓ —— 一个"图里没码"✓、一个"图都读不出来"✓）；
+ *        · dex：相册那条路的五个符号 ✓（入口 `pickImageFromAlbum` + 解码 `decodeAlbumImage`
+ *          + 纯数学 `ScanImage` + `RGBLuminanceSource` + **反色那一档** `InvertedLuminanceSource` ✓）；
+ *        · dex：**零新权限**的取图方式 ✓（`ACTION_PICK_IMAGES` + `ACTION_OPEN_DOCUMENT`
+ *          + `ExifInterface` ✓ —— 少了 SAF 那条，安卓 12 及以下点相册就是"点了没反应"✗）。
+ *      ⚠️ 权限白名单**没有变** ✓（还是那五条 ✓）：相册整条路走系统选择器（SAF ✓）
+ *        ⇒ 谁哪天为了"能读相册"加上 `READ_MEDIA_IMAGES` ✗，第 1 条会当场红 ✓。
+ *      ★ "算得对不对"由 `scripts/check-scan-image.mjs` **真跑**着验（44 条 ✓）——
+ *        与 `check-preview-fit.mjs` / `check-pair-link.mjs` 同一个套路 ✓。
  */
-const EXPECTED_MIN_CHECKS = 51
+const EXPECTED_MIN_CHECKS = 54
 let checkCount = 0
 const check = (ok, label, detail) => {
   checkCount += 1
@@ -456,6 +475,25 @@ if (existsSync(aapt2)) {
     resources === '' ? '读不出资源表 ✗' : (missing.length === 0 ? wanted.join('、') : `缺 ${missing.join('、')}`),
   )
   /**
+   * ★★ round 186：**「从相册选一张」那三条文案也在包里** ✓（`string/scan_album*` ✓）。
+   *
+   * 与上面两条同一个理由 ✓（少一个 `R.string.*` 编译期就红 ✓ —— 这条防的是
+   * "资源被 aapt2 的拆分/裁剪弄丢"✓：那时 dex 一个字节不变 ✗、只是界面上显示成一串资源 id ✗）。
+   * 取三个关键字，各管一件事 ✓：
+   *   · `scan_album` —— 那颗按钮的字 ✓（**没有它，相册这条路在界面上根本不存在** ✗）；
+   *   · `scan_album_not_found` —— "这张图里没找到二维码"✓（这条丢了，用户看到的是一个空白的提示行 ✗）；
+   *   · `scan_album_failed` —— "打不开这张图片"✓（格式不支持 / 没拿到读取权限 ✓ ——
+   *     与上一条**分开**是刻意的 ✓：一个是"图里没码"✓、一个是"图都读不出来"✓，
+   *     合并成一句就是让用户猜 ✓）。
+   */
+  const wantedAlbum = ['string/scan_album', 'string/scan_album_not_found', 'string/scan_album_failed']
+  const missingAlbum = wantedAlbum.filter((name) => !resources.includes(name))
+  check(
+    missingAlbum.length === 0,
+    '★★ 相册那条路的文案资源在包里（`scan_album` 按钮 + `scan_album_not_found` 没找到 + `scan_album_failed` 打不开 ✓ —— 少了按钮那条字，用户在界面上根本没有「从相册选一张」✗）',
+    resources === '' ? '读不出资源表 ✗' : (missingAlbum.length === 0 ? wantedAlbum.join('、') : `缺 ${missingAlbum.join('、')}`),
+  )
+  /**
    * ★★ C2：**TOFU 与「忘记这台电脑」的文案资源也在包里** ✓。
    *
    * 与上面那条同一个理由 ✓（少一个 `R.string.*` 编译期就红 ✓ —— 所以这条防的是
@@ -762,6 +800,57 @@ if (existsSync(aapt2)) {
     hasAll(scanBridge),
     '★★ 网页侧唤起壳内扫码的桥在 dex 里（`DshmShell.scanPair` ✓ —— 少了它，网页上那两颗「扫码配对」只能是一句提示 ✗，用户在手机上看就是"点了没反应"✗，而且没有任何报错 ✗）',
     missing(scanBridge).length === 0 ? scanBridge.join('、') : `缺 ${missing(scanBridge).join('、')}`,
+  )
+  /**
+   * ★★ round 186：**相册那条路的代码真的进包了** ✓（用户原话：「给我们项目的手机端的扫码配对
+   * 加一个可以扫描相册图片的功能」✓）。
+   *
+   * 为什么只能靠 dex 符号判 ✗：与前几条同病 —— 这条路在手机上失败时**没有任何报错** ✗
+   * （不崩、不弹、只有一句"这张图片里没找到二维码"✓），而"源码改了但装出去的还是旧 APK"✗
+   * 在真机上与"根本没实现"长得**一模一样** ✗（本项目反复吃过这一类事故 ✓，见 `05` §73 ✓）。
+   *
+   * 五个符号，缺一不可 ✓：
+   *   · `pickImageFromAlbum` —— 那颗「从相册选一张」的入口 ✓（少了它按钮点了没反应 ✗）；
+   *   · `decodeAlbumImage` —— 真去解码的那一段 ✓（阶梯 / EXIF / 铺白都在它里面 ✓）；
+   *   · `ScanImage` —— 取样倍数 / EXIF 方向 / 解码阶梯的**纯数学** ✓
+   *     （"算得对不对"归 `scripts/check-scan-image.mjs` **真跑** ✓；"在不在包里"归这一条 ✓，
+   *      两者都在才叫验过 ✓）；
+   *   · `RGBLuminanceSource` —— 位图 ⇒ 灰度的那个适配器 ✓（少了它就是 `NoClassDefFoundError` ✗
+   *     ——`javac -cp` 只证明**编译期**找得到 jar ✓，jar 没进 d8 输入的话编译一路绿灯 ✗）；
+   *   · `InvertedLuminanceSource` —— **反色那一档** ✓（深色主题的截图全靠它 ✓，
+   *     少了它那一类图永远解不出 ✗，而用户看到的是"我选的明明就是那张截图"✗）。
+   */
+  const albumPath = ['pickImageFromAlbum', 'decodeAlbumImage', 'ScanImage', 'RGBLuminanceSource', 'InvertedLuminanceSource']
+  check(
+    hasAll(albumPath),
+    '★★ 相册取码那条路在 dex 里（`pickImageFromAlbum` 入口 ✓ + `decodeAlbumImage` 解码 ✓ + `ScanImage` 纯数学 ✓ + `RGBLuminanceSource` ✓ + `InvertedLuminanceSource` 反色 ✓ —— 少了入口就是按钮没反应 ✗，少了反色就是深色截图永远解不出 ✗）',
+    missing(albumPath).length === 0 ? albumPath.join('、') : `缺 ${missing(albumPath).join('、')}`,
+  )
+  /**
+   * ★★ round 186：**取图走的是"零新权限"那条路** ✓（SAF / 系统照片选择器 ✓）。
+   *
+   * 这一条防的是**将来**的一次"顺手改坏"✗ —— 三个判据各钉一件事 ✓：
+   *   · `android.provider.action.PICK_IMAGES` —— 安卓 13+ 的**系统照片选择器** ✓
+   *     （用户只授权他挑的那一张 ✓ 我们不读整个相册 ✓）；
+   *   · `android.intent.action.OPEN_DOCUMENT` —— 老系统那条 SAF 兜底 ✓
+   *     （**少了它**，安卓 12 及以下点「从相册选一张」就是**打不开** ✗ ——
+   *      而那正是"点了没反应"这一族 ✓）；
+   *   · `android/media/ExifInterface` —— 按 EXIF 摆正 ✓（竖拍 / 镜像的照片不摆正就永远解不出 ✗）。
+   *
+   * ★ 这三个都是**字符串常量 / 类型描述**，在 dex 的字符串表里是**字面量** ✓ ——
+   *   与保活轮那个 `FOREGROUND_SERVICE_TYPE_SPECIAL_USE`（编译期内联成整数 ✗）不同 ✓，
+   *   这里断言的**不是**某个 `static final` 的名字 ✓，而是它**真的被写进去的那个值** ✓
+   *   （本机实证过 `grep -a -F` 在 `classes.dex` 上命中 ✓）。
+   *
+   * ★★ 同时这条也是**权限白名单没被动过**的旁证 ✓：相册这条路整条都走系统选择器 ✓
+   *   ⇒ 白名单仍然是那五条 ✓（见文件头第 1 条 ✓、`AndroidManifest.xml` ✓）。
+   *   谁哪天为了"能读相册"加上 `READ_MEDIA_IMAGES` ✗，第 1 条会当场红 ✓。
+   */
+  const albumIntents = ['android.provider.action.PICK_IMAGES', 'android.intent.action.OPEN_DOCUMENT', 'android/media/ExifInterface']
+  check(
+    hasAll(albumIntents),
+    '★★ 相册取图走的是零新权限那条路（`ACTION_PICK_IMAGES` 系统照片选择器 ✓ + `ACTION_OPEN_DOCUMENT` 老系统 SAF 兜底 ✓ + `ExifInterface` 按 EXIF 摆正 ✓ —— 少了 SAF 那条，安卓 12 及以下点相册就是"点了没反应"✗）',
+    missing(albumIntents).length === 0 ? albumIntents.join('、') : `缺 ${missing(albumIntents).join('、')}`,
   )
   /**
    * ★★ round 153：**画面比例那套数学 + 重摆动作真的进包了** ✓。

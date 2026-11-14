@@ -14,6 +14,7 @@
  * |---|---|---|
  * | 1 单元测试 | 宿主 + 客户端的逻辑不变量 | `npm test` ⇒ 400+ 条 |
  * | 2 首页数据层 | 身份归一 / 探测 / 选路 / 动画策略（JVM ✓） | `check-home-model` ⇒ 8 份测试 |
+ * | 2 相册取码 | 取样倍数 / EXIF 方向 / 解码阶梯（JVM ✓ —— round 186 ✓） | `check-scan-image` ⇒ 44 条 |
  * | 3 TLS 探针 | 真握手：钉住的 CA + 链校验（起真证书、真服务 ✓） | `check-manifest-probe` ⇒ 68 条（探针 34 + 取图 34） |
  * | 4 APK | 全量构建 + 包内容/形状/机器无关 | `build-apk` + `check-apk` ⇒ 51 条 |
  * | 5 会话页端到端 | 假隧道 + 真浏览器 + **真会话事件** | `check-chat-page` ⇒ 30 条 |
@@ -108,6 +109,7 @@ function reading(output) {
 const steps = [
   ['① 单元测试（宿主 + 客户端）', 'npm', ['test']],
   ['② 原生首页数据层（JVM）', 'node', ['scripts/check-home-model.mjs']],
+  ['② 相册取码的解码阶梯（JVM）', 'node', ['scripts/check-scan-image.mjs']],
   ...(FAST ? [] : [['③ TLS 探针（真握手）', 'node', ['scripts/check-manifest-probe.mjs']]]),
   ['④ APK 全量构建', 'node', ['scripts/build-apk.mjs']],
   ['④ APK 内容与形状', 'node', ['scripts/check-apk.mjs']],
